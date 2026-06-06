@@ -13,7 +13,7 @@ roze-config = { path = "../../crates/roze-config" }
 roze-error = { path = "../../crates/roze-error" }
 roze-http = { path = "../../crates/roze-http" }
 roze-log = { path = "../../crates/roze-log" }
-roze-auth = { path = "../../crates/roze-auth" }
+roze-jwt = { path = "../../crates/roze-jwt" }
 roze-cache = { path = "../../crates/roze-cache" }
 roze-context = { path = "../../crates/roze-context" }
 roze-db = { path = "../../crates/roze-db" }

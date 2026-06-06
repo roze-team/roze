@@ -2233,9 +2233,7 @@ dependencies = [
 name = "roze-auth"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "jsonwebtoken",
- "roze-config",
+ "roze-jwt",
  "serde",
 ]
 
@@ -2243,7 +2241,11 @@ dependencies = [
 name = "roze-bootstrap"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "roze-health",
  "roze-service",
+ "roze-shutdown",
+ "tokio",
 ]
 
 [[package]]
@@ -2264,6 +2266,8 @@ name = "roze-codec"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2288,6 +2292,10 @@ version = "0.1.0"
 [[package]]
 name = "roze-cron"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+]
 
 [[package]]
 name = "roze-db"
@@ -2312,6 +2320,14 @@ dependencies = [
 [[package]]
 name = "roze-eventbus"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "roze-example"
@@ -2322,13 +2338,13 @@ dependencies = [
  "poem",
  "prost",
  "protoc-bin-vendored",
- "roze-auth",
  "roze-cache",
  "roze-config",
  "roze-context",
  "roze-db",
  "roze-error",
  "roze-http",
+ "roze-jwt",
  "roze-log",
  "roze-metrics",
  "roze-middleware",
@@ -2352,6 +2368,8 @@ name = "roze-grpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "roze-context",
+ "roze-trace",
  "tonic",
 ]
 
@@ -2382,14 +2400,29 @@ dependencies = [
 [[package]]
 name = "roze-jwt"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jsonwebtoken",
+ "roze-config",
+ "serde",
+]
 
 [[package]]
 name = "roze-kafka"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "roze-eventbus",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "roze-local-cache"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "roze-log"
@@ -2411,6 +2444,7 @@ dependencies = [
  "roze-auth",
  "roze-context",
  "roze-error",
+ "roze-jwt",
  "roze-metrics",
  "roze-trace",
  "tokio",
@@ -2420,6 +2454,12 @@ dependencies = [
 [[package]]
 name = "roze-migration"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "roze-mq"
@@ -2436,6 +2476,12 @@ dependencies = [
 [[package]]
 name = "roze-nats"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "roze-eventbus",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "roze-openapi"
@@ -2452,6 +2498,11 @@ version = "0.1.0"
 [[package]]
 name = "roze-orm"
 version = "0.1.0"
+dependencies = [
+ "sea-orm",
+ "serde",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "roze-permission"
@@ -2510,6 +2561,7 @@ dependencies = [
  "roze-auth",
  "roze-config",
  "roze-context",
+ "roze-jwt",
  "roze-trace",
  "serde",
  "serde_json",
@@ -2525,6 +2577,11 @@ version = "0.1.0"
 [[package]]
 name = "roze-session"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
+]
 
 [[package]]
 name = "roze-session-hub"
@@ -2553,6 +2610,12 @@ dependencies = [
 [[package]]
 name = "roze-sqlx"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "roze-swagger"
@@ -2568,6 +2631,10 @@ dependencies = [
 [[package]]
 name = "roze-transaction"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+]
 
 [[package]]
 name = "roze-utils"
@@ -2583,6 +2650,10 @@ dependencies = [
 [[package]]
 name = "roze-worker"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+]
 
 [[package]]
 name = "roze-ws"

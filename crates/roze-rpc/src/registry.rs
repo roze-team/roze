@@ -700,6 +700,33 @@ pub fn weighted_instances(instances: &[ServiceInstance]) -> Vec<ServiceInstance>
     out
 }
 
+pub fn instance_score(instance: &ServiceInstance) -> i64 {
+    if let Some(value) = instance.metadata.get("healthy") {
+        if matches!(value.as_str(), "false" | "0" | "no") {
+            return i64::MIN / 2;
+        }
+    }
+
+    let weight = instance.weight.max(1) as i64;
+    let load_penalty = instance
+        .metadata
+        .get("load")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or_default();
+    let latency_penalty = instance
+        .metadata
+        .get("latency_ms")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or_default();
+    let error_penalty = instance
+        .metadata
+        .get("errors")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or_default();
+
+    weight * 1000 - load_penalty - latency_penalty - error_penalty * 10
+}
+
 pub fn pick_with_strategy(
     strategy: balance::BalancerKind,
     instances: &[ServiceInstance],
@@ -769,6 +796,17 @@ mod tests {
     fn registry_from_kind_builds_memory_registry() {
         let registry = registry_from_kind(RegistryKind::Memory).expect("registry");
         let _ = registry;
+    }
+
+    #[test]
+    fn instance_score_prefers_healthy_low_load_instances() {
+        let mut good = ServiceInstance::new("user", "127.0.0.1:8080");
+        good.metadata.insert("load".into(), "1".into());
+        good.metadata.insert("latency_ms".into(), "5".into());
+        let mut bad = ServiceInstance::new("user", "127.0.0.1:8081");
+        bad.metadata.insert("healthy".into(), "false".into());
+        bad.metadata.insert("load".into(), "100".into());
+        assert!(instance_score(&good) > instance_score(&bad));
     }
 
     #[test]

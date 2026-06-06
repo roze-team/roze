@@ -156,7 +156,9 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 }
 
 pub fn render_openapi(spec: &ApiSpec) -> String {
-    let mut out = String::from("use roze_openapi::{HttpMethod, OpenApiBuilder, Operation};\n\n");
+    let mut out = String::from(
+        "use std::collections::BTreeMap;\n\nuse roze_openapi::{HttpMethod, OpenApiBuilder, Operation, Schema, SecurityScheme};\n\n",
+    );
     out.push_str("pub fn document() -> serde_json::Value {\n");
     out.push_str(&format!(
         "    let mut builder = OpenApiBuilder::new({:?}, \"0.1.0\").description({:?});\n",
@@ -186,6 +188,36 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         ));
     }
 
+    if spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some() {
+        out.push_str(
+            "    builder = builder.security_scheme(\"bearerAuth\", SecurityScheme::Http { scheme: \"bearer\".to_string(), bearer_format: Some(\"JWT\".to_string()) });\n",
+        );
+    }
+
+    for ty in &spec.types {
+        out.push_str("    {\n");
+        out.push_str("        let mut properties = BTreeMap::new();\n");
+        let mut required = Vec::new();
+        for field in &ty.fields {
+            out.push_str(&format!(
+                "        properties.insert({:?}.to_string(), {});\n",
+                field_wire_name(field),
+                openapi_schema_expr(&field.ty)
+            ));
+            required.push(field_wire_name(field));
+        }
+        out.push_str(&format!(
+            "        builder = builder.component_schema({:?}, Schema::object(properties, vec![{}]));\n",
+            ty.name,
+            required
+                .iter()
+                .map(|name| format!("{:?}.to_string()", name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        out.push_str("    }\n");
+    }
+
     for route in &spec.rest_routes {
         let route_spec = route_request_spec(spec, route).expect("request spec");
         let operation_id = route
@@ -198,6 +230,9 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
             out.push_str(&format!(".summary({:?})", doc));
         }
         out.push_str(&format!(".tag({:?})", spec.service));
+        if spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some() {
+            out.push_str(".require_security(\"bearerAuth\")");
+        }
 
         for source in [
             FieldSource::Path,
@@ -651,6 +686,20 @@ fn map_type(ty: &str) -> &str {
         "uint" => "u64",
         "bool" => "bool",
         other => other,
+    }
+}
+
+fn openapi_schema_expr(ty: &str) -> String {
+    match ty {
+        "String" | "string" => "Schema::string()".to_string(),
+        "bool" => "Schema::boolean()".to_string(),
+        "i32" | "int32" => "Schema::integer(\"int32\")".to_string(),
+        "i64" | "int" | "int64" => "Schema::integer(\"int64\")".to_string(),
+        "u32" | "uint32" => "Schema::integer(\"uint32\")".to_string(),
+        "u64" | "uint" | "uint64" => "Schema::integer(\"uint64\")".to_string(),
+        "f32" | "float" => "Schema::number(\"float\")".to_string(),
+        "f64" | "double" => "Schema::number(\"double\")".to_string(),
+        other => format!("Schema::reference({other:?})"),
     }
 }
 

@@ -5,7 +5,5 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-jsonwebtoken.workspace = true
-roze-config = { path = "../roze-config" }
 serde.workspace = true
+roze-jwt = { path = "../roze-jwt" }

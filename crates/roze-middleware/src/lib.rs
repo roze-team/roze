@@ -14,10 +14,11 @@ use poem::{
 };
 use tracing::Instrument;
 
-use roze_auth::{extract_bearer_token, verify_token, JwtConfig};
+use roze_auth::principal_from_claims;
 use roze_context::Context;
 use roze_error::RozeError;
 use roze_metrics::record_http_request;
+use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_trace::{generate_trace_id, request_span, TRACE_ID_HEADER};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -125,7 +126,7 @@ where
             let token = extract_bearer_token(header_value).ok_or_else(|| RozeError::Unauthorized)?;
             let claims =
                 verify_token(token, &config).map_err(|err| RozeError::Internal(err.to_string()))?;
-            req.extensions_mut().insert(claims);
+            req.extensions_mut().insert(principal_from_claims(&claims));
             ep.call(req).await
         }
     }

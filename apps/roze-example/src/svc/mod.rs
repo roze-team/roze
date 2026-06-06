@@ -27,7 +27,7 @@ impl ServiceContext {
         Ok(Self { config, db, cache })
     }
 
-    pub fn jwt_config(&self) -> Option<roze_auth::JwtConfig> {
+    pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
         self.config.auth.as_ref().map(Into::into)
     }
 }

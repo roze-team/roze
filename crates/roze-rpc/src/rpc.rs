@@ -4,8 +4,9 @@ use crate::{
     balance::Balancer,
     registry::{CachedRegistryResolver, Registry},
 };
-use roze_auth::{extract_bearer_token, verify_token, JwtConfig};
+use roze_auth::principal_from_claims;
 use roze_context::Context;
+use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_trace::{generate_trace_id, TRACE_ID_HEADER};
 use tokio::time::sleep;
 use tonic::transport::{Channel, Endpoint, Server};
@@ -70,7 +71,7 @@ pub fn auth_interceptor(
         let subject = MetadataValue::try_from(claims.sub.as_str())
             .map_err(|_| Status::unauthenticated("invalid subject"))?;
         req.metadata_mut().insert("x-subject", subject);
-        req.extensions_mut().insert(claims);
+        req.extensions_mut().insert(principal_from_claims(&claims));
         req.metadata_mut().insert(
             TRACE_ID_HEADER,
             MetadataValue::try_from(trace_id.as_str())

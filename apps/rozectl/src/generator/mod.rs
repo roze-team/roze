@@ -62,13 +62,17 @@ config.workspace = true
 poem.workspace = true
 prost.workspace = true
 roze-config = {{ path = "../../crates/roze-config" }}
+roze-error = {{ path = "../../crates/roze-error" }}
 roze-http = {{ path = "../../crates/roze-http" }}
 roze-log = {{ path = "../../crates/roze-log" }}
-roze-auth = {{ path = "../../crates/roze-auth" }}
+roze-metrics = {{ path = "../../crates/roze-metrics" }}
+roze-middleware = {{ path = "../../crates/roze-middleware" }}
+roze-jwt = {{ path = "../../crates/roze-jwt" }}
 roze-cache = {{ path = "../../crates/roze-cache" }}
 roze-context = {{ path = "../../crates/roze-context" }}
 roze-db = {{ path = "../../crates/roze-db" }}
 roze-openapi = {{ path = "../../crates/roze-openapi" }}
+roze-result = {{ path = "../../crates/roze-result" }}
 roze-rpc = {{ path = "../../crates/roze-rpc" }}
 roze-validation = {{ path = "../../crates/roze-validation" }}
 serde.workspace = true
@@ -168,7 +172,7 @@ impl ServiceContext {
         Ok(Self { config, db, cache })
     }
 
-    pub fn jwt_config(&self) -> Option<roze_auth::JwtConfig> {
+    pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
         self.config.auth.as_ref().map(Into::into)
     }
 }

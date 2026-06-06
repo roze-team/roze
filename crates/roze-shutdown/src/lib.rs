@@ -1,4 +1,5 @@
 use tokio::sync::watch;
+use tokio::time::{timeout, Duration};
 
 #[derive(Clone)]
 pub struct ShutdownHandle {
@@ -33,6 +34,14 @@ impl ShutdownListener {
 
 pub async fn listen_for_ctrl_c() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+pub async fn wait_for_shutdown(listener: ShutdownListener) {
+    listener.wait().await;
+}
+
+pub async fn wait_for_ctrl_c_or_timeout(duration: Duration) -> bool {
+    timeout(duration, tokio::signal::ctrl_c()).await.is_err()
 }
 
 #[cfg(test)]

@@ -5,3 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

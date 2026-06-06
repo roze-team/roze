@@ -11,6 +11,7 @@ base64.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
+roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
 reqwest.workspace = true
 serde.workspace = true
