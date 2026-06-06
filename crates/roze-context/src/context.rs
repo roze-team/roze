@@ -10,6 +10,8 @@ use std::{
 };
 use roze_trace::generate_trace_id as trace_generate_trace_id;
 
+pub const TIMEOUT_HEADER: &str = "x-roze-timeout-ms";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
     Canceled,

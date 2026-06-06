@@ -5,7 +5,46 @@ use crate::{
     parser::{ApiSpec, Field, FieldSource, HttpMethod},
 };
 
-pub fn render_main(_spec: &ApiSpec) -> String {
+pub fn render_rest_main(_spec: &ApiSpec) -> String {
+    r#"mod config;
+mod handler;
+mod logic;
+mod openapi;
+mod svc;
+mod types;
+
+use roze_http::rest::RestServer;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    roze_log::init_tracing();
+
+    let config = config::load(config_path())?;
+    let rest = config
+        .rest
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
+    let ctx = svc::ServiceContext::new(config).await?;
+    let app = roze_middleware::apply_common(handler::router(ctx));
+    RestServer::new(rest.addr, app).serve().await?;
+
+    Ok(())
+}
+
+fn config_path() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_config = manifest_dir.join("config.yaml");
+    if manifest_config.exists() {
+        manifest_config
+    } else {
+        std::path::PathBuf::from("config.yaml")
+    }
+}
+"#
+    .to_string()
+}
+
+pub fn render_combined_main(_spec: &ApiSpec) -> String {
     r#"mod config;
 mod handler;
 mod logic;
@@ -70,10 +109,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
     ));
 
     for route in &spec.rest_routes {
-        let handler = route
-            .handler
-            .clone()
-            .unwrap_or_else(|| handler_name(&route.method, &route.path));
+        let handler = resolved_handler_name(route);
         let routing_fn = match route.method {
             HttpMethod::Get => "poem::get",
             HttpMethod::Post => "poem::post",
@@ -121,15 +157,16 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
 }
 
 pub fn render_logic(spec: &ApiSpec) -> String {
+    if spec.rest_routes.is_empty() {
+        return String::new();
+    }
+
     let mut out = String::from("use roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
 
     for route in &spec.rest_routes {
-        let handler = route
-            .handler
-            .clone()
-            .unwrap_or_else(|| handler_name(&route.method, &route.path));
+        let handler = resolved_handler_name(route);
         match route.method {
             HttpMethod::Get | HttpMethod::Delete => {
                 out.push_str(&format!(
@@ -167,7 +204,10 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 
 pub fn render_openapi(spec: &ApiSpec) -> String {
     let needs_jwt = spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some();
-    let mut out = String::from("use std::collections::BTreeMap;\n\nuse roze_openapi::{HttpMethod, OpenApiBuilder, Operation, Schema");
+    let mut out = String::from("use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema");
+    if !spec.rest_routes.is_empty() {
+        out.push_str(", HttpMethod, Operation");
+    }
     if needs_jwt {
         out.push_str(", SecurityScheme");
     }
@@ -307,10 +347,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         .unwrap_or_else(|| panic!("missing request type `{}`", route.request));
     let route_spec = route_request_spec(spec, route).expect("request spec");
     validate_route_bindings(route, &route_spec);
-    let handler = route
-        .handler
-        .clone()
-        .unwrap_or_else(|| handler_name(&route.method, &route.path));
+    let handler = resolved_handler_name(route);
 
     let mut out = String::new();
     if let Some(doc) = &route.doc {
@@ -662,6 +699,14 @@ fn handler_name(method: &HttpMethod, path: &str) -> String {
         .replace('-', "_");
 
     format!("{}_{}", method, path_name)
+}
+
+fn resolved_handler_name(route: &crate::parser::RestRoute) -> String {
+    route
+        .handler
+        .as_ref()
+        .map(|handler| to_snake_case(handler))
+        .unwrap_or_else(|| handler_name(&route.method, &route.path))
 }
 
 fn full_route_path(spec: &ApiSpec, path: &str) -> String {

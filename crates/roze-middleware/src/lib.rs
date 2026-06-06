@@ -159,8 +159,10 @@ where
     fn call(&self, mut req: Request) -> impl Future<Output = Result<Self::Output>> + Send {
         let request_id = next_request_id();
         let trace_id = incoming_trace_id(&req).unwrap_or_else(|| request_id.clone());
-        req.extensions_mut()
-            .insert(Context::background_with_trace_id(trace_id.clone()));
+        let context = incoming_timeout(&req)
+            .map(|timeout| Context::background_with_trace_id(trace_id.clone()).with_timeout(timeout))
+            .unwrap_or_else(|| Context::background_with_trace_id(trace_id.clone()));
+        req.extensions_mut().insert(context);
         req.extensions_mut().insert(RequestContext {
             request_id: request_id.clone(),
             trace_id,
@@ -386,6 +388,15 @@ fn incoming_trace_id(req: &Request) -> Option<String> {
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn incoming_timeout(req: &Request) -> Option<Duration> {
+    let raw = req
+        .headers()
+        .get(roze_context::TIMEOUT_HEADER)
+        .and_then(|value| value.to_str().ok())?;
+    let millis = raw.parse::<u64>().ok()?;
+    Some(Duration::from_millis(millis))
 }
 
 fn ensure_trace_id_header(req: &mut Request) -> String {

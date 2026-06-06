@@ -201,6 +201,10 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         current_middlewares.extend(parse_name_list(middleware));
                         continue;
                     }
+                    if let Some(method) = svc_line.strip_prefix("rpc ") {
+                        rpc_methods.push(parse_rpc_method(method, svc_line_no)?);
+                        continue;
+                    }
                     if let Some(mut route) = parse_rest_route(svc_line, svc_line_no)? {
                         route.handler = current_handler.take();
                         route.doc = current_doc.take();
@@ -211,7 +215,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
 
                     return invalid(
                         svc_line_no,
-                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name` or route declaration",
+                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, RPC method or route declaration",
                     );
                 }
 
@@ -531,6 +535,41 @@ mod tests {
         assert_eq!(spec.types.len(), 2);
         assert_eq!(spec.rest_routes.len(), 1);
         assert_eq!(spec.rpc_methods.len(), 1);
+    }
+
+    #[test]
+    fn parses_rpc_method_inside_service_block() {
+        let spec = parse_api(
+            r#"
+            service user {
+                @server (
+                    group: user
+                )
+                rpc GetUser (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                id: u64
+                name: string
+            }
+            "#,
+        )
+        .expect("valid RPC service");
+
+        assert_eq!(spec.service, "user");
+        assert!(spec.rest_routes.is_empty());
+        assert_eq!(
+            spec.rpc_methods,
+            vec![RpcMethod {
+                name: "GetUser".to_string(),
+                request: "GetUserReq".to_string(),
+                response: "UserResp".to_string(),
+            }]
+        );
     }
 
     #[test]

@@ -2233,7 +2233,16 @@ dependencies = [
 name = "roze-auth"
 version = "0.1.0"
 dependencies = [
- "roze-jwt",
+ "roze-jwt 0.1.0",
+ "serde",
+]
+
+[[package]]
+name = "roze-auth"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "roze-jwt 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "serde",
 ]
 
@@ -2253,9 +2262,23 @@ name = "roze-cache"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "roze-config",
- "roze-redis",
- "roze-singleflight",
+ "roze-config 0.1.0",
+ "roze-redis 0.1.0",
+ "roze-singleflight 0.1.0",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "roze-cache"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "anyhow",
+ "roze-config 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-redis 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-singleflight 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "serde",
  "serde_json",
  "tokio",
@@ -2279,10 +2302,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-config"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "config",
+ "serde",
+]
+
+[[package]]
 name = "roze-context"
 version = "0.1.0"
 dependencies = [
- "roze-trace",
+ "roze-trace 0.1.0",
+]
+
+[[package]]
+name = "roze-context"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "roze-trace 0.1.0 (git+https://github.com/roze-team/roze.git)",
 ]
 
 [[package]]
@@ -2302,7 +2342,17 @@ name = "roze-db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "roze-config",
+ "roze-config 0.1.0",
+ "sea-orm",
+]
+
+[[package]]
+name = "roze-db"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "anyhow",
+ "roze-config 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "sea-orm",
 ]
 
@@ -2311,7 +2361,19 @@ name = "roze-error"
 version = "0.1.0"
 dependencies = [
  "poem",
- "roze-result",
+ "roze-result 0.1.0",
+ "serde",
+ "thiserror 1.0.69",
+ "tonic",
+]
+
+[[package]]
+name = "roze-error"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "poem",
+ "roze-result 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "serde",
  "thiserror 1.0.69",
  "tonic",
@@ -2338,22 +2400,22 @@ dependencies = [
  "poem",
  "prost",
  "protoc-bin-vendored",
- "roze-cache",
- "roze-config",
- "roze-context",
- "roze-db",
- "roze-error",
- "roze-http",
- "roze-jwt",
- "roze-log",
- "roze-metrics",
- "roze-middleware",
- "roze-openapi",
- "roze-result",
+ "roze-cache 0.1.0",
+ "roze-config 0.1.0",
+ "roze-context 0.1.0",
+ "roze-db 0.1.0",
+ "roze-error 0.1.0",
+ "roze-http 0.1.0",
+ "roze-jwt 0.1.0",
+ "roze-log 0.1.0",
+ "roze-metrics 0.1.0",
+ "roze-middleware 0.1.0",
+ "roze-openapi 0.1.0",
+ "roze-result 0.1.0",
  "roze-rpc",
  "roze-swagger",
- "roze-trace",
- "roze-validation",
+ "roze-trace 0.1.0",
+ "roze-validation 0.1.0",
  "sea-orm",
  "serde",
  "serde_json",
@@ -2369,8 +2431,8 @@ name = "roze-grpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "roze-context",
- "roze-trace",
+ "roze-context 0.1.0",
+ "roze-trace 0.1.0",
  "tonic",
 ]
 
@@ -2383,7 +2445,18 @@ name = "roze-http"
 version = "0.1.0"
 dependencies = [
  "poem",
- "roze-error",
+ "roze-error 0.1.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "roze-http"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "poem",
+ "roze-error 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "tokio",
  "tracing",
 ]
@@ -2404,7 +2477,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jsonwebtoken",
- "roze-config",
+ "roze-config 0.1.0",
+ "serde",
+]
+
+[[package]]
+name = "roze-jwt"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "anyhow",
+ "jsonwebtoken",
+ "roze-config 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "serde",
 ]
 
@@ -2434,20 +2518,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-log"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "roze-metrics"
 version = "0.1.0"
+
+[[package]]
+name = "roze-metrics"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
 
 [[package]]
 name = "roze-middleware"
 version = "0.1.0"
 dependencies = [
  "poem",
- "roze-auth",
- "roze-context",
- "roze-error",
- "roze-jwt",
- "roze-metrics",
- "roze-trace",
+ "roze-auth 0.1.0",
+ "roze-context 0.1.0",
+ "roze-error 0.1.0",
+ "roze-jwt 0.1.0",
+ "roze-metrics 0.1.0",
+ "roze-trace 0.1.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "roze-middleware"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "poem",
+ "roze-auth 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-context 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-error 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-jwt 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-metrics 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-trace 0.1.0 (git+https://github.com/roze-team/roze.git)",
  "tokio",
  "tracing",
 ]
@@ -2493,6 +2607,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-openapi"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "roze-opentelemetry"
 version = "0.1.0"
 
@@ -2517,7 +2640,7 @@ version = "0.1.0"
 name = "roze-prometheus"
 version = "0.1.0"
 dependencies = [
- "roze-metrics",
+ "roze-metrics 0.1.0",
 ]
 
 [[package]]
@@ -2542,8 +2665,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-redis"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "anyhow",
+ "redis",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "roze-result"
 version = "0.1.0"
+dependencies = [
+ "poem",
+ "serde",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "roze-result"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
 dependencies = [
  "poem",
  "serde",
@@ -2559,11 +2705,11 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "reqwest",
- "roze-auth",
- "roze-config",
- "roze-context",
- "roze-jwt",
- "roze-trace",
+ "roze-auth 0.1.0",
+ "roze-config 0.1.0",
+ "roze-context 0.1.0",
+ "roze-jwt 0.1.0",
+ "roze-trace 0.1.0",
  "serde",
  "serde_json",
  "tokio",
@@ -2580,20 +2726,20 @@ dependencies = [
  "poem",
  "prost",
  "protoc-bin-vendored",
- "roze-cache",
- "roze-config",
- "roze-context",
- "roze-db",
- "roze-error",
- "roze-http",
- "roze-jwt",
- "roze-log",
- "roze-metrics",
- "roze-middleware",
- "roze-openapi",
- "roze-result",
+ "roze-cache 0.1.0",
+ "roze-config 0.1.0",
+ "roze-context 0.1.0",
+ "roze-db 0.1.0",
+ "roze-error 0.1.0",
+ "roze-http 0.1.0",
+ "roze-jwt 0.1.0",
+ "roze-log 0.1.0",
+ "roze-metrics 0.1.0",
+ "roze-middleware 0.1.0",
+ "roze-openapi 0.1.0",
+ "roze-result 0.1.0",
  "roze-rpc",
- "roze-validation",
+ "roze-validation 0.1.0",
  "sea-orm",
  "serde",
  "serde_json",
@@ -2642,6 +2788,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-singleflight"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "roze-sqlx"
 version = "0.1.0"
 dependencies = [
@@ -2663,6 +2817,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-trace"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "roze-transaction"
 version = "0.1.0"
 dependencies = [
@@ -2677,6 +2839,14 @@ version = "0.1.0"
 [[package]]
 name = "roze-validation"
 version = "0.1.0"
+dependencies = [
+ "validator",
+]
+
+[[package]]
+name = "roze-validation"
+version = "0.1.0"
+source = "git+https://github.com/roze-team/roze.git#dc0662005e6849def92f21443010cc63c5e70f26"
 dependencies = [
  "validator",
 ]
@@ -2706,6 +2876,7 @@ dependencies = [
  "anyhow",
  "clap",
  "thiserror 1.0.69",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -3843,6 +4014,34 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "user-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "poem",
+ "roze-cache 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-config 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-context 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-db 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-error 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-http 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-jwt 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-log 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-metrics 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-middleware 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-openapi 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-result 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "roze-validation 0.1.0 (git+https://github.com/roze-team/roze.git)",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "validator",
 ]
 
 [[package]]

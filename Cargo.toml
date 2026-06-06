@@ -50,6 +50,7 @@ members = [
     "apps/rozectl",
     "apps/roze-example",
     "apps/roze-sample",
+    "apps/user",
 ]
 resolver = "2"
 
@@ -81,3 +82,4 @@ tonic = "0.11"
 tonic-build = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml_edit = "0.22"

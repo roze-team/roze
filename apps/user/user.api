@@ -1,0 +1,17 @@
+service user {
+    @server (
+        prefix: /api
+        group: user
+    )
+    post /user/login (LoginReq) returns (LoginResp)
+}
+
+type LoginReq {
+    username: string `json:"username"`
+    password: string `json:"password"`
+}
+
+type LoginResp {
+    token: string
+    expiresAt: u64
+}

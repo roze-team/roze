@@ -1,0 +1,11 @@
+model User {
+    table: users
+    primary: id
+    cache: true
+    cache_ttl_secs: 300
+
+    field id i64
+    field username String
+    field password String
+    field created_at i64
+}

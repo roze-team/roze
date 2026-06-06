@@ -1,0 +1,32 @@
+[package]
+name = "user-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+config.workspace = true
+poem.workspace = true
+roze-config = { git = "https://github.com/roze-team/roze.git" }
+roze-error = { git = "https://github.com/roze-team/roze.git" }
+roze-http = { git = "https://github.com/roze-team/roze.git" }
+roze-log = { git = "https://github.com/roze-team/roze.git" }
+roze-metrics = { git = "https://github.com/roze-team/roze.git" }
+roze-middleware = { git = "https://github.com/roze-team/roze.git" }
+roze-jwt = { git = "https://github.com/roze-team/roze.git" }
+roze-cache = { git = "https://github.com/roze-team/roze.git" }
+roze-context = { git = "https://github.com/roze-team/roze.git" }
+roze-db = { git = "https://github.com/roze-team/roze.git" }
+roze-openapi = { git = "https://github.com/roze-team/roze.git" }
+roze-result = { git = "https://github.com/roze-team/roze.git" }
+roze-validation = { git = "https://github.com/roze-team/roze.git" }
+serde.workspace = true
+serde_json.workspace = true
+sea-orm.workspace = true
+validator.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+

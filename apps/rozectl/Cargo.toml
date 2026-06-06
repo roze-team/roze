@@ -8,3 +8,4 @@ version.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 thiserror.workspace = true
+toml_edit.workspace = true

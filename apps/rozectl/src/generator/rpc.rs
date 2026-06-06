@@ -3,6 +3,56 @@ use crate::{
     parser::{ApiSpec, Field, HttpMethod, RestRoute, RpcMethod, TypeDef},
 };
 
+pub fn render_main(spec: &ApiSpec) -> String {
+    let package = spec.service.replace('-', "_");
+    let service = to_pascal_case(&spec.service);
+    let server_mod = format!("{}_server", to_snake_case(&service));
+
+    format!(
+        r#"mod config;
+mod client;
+mod pb;
+mod rpc;
+mod svc;
+mod types;
+
+use std::path::PathBuf;
+
+use crate::pb::{package}::{{{server_mod}::{service}Server}};
+use roze_rpc::rpc::RpcServer;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {{
+    roze_log::init_tracing();
+
+    let config = config::load(config_path())?;
+    let rpc = config
+        .rpc
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing rpc config"))?;
+    let ctx = svc::ServiceContext::new(config).await?;
+    RpcServer::new(rpc.addr)
+        .builder()
+        .add_service({service}Server::new(rpc::RpcService::new(ctx)))
+        .serve(rpc.addr)
+        .await?;
+
+    Ok(())
+}}
+
+fn config_path() -> PathBuf {{
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_config = manifest_dir.join("config.yaml");
+    if manifest_config.exists() {{
+        manifest_config
+    }} else {{
+        PathBuf::from("config.yaml")
+    }}
+}}
+"#
+    )
+}
+
 pub fn render_rpc(spec: &ApiSpec) -> String {
     let package = spec.service.replace('-', "_");
     let service = to_pascal_case(&spec.service);
@@ -118,10 +168,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("}\n");
 
     for route in &spec.rest_routes {
-        let handler = route
-            .handler
-            .clone()
-            .unwrap_or_else(|| handler_name(&route.method, &route.path));
+        let handler = resolved_handler_name(route);
         out.push_str(&format!(
             "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, tonic::Status> {{\n        let options = self.options;\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = tonic::Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    inner.{handler}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
@@ -144,10 +191,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
 }
 
 fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
-    let handler = route
-        .handler
-        .clone()
-        .unwrap_or_else(|| handler_name(&route.method, &route.path));
+    let handler = resolved_handler_name(route);
     let req_ty = &route.request;
     let resp_ty = &route.response;
     let mut out = String::new();
@@ -167,10 +211,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str(&format!(
         "        let resp = crate::logic::{handler}({args})\n",
         handler = handler,
-        args = match route.method {
-            HttpMethod::Get | HttpMethod::Delete => "self.ctx.clone(), request_ctx",
-            HttpMethod::Post | HttpMethod::Put => "self.ctx.clone(), request_ctx, req",
-        }
+        args = "self.ctx.clone(), request_ctx, req"
     ));
     out.push_str("            .await\n");
     out.push_str("            .map_err(|err| tonic::Status::internal(err.to_string()))?;\n");
@@ -213,6 +254,14 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     ));
     out.push_str("    }\n");
     out
+}
+
+fn resolved_handler_name(route: &RestRoute) -> String {
+    route
+        .handler
+        .as_ref()
+        .map(|handler| to_snake_case(handler))
+        .unwrap_or_else(|| handler_name(&route.method, &route.path))
 }
 
 fn proto_to_app(spec: &ApiSpec, ty_name: &str, var: &str) -> String {

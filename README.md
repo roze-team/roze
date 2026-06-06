@@ -31,8 +31,39 @@ The Loco/Rails lesson applied here is convention over configuration: generated s
 ## Quick Start
 
 ```bash
-cargo run -p rozectl -- generate example/user.api --out apps/roze-example --force
+cargo run -p rozectl -- generate example/user.api --out apps/roze-example --roze-source path
 cargo run -p roze-example
+```
+
+Regenerate framework-owned files while preserving `src/logic/mod.rs` and
+`config.yaml`:
+
+```bash
+cargo run -p rozectl -- api generate example/user.api \
+  --out apps/roze-example \
+  --update \
+  --roze-source path
+```
+
+Use `--force` only for a full rebuild. New projects use
+`https://github.com/roze-team/roze.git` dependencies by default; pass
+`--roze-source path` for projects inside this repository.
+
+`rozectl api new user` and `rozectl rpc new user` create `user/` in the current
+directory by default. Use `--out services/user` to choose another location.
+Projects created outside a Cargo workspace receive a standalone manifest with
+explicit package metadata and dependency versions.
+
+`rozectl model generate example/user.model --out apps/roze-example` writes a
+SeaORM-style model scaffold into an existing service. The model generator
+supports both the existing DSL and SQL DDL via `--format auto|dsl|sql`.
+The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
+`field` lines.
+
+Example SQL input:
+
+```bash
+rozectl model generate example/user.sql --out apps/roze-example --format sql
 ```
 
 Generated service layout:

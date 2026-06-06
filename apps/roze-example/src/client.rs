@@ -82,3 +82,30 @@ impl RpcClient {
         Ok(response.into_inner())
     }
 }
+
+impl RpcClient {
+    pub async fn get_user(&mut self, context: &roze_context::Context, req: proto::GetUserReq) -> Result<proto::UserResp, tonic::Status> {
+        let options = self.options;
+        let request_template = req.clone();
+        let context = context.clone();
+        let inner = self.inner.clone();
+        let response = roze_rpc::rpc::retry_status(
+            || {
+                let mut request = tonic::Request::new(request_template.clone());
+                let context = context.clone();
+                let mut inner = inner.clone();
+                async move {
+                    if let Some(timeout) = context.remaining_timeout() {
+                        request.set_timeout(timeout);
+                    } else {
+                        request.set_timeout(options.request_timeout);
+                    }
+                    roze_rpc::rpc::apply_request_context(&mut request, &context);
+                    inner.get_user(request).await
+                }
+            },
+            options,
+        ).await?;
+        Ok(response.into_inner())
+    }
+}

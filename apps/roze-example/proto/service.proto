@@ -4,6 +4,7 @@ package user_api;
 
 service UserApi {
   rpc Login (LoginReq) returns (LoginResp);
+  rpc GetUser (GetUserReq) returns (UserResp);
 }
 
 message LoginReq {
@@ -13,5 +14,15 @@ message LoginReq {
 
 message LoginResp {
   string token = 1;
+}
+
+message GetUserReq {
+  int64 id = 1;
+}
+
+message UserResp {
+  int64 id = 1;
+  string username = 2;
+  int64 created_at = 3;
 }
 

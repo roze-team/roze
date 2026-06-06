@@ -87,7 +87,11 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
         .cloned()
         .unwrap_or_else(|| {
             let trace_id = metadata_trace_id(request).unwrap_or_else(generate_trace_id);
-            Context::background_with_trace_id(trace_id)
+            let ctx = Context::background_with_trace_id(trace_id);
+            match metadata_timeout(request) {
+                Some(timeout) => ctx.with_timeout(timeout),
+                None => ctx,
+            }
         })
 }
 
@@ -95,6 +99,14 @@ pub fn apply_context<T>(request: &mut Request<T>, context: &Context) {
     let trace_id = context.trace_id();
     if let Ok(value) = MetadataValue::try_from(trace_id.as_str()) {
         request.metadata_mut().insert(TRACE_ID_HEADER, value);
+    }
+    if let Some(timeout) = context.remaining_timeout() {
+        let timeout_ms = timeout.as_millis().to_string();
+        if let Ok(value) = MetadataValue::try_from(timeout_ms.as_str()) {
+            request
+                .metadata_mut()
+                .insert(roze_context::TIMEOUT_HEADER, value);
+        }
     }
     request.extensions_mut().insert(context.clone());
 }
@@ -106,6 +118,15 @@ pub fn metadata_trace_id<T>(request: &Request<T>) -> Option<String> {
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+pub fn metadata_timeout<T>(request: &Request<T>) -> Option<Duration> {
+    let raw = request
+        .metadata()
+        .get(roze_context::TIMEOUT_HEADER)
+        .and_then(|value| value.to_str().ok())?;
+    let millis = raw.parse::<u64>().ok()?;
+    Some(Duration::from_millis(millis))
 }
 
 pub fn with_trace_interceptor(

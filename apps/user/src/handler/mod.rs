@@ -13,11 +13,10 @@ use crate::types::*;
 
 pub fn router(ctx: ServiceContext) -> impl Endpoint {
     Route::new()
-        .at("/healthz", poem::get(health))
-        .at("/metrics", poem::get(metrics))
-        .at("/openapi.json", poem::get(openapi_doc))
-        .at("/user/login", poem::post(login))
-        .at("/user/:id", poem::get(get_user))
+        .at("/api/healthz", poem::get(health))
+        .at("/api/metrics", poem::get(metrics))
+        .at("/api/openapi.json", poem::get(openapi_doc))
+        .at("/api/user/login", poem::post(post_user_login))
         .data(ctx)
 }
 
@@ -45,28 +44,13 @@ struct LoginReqJson {
 }
 
 #[handler]
-async fn login(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Json(body): Json<LoginReqJson>) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
+async fn post_user_login(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Json(body): Json<LoginReqJson>) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
     roze_validation::validate_or_message(&body).map_err(RozeError::BadRequest)?;
     let req = LoginReq {
         username: body.username,
         password: body.password,
     };
-    let resp = crate::logic::login((*ctx).clone(), (*request_ctx).clone(), req).await?;
-    Ok(Json(ApiResponse::ok(resp)))
-}
-
-#[derive(Debug, Clone, Deserialize, Validate)]
-struct GetUserReqPath {
-    id: i64,
-}
-
-#[handler]
-async fn get_user(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Path(path): Path<GetUserReqPath>) -> Result<Json<ApiResponse<UserResp>>, RozeError> {
-    roze_validation::validate_or_message(&path).map_err(RozeError::BadRequest)?;
-    let req = GetUserReq {
-        id: path.id,
-    };
-    let resp = crate::logic::get_user((*ctx).clone(), (*request_ctx).clone(), req).await?;
+    let resp = crate::logic::post_user_login((*ctx).clone(), (*request_ctx).clone(), req).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
 

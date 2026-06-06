@@ -1,0 +1,17 @@
+name: user
+rest:
+  addr: 127.0.0.1:3000
+registry:
+  kind: memory
+  endpoints: []
+  # ttl_seconds: 10
+  # renew_interval_secs: 3
+# database:
+#   url: sqlite://data/user.db?mode=rwc
+# cache:
+#   url: redis://127.0.0.1/
+#   namespace: user
+# auth:
+#   jwt_secret: change-me
+#   jwt_issuer: user
+#   jwt_expiration_secs: 86400

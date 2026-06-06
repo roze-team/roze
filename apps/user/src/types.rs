@@ -11,17 +11,6 @@ pub struct LoginReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginResp {
     pub token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetUserReq {
-    pub id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserResp {
-    pub id: i64,
-    pub username: String,
-    pub created_at: i64,
+    pub expires_at: u64,
 }
 

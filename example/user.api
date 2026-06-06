@@ -12,9 +12,22 @@ type (
     LoginResp {
         Token string `json:"token"`
     }
+
+    GetUserReq {
+        Id int `path:"id"`
+    }
+
+    UserResp {
+        Id int `json:"id"`
+        Username string `json:"username"`
+        CreatedAt int `json:"created_at"`
+    }
 )
 
 service user-api {
     @handler login
     post /user/login (LoginReq) returns (LoginResp)
+
+    @handler getUser
+    get /user/:id (GetUserReq) returns (UserResp)
 }

@@ -2,12 +2,8 @@ mod config;
 mod handler;
 mod logic;
 mod openapi;
-mod client;
-mod pb;
-mod rpc;
 mod svc;
 mod types;
-mod model;
 
 use roze_http::rest::RestServer;
 
