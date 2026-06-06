@@ -1,0 +1,23 @@
+[package]
+name = "roze-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+config.workspace = true
+poem.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sea-orm.workspace = true
+base64.workspace = true
+jsonwebtoken.workspace = true
+redis.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package user_api;
+
+service UserApi {
+  rpc Login (LoginReq) returns (LoginResp);
+}
+
+message LoginReq {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResp {
+  string token = 1;
+}
+

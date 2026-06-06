@@ -1,0 +1,20 @@
+info (
+    title: "用户服务"
+    desc: "用户登录、注册"
+)
+
+type (
+    LoginReq {
+        Username string `json:"username"`
+        Password string `json:"password"`
+    }
+
+    LoginResp {
+        Token string `json:"token"`
+    }
+)
+
+service user-api {
+    @handler login
+    post /user/login (LoginReq) returns (LoginResp)
+}
