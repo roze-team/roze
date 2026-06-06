@@ -1,0 +1,14 @@
+[package]
+name = "roze-cache"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+roze-config = { path = "../roze-config" }
+roze-redis = { path = "../roze-redis" }
+roze-singleflight = { path = "../roze-singleflight" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

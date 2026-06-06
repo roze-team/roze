@@ -1,0 +1,8 @@
+[package]
+name = "roze-prometheus"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+roze-metrics = { path = "../roze-metrics" }

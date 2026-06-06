@@ -2,9 +2,20 @@
 
 Roze is a small Rust service framework scaffold with:
 
-- `rozectl`: code generation for `.api` service definitions.
-- `roze-core`: lightweight wrappers around REST, RPC, registry, and middleware primitives.
-- `example/user-service`: a generated example service from `example/user.api`.
+- `crates/roze-core`: base types, errors, results, and shared response helpers.
+- `crates/roze-http`: Poem router, extractors, and middleware wrappers.
+- `crates/roze-validation`: request parameter validation helpers.
+- `crates/roze-config`: YAML/TOML/env configuration loading.
+- `crates/roze-log`: tracing and `trace_id` plumbing.
+- `crates/roze-auth`: JWT and auth helpers.
+- `crates/roze-db`: SeaORM and database helpers.
+- `crates/roze-cache`: Redis helpers.
+- `crates/roze-openapi`: Swagger/OpenAPI support.
+- `crates/roze-rpc`: tonic gRPC helpers.
+- `crates/roze-job`: scheduled job scaffolding.
+- `crates/roze-mq`: messaging scaffolding.
+- `apps/rozectl`: code generation for `.api` service definitions.
+- `apps/roze-example`: a generated example service from `example/user.api`.
 
 The direction is go-zero style microservice ergonomics with Rust-native building blocks:
 
@@ -20,8 +31,8 @@ The Loco/Rails lesson applied here is convention over configuration: generated s
 ## Quick Start
 
 ```bash
-cargo run -p rozectl -- generate example/user.api --out example/user-service --force
-cargo run -p user-api-service
+cargo run -p rozectl -- generate example/user.api --out apps/roze-example --force
+cargo run -p roze-example
 ```
 
 Generated service layout:

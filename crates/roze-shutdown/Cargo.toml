@@ -1,0 +1,8 @@
+[package]
+name = "roze-shutdown"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true

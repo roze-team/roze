@@ -1,8 +1,54 @@
 [workspace]
 members = [
-    "roze-core",
-    "rozectl",
-    "example/user-service",
+    "crates/roze-context",
+    "crates/roze-trace",
+    "crates/roze-core",
+    "crates/roze-error",
+    "crates/roze-result",
+    "crates/roze-codec",
+    "crates/roze-http",
+    "crates/roze-metrics",
+    "crates/roze-middleware",
+    "crates/roze-utils",
+    "crates/roze-grpc",
+    "crates/roze-service",
+    "crates/roze-bootstrap",
+    "crates/roze-shutdown",
+    "crates/roze-health",
+    "crates/roze-validation",
+    "crates/roze-config",
+    "crates/roze-log",
+    "crates/roze-prometheus",
+    "crates/roze-opentelemetry",
+    "crates/roze-profiling",
+    "crates/roze-auth",
+    "crates/roze-db",
+    "crates/roze-orm",
+    "crates/roze-sqlx",
+    "crates/roze-transaction",
+    "crates/roze-migration",
+    "crates/roze-cache",
+    "crates/roze-redis",
+    "crates/roze-local-cache",
+    "crates/roze-singleflight",
+    "crates/roze-openapi",
+    "crates/roze-mq",
+    "crates/roze-kafka",
+    "crates/roze-nats",
+    "crates/roze-eventbus",
+    "crates/roze-job",
+    "crates/roze-jwt",
+    "crates/roze-session",
+    "crates/roze-permission",
+    "crates/roze-swagger",
+    "crates/roze-cron",
+    "crates/roze-worker",
+    "crates/roze-ws",
+    "crates/roze-push",
+    "crates/roze-session-hub",
+    "crates/roze-rpc",
+    "apps/rozectl",
+    "apps/roze-example",
 ]
 resolver = "2"
 
@@ -15,7 +61,7 @@ version = "0.1.0"
 anyhow = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
-config = { version = "0.14", default-features = false, features = ["json", "yaml"] }
+config = { version = "0.14", default-features = false, features = ["json", "yaml", "toml"] }
 poem = "3"
 prost = "0.12"
 protoc-bin-vendored = "3"
@@ -23,11 +69,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }
 thiserror = "1"
+validator = { version = "0.20", features = ["derive"] }
 base64 = "0.22"
 jsonwebtoken = "9"
 redis = { version = "0.27", features = ["aio", "tokio-comp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.11"
 tonic-build = "0.11"
 tracing = "0.1"

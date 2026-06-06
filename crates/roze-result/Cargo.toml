@@ -1,0 +1,11 @@
+[package]
+name = "roze-result"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+poem.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tonic.workspace = true

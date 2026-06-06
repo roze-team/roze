@@ -1,0 +1,15 @@
+[package]
+name = "roze-middleware"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+poem.workspace = true
+roze-auth = { path = "../roze-auth" }
+roze-context = { path = "../roze-context" }
+roze-error = { path = "../roze-error" }
+roze-metrics = { path = "../roze-metrics" }
+roze-trace = { path = "../roze-trace" }
+tokio.workspace = true
+tracing.workspace = true

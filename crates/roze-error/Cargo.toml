@@ -1,0 +1,12 @@
+[package]
+name = "roze-error"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+poem.workspace = true
+tonic.workspace = true
+serde.workspace = true
+roze-result = { path = "../roze-result" }
+thiserror.workspace = true

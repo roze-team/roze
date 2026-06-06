@@ -1,0 +1,9 @@
+[package]
+name = "roze-config"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+config.workspace = true
+serde.workspace = true

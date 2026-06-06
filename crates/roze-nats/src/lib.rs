@@ -1,0 +1,2 @@
+//! NATS adapter crate.
+

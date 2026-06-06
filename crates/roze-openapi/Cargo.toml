@@ -1,0 +1,9 @@
+[package]
+name = "roze-openapi"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+serde.workspace = true

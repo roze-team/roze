@@ -1,0 +1,8 @@
+[package]
+name = "roze-codec"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+base64.workspace = true

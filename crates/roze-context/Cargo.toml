@@ -1,0 +1,8 @@
+[package]
+name = "roze-context"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+roze-trace = { path = "../roze-trace" }

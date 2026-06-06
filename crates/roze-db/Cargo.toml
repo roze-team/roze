@@ -1,0 +1,10 @@
+[package]
+name = "roze-db"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+roze-config = { path = "../roze-config" }
+sea-orm.workspace = true

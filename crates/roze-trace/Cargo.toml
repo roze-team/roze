@@ -1,0 +1,8 @@
+[package]
+name = "roze-trace"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+tracing.workspace = true

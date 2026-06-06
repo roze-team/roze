@@ -1,0 +1,11 @@
+[package]
+name = "roze-http"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+poem.workspace = true
+roze-error = { path = "../roze-error" }
+tokio.workspace = true
+tracing.workspace = true

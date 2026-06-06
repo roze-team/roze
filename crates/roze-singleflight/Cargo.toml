@@ -1,0 +1,8 @@
+[package]
+name = "roze-singleflight"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true

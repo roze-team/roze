@@ -1,0 +1,8 @@
+[package]
+name = "roze-bootstrap"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+roze-service = { path = "../roze-service" }
