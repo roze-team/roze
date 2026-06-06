@@ -2351,6 +2351,7 @@ dependencies = [
  "roze-openapi",
  "roze-result",
  "roze-rpc",
+ "roze-swagger",
  "roze-trace",
  "roze-validation",
  "sea-orm",
@@ -2568,6 +2569,39 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+]
+
+[[package]]
+name = "roze-sample-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "poem",
+ "prost",
+ "protoc-bin-vendored",
+ "roze-cache",
+ "roze-config",
+ "roze-context",
+ "roze-db",
+ "roze-error",
+ "roze-http",
+ "roze-jwt",
+ "roze-log",
+ "roze-metrics",
+ "roze-middleware",
+ "roze-openapi",
+ "roze-result",
+ "roze-rpc",
+ "roze-validation",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "validator",
 ]
 
 [[package]]

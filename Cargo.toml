@@ -49,6 +49,7 @@ members = [
     "crates/roze-rpc",
     "apps/rozectl",
     "apps/roze-example",
+    "apps/roze-sample",
 ]
 resolver = "2"
 

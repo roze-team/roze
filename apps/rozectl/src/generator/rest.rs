@@ -22,7 +22,7 @@ use roze_http::rest::RestServer;
 async fn main() -> anyhow::Result<()> {
     roze_log::init_tracing();
 
-    let config = config::load("config.yaml")?;
+    let config = config::load(config_path())?;
     let rest = config
         .rest
         .clone()
@@ -32,6 +32,16 @@ async fn main() -> anyhow::Result<()> {
     RestServer::new(rest.addr, app).serve().await?;
 
     Ok(())
+}
+
+fn config_path() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_config = manifest_dir.join("config.yaml");
+    if manifest_config.exists() {
+        manifest_config
+    } else {
+        std::path::PathBuf::from("config.yaml")
+    }
 }
 "#
     .to_string()
@@ -156,9 +166,12 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 }
 
 pub fn render_openapi(spec: &ApiSpec) -> String {
-    let mut out = String::from(
-        "use std::collections::BTreeMap;\n\nuse roze_openapi::{HttpMethod, OpenApiBuilder, Operation, Schema, SecurityScheme};\n\n",
-    );
+    let needs_jwt = spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some();
+    let mut out = String::from("use std::collections::BTreeMap;\n\nuse roze_openapi::{HttpMethod, OpenApiBuilder, Operation, Schema");
+    if needs_jwt {
+        out.push_str(", SecurityScheme");
+    }
+    out.push_str("};\n\n");
     out.push_str("pub fn document() -> serde_json::Value {\n");
     out.push_str(&format!(
         "    let mut builder = OpenApiBuilder::new({:?}, \"0.1.0\").description({:?});\n",

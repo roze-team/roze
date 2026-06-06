@@ -8,8 +8,6 @@ mod rpc;
 mod svc;
 mod types;
 
-use std::path::PathBuf;
-
 use roze_http::rest::RestServer;
 
 #[tokio::main]
@@ -28,12 +26,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn config_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+fn config_path() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let manifest_config = manifest_dir.join("config.yaml");
     if manifest_config.exists() {
         manifest_config
     } else {
-        PathBuf::from("config.yaml")
+        std::path::PathBuf::from("config.yaml")
     }
 }

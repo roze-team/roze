@@ -11,6 +11,6 @@ pub struct LoginReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginResp {
     pub token: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: u64,
 }
+

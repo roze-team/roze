@@ -30,12 +30,4 @@ impl ServiceContext {
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
         self.config.auth.as_ref().map(Into::into)
     }
-
-    pub fn jwt_config_or_demo(&self) -> roze_jwt::JwtConfig {
-        self.jwt_config().unwrap_or_else(|| roze_jwt::JwtConfig {
-            jwt_secret: format!("{}-demo-secret", self.config.name),
-            jwt_issuer: self.config.name.clone(),
-            jwt_expiration_secs: 24 * 60 * 60,
-        })
-    }
 }

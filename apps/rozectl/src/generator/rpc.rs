@@ -51,9 +51,10 @@ pub fn render_client(spec: &ApiSpec) -> String {
 
     let mut out = String::from("#![allow(dead_code, unused_imports)]\n\n");
     out.push_str(&format!(
-        "use crate::pb::{package}::{{self as proto, {client_mod}::UserApiClient as ProtoClient}};\n",
+        "use crate::pb::{package}::{{self as proto, {client_mod}::{service}Client as ProtoClient}};\n",
         package = package,
-        client_mod = client_mod
+        client_mod = client_mod,
+        service = service
     ));
     out.push_str("use roze_rpc::balance::Balancer;\n");
     out.push_str("use roze_rpc::registry::{CachedRegistryResolver, Registry};\n");

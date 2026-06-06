@@ -1,0 +1,17 @@
+service roze-sample {
+    @server (
+        prefix: /api
+        group: roze_sample
+    )
+    post /roze_sample/login (LoginReq) returns (LoginResp)
+}
+
+type LoginReq {
+    username: string `json:"username"`
+    password: string `json:"password"`
+}
+
+type LoginResp {
+    token: string
+    expiresAt: u64
+}

@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use poem::{handler, http::HeaderMap, web::{Data, Form, Html, Json, Path, Query}, Endpoint, EndpointExt, Route};
+use poem::{handler, http::HeaderMap, web::{Data, Form, Json, Path, Query}, Endpoint, EndpointExt, Route};
 use serde::Deserialize;
 use roze_validation::Validate;
 use roze_context::Context;
@@ -13,11 +13,10 @@ use crate::types::*;
 
 pub fn router(ctx: ServiceContext) -> impl Endpoint {
     Route::new()
-        .at("/healthz", poem::get(health))
-        .at("/metrics", poem::get(metrics))
-        .at("/openapi.json", poem::get(openapi_doc))
-        .at("/docs", poem::get(docs))
-        .at("/user/login", poem::post(login))
+        .at("/api/healthz", poem::get(health))
+        .at("/api/metrics", poem::get(metrics))
+        .at("/api/openapi.json", poem::get(openapi_doc))
+        .at("/api/roze_sample/login", poem::post(post_roze_sample_login))
         .data(ctx)
 }
 
@@ -36,11 +35,6 @@ async fn openapi_doc() -> Json<serde_json::Value> {
     Json(openapi::document())
 }
 
-#[handler]
-async fn docs() -> Html<String> {
-    Html(roze_swagger::swagger_ui_html("user-api", "/openapi.json"))
-}
-
 #[derive(Debug, Clone, Deserialize, Validate)]
 struct LoginReqJson {
     #[validate(length(min = 1))]
@@ -50,12 +44,13 @@ struct LoginReqJson {
 }
 
 #[handler]
-async fn login(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Json(body): Json<LoginReqJson>) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
+async fn post_roze_sample_login(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Json(body): Json<LoginReqJson>) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
     roze_validation::validate_or_message(&body).map_err(RozeError::BadRequest)?;
     let req = LoginReq {
         username: body.username,
         password: body.password,
     };
-    let resp = crate::logic::login((*ctx).clone(), (*request_ctx).clone(), req).await?;
+    let resp = crate::logic::post_roze_sample_login((*ctx).clone(), (*request_ctx).clone(), req).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
+

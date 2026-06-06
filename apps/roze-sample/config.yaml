@@ -1,0 +1,17 @@
+name: roze-sample
+rest:
+  addr: 127.0.0.1:3000
+registry:
+  kind: memory
+  endpoints: []
+  # ttl_seconds: 10
+  # renew_interval_secs: 3
+# database:
+#   url: sqlite://data/roze-sample.db?mode=rwc
+# cache:
+#   url: redis://127.0.0.1/
+#   namespace: roze-sample
+# auth:
+#   jwt_secret: change-me
+#   jwt_issuer: roze-sample
+#   jwt_expiration_secs: 86400
