@@ -1,9 +1,12 @@
 use std::{
+    collections::HashMap,
     fs,
     path::Path,
 };
 
 use anyhow::{bail, Context};
+use roze_sqlx::{SqlxConfig, SqlxDatabaseKind, SqlxPool};
+use sqlx::Row;
 
 use super::{to_pascal_case, to_snake_case, GenerateMode, GenerateOptions};
 
@@ -17,6 +20,7 @@ pub enum ModelFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     pub name: String,
+    pub schema_name: Option<String>,
     pub table: String,
     pub primary: String,
     pub cache: bool,
@@ -28,6 +32,8 @@ pub struct ModelSpec {
 pub struct ModelField {
     pub name: String,
     pub ty: String,
+    pub default_value: Option<String>,
+    pub comment: Option<String>,
 }
 
 pub fn generate_model_project(
@@ -37,17 +43,45 @@ pub fn generate_model_project(
     format: ModelFormat,
 ) -> anyhow::Result<()> {
     let models = parse_models_with_format(source, format)?;
-    ensure_model_output(out, options.mode)?;
+    write_model_project(&models, out, options)
+}
 
-    fs::create_dir_all(out.join("src/model"))?;
-    fs::write(out.join("src/model/mod.rs"), render_model_mod(&models))?;
-    for model in &models {
-        let file_name = format!("{}.rs", to_snake_case(&model.name));
-        fs::write(
-            out.join("src/model").join(file_name),
-            render_model_module(model),
-        )
-        .with_context(|| format!("failed to write model {}", model.name))?;
+pub async fn inspect_model_project(
+    table: &str,
+    db_url: &str,
+    db_kind: SqlxDatabaseKind,
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let pool = roze_sqlx::connect(&SqlxConfig {
+        kind: db_kind,
+        url: db_url.to_string(),
+        max_connections: 10,
+    })
+    .await?;
+
+    let model = match pool {
+        SqlxPool::Sqlite(pool) => inspect_sqlite_table(&pool, table).await?,
+        SqlxPool::Postgres(pool) => inspect_postgres_table(&pool, table).await?,
+        SqlxPool::MySql(pool) => inspect_mysql_table(&pool, table).await?,
+    };
+
+    write_model_project(&[model], out, options)
+}
+
+fn write_model_project(
+    models: &[ModelSpec],
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    ensure_model_output(out, options.mode)?;
+    let model_dir = out.join("src/model");
+    fs::create_dir_all(&model_dir)?;
+
+    fs::write(model_dir.join("mod.rs"), render_model_mod(models))?;
+    for model in models {
+        let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
+        fs::write(module_path, render_model_module(model))?;
     }
 
     update_main_rs(out)?;
@@ -140,11 +174,30 @@ fn render_model_module(model: &ModelSpec) -> String {
         "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
     )
     .unwrap();
-    writeln!(&mut out, "#[sea_orm(table_name = \"{}\")]", table_name).unwrap();
+    match &model.schema_name {
+        Some(schema_name) => {
+            writeln!(
+                &mut out,
+                "#[sea_orm(schema_name = \"{}\", table_name = \"{}\")]", 
+                schema_name,
+                table_name
+            )
+            .unwrap();
+        }
+        None => {
+            writeln!(&mut out, "#[sea_orm(table_name = \"{}\")]", table_name).unwrap();
+        }
+    }
     writeln!(&mut out, "pub struct Model {{").unwrap();
     for field in &model.fields {
         if field.name == model.primary {
             writeln!(&mut out, "    #[sea_orm(primary_key)]").unwrap();
+        }
+        if let Some(comment) = &field.comment {
+            writeln!(&mut out, "    /// {}", comment.replace('\n', " ")).unwrap();
+        }
+        if let Some(default_value) = &field.default_value {
+            writeln!(&mut out, "    /// default: {}", default_value.replace('\n', " ")).unwrap();
         }
         writeln!(&mut out, "    pub {}: {},", field.name, field.ty).unwrap();
     }
@@ -350,6 +403,298 @@ fn render_model_module(model: &ModelSpec) -> String {
     out
 }
 
+#[derive(Debug, Clone)]
+struct InspectedColumn {
+    name: String,
+    ty: String,
+    nullable: bool,
+    auto_increment: bool,
+    default_value: Option<String>,
+    comment: Option<String>,
+}
+
+async fn inspect_sqlite_table(
+    pool: &sqlx::SqlitePool,
+    table: &str,
+) -> anyhow::Result<ModelSpec> {
+    let table_name = strip_sql_identifier(table);
+    let pragma_table = table_name.clone();
+    let rows = sqlx::query(&format!(
+        "PRAGMA table_info({})",
+        sqlite_identifier(&pragma_table)
+    ))
+    .fetch_all(pool)
+    .await?;
+
+    let mut columns = Vec::new();
+    let mut primary = None;
+    for row in rows {
+        let name: String = row.try_get("name")?;
+        let ty: String = row.try_get::<Option<String>, _>("type")?.unwrap_or_default();
+        let notnull: i64 = row.try_get("notnull")?;
+        let default_value: Option<String> = row.try_get("dflt_value")?;
+        let pk: i64 = row.try_get("pk")?;
+        if pk > 0 {
+            if primary.is_some() {
+                bail!("table `{}` has composite primary keys which are not supported", table_name);
+            }
+            primary = Some(name.clone());
+        }
+        columns.push(InspectedColumn {
+            name,
+            ty: map_sql_type(&ty, pk > 0),
+            nullable: notnull == 0,
+            auto_increment: pk > 0 && ty.to_ascii_lowercase().contains("int"),
+            default_value,
+            comment: None,
+        });
+    }
+
+    build_inspected_model(None, &table_name, columns, primary)
+}
+
+async fn inspect_postgres_table(
+    pool: &sqlx::PgPool,
+    table: &str,
+) -> anyhow::Result<ModelSpec> {
+    let (schema, table_name) = split_table_reference(table);
+    let schema = schema.unwrap_or_else(|| "public".to_string());
+
+    let columns = sqlx::query(
+        r#"
+        SELECT
+            column_name,
+            data_type,
+            udt_name,
+            is_nullable,
+            column_default
+        FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        ORDER BY ordinal_position
+        "#,
+    )
+    .bind(&schema)
+    .bind(&table_name)
+    .fetch_all(pool)
+    .await?;
+
+    if columns.is_empty() {
+        bail!("table `{schema}.{table_name}` not found");
+    }
+
+    let primary_rows = sqlx::query(
+        r#"
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+         AND tc.table_name = kcu.table_name
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema = $1
+          AND tc.table_name = $2
+        ORDER BY kcu.ordinal_position
+        "#,
+    )
+    .bind(&schema)
+    .bind(&table_name)
+    .fetch_all(pool)
+    .await?;
+
+    let primary_columns = primary_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("column_name"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if primary_columns.len() > 1 {
+        bail!("table `{schema}.{table_name}` has composite primary keys which are not supported");
+    }
+    let primary = primary_columns.first().cloned();
+
+    let mut inspected = Vec::new();
+    for row in columns {
+        let name: String = row.try_get("column_name")?;
+        let data_type: String = row.try_get("data_type")?;
+        let udt_name: String = row.try_get("udt_name")?;
+        let nullable: String = row.try_get("is_nullable")?;
+        let default_value: Option<String> = row.try_get("column_default")?;
+        let auto_increment = default_value
+            .as_deref()
+            .map(|value| value.contains("nextval("))
+            .unwrap_or(false);
+        let ty = map_sql_type(&format!("{data_type} {udt_name}"), auto_increment);
+        inspected.push(InspectedColumn {
+            name,
+            ty,
+            nullable: nullable.eq_ignore_ascii_case("yes"),
+            auto_increment,
+            default_value,
+            comment: None,
+        });
+    }
+
+    build_inspected_model(Some(schema), &table_name, inspected, primary)
+}
+
+async fn inspect_mysql_table(
+    pool: &sqlx::MySqlPool,
+    table: &str,
+) -> anyhow::Result<ModelSpec> {
+    let (schema, table_name) = split_table_reference(table);
+    let schema = match schema {
+        Some(schema) => schema,
+        None => sqlx::query("SELECT DATABASE() AS db")
+            .fetch_one(pool)
+            .await?
+            .try_get::<Option<String>, _>("db")?
+            .ok_or_else(|| anyhow::anyhow!("mysql connection has no default database"))?,
+    };
+
+    let columns = sqlx::query(
+        r#"
+        SELECT
+            column_name,
+            data_type,
+            column_type,
+            is_nullable,
+            column_default,
+            extra,
+            column_comment
+        FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = ?
+        ORDER BY ordinal_position
+        "#,
+    )
+    .bind(&schema)
+    .bind(&table_name)
+    .fetch_all(pool)
+    .await?;
+
+    if columns.is_empty() {
+        bail!("table `{schema}.{table_name}` not found");
+    }
+
+    let primary_rows = sqlx::query(
+        r#"
+        SELECT column_name
+        FROM information_schema.key_column_usage
+        WHERE table_schema = ? AND table_name = ? AND constraint_name = 'PRIMARY'
+        ORDER BY ordinal_position
+        "#,
+    )
+    .bind(&schema)
+    .bind(&table_name)
+    .fetch_all(pool)
+    .await?;
+
+    let primary_columns = primary_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("column_name"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if primary_columns.len() > 1 {
+        bail!("table `{schema}.{table_name}` has composite primary keys which are not supported");
+    }
+    let primary = primary_columns.first().cloned();
+
+    let mut inspected = Vec::new();
+    for row in columns {
+        let name: String = row.try_get("column_name")?;
+        let data_type: String = row.try_get("data_type")?;
+        let column_type: String = row.try_get("column_type")?;
+        let nullable: String = row.try_get("is_nullable")?;
+        let default_value: Option<String> = row.try_get("column_default")?;
+        let extra: String = row.try_get("extra")?;
+        let comment: Option<String> = row.try_get("column_comment")?;
+        let auto_increment = extra.to_ascii_lowercase().contains("auto_increment");
+        let ty = map_sql_type(&format!("{data_type} {column_type}"), auto_increment);
+        inspected.push(InspectedColumn {
+            name,
+            ty,
+            nullable: nullable.eq_ignore_ascii_case("yes"),
+            auto_increment,
+            default_value,
+            comment,
+        });
+    }
+
+    build_inspected_model(Some(schema), &table_name, inspected, primary)
+}
+
+fn build_inspected_model(
+    schema_name: Option<String>,
+    table: &str,
+    columns: Vec<InspectedColumn>,
+    primary: Option<String>,
+) -> anyhow::Result<ModelSpec> {
+    if columns.is_empty() {
+        bail!("table `{table}` has no columns");
+    }
+
+    let primary = match primary {
+        Some(primary) => primary,
+        None => columns
+            .iter()
+            .find(|column| column.auto_increment)
+            .map(|column| column.name.clone())
+            .ok_or_else(|| anyhow::anyhow!("table `{table}` has no primary key"))?,
+    };
+
+    let mut fields = Vec::with_capacity(columns.len());
+    for column in columns {
+        let ty = if column.nullable && column.name != primary {
+            format!("Option<{}>", column.ty)
+        } else {
+            column.ty
+        };
+        fields.push(ModelField {
+            name: column.name,
+            ty,
+            default_value: column.default_value,
+            comment: column.comment,
+        });
+    }
+
+    if !fields.iter().any(|field| field.name == primary) {
+        bail!("table `{table}` primary field `{primary}` not found");
+    }
+
+    Ok(ModelSpec {
+        name: model_name_from_table(table),
+        schema_name,
+        table: table.to_string(),
+        primary,
+        cache: true,
+        cache_ttl_secs: None,
+        fields,
+    })
+}
+
+fn split_table_reference(input: &str) -> (Option<String>, String) {
+    let trimmed = strip_sql_identifier(input);
+    let mut parts = trimmed
+        .split('.')
+        .map(strip_sql_identifier)
+        .filter(|part| !part.is_empty());
+    let first = parts.next();
+    let second = parts.next();
+    match (first, second, parts.next()) {
+        (Some(table), None, None) => (None, table),
+        (Some(schema), Some(table), None) => (Some(schema), table),
+        _ => (None, trimmed),
+    }
+}
+
+fn table_key(schema_name: Option<&str>, table: &str) -> String {
+    match schema_name {
+        Some(schema) if !schema.is_empty() => format!("{}.{}", strip_sql_identifier(schema), strip_sql_identifier(table)),
+        _ => strip_sql_identifier(table),
+    }
+}
+
+fn sqlite_identifier(input: &str) -> String {
+    let cleaned = strip_sql_identifier(input);
+    format!("\"{}\"", cleaned.replace('\"', "\"\""))
+}
+
 #[allow(dead_code)]
 pub fn parse_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
     parse_models_with_format(source, ModelFormat::Auto)
@@ -444,6 +789,8 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 fields.push(ModelField {
                     name: field_name.to_string(),
                     ty: field_ty.to_string(),
+                    default_value: None,
+                    comment: None,
                 });
                 continue;
             }
@@ -465,6 +812,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
 
         models.push(ModelSpec {
             name,
+            schema_name: None,
             table,
             primary,
             cache,
@@ -482,6 +830,8 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
 
 fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
     let mut models = Vec::new();
+    let mut model_indexes = HashMap::<String, usize>::new();
+    let mut pending_comments = Vec::<(String, String, String)>::new();
     let lines = source.lines().enumerate().collect::<Vec<_>>();
     let mut i = 0usize;
 
@@ -494,36 +844,89 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             continue;
         }
 
-        if !starts_with_ci(line, "create table") {
-            bail!("line {}: expected `CREATE TABLE ...`", line_no + 1);
+        let statement_kind = if starts_with_ci(line, "create table") {
+            Some(StatementKind::CreateTable)
+        } else if starts_with_ci(line, "comment on column") {
+            Some(StatementKind::CommentOnColumn)
+        } else {
+            None
         }
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `CREATE TABLE` or `COMMENT ON COLUMN`", line_no + 1))?;
 
-        let mut statement = String::from(line);
-        let mut depth = paren_balance(line);
-        let mut finished = line.trim_end().ends_with(';') && depth <= 0;
+        let (statement, next_i) = collect_sql_statement(&lines, i - 1, line_no + 1)?;
+        i = next_i;
 
-        while !finished && i < lines.len() {
-            let (_, next_raw) = lines[i];
-            let next_line = next_raw.trim_end();
-            statement.push('\n');
-            statement.push_str(next_line);
-            depth += paren_balance(next_line);
-            finished = next_line.trim_end().ends_with(';') && depth <= 0;
-            i += 1;
+        match statement_kind {
+            StatementKind::CreateTable => {
+                let model = parse_create_table(&statement, line_no + 1)?;
+                let key = table_key(model.schema_name.as_deref(), &model.table);
+                model_indexes.insert(key, models.len());
+                models.push(model);
+            }
+            StatementKind::CommentOnColumn => {
+                let (table, column, comment) = parse_comment_on_column(&statement, line_no + 1)?;
+                pending_comments.push((table, column, comment));
+            }
         }
-
-        if !finished {
-            bail!("line {}: unterminated CREATE TABLE statement", line_no + 1);
-        }
-
-        models.push(parse_create_table(&statement, line_no + 1)?);
     }
 
     if models.is_empty() {
         bail!("no model declarations found");
     }
 
+    for (table, column, comment) in pending_comments {
+        let index = model_indexes
+            .get(&table)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("unknown table `{table}` for column comment"))?;
+        let model = models.get_mut(index).expect("model index valid");
+        let field = model
+            .fields
+            .iter_mut()
+            .find(|field| field.name == column)
+            .ok_or_else(|| anyhow::anyhow!("unknown column `{column}` for table `{table}`"))?;
+        field.comment = Some(comment);
+    }
+
     Ok(models)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StatementKind {
+    CreateTable,
+    CommentOnColumn,
+}
+
+fn collect_sql_statement(
+    lines: &[(usize, &str)],
+    start_idx: usize,
+    start_line: usize,
+) -> anyhow::Result<(String, usize)> {
+    let mut statement = String::new();
+    let mut depth = 0i32;
+    let mut finished = false;
+    let mut i = start_idx;
+
+    while i < lines.len() {
+        let (_, raw) = lines[i];
+        let trimmed = raw.trim_end();
+        if !statement.is_empty() {
+            statement.push('\n');
+        }
+        statement.push_str(trimmed);
+        depth += paren_balance(trimmed);
+        finished = trimmed.trim_end().ends_with(';') && depth <= 0;
+        i += 1;
+        if finished {
+            break;
+        }
+    }
+
+    if !finished {
+        bail!("line {}: unterminated SQL statement", start_line);
+    }
+
+    Ok((statement, i))
 }
 
 fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<ModelSpec> {
@@ -537,9 +940,10 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
 
     let header = statement[..open].trim();
     let body = &statement[open + 1..close];
-    let table = parse_table_name(header, start_line)?;
+    let (schema_name, table) = parse_table_reference(header, start_line)?;
     let mut fields = Vec::new();
     let mut primary = None;
+    let mut inline_primary_fields = Vec::new();
 
     for entry in split_sql_items(body) {
         let entry = entry.trim();
@@ -559,14 +963,27 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         if starts_with_ci(entry, "key ")
             || starts_with_ci(entry, "unique key")
             || starts_with_ci(entry, "index ")
-            || starts_with_ci(entry, "constraint ")
-            || starts_with_ci(entry, "foreign key")
             || starts_with_ci(entry, "unique index")
         {
             continue;
         }
 
+        if starts_with_ci(entry, "constraint ")
+            && (entry.to_ascii_lowercase().contains("foreign key")
+                || entry.to_ascii_lowercase().contains("references"))
+        {
+            bail!("line {}: foreign keys are not supported", start_line);
+        }
+
+        if starts_with_ci(entry, "foreign key") || entry.to_ascii_lowercase().contains("references") {
+            bail!("line {}: foreign keys are not supported", start_line);
+        }
+
         fields.push(parse_sql_field(entry, start_line)?);
+        let last = fields.last().expect("field pushed");
+        if last.inline_primary_key {
+            inline_primary_fields.push(last.name.clone());
+        }
     }
 
     if fields.is_empty() {
@@ -575,6 +992,10 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
 
     let primary = match primary {
         Some(primary) => primary,
+        None if inline_primary_fields.len() == 1 => inline_primary_fields[0].clone(),
+        None if inline_primary_fields.len() > 1 => {
+            bail!("line {}: composite primary keys are not supported", start_line)
+        }
         None => fields
             .iter()
             .find(|field| field.auto_increment)
@@ -594,6 +1015,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
     let primary_name = primary.clone();
     Ok(ModelSpec {
         name,
+        schema_name,
         table,
         primary,
         cache: true,
@@ -601,19 +1023,43 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         fields: fields
             .into_iter()
             .map(|field| {
-                let field_name = field.name;
-                let ty = if field.nullable && field_name != primary_name {
+                let ty = if field.nullable && field.name != primary_name {
                     format!("Option<{}>", field.ty)
                 } else {
                     field.ty
                 };
                 ModelField {
-                    name: field_name,
+                    name: field.name,
                     ty,
+                    default_value: field.default_value,
+                    comment: field.comment,
                 }
             })
             .collect(),
     })
+}
+
+fn parse_comment_on_column(
+    statement: &str,
+    start_line: usize,
+) -> anyhow::Result<(String, String, String)> {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    let lower = statement.to_ascii_lowercase();
+    let prefix = "comment on column ";
+    if !lower.starts_with(prefix) {
+        bail!("line {}: expected `COMMENT ON COLUMN ... IS ...`", start_line);
+    }
+
+    let rest = statement[prefix.len()..].trim();
+    let (target, value) = split_once_ci(rest, " is ")
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `IS` in COMMENT ON COLUMN", start_line))?;
+    let (schema_name, table_name, column) = parse_column_reference(target.trim(), start_line)?;
+    let table = table_key(schema_name.as_deref(), &table_name);
+    if table.is_empty() {
+        bail!("line {}: missing table name in COMMENT ON COLUMN", start_line);
+    }
+
+    Ok((table, column, unquote_sql_string(value.trim())))
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +1068,9 @@ struct ParsedSqlField {
     ty: String,
     nullable: bool,
     auto_increment: bool,
+    inline_primary_key: bool,
+    default_value: Option<String>,
+    comment: Option<String>,
 }
 
 fn parse_sql_field(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlField> {
@@ -634,12 +1083,10 @@ fn parse_sql_field(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlFi
     }
 
     let mut type_tokens = Vec::new();
-    let mut attrs = Vec::new();
     let mut i = 0usize;
     while i < tokens.len() {
         let token = tokens[i].clone();
         if is_sql_attr_keyword(token.as_str()) {
-            attrs.extend(tokens[i..].iter().cloned());
             break;
         }
         type_tokens.push(token);
@@ -650,21 +1097,121 @@ fn parse_sql_field(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlFi
     }
 
     let raw_ty = type_tokens.join(" ");
-    let nullable = if contains_keyword(&attrs, "not") && contains_keyword(&attrs, "null") {
-        false
-    } else if contains_keyword(&attrs, "null") {
-        true
-    } else {
-        true
-    };
-    let auto_increment = contains_keyword(&attrs, "auto_increment");
+    let attrs = tokens[i..].to_vec();
+    let sql_attrs = parse_sql_attrs(&attrs);
+    let auto_increment = sql_attrs.auto_increment || raw_ty.to_ascii_lowercase().contains("serial");
     let ty = map_sql_type(&raw_ty, auto_increment);
+    let nullable = if auto_increment {
+        false
+    } else {
+        sql_attrs.nullable
+    };
     Ok(ParsedSqlField {
         name: strip_sql_identifier(&name),
         ty,
         nullable,
         auto_increment,
+        inline_primary_key: sql_attrs.inline_primary_key,
+        default_value: sql_attrs.default_value,
+        comment: sql_attrs.comment,
     })
+}
+
+#[derive(Debug, Clone, Default)]
+struct SqlAttrs {
+    nullable: bool,
+    auto_increment: bool,
+    inline_primary_key: bool,
+    default_value: Option<String>,
+    comment: Option<String>,
+}
+
+fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
+    let mut attrs = SqlAttrs {
+        nullable: true,
+        ..SqlAttrs::default()
+    };
+    let mut i = 0usize;
+
+    while i < tokens.len() {
+        let token = tokens[i].as_str();
+        match token.to_ascii_lowercase().as_str() {
+            "not" if tokens.get(i + 1).is_some_and(|next| next.eq_ignore_ascii_case("null")) => {
+                attrs.nullable = false;
+                i += 2;
+            }
+            "null" => {
+                attrs.nullable = true;
+                i += 1;
+            }
+            "auto_increment" | "identity" => {
+                attrs.auto_increment = true;
+                i += 1;
+            }
+            "primary"
+                if tokens.get(i + 1).is_some_and(|next| next.eq_ignore_ascii_case("key")) =>
+            {
+                attrs.inline_primary_key = true;
+                i += 2;
+            }
+            "default" => {
+                let (value, consumed) = collect_sql_clause(tokens, i + 1);
+                if !value.is_empty() {
+                    attrs.default_value = Some(value);
+                }
+                i += 1 + consumed;
+            }
+            "comment" => {
+                let (value, consumed) = collect_sql_clause(tokens, i + 1);
+                if !value.is_empty() {
+                    attrs.comment = Some(unquote_sql_string(&value));
+                }
+                i += 1 + consumed;
+            }
+            "=" => {
+                i += 1;
+            }
+            "serial" | "bigserial" | "smallserial" => {
+                attrs.auto_increment = true;
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    attrs
+}
+
+fn collect_sql_clause(tokens: &[String], start: usize) -> (String, usize) {
+    let mut parts = Vec::new();
+    let mut consumed = 0usize;
+    let mut depth = 0i32;
+
+    for token in tokens.iter().skip(start) {
+        let lower = token.to_ascii_lowercase();
+        if !parts.is_empty() && depth == 0 && is_sql_attr_keyword(&lower) {
+            break;
+        }
+        depth += token.chars().filter(|ch| *ch == '(').count() as i32;
+        depth -= token.chars().filter(|ch| *ch == ')').count() as i32;
+        parts.push(token.clone());
+        consumed += 1;
+    }
+
+    (parts.join(" ").trim().to_string(), consumed)
+}
+
+fn unquote_sql_string(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Some(value) = trimmed.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) {
+        return value.replace("''", "'");
+    }
+    if let Some(value) = trimmed.strip_prefix('"').and_then(|value| value.strip_suffix('"')) {
+        return value.replace("\"\"", "\"");
+    }
+    trimmed.to_string()
 }
 
 fn parse_key_columns(entry: &str, start_line: usize) -> anyhow::Result<Vec<String>> {
@@ -681,7 +1228,10 @@ fn parse_key_columns(entry: &str, start_line: usize) -> anyhow::Result<Vec<Strin
         .collect())
 }
 
-fn parse_table_name(header: &str, start_line: usize) -> anyhow::Result<String> {
+fn parse_table_reference(
+    header: &str,
+    start_line: usize,
+) -> anyhow::Result<(Option<String>, String)> {
     let header = header.trim().trim_end_matches('(').trim();
     let lower = header.to_ascii_lowercase();
     if !lower.starts_with("create table") {
@@ -698,11 +1248,26 @@ fn parse_table_name(header: &str, start_line: usize) -> anyhow::Result<String> {
         bail!("line {}: missing table name", start_line);
     }
     let table = rest.split_whitespace().next().unwrap_or_default();
-    let table = strip_sql_identifier(table);
+    let (schema_name, table) = split_schema_table_name(table);
     if table.is_empty() {
         bail!("line {}: missing table name", start_line);
     }
-    Ok(table)
+    Ok((schema_name, table))
+}
+
+fn parse_column_reference(
+    reference: &str,
+    start_line: usize,
+) -> anyhow::Result<(Option<String>, String, String)> {
+    let mut parts = reference.split('.').map(strip_sql_identifier).filter(|part| !part.is_empty());
+    let column = parts
+        .next_back()
+        .ok_or_else(|| anyhow::anyhow!("line {}: missing column name in COMMENT ON COLUMN", start_line))?;
+    let table = parts
+        .next_back()
+        .ok_or_else(|| anyhow::anyhow!("line {}: missing table name in COMMENT ON COLUMN", start_line))?;
+    let schema_name = parts.next_back();
+    Ok((schema_name, table, column))
 }
 
 fn split_sql_items(body: &str) -> Vec<String> {
@@ -837,11 +1402,27 @@ fn split_identifier(input: &str) -> Option<(String, String)> {
 
 fn strip_sql_identifier(input: &str) -> String {
     let input = input.trim().trim_end_matches(',').trim();
-    input
-        .strip_prefix('`')
-        .and_then(|value| value.strip_suffix('`'))
-        .unwrap_or(input)
-        .to_string()
+    for (open, close) in [('`', '`'), ('"', '"'), ('[', ']')] {
+        if input.starts_with(open) && input.ends_with(close) && input.len() >= 2 {
+            return input[1..input.len() - 1].to_string();
+        }
+    }
+    input.to_string()
+}
+
+fn split_schema_table_name(input: &str) -> (Option<String>, String) {
+    let cleaned = strip_sql_identifier(input);
+    let mut parts = cleaned
+        .split('.')
+        .map(strip_sql_identifier)
+        .filter(|part| !part.is_empty());
+    let first = parts.next();
+    let second = parts.next();
+    match (first, second, parts.next()) {
+        (Some(table), None, None) => (None, table),
+        (Some(schema), Some(table), None) => (Some(schema), table),
+        _ => (None, cleaned),
+    }
 }
 
 fn model_name_from_table(table: &str) -> String {
@@ -876,6 +1457,12 @@ fn starts_with_ci(input: &str, prefix: &str) -> bool {
         .get(..prefix.len())
         .map(|head| head.eq_ignore_ascii_case(prefix))
         .unwrap_or(false)
+}
+
+fn split_once_ci<'a>(input: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
+    let lower = input.to_ascii_lowercase();
+    let idx = lower.find(&needle.to_ascii_lowercase())?;
+    Some((&input[..idx], &input[idx + needle.len()..]))
 }
 
 fn is_sql_comment(input: &str) -> bool {
@@ -933,21 +1520,23 @@ fn is_sql_attr_keyword(token: &str) -> bool {
     )
 }
 
-fn contains_keyword(tokens: &[String], keyword: &str) -> bool {
-    tokens
-        .iter()
-        .any(|token| token.eq_ignore_ascii_case(keyword))
-}
-
 fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
     let normalized = raw_ty.to_ascii_lowercase();
     if normalized.contains("tinyint(1)") || normalized == "bool" || normalized == "boolean" {
         return "bool".to_string();
     }
 
-    if normalized.contains("bigint") {
+    if normalized.contains("bigserial") || normalized.contains("bigint") {
         return if normalized.contains("unsigned") || auto_increment {
             "u64".to_string()
+        } else {
+            "i64".to_string()
+        };
+    }
+
+    if normalized.contains("serial") {
+        return if normalized.contains("smallserial") || normalized.contains("smallint") {
+            "i64".to_string()
         } else {
             "i64".to_string()
         };
@@ -957,6 +1546,7 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         || normalized.contains("mediumint")
         || normalized.contains("smallint")
         || normalized.contains("tinyint")
+        || normalized.contains("integer")
     {
         return if normalized.contains("unsigned") {
             "u64".to_string()
@@ -970,21 +1560,29 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         || normalized.contains("numeric")
         || normalized.contains("float")
         || normalized.contains("real")
+        || normalized.contains("money")
     {
         return "f64".to_string();
     }
 
-    if normalized.contains("blob") || normalized.contains("binary") {
+    if normalized.contains("blob") || normalized.contains("binary") || normalized.contains("bytea") {
         return "Vec<u8>".to_string();
     }
 
     if normalized.contains("json")
+        || normalized.contains("jsonb")
         || normalized.contains("char")
         || normalized.contains("text")
         || normalized.contains("enum")
         || normalized.contains("set")
         || normalized.contains("date")
         || normalized.contains("time")
+        || normalized.contains("timestamp")
+        || normalized.contains("timestamptz")
+        || normalized.contains("uuid")
+        || normalized.contains("cidr")
+        || normalized.contains("inet")
+        || normalized.contains("macaddr")
     {
         return "String".to_string();
     }
@@ -1024,6 +1622,11 @@ fn parse_u64(input: &str, line_no: usize) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generator::DependencySource;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn parses_model_blocks() {
@@ -1050,11 +1653,12 @@ mod tests {
     fn parses_sql_model_blocks() {
         let source = r#"
         CREATE TABLE `users` (
-            `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+            `id` bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
             `name` varchar(255) NOT NULL,
-            `nickname` varchar(255) NULL,
-            PRIMARY KEY (`id`)
+            `nickname` varchar(255) NULL DEFAULT 'guest' COMMENT 'Nickname',
+            `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        COMMENT ON COLUMN users.nickname IS 'nickname from profile';
         "#;
 
         let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
@@ -1065,12 +1669,31 @@ mod tests {
         assert!(models[0].cache);
         assert_eq!(models[0].fields[0].ty, "u64");
         assert_eq!(models[0].fields[2].ty, "Option<String>");
+        assert_eq!(models[0].fields[2].default_value.as_deref(), Some("'guest'"));
+        assert_eq!(models[0].fields[2].comment.as_deref(), Some("nickname from profile"));
+        assert_eq!(models[0].fields[3].default_value.as_deref(), Some("CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn rejects_foreign_keys() {
+        let source = r#"
+        CREATE TABLE users (
+            id bigint NOT NULL AUTO_INCREMENT,
+            org_id bigint NOT NULL,
+            PRIMARY KEY (id),
+            CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs(id)
+        );
+        "#;
+
+        let err = parse_models_with_format(source, ModelFormat::Sql).expect_err("parse error");
+        assert!(err.to_string().contains("foreign keys are not supported"));
     }
 
     #[test]
     fn renders_repository_and_entity() {
         let model = ModelSpec {
             name: "User".to_string(),
+            schema_name: None,
             table: "users".to_string(),
             primary: "id".to_string(),
             cache: true,
@@ -1079,10 +1702,14 @@ mod tests {
                 ModelField {
                     name: "id".to_string(),
                     ty: "i64".to_string(),
+                    default_value: None,
+                    comment: None,
                 },
                 ModelField {
                     name: "name".to_string(),
                     ty: "String".to_string(),
+                    default_value: None,
+                    comment: None,
                 },
             ],
         };
@@ -1091,5 +1718,142 @@ mod tests {
         assert!(rendered.contains("DeriveEntityModel"));
         assert!(rendered.contains("pub async fn cached_find_by_id"));
         assert!(rendered.contains("pub async fn delete_by_id"));
+    }
+
+    #[tokio::test]
+    async fn inspects_sqlite_and_writes_model_project() {
+        let _ = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        sqlx::query(
+            r#"
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                nickname TEXT DEFAULT 'guest'
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        let spec = inspect_sqlite_table(&pool, "users")
+            .await
+            .expect("inspect");
+        assert_eq!(spec.name, "User");
+        assert_eq!(spec.primary, "id");
+        assert!(spec.cache);
+        assert_eq!(spec.fields[1].ty, "String");
+        assert_eq!(spec.fields[2].ty, "Option<String>");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-inspect-out-{unique}"));
+        fs::create_dir_all(out.join("src")).expect("out src");
+        fs::write(
+            out.join("src/main.rs"),
+            r#"mod config;
+mod svc;
+mod types;
+"#,
+        )
+        .expect("main");
+
+        write_model_project(
+            &[spec],
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("write");
+
+        assert!(out.join("src/model/mod.rs").is_file());
+        assert!(out.join("src/model/user.rs").is_file());
+        let main_rs = fs::read_to_string(out.join("src/main.rs")).expect("main read");
+        assert!(main_rs.contains("mod model;"));
+    }
+
+    #[tokio::test]
+    async fn inspects_postgres_schema_namespace_if_available() {
+        let Some(db_url) = std::env::var("ROZECTL_TEST_POSTGRES_URL").ok() else {
+            eprintln!("skipping postgres inspect test: ROZECTL_TEST_POSTGRES_URL not set");
+            return;
+        };
+
+        let pool = sqlx::PgPool::connect(&db_url).await.expect("connect");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS public.rozectl_users (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                nickname TEXT DEFAULT 'guest'
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        let spec = inspect_postgres_table(&pool, "public.rozectl_users")
+            .await
+            .expect("inspect");
+        assert_eq!(spec.schema_name.as_deref(), Some("public"));
+        assert_eq!(spec.table, "rozectl_users");
+        assert_eq!(spec.primary, "id");
+
+        let rendered = render_model_module(&spec);
+        assert!(rendered.contains("schema_name = \"public\""));
+        assert!(rendered.contains("table_name = \"rozectl_users\""));
+    }
+
+    #[tokio::test]
+    async fn inspects_mysql_schema_namespace_if_available() {
+        let Some(db_url) = std::env::var("ROZECTL_TEST_MYSQL_URL").ok() else {
+            eprintln!("skipping mysql inspect test: ROZECTL_TEST_MYSQL_URL not set");
+            return;
+        };
+
+        let pool = sqlx::MySqlPool::connect(&db_url).await.expect("connect");
+        let db_name: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(&pool)
+            .await
+            .expect("database");
+        let Some(db_name) = db_name else {
+            eprintln!("skipping mysql inspect test: connection has no default database");
+            return;
+        };
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS rozectl_users (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                nickname VARCHAR(255) DEFAULT 'guest'
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        let qualified = format!("{}.rozectl_users", db_name);
+        let spec = inspect_mysql_table(&pool, &qualified)
+            .await
+            .expect("inspect");
+        assert_eq!(spec.schema_name.as_deref(), Some(db_name.as_str()));
+        assert_eq!(spec.table, "rozectl_users");
+        assert_eq!(spec.primary, "id");
+
+        let rendered = render_model_module(&spec);
+        assert!(rendered.contains(&format!("schema_name = \"{}\"", db_name)));
+        assert!(rendered.contains("table_name = \"rozectl_users\""));
     }
 }

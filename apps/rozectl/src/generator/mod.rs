@@ -123,6 +123,13 @@ pub enum GeneratorCommand {
         options: GenerateOptions,
         format: model::ModelFormat,
     },
+    ModelInspect {
+        table: String,
+        db_url: String,
+        db_kind: roze_sqlx::SqlxDatabaseKind,
+        out: PathBuf,
+        options: GenerateOptions,
+    },
 }
 
 impl GeneratorCommand {
@@ -133,11 +140,44 @@ impl GeneratorCommand {
             Self::RpcGenerate { .. } => "rpc.generate",
             Self::RpcNew { .. } => "rpc.new",
             Self::ModelGenerate { .. } => "model.generate",
+            Self::ModelInspect { .. } => "model.inspect",
         }
     }
 }
 
 type GeneratorHandler = fn(GeneratorCommand) -> anyhow::Result<()>;
+
+struct GeneratorEntry {
+    key: &'static str,
+    handler: GeneratorHandler,
+}
+
+const GENERATOR_ENTRIES: &[GeneratorEntry] = &[
+    GeneratorEntry {
+        key: "api.generate",
+        handler: api_generate_handler,
+    },
+    GeneratorEntry {
+        key: "api.new",
+        handler: api_new_handler,
+    },
+    GeneratorEntry {
+        key: "rpc.generate",
+        handler: rpc_generate_handler,
+    },
+    GeneratorEntry {
+        key: "rpc.new",
+        handler: rpc_new_handler,
+    },
+    GeneratorEntry {
+        key: "model.generate",
+        handler: model_generate_handler,
+    },
+    GeneratorEntry {
+        key: "model.inspect",
+        handler: model_inspect_handler,
+    },
+];
 
 #[derive(Debug, Default)]
 pub struct GeneratorRegistry {
@@ -147,11 +187,9 @@ pub struct GeneratorRegistry {
 impl GeneratorRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
-        registry.register("api.generate", api_generate_handler);
-        registry.register("api.new", api_new_handler);
-        registry.register("rpc.generate", rpc_generate_handler);
-        registry.register("rpc.new", rpc_new_handler);
-        registry.register("model.generate", model_generate_handler);
+        for entry in GENERATOR_ENTRIES {
+            registry.register(entry.key, entry.handler);
+        }
         registry
     }
 
@@ -233,6 +271,29 @@ fn model_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
                 .with_context(|| format!("failed to generate model scaffold at {}", out.display()))
         }
         other => bail!("unexpected command variant for model.generate: {other:?}"),
+    }
+}
+
+fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
+    match command {
+        GeneratorCommand::ModelInspect {
+            table,
+            db_url,
+            db_kind,
+            out,
+            options,
+        } => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("failed to create async runtime for model inspection")?;
+            rt.block_on(async move {
+                model::inspect_model_project(&table, &db_url, db_kind, &out, options)
+                    .await
+                    .with_context(|| format!("failed to inspect model for table `{table}`"))
+            })
+        }
+        other => bail!("unexpected command variant for model.inspect: {other:?}"),
     }
 }
 

@@ -4,6 +4,7 @@ mod parser;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use roze_sqlx::SqlxDatabaseKind;
 
 use generator::{DependencySource, GenerateMode, GenerateOptions, GeneratorCommand};
 
@@ -29,6 +30,15 @@ enum ModelFormat {
     Sql,
 }
 
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum DbKind {
+    #[default]
+    Sqlite,
+    Postgres,
+    #[value(alias = "mysql")]
+    MySql,
+}
+
 impl From<RozeSource> for DependencySource {
     fn from(value: RozeSource) -> Self {
         match value {
@@ -44,6 +54,16 @@ impl From<ModelFormat> for generator::model::ModelFormat {
             ModelFormat::Auto => Self::Auto,
             ModelFormat::Dsl => Self::Dsl,
             ModelFormat::Sql => Self::Sql,
+        }
+    }
+}
+
+impl From<DbKind> for SqlxDatabaseKind {
+    fn from(value: DbKind) -> Self {
+        match value {
+            DbKind::Sqlite => Self::Sqlite,
+            DbKind::Postgres => Self::Postgres,
+            DbKind::MySql => Self::MySql,
         }
     }
 }
@@ -138,6 +158,21 @@ enum ModelCommands {
         roze_source: RozeSource,
         #[arg(long, value_enum, default_value_t)]
         format: ModelFormat,
+    },
+    Inspect {
+        table: String,
+        #[arg(long)]
+        db_url: String,
+        #[arg(long, value_enum, default_value_t)]
+        db_kind: DbKind,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
     },
 }
 
@@ -246,6 +281,30 @@ fn main() -> anyhow::Result<()> {
                 ),
                 format: format.into(),
             })?,
+            ModelCommands::Inspect {
+                table,
+                db_url,
+                db_kind,
+                out,
+                force,
+                update,
+                roze_source,
+            } => registry.dispatch(GeneratorCommand::ModelInspect {
+                table,
+                db_url,
+                db_kind: db_kind.into(),
+                out,
+                options: GenerateOptions::new(
+                    if force {
+                        GenerateMode::Force
+                    } else if update {
+                        GenerateMode::Update
+                    } else {
+                        GenerateMode::Create
+                    },
+                    roze_source.into(),
+                ),
+            })?,
         },
     }
 
@@ -270,6 +329,7 @@ fn resolve_new_out(name: &str, out: Option<PathBuf>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn new_project_defaults_to_current_directory() {
@@ -282,5 +342,66 @@ mod tests {
             resolve_new_out("user", Some(PathBuf::from("services/user"))),
             PathBuf::from("services/user")
         );
+    }
+
+    #[test]
+    fn model_inspect_accepts_schema_qualified_tables() {
+        let cli = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "inspect",
+            "public.users",
+            "--db-kind",
+            "postgres",
+            "--db-url",
+            "postgres://postgres:postgres@localhost:5432/roze",
+        ])
+        .expect("parse postgres inspect");
+
+        match cli.command {
+            Commands::Model {
+                command:
+                    ModelCommands::Inspect {
+                        table,
+                        db_url,
+                        db_kind,
+                        ..
+                    },
+            } => {
+                assert_eq!(table, "public.users");
+                assert_eq!(db_url, "postgres://postgres:postgres@localhost:5432/roze");
+                assert!(matches!(db_kind, DbKind::Postgres));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "inspect",
+            "db.users",
+            "--db-kind",
+            "mysql",
+            "--db-url",
+            "mysql://root:root@localhost:3306/roze",
+        ])
+        .expect("parse mysql inspect");
+
+        match cli.command {
+            Commands::Model {
+                command:
+                    ModelCommands::Inspect {
+                        table,
+                        db_url,
+                        db_kind,
+                        ..
+                    },
+            } => {
+                assert_eq!(table, "db.users");
+                assert_eq!(db_url, "mysql://root:root@localhost:3306/roze");
+                assert!(matches!(db_kind, DbKind::MySql));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

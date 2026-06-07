@@ -9,3 +9,6 @@ anyhow.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 toml_edit.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+roze-sqlx = { path = "../../crates/roze-sqlx" }

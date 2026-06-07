@@ -60,11 +60,42 @@ supports both the existing DSL and SQL DDL via `--format auto|dsl|sql`.
 The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `field` lines.
 
+`rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
+inspects an existing database schema and emits the same SeaORM-based model
+scaffold. SeaORM remains the default ORM for generated database code.
+
+Schema-qualified table names are supported for inspection, for example:
+`public.users` on Postgres and `db.users` on MySQL.
+
+Examples:
+
+```bash
+rozectl model inspect public.users \
+  --db-kind postgres \
+  --db-url postgres://postgres:postgres@localhost:5432/roze \
+  --out apps/roze-example
+
+rozectl model inspect db.users \
+  --db-kind mysql \
+  --db-url mysql://root:root@localhost:3306/roze \
+  --out apps/roze-example
+```
+
+The generated model keeps the schema name in the SeaORM entity attributes.
+
 Example SQL input:
 
 ```bash
 rozectl model generate example/user.sql --out apps/roze-example --format sql
 ```
+
+Supported SQL input focuses on common MySQL and Postgres DDL:
+
+- `CREATE TABLE` with a single primary key
+- `AUTO_INCREMENT`, `SERIAL`, `BIGSERIAL`, and inline `PRIMARY KEY`
+- `DEFAULT` and column comments, including `COMMENT ON COLUMN ... IS ...`
+- common scalar column types such as integers, booleans, text, JSON, timestamps, UUIDs, and blobs
+- unsupported features such as composite keys and foreign keys fail fast with a clear error
 
 Generated service layout:
 
