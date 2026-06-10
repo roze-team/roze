@@ -60,21 +60,30 @@ pub async fn connect(config: &SqlxConfig) -> anyhow::Result<SqlxPool> {
     }
 }
 
-pub async fn connect_sqlite(url: impl AsRef<str>, max_connections: u32) -> anyhow::Result<SqlitePool> {
+pub async fn connect_sqlite(
+    url: impl AsRef<str>,
+    max_connections: u32,
+) -> anyhow::Result<SqlitePool> {
     Ok(SqlitePoolOptions::new()
         .max_connections(max_connections)
         .connect(url.as_ref())
         .await?)
 }
 
-pub async fn connect_postgres(url: impl AsRef<str>, max_connections: u32) -> anyhow::Result<PgPool> {
+pub async fn connect_postgres(
+    url: impl AsRef<str>,
+    max_connections: u32,
+) -> anyhow::Result<PgPool> {
     Ok(PgPoolOptions::new()
         .max_connections(max_connections)
         .connect(url.as_ref())
         .await?)
 }
 
-pub async fn connect_mysql(url: impl AsRef<str>, max_connections: u32) -> anyhow::Result<MySqlPool> {
+pub async fn connect_mysql(
+    url: impl AsRef<str>,
+    max_connections: u32,
+) -> anyhow::Result<MySqlPool> {
     Ok(MySqlPoolOptions::new()
         .max_connections(max_connections)
         .connect(url.as_ref())
@@ -97,8 +106,7 @@ mod tests {
             max_connections: default_max_connections(),
         };
         assert_eq!(cfg.max_connections, 10);
-        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:")
-            .expect("pool");
+        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("pool");
         assert!(matches!(
             SqlxPool::Sqlite(pool).kind(),
             SqlxDatabaseKind::Sqlite

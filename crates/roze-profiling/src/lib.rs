@@ -49,7 +49,10 @@ impl ProfilingRegistry {
     }
 
     pub fn mark(&self, sample: ProfileSample) {
-        self.samples.lock().expect("profiling lock poisoned").push(sample);
+        self.samples
+            .lock()
+            .expect("profiling lock poisoned")
+            .push(sample);
     }
 
     pub fn capture(&self, name: impl Into<String>) -> ProfileGuard {
@@ -60,7 +63,10 @@ impl ProfilingRegistry {
     }
 
     pub fn samples(&self) -> Vec<ProfileSample> {
-        self.samples.lock().expect("profiling lock poisoned").clone()
+        self.samples
+            .lock()
+            .expect("profiling lock poisoned")
+            .clone()
     }
 
     pub fn summary(&self) -> BTreeMap<String, Duration> {

@@ -8,31 +8,24 @@ version.workspace = true
 anyhow.workspace = true
 config.workspace = true
 poem.workspace = true
-prost.workspace = true
 roze-config = { path = "../../crates/roze-config" }
 roze-error = { path = "../../crates/roze-error" }
 roze-http = { path = "../../crates/roze-http" }
 roze-log = { path = "../../crates/roze-log" }
+roze-metrics = { path = "../../crates/roze-metrics" }
+roze-middleware = { path = "../../crates/roze-middleware" }
 roze-jwt = { path = "../../crates/roze-jwt" }
 roze-cache = { path = "../../crates/roze-cache" }
 roze-context = { path = "../../crates/roze-context" }
 roze-db = { path = "../../crates/roze-db" }
-roze-metrics = { path = "../../crates/roze-metrics" }
-roze-middleware = { path = "../../crates/roze-middleware" }
+roze-mongo = { path = "../../crates/roze-mongo" }
 roze-openapi = { path = "../../crates/roze-openapi" }
-roze-swagger = { path = "../../crates/roze-swagger" }
 roze-result = { path = "../../crates/roze-result" }
-roze-trace = { path = "../../crates/roze-trace" }
-roze-rpc = { path = "../../crates/roze-rpc" }
 roze-validation = { path = "../../crates/roze-validation" }
+roze-rpc = { path = "../../crates/roze-rpc" }
 serde.workspace = true
 serde_json.workspace = true
 sea-orm.workspace = true
 validator.workspace = true
 tokio.workspace = true
-tonic.workspace = true
 tracing.workspace = true
-
-[build-dependencies]
-protoc-bin-vendored.workspace = true
-tonic-build.workspace = true

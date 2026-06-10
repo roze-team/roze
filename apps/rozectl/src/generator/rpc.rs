@@ -30,12 +30,21 @@ async fn main() -> anyhow::Result<()> {{
         .rpc
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rpc config"))?;
+    let registry = roze_rpc::registry::build_service_registry(&config)?
+        .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
+    let mut registration = roze_rpc::rpc::ServiceRegistrationGuard::start(
+        registry,
+        config.name.clone(),
+        rpc.addr,
+    )
+    .await?;
     let ctx = svc::ServiceContext::new(config).await?;
     RpcServer::new(rpc.addr)
         .builder()
         .add_service({service}Server::new(rpc::RpcService::new(ctx)))
         .serve(rpc.addr)
         .await?;
+    registration.shutdown().await?;
 
     Ok(())
 }}
@@ -65,6 +74,7 @@ pub fn render_rpc(spec: &ApiSpec) -> String {
         server_mod = server_mod,
         service = service
     ));
+    out.push_str("use roze_grpc::transport::{Request, Response, Status};\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
 
@@ -78,7 +88,7 @@ pub fn render_rpc(spec: &ApiSpec) -> String {
     out.push_str("    }\n");
     out.push_str("}\n\n");
 
-    out.push_str("#[tonic::async_trait]\n");
+    out.push_str("#[async_trait::async_trait]\n");
     out.push_str(&format!(
         "impl {service} for RpcService {{\n",
         service = service
@@ -108,18 +118,20 @@ pub fn render_client(spec: &ApiSpec) -> String {
     ));
     out.push_str("use roze_rpc::balance::Balancer;\n");
     out.push_str("use roze_rpc::registry::{CachedRegistryResolver, Registry};\n");
-    out.push_str("use tonic::transport::{Channel, Endpoint};\n\n");
+    out.push_str("use roze_grpc::transport::{Channel, Endpoint, Request, Status};\n\n");
 
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("pub struct RpcClient {\n");
     out.push_str("    inner: ProtoClient<Channel>,\n");
     out.push_str("    options: roze_rpc::rpc::RpcClientOptions,\n");
+    out.push_str("    client_config: Option<roze_config::RpcClientConfig>,\n");
     out.push_str("}\n\n");
     out.push_str("impl RpcClient {\n");
     out.push_str("    pub fn new(channel: Channel) -> Self {\n");
     out.push_str("        Self {\n");
     out.push_str("            inner: ProtoClient::new(channel),\n");
     out.push_str("            options: roze_rpc::rpc::RpcClientOptions::default(),\n");
+    out.push_str("            client_config: None,\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -128,6 +140,17 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("        Self {\n");
     out.push_str("            inner: ProtoClient::new(channel),\n");
     out.push_str("            options,\n");
+    out.push_str("            client_config: None,\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n\n");
+    out.push_str(
+        "    pub fn with_config(channel: Channel, config: roze_config::RpcClientConfig) -> Self {\n",
+    );
+    out.push_str("        let options = roze_rpc::rpc::RpcClientOptions::from_config(&config);\n");
+    out.push_str("        Self {\n");
+    out.push_str("            inner: ProtoClient::new(channel),\n");
+    out.push_str("            options,\n");
+    out.push_str("            client_config: Some(config),\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str("    pub fn inner_mut(&mut self) -> &mut ProtoClient<Channel> {\n");
@@ -140,6 +163,14 @@ pub fn render_client(spec: &ApiSpec) -> String {
         "        let channel = Endpoint::from_shared(url)?.connect_timeout(options.connect_timeout).timeout(options.request_timeout).connect().await?;\n",
     );
     out.push_str("        Ok(Self::with_options(channel, options))\n");
+    out.push_str("    }\n\n");
+    out.push_str(
+        "    pub async fn connect_from_config(config: roze_config::RpcClientConfig) -> anyhow::Result<Self> {\n",
+    );
+    out.push_str(
+        "        let channel = roze_rpc::rpc::connect_channel_from_config(&config).await?;\n",
+    );
+    out.push_str("        Ok(Self::with_config(channel, config))\n");
     out.push_str("    }\n\n");
     out.push_str(
         "    pub async fn connect_via_registry<R, B>(service: &str, registry: &R, balancer: &B) -> anyhow::Result<Self>\n",
@@ -170,7 +201,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     for route in &spec.rest_routes {
         let handler = resolved_handler_name(route);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, tonic::Status> {{\n        let options = self.options;\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = tonic::Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    inner.{handler}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    roze_rpc::rpc::apply_client_auth(&mut request, &options, client_config.as_ref());\n                    inner.{handler}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
             request = route.request,
             response = route.response
@@ -180,7 +211,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     for method in &spec.rpc_methods {
         let method_name = to_snake_case(&method.name);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, tonic::Status> {{\n        let options = self.options;\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = tonic::Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    inner.{method_name}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    roze_rpc::rpc::apply_client_auth(&mut request, &options, client_config.as_ref());\n                    inner.{method_name}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
             request = method.request,
             response = method.response
@@ -197,28 +228,32 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
-        "    async fn {handler}(&self, request: tonic::Request<proto::{req_ty}>) -> Result<tonic::Response<proto::{resp_ty}>, tonic::Status> {{\n",
+        "    async fn {handler}(&self, request: Request<proto::{req_ty}>) -> Result<Response<proto::{resp_ty}>, Status> {{\n",
         handler = handler,
         req_ty = req_ty,
         resp_ty = resp_ty
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
+    out.push_str(&format!(
+        "        let (request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
+        handler
+    ));
     out.push_str("        let req = request.into_inner();\n");
     out.push_str(&format!(
         "        let req = {};\n",
         proto_to_app(spec, req_ty, "req")
     ));
     out.push_str(&format!(
-        "        let resp = crate::logic::{handler}({args})\n",
+        "        let result = crate::logic::{handler}({args}).await;\n",
         handler = handler,
         args = "self.ctx.clone(), request_ctx, req"
     ));
-    out.push_str("            .await\n");
-    out.push_str("            .map_err(|err| tonic::Status::internal(err.to_string()))?;\n");
+    out.push_str("        match result {\n");
     out.push_str(&format!(
-        "        Ok(tonic::Response::new({}))\n",
+        "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
         app_to_proto(spec, resp_ty, "resp")
     ));
+    out.push_str("            Err(err) => {\n                roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                Err(Status::internal(err.to_string()))\n            }\n        }\n");
     out.push_str("    }\n");
     out
 }
@@ -230,26 +265,30 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
-        "    async fn {method_name}(&self, request: tonic::Request<proto::{req_ty}>) -> Result<tonic::Response<proto::{resp_ty}>, tonic::Status> {{\n",
+        "    async fn {method_name}(&self, request: Request<proto::{req_ty}>) -> Result<Response<proto::{resp_ty}>, Status> {{\n",
         method_name = method_name,
         req_ty = req_ty,
         resp_ty = resp_ty
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
+    out.push_str(&format!(
+        "        let (_request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
+        method.name
+    ));
     out.push_str("        let req = request.into_inner();\n");
     out.push_str(&format!(
         "        let req = {};\n",
         proto_to_app(spec, req_ty, "req")
     ));
-    out.push_str("        let _ = request_ctx;\n");
     out.push_str("        let _ = req;\n");
     out.push_str(&format!(
         "        let resp = {} {{ {} }};\n",
         resp_ty,
         default_fields(spec, resp_ty)
     ));
+    out.push_str("        roze_rpc::rpc::finish_method(method_guard, \"ok\");\n");
     out.push_str(&format!(
-        "        Ok(tonic::Response::new({}))\n",
+        "        Ok(Response::new({}))\n",
         app_to_proto(spec, resp_ty, "resp")
     ));
     out.push_str("    }\n");
@@ -322,8 +361,7 @@ fn handler_name(method: &HttpMethod, path: &str) -> String {
         .trim_matches('/')
         .replace(':', "")
         .replace(['{', '}'], "")
-        .replace('/', "_")
-        .replace('-', "_");
+        .replace(['/', '-'], "_");
 
     format!("{}_{}", method, path_name)
 }
@@ -353,5 +391,39 @@ fn default_value(ty: &str) -> &'static str {
         "String" | "string" => "String::new()",
         "bool" => "false",
         _ => "Default::default()",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_api;
+
+    #[test]
+    fn client_supports_config_based_connection_and_auth() {
+        let spec = parse_api(
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (GetUserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type GetUserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("api");
+
+        let client = render_client(&spec);
+        assert!(client.contains("client_config: Option<roze_config::RpcClientConfig>"));
+        assert!(client.contains("pub async fn connect_from_config"));
+        assert!(client.contains("RpcClientOptions::from_config(&config)"));
+        assert!(
+            client.contains("apply_client_auth(&mut request, &options, client_config.as_ref())")
+        );
     }
 }

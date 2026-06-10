@@ -44,10 +44,11 @@ impl TraceContext {
     }
 
     pub fn from_headers(headers: &HashMap<String, String>) -> Option<Self> {
-        let trace_id = headers
-            .get("x-trace-id")
-            .cloned()
-            .or_else(|| Self::from_traceparent(headers.get("traceparent")?)?.trace_id.into())?;
+        let trace_id = headers.get("x-trace-id").cloned().or_else(|| {
+            Self::from_traceparent(headers.get("traceparent")?)?
+                .trace_id
+                .into()
+        })?;
         let span_id = headers.get("x-span-id").cloned();
         let sampled = headers
             .get("x-trace-sampled")
@@ -77,7 +78,10 @@ impl TraceContext {
     }
 
     pub fn traceparent(&self) -> String {
-        let span_id = self.span_id.clone().unwrap_or_else(|| "0000000000000000".to_string());
+        let span_id = self
+            .span_id
+            .clone()
+            .unwrap_or_else(|| "0000000000000000".to_string());
         format!(
             "00-{}-{}-{:02x}",
             pad_trace_id(&self.trace_id),

@@ -22,7 +22,7 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 - IDL first: `.api` files define request/response types and routes.
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
 - REST: `poem` plus `roze-core::rest::{ApiResponse, AppError}` and Poem-native middleware.
-- RPC: `tonic-build` compiles generated proto files, and `rpc.rs` adapts gRPC requests into shared `logic`.
+- RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
 - ORM: `SeaORM` is the default database layer; generated services get an optional `database.url` config and `ServiceContext::db`.
 - Governance: registry, balancing, middleware, config, tracing, and error handling live in `roze-core`.
 
@@ -31,9 +31,14 @@ The Loco/Rails lesson applied here is convention over configuration: generated s
 ## Quick Start
 
 ```bash
-cargo run -p rozectl -- generate example/user.api --out apps/roze-example --roze-source path
+cargo run -p rozectl -- api generate example/user.api --out apps/roze-example --roze-source path
 cargo run -p roze-example
 ```
+
+`rozectl api generate` creates a REST service from route declarations. `rozectl
+rpc generate` creates a gRPC service from `rpc` method declarations. The two
+commands intentionally reject mixed definitions so API and RPC projects keep
+different layouts and dependency sets.
 
 Regenerate framework-owned files while preserving `src/logic/mod.rs` and
 `config.yaml`:
@@ -63,6 +68,17 @@ The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
 inspects an existing database schema and emits the same SeaORM-based model
 scaffold. SeaORM remains the default ORM for generated database code.
+
+Use `--schema` to make the target schema explicit when the table name is
+shared across namespaces:
+
+```bash
+rozectl model inspect users \
+  --schema public \
+  --db-kind postgres \
+  --db-url postgres://postgres:postgres@localhost:5432/roze \
+  --out apps/roze-example
+```
 
 Schema-qualified table names are supported for inspection, for example:
 `public.users` on Postgres and `db.users` on MySQL.
@@ -110,5 +126,32 @@ src/
   rpc.rs
 build.rs
 proto/service.proto
-config.yaml
+  config.yaml
 ```
+
+### Rozectl verification
+
+The `rozectl` generator is tested in three slices:
+
+- SQLite and local parser/generator tests:
+
+```bash
+cargo test -p rozectl -- --skip postgres --skip mysql
+```
+
+- PostgreSQL-specific inspect tests:
+
+```bash
+export ROZECTL_TEST_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres
+cargo test -p rozectl postgres
+```
+
+- MySQL-specific inspect tests:
+
+```bash
+export ROZECTL_TEST_MYSQL_URL=mysql://root:root@127.0.0.1:3306/roze
+cargo test -p rozectl mysql
+```
+
+The CI workflow runs these slices separately and also checks the `rozectl`
+sources with `rustfmt` and `clippy`.

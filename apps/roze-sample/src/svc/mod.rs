@@ -7,12 +7,14 @@ use sea_orm::DatabaseConnection;
 pub struct ServiceContext {
     pub config: Config,
     pub db: Option<DatabaseConnection>,
+    pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
 }
 
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let db = roze_db::connect_optional(config.database.as_ref()).await?;
+        let mongo = roze_mongo::connect_optional(config.mongo.as_ref()).await?;
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
@@ -24,7 +26,12 @@ impl ServiceContext {
             ),
             None => None,
         };
-        Ok(Self { config, db, cache })
+        Ok(Self {
+            config,
+            db,
+            mongo,
+            cache,
+        })
     }
 
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {

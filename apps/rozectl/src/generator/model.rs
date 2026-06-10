@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::Path,
 };
@@ -15,6 +15,7 @@ pub enum ModelFormat {
     Auto,
     Dsl,
     Sql,
+    Mongo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +26,9 @@ pub struct ModelSpec {
     pub primary: String,
     pub cache: bool,
     pub cache_ttl_secs: Option<u64>,
+    pub negative_cache_ttl_secs: Option<u64>,
+    pub cache_keys: Vec<String>,
+    pub cache_prefix: Option<String>,
     pub fields: Vec<ModelField>,
 }
 
@@ -43,11 +47,15 @@ pub fn generate_model_project(
     format: ModelFormat,
 ) -> anyhow::Result<()> {
     let models = parse_models_with_format(source, format)?;
-    write_model_project(&models, out, options)
+    match format {
+        ModelFormat::Mongo => write_mongo_model_project(&models, out, options),
+        _ => write_model_project(&models, out, options),
+    }
 }
 
 pub async fn inspect_model_project(
     table: &str,
+    schema_name: Option<&str>,
     db_url: &str,
     db_kind: SqlxDatabaseKind,
     out: &Path,
@@ -61,9 +69,9 @@ pub async fn inspect_model_project(
     .await?;
 
     let model = match pool {
-        SqlxPool::Sqlite(pool) => inspect_sqlite_table(&pool, table).await?,
-        SqlxPool::Postgres(pool) => inspect_postgres_table(&pool, table).await?,
-        SqlxPool::MySql(pool) => inspect_mysql_table(&pool, table).await?,
+        SqlxPool::Sqlite(pool) => inspect_sqlite_table(&pool, schema_name, table).await?,
+        SqlxPool::Postgres(pool) => inspect_postgres_table(&pool, schema_name, table).await?,
+        SqlxPool::MySql(pool) => inspect_mysql_table(&pool, schema_name, table).await?,
     };
 
     write_model_project(&[model], out, options)
@@ -82,6 +90,25 @@ fn write_model_project(
     for model in models {
         let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
         fs::write(module_path, render_model_module(model))?;
+    }
+
+    update_main_rs(out)?;
+    Ok(())
+}
+
+fn write_mongo_model_project(
+    models: &[ModelSpec],
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    ensure_model_output(out, options.mode)?;
+    let model_dir = out.join("src/model");
+    fs::create_dir_all(&model_dir)?;
+
+    fs::write(model_dir.join("mod.rs"), render_mongo_model_mod(models))?;
+    for model in models {
+        let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
+        fs::write(module_path, render_mongo_model_module(model))?;
     }
 
     update_main_rs(out)?;
@@ -113,7 +140,8 @@ fn update_main_rs(out: &Path) -> anyhow::Result<()> {
 
     let updated = insert_after_module(&content, "mod types;\n", "mod model;\n")
         .unwrap_or_else(|| format!("mod model;\n{content}"));
-    fs::write(&main_path, updated).with_context(|| format!("failed to write {}", main_path.display()))
+    fs::write(&main_path, updated)
+        .with_context(|| format!("failed to write {}", main_path.display()))
 }
 
 fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<String> {
@@ -142,6 +170,19 @@ fn render_model_mod(models: &[ModelSpec]) -> String {
     out
 }
 
+fn render_mongo_model_mod(models: &[ModelSpec]) -> String {
+    let mut out = String::from("#![allow(dead_code, unused_imports)]\n\n");
+    for model in models {
+        let module = to_snake_case(&model.name);
+        let pascal = to_pascal_case(&model.name);
+        out.push_str(&format!("pub mod {module};\n"));
+        out.push_str(&format!(
+            "pub use {module}::{{{pascal}Repository, Model as {pascal}Model}};\n"
+        ));
+    }
+    out
+}
+
 fn render_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
@@ -153,6 +194,11 @@ fn render_model_module(model: &ModelSpec) -> String {
         .expect("primary field present");
     let table_name = &model.table;
     let cache_ttl_secs = model.cache_ttl_secs.unwrap_or(300);
+    let negative_cache_ttl_secs = model
+        .negative_cache_ttl_secs
+        .unwrap_or_else(|| (cache_ttl_secs / 6).clamp(5, 60));
+    let cache_prefix = model.cache_prefix.as_deref().unwrap_or(table_name);
+    let cache_fields = cache_lookup_fields(model);
     let mut out = String::new();
     use std::fmt::Write as _;
 
@@ -162,7 +208,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{ActiveModelTrait, DatabaseConnection, DeleteResult, EntityTrait, IntoActiveModel}};"
+        "use sea_orm::{{ActiveModelTrait, ColumnTrait, DatabaseConnection, DeleteResult, EntityTrait, IntoActiveModel, QueryFilter}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -178,9 +224,8 @@ fn render_model_module(model: &ModelSpec) -> String {
         Some(schema_name) => {
             writeln!(
                 &mut out,
-                "#[sea_orm(schema_name = \"{}\", table_name = \"{}\")]", 
-                schema_name,
-                table_name
+                "#[sea_orm(schema_name = \"{}\", table_name = \"{}\")]",
+                schema_name, table_name
             )
             .unwrap();
         }
@@ -197,7 +242,12 @@ fn render_model_module(model: &ModelSpec) -> String {
             writeln!(&mut out, "    /// {}", comment.replace('\n', " ")).unwrap();
         }
         if let Some(default_value) = &field.default_value {
-            writeln!(&mut out, "    /// default: {}", default_value.replace('\n', " ")).unwrap();
+            writeln!(
+                &mut out,
+                "    /// default: {}",
+                default_value.replace('\n', " ")
+            )
+            .unwrap();
         }
         writeln!(&mut out, "    pub {}: {},", field.name, field.ty).unwrap();
     }
@@ -247,6 +297,22 @@ fn render_model_module(model: &ModelSpec) -> String {
         primary, primary, primary_ty
     )
     .unwrap();
+    if model.cache {
+        writeln!(
+            &mut out,
+            "        self.cached_find_by_{}({}).await",
+            primary, primary
+        )
+        .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    pub async fn find_by_{}_uncached(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            primary, primary, primary_ty
+        )
+        .unwrap();
+    }
     writeln!(&mut out, "        let db = self.db()?;").unwrap();
     writeln!(
         &mut out,
@@ -256,6 +322,42 @@ fn render_model_module(model: &ModelSpec) -> String {
     .unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    for field in cache_fields.iter().filter(|field| field.name != *primary) {
+        let field_name = &field.name;
+        let field_ty = &field.ty;
+        let column = to_pascal_case(field_name);
+        writeln!(
+            &mut out,
+            "    pub async fn find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            field_name, field_name, field_ty
+        )
+        .unwrap();
+        if model.cache {
+            writeln!(
+                &mut out,
+                "        self.cached_find_by_{}({}).await",
+                field_name, field_name
+            )
+            .unwrap();
+            writeln!(&mut out, "    }}").unwrap();
+            writeln!(&mut out).unwrap();
+            writeln!(
+                &mut out,
+                "    pub async fn find_by_{}_uncached(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+                field_name, field_name, field_ty
+            )
+            .unwrap();
+        }
+        writeln!(&mut out, "        let db = self.db()?;").unwrap();
+        writeln!(
+            &mut out,
+            "        Ok(Entity::find().filter(Column::{}.eq({})).one(db).await?)",
+            column, field_name
+        )
+        .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+    }
     writeln!(
         &mut out,
         "    pub async fn list(&self) -> anyhow::Result<Vec<Model>> {{"
@@ -271,13 +373,16 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.db()?;").unwrap();
-    writeln!(&mut out, "        let active: ActiveModel = model.into_active_model();").unwrap();
+    writeln!(
+        &mut out,
+        "        let active: ActiveModel = model.into_active_model();"
+    )
+    .unwrap();
     writeln!(&mut out, "        let inserted = active.insert(db).await?;").unwrap();
     if model.cache {
         writeln!(
             &mut out,
-            "        self.invalidate_cache(inserted.{primary}).await?;",
-            primary = primary
+            "        self.invalidate_model_cache(&inserted).await?;"
         )
         .unwrap();
     }
@@ -290,13 +395,16 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.db()?;").unwrap();
-    writeln!(&mut out, "        let active: ActiveModel = model.into_active_model();").unwrap();
+    writeln!(
+        &mut out,
+        "        let active: ActiveModel = model.into_active_model();"
+    )
+    .unwrap();
     writeln!(&mut out, "        let updated = active.update(db).await?;").unwrap();
     if model.cache {
         writeln!(
             &mut out,
-            "        self.invalidate_cache(updated.{primary}).await?;",
-            primary = primary
+            "        self.invalidate_model_cache(&updated).await?;"
         )
         .unwrap();
     }
@@ -310,19 +418,40 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.db()?;").unwrap();
+    if model.cache {
+        writeln!(
+            &mut out,
+            "        let existing = self.find_by_{}_uncached({}.clone()).await?;",
+            primary, primary
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "        let delete_key = {}.clone();", primary).unwrap();
     writeln!(
         &mut out,
         "        let result = Entity::delete_by_id({}).exec(db).await?;",
-        primary
+        "delete_key"
     )
     .unwrap();
     if model.cache {
         writeln!(
             &mut out,
-            "        self.invalidate_cache({primary}).await?;",
-            primary = primary
+            "        if let Some(model) = existing.as_ref() {{"
         )
         .unwrap();
+        writeln!(
+            &mut out,
+            "            self.invalidate_model_cache(model).await?;"
+        )
+        .unwrap();
+        writeln!(&mut out, "        }} else {{").unwrap();
+        writeln!(
+            &mut out,
+            "            self.invalidate_cache_field(\"{}\", &{}).await?;",
+            primary, primary
+        )
+        .unwrap();
+        writeln!(&mut out, "        }}").unwrap();
     }
     writeln!(&mut out, "        Ok(result)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
@@ -330,26 +459,54 @@ fn render_model_module(model: &ModelSpec) -> String {
         writeln!(&mut out).unwrap();
         writeln!(
             &mut out,
-            "    fn cache_key(&self, {}: {}) -> String {{",
-            primary, primary_ty
+            "    fn cache_key(&self, field: &str, value: impl std::fmt::Display) -> String {{"
         )
         .unwrap();
         writeln!(
             &mut out,
-            "        format!(\"{{}}:{{}}\", Self::table_name(), {})",
-            primary
+            "        format!(\"{}:{{}}:{{}}\", field, value)",
+            cache_prefix
         )
         .unwrap();
         writeln!(&mut out, "    }}").unwrap();
         writeln!(&mut out).unwrap();
         writeln!(
             &mut out,
-            "    async fn invalidate_cache(&self, {}: {}) -> anyhow::Result<()> {{",
-            primary, primary_ty
+            "    async fn invalidate_model_cache(&self, model: &Model) -> anyhow::Result<()> {{"
         )
         .unwrap();
-        writeln!(&mut out, "        if let Some(cache) = self.ctx.cache.as_ref() {{").unwrap();
-        writeln!(&mut out, "            let key = self.cache_key({});", primary).unwrap();
+        writeln!(
+            &mut out,
+            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+        )
+        .unwrap();
+        for field in &cache_fields {
+            writeln!(
+                &mut out,
+                "            cache.del(&self.cache_key(\"{}\", &model.{})).await?;",
+                field.name, field.name
+            )
+            .unwrap();
+        }
+        writeln!(&mut out, "        }}").unwrap();
+        writeln!(&mut out, "        Ok(())").unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    async fn invalidate_cache_field(&self, field: &str, value: impl std::fmt::Display) -> anyhow::Result<()> {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            let key = self.cache_key(field, value);"
+        )
+        .unwrap();
         writeln!(&mut out, "            cache.del(&key).await?;").unwrap();
         writeln!(&mut out, "        }}").unwrap();
         writeln!(&mut out, "        Ok(())").unwrap();
@@ -361,8 +518,17 @@ fn render_model_module(model: &ModelSpec) -> String {
             primary, primary, primary_ty
         )
         .unwrap();
-        writeln!(&mut out, "        if let Some(cache) = self.ctx.cache.as_ref() {{").unwrap();
-        writeln!(&mut out, "            let key = self.cache_key({});", primary).unwrap();
+        writeln!(
+            &mut out,
+            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            let key = self.cache_key(\"{}\", &{});",
+            primary, primary
+        )
+        .unwrap();
         writeln!(
             &mut out,
             "            let ttl = Duration::from_secs({});",
@@ -371,10 +537,11 @@ fn render_model_module(model: &ModelSpec) -> String {
         .unwrap();
         writeln!(
             &mut out,
-            "            let negative_ttl = Duration::from_secs(({} / 6).clamp(5, 60));",
-            cache_ttl_secs
+            "            let negative_ttl = Duration::from_secs({});",
+            negative_cache_ttl_secs
         )
         .unwrap();
+        writeln!(&mut out, "            let lookup = {}.clone();", primary).unwrap();
         writeln!(&mut out, "            return cache").unwrap();
         writeln!(&mut out, "                .get_or_set_json_option(").unwrap();
         writeln!(&mut out, "                    &key,").unwrap();
@@ -382,8 +549,8 @@ fn render_model_module(model: &ModelSpec) -> String {
         writeln!(&mut out, "                    Some(negative_ttl),").unwrap();
         writeln!(
             &mut out,
-            "                    || async {{ self.find_by_{}({}).await }},",
-            primary, primary
+            "                    || async move {{ self.find_by_{}_uncached(lookup).await }},",
+            primary
         )
         .unwrap();
         writeln!(&mut out, "                )").unwrap();
@@ -392,15 +559,481 @@ fn render_model_module(model: &ModelSpec) -> String {
         writeln!(&mut out).unwrap();
         writeln!(
             &mut out,
-            "        self.find_by_{}({}).await",
+            "        self.find_by_{}_uncached({}).await",
             primary, primary
         )
         .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        for field in cache_fields.iter().filter(|field| field.name != *primary) {
+            let field_name = &field.name;
+            let field_ty = &field.ty;
+            writeln!(&mut out).unwrap();
+            writeln!(
+                &mut out,
+                "    pub async fn cached_find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+                field_name, field_name, field_ty
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "            let key = self.cache_key(\"{}\", &{});",
+                field_name, field_name
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "            let ttl = Duration::from_secs({});",
+                cache_ttl_secs
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "            let negative_ttl = Duration::from_secs({});",
+                negative_cache_ttl_secs
+            )
+            .unwrap();
+            writeln!(&mut out, "            let lookup = {}.clone();", field_name).unwrap();
+            writeln!(&mut out, "            return cache").unwrap();
+            writeln!(&mut out, "                .get_or_set_json_option(").unwrap();
+            writeln!(&mut out, "                    &key,").unwrap();
+            writeln!(&mut out, "                    Some(ttl),").unwrap();
+            writeln!(&mut out, "                    Some(negative_ttl),").unwrap();
+            writeln!(
+                &mut out,
+                "                    || async move {{ self.find_by_{}_uncached(lookup).await }},",
+                field_name
+            )
+            .unwrap();
+            writeln!(&mut out, "                )").unwrap();
+            writeln!(&mut out, "                .await;").unwrap();
+            writeln!(&mut out, "        }}").unwrap();
+            writeln!(&mut out).unwrap();
+            writeln!(
+                &mut out,
+                "        self.find_by_{}_uncached({}).await",
+                field_name, field_name
+            )
+            .unwrap();
+            writeln!(&mut out, "    }}").unwrap();
+        }
+    }
+    writeln!(&mut out, "}}").unwrap();
+
+    out
+}
+
+fn render_mongo_model_module(model: &ModelSpec) -> String {
+    let pascal = to_pascal_case(&model.name);
+    let primary = &model.primary;
+    let primary_ty = model
+        .fields
+        .iter()
+        .find(|field| field.name == *primary)
+        .map(|field| field.ty.clone())
+        .expect("primary field present");
+    let collection_name = &model.table;
+    let cache_prefix = model.cache_prefix.as_deref().unwrap_or(collection_name);
+    let cache_fields = cache_lookup_fields(model);
+    let mut out = String::new();
+    use std::fmt::Write as _;
+
+    writeln!(&mut out, "#![allow(dead_code, unused_imports)]").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "use std::time::Duration;").unwrap();
+    writeln!(
+        &mut out,
+        "use roze_mongo::bson::{{self, doc, oid::ObjectId, DateTime, Document}};"
+    )
+    .unwrap();
+    writeln!(&mut out, "use roze_mongo::Collection;").unwrap();
+    writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "use crate::svc::ServiceContext;").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]"
+    )
+    .unwrap();
+    writeln!(&mut out, "pub struct Model {{").unwrap();
+    for field in &model.fields {
+        if field.name == "id" && model.primary == "id" {
+            writeln!(&mut out, "    #[serde(rename = \"_id\")]").unwrap();
+        }
+        if let Some(comment) = &field.comment {
+            writeln!(&mut out, "    /// {}", comment.replace('\n', " ")).unwrap();
+        }
+        writeln!(&mut out, "    pub {}: {},", field.name, field.ty).unwrap();
+    }
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
+    writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "impl<'a> {}Repository<'a> {{", pascal).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn new(ctx: &'a ServiceContext) -> Self {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        Self {{ ctx }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    fn collection(&self) -> anyhow::Result<Collection<Model>> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let mongo = self.ctx.mongo.as_ref().ok_or_else(|| anyhow::anyhow!(\"mongo connection is not configured\"))?;"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        Ok(mongo.collection(\"{}\"))",
+        collection_name
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    fn filter_by<T: Serialize + ?Sized>(field: &str, value: &T) -> anyhow::Result<Document> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        let mut filter = Document::new();").unwrap();
+    writeln!(
+        &mut out,
+        "        filter.insert(field, bson::to_bson(value)?);"
+    )
+    .unwrap();
+    writeln!(&mut out, "        Ok(filter)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "    pub fn collection_name() -> &'static str {{").unwrap();
+    writeln!(&mut out, "        \"{}\"", collection_name).unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    render_mongo_find_methods(&mut out, model, primary, &primary_ty, true);
+    for field in cache_fields.iter().filter(|field| field.name != *primary) {
+        render_mongo_find_methods(&mut out, model, &field.name, &field.ty, false);
+    }
+    writeln!(
+        &mut out,
+        "    pub async fn list(&self) -> anyhow::Result<Vec<Model>> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let mut cursor = self.collection()?.find(doc! {{}}).await?;"
+    )
+    .unwrap();
+    writeln!(&mut out, "        let mut items = Vec::new();").unwrap();
+    writeln!(&mut out, "        while cursor.advance().await? {{").unwrap();
+    writeln!(
+        &mut out,
+        "            items.push(cursor.deserialize_current()?);"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "        Ok(items)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn insert(&self, model: Model) -> anyhow::Result<Model> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.collection()?.insert_one(&model).await?;"
+    )
+    .unwrap();
+    if model.cache {
+        writeln!(
+            &mut out,
+            "        self.invalidate_model_cache(&model).await?;"
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "        Ok(model)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn update(&self, model: Model) -> anyhow::Result<Model> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let filter = Self::filter_by(\"{}\", &model.{})?;",
+        mongo_field_name(primary),
+        primary
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.collection()?.replace_one(filter, &model).await?;"
+    )
+    .unwrap();
+    if model.cache {
+        writeln!(
+            &mut out,
+            "        self.invalidate_model_cache(&model).await?;"
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "        Ok(model)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn delete_by_{}(&self, {}: {}) -> anyhow::Result<u64> {{",
+        primary, primary, primary_ty
+    )
+    .unwrap();
+    if model.cache {
+        writeln!(
+            &mut out,
+            "        let existing = self.find_by_{}_uncached({}.clone()).await?;",
+            primary, primary
+        )
+        .unwrap();
+    }
+    writeln!(
+        &mut out,
+        "        let filter = Self::filter_by(\"{}\", &{})?;",
+        mongo_field_name(primary),
+        primary
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let result = self.collection()?.delete_one(filter).await?;"
+    )
+    .unwrap();
+    if model.cache {
+        writeln!(
+            &mut out,
+            "        if let Some(model) = existing.as_ref() {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            self.invalidate_model_cache(model).await?;"
+        )
+        .unwrap();
+        writeln!(&mut out, "        }} else {{").unwrap();
+        writeln!(
+            &mut out,
+            "            self.invalidate_cache_field(\"{}\", &{}).await?;",
+            primary, primary
+        )
+        .unwrap();
+        writeln!(&mut out, "        }}").unwrap();
+    }
+    writeln!(&mut out, "        Ok(result.deleted_count)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    if model.cache {
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    fn cache_key(&self, field: &str, value: impl std::fmt::Display) -> String {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        format!(\"{}:{{}}:{{}}\", field, value)",
+            cache_prefix
+        )
+        .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    async fn invalidate_model_cache(&self, model: &Model) -> anyhow::Result<()> {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+        )
+        .unwrap();
+        for field in &cache_fields {
+            writeln!(
+                &mut out,
+                "            cache.del(&self.cache_key(\"{}\", &model.{})).await?;",
+                field.name, field.name
+            )
+            .unwrap();
+        }
+        writeln!(&mut out, "        }}").unwrap();
+        writeln!(&mut out, "        Ok(())").unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    async fn invalidate_cache_field(&self, field: &str, value: impl std::fmt::Display) -> anyhow::Result<()> {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "            let key = self.cache_key(field, value);"
+        )
+        .unwrap();
+        writeln!(&mut out, "            cache.del(&key).await?;").unwrap();
+        writeln!(&mut out, "        }}").unwrap();
+        writeln!(&mut out, "        Ok(())").unwrap();
         writeln!(&mut out, "    }}").unwrap();
     }
     writeln!(&mut out, "}}").unwrap();
 
     out
+}
+
+fn render_mongo_find_methods(
+    out: &mut String,
+    model: &ModelSpec,
+    field_name: &str,
+    field_ty: &str,
+    is_primary: bool,
+) {
+    use std::fmt::Write as _;
+    let mongo_name = mongo_field_name(field_name);
+    writeln!(
+        out,
+        "    pub async fn find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+        field_name, field_name, field_ty
+    )
+    .unwrap();
+    if model.cache {
+        writeln!(
+            out,
+            "        self.cached_find_by_{}({}).await",
+            field_name, field_name
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "    pub async fn find_by_{}_uncached(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            field_name, field_name, field_ty
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "        let filter = Self::filter_by(\"{}\", &{})?;",
+        mongo_name, field_name
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        Ok(self.collection()?.find_one(filter).await?)"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    if model.cache {
+        writeln!(
+            out,
+            "    pub async fn cached_find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            field_name, field_name, field_ty
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            let key = self.cache_key(\"{}\", &{});",
+            field_name, field_name
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            let ttl = Duration::from_secs({});",
+            model.cache_ttl_secs.unwrap_or(300)
+        )
+        .unwrap();
+        let negative_cache_ttl_secs = model
+            .negative_cache_ttl_secs
+            .unwrap_or_else(|| (model.cache_ttl_secs.unwrap_or(300) / 6).clamp(5, 60));
+        writeln!(
+            out,
+            "            let negative_ttl = Duration::from_secs({});",
+            negative_cache_ttl_secs
+        )
+        .unwrap();
+        writeln!(out, "            let lookup = {}.clone();", field_name).unwrap();
+        writeln!(out, "            return cache").unwrap();
+        writeln!(out, "                .get_or_set_json_option(").unwrap();
+        writeln!(out, "                    &key,").unwrap();
+        writeln!(out, "                    Some(ttl),").unwrap();
+        writeln!(out, "                    Some(negative_ttl),").unwrap();
+        writeln!(
+            out,
+            "                    || async move {{ self.find_by_{}_uncached(lookup).await }},",
+            field_name
+        )
+        .unwrap();
+        writeln!(out, "                )").unwrap();
+        writeln!(out, "                .await;").unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "        self.find_by_{}_uncached({}).await",
+            field_name, field_name
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+        if is_primary {
+            writeln!(out).unwrap();
+        }
+    }
+}
+
+fn mongo_field_name(field_name: &str) -> &str {
+    if field_name == "id" {
+        "_id"
+    } else {
+        field_name
+    }
+}
+
+fn cache_lookup_fields(model: &ModelSpec) -> Vec<&ModelField> {
+    let mut seen = HashSet::new();
+    model
+        .cache_keys
+        .iter()
+        .filter_map(|key| {
+            let field = model
+                .fields
+                .iter()
+                .find(|field| field.name == *key && !is_optional_type(&field.ty))?;
+            if seen.insert(field.name.as_str()) {
+                Some(field)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +1048,7 @@ struct InspectedColumn {
 
 async fn inspect_sqlite_table(
     pool: &sqlx::SqlitePool,
+    schema_name: Option<&str>,
     table: &str,
 ) -> anyhow::Result<ModelSpec> {
     let table_name = strip_sql_identifier(table);
@@ -430,13 +1064,18 @@ async fn inspect_sqlite_table(
     let mut primary = None;
     for row in rows {
         let name: String = row.try_get("name")?;
-        let ty: String = row.try_get::<Option<String>, _>("type")?.unwrap_or_default();
+        let ty: String = row
+            .try_get::<Option<String>, _>("type")?
+            .unwrap_or_default();
         let notnull: i64 = row.try_get("notnull")?;
         let default_value: Option<String> = row.try_get("dflt_value")?;
         let pk: i64 = row.try_get("pk")?;
         if pk > 0 {
             if primary.is_some() {
-                bail!("table `{}` has composite primary keys which are not supported", table_name);
+                bail!(
+                    "table `{}` has composite primary keys which are not supported",
+                    table_name
+                );
             }
             primary = Some(name.clone());
         }
@@ -450,14 +1089,54 @@ async fn inspect_sqlite_table(
         });
     }
 
-    build_inspected_model(None, &table_name, columns, primary)
+    let unique_cache_keys = inspect_sqlite_unique_cache_keys(pool, &pragma_table).await?;
+    build_inspected_model(
+        schema_name.map(strip_sql_identifier),
+        &table_name,
+        columns,
+        primary,
+        unique_cache_keys,
+    )
+}
+
+async fn inspect_sqlite_unique_cache_keys(
+    pool: &sqlx::SqlitePool,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query(&format!("PRAGMA index_list({})", sqlite_identifier(table)))
+        .fetch_all(pool)
+        .await?;
+    let mut keys = Vec::new();
+    for row in rows {
+        let unique: i64 = row.try_get("unique")?;
+        let origin: Option<String> = row.try_get("origin").ok();
+        let partial: i64 = row.try_get("partial").unwrap_or(0);
+        if unique == 0 || partial != 0 || origin.as_deref() == Some("pk") {
+            continue;
+        }
+        let index_name: String = row.try_get("name")?;
+        let columns = sqlx::query(&format!(
+            "PRAGMA index_info({})",
+            sqlite_identifier(&index_name)
+        ))
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<Result<Vec<_>, _>>()?;
+        if columns.len() == 1 {
+            keys.push(columns[0].clone());
+        }
+    }
+    Ok(keys)
 }
 
 async fn inspect_postgres_table(
     pool: &sqlx::PgPool,
+    schema_name: Option<&str>,
     table: &str,
 ) -> anyhow::Result<ModelSpec> {
-    let (schema, table_name) = split_table_reference(table);
+    let (schema, table_name) = normalize_table_reference(schema_name, table)?;
     let schema = schema.unwrap_or_else(|| "public".to_string());
 
     let columns = sqlx::query(
@@ -509,6 +1188,7 @@ async fn inspect_postgres_table(
         bail!("table `{schema}.{table_name}` has composite primary keys which are not supported");
     }
     let primary = primary_columns.first().cloned();
+    let unique_cache_keys = inspect_postgres_unique_cache_keys(pool, &schema, &table_name).await?;
 
     let mut inspected = Vec::new();
     for row in columns {
@@ -532,14 +1212,56 @@ async fn inspect_postgres_table(
         });
     }
 
-    build_inspected_model(Some(schema), &table_name, inspected, primary)
+    build_inspected_model(
+        Some(schema),
+        &table_name,
+        inspected,
+        primary,
+        unique_cache_keys,
+    )
+}
+
+async fn inspect_postgres_unique_cache_keys(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT max(a.attname) AS column_name
+        FROM pg_index ix
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN unnest(ix.indkey) WITH ORDINALITY AS keys(attnum, ord) ON true
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = keys.attnum
+        WHERE n.nspname = $1
+          AND t.relname = $2
+          AND ix.indisunique
+          AND NOT ix.indisprimary
+          AND ix.indpred IS NULL
+        GROUP BY i.relname
+        HAVING count(*) = 1
+        ORDER BY i.relname
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| row.try_get::<String, _>("column_name"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 async fn inspect_mysql_table(
     pool: &sqlx::MySqlPool,
+    schema_name: Option<&str>,
     table: &str,
 ) -> anyhow::Result<ModelSpec> {
-    let (schema, table_name) = split_table_reference(table);
+    let (schema, table_name) = normalize_table_reference(schema_name, table)?;
     let schema = match schema {
         Some(schema) => schema,
         None => sqlx::query("SELECT DATABASE() AS db")
@@ -594,6 +1316,7 @@ async fn inspect_mysql_table(
         bail!("table `{schema}.{table_name}` has composite primary keys which are not supported");
     }
     let primary = primary_columns.first().cloned();
+    let unique_cache_keys = inspect_mysql_unique_cache_keys(pool, &schema, &table_name).await?;
 
     let mut inspected = Vec::new();
     for row in columns {
@@ -616,7 +1339,42 @@ async fn inspect_mysql_table(
         });
     }
 
-    build_inspected_model(Some(schema), &table_name, inspected, primary)
+    build_inspected_model(
+        Some(schema),
+        &table_name,
+        inspected,
+        primary,
+        unique_cache_keys,
+    )
+}
+
+async fn inspect_mysql_unique_cache_keys(
+    pool: &sqlx::MySqlPool,
+    schema: &str,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT index_name, MIN(column_name) AS column_name, COUNT(*) AS column_count
+        FROM information_schema.statistics
+        WHERE table_schema = ?
+          AND table_name = ?
+          AND non_unique = 0
+          AND index_name <> 'PRIMARY'
+        GROUP BY index_name
+        HAVING COUNT(*) = 1
+        ORDER BY index_name
+        "#,
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| row.try_get::<String, _>("column_name"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn build_inspected_model(
@@ -624,6 +1382,7 @@ fn build_inspected_model(
     table: &str,
     columns: Vec<InspectedColumn>,
     primary: Option<String>,
+    unique_cache_keys: Vec<String>,
 ) -> anyhow::Result<ModelSpec> {
     if columns.is_empty() {
         bail!("table `{table}` has no columns");
@@ -657,15 +1416,69 @@ fn build_inspected_model(
         bail!("table `{table}` primary field `{primary}` not found");
     }
 
+    let cache_keys = normalize_cache_keys(&primary, unique_cache_keys, &fields);
+
     Ok(ModelSpec {
         name: model_name_from_table(table),
         schema_name,
         table: table.to_string(),
-        primary,
+        primary: primary.clone(),
         cache: true,
         cache_ttl_secs: None,
+        negative_cache_ttl_secs: None,
+        cache_keys,
+        cache_prefix: None,
         fields,
     })
+}
+
+fn normalize_cache_keys(
+    primary: &str,
+    candidates: Vec<String>,
+    fields: &[ModelField],
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut keys = Vec::new();
+    for key in std::iter::once(primary.to_string()).chain(candidates) {
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let Some(field) = fields.iter().find(|field| field.name == key) else {
+            continue;
+        };
+        if is_optional_type(&field.ty) {
+            continue;
+        }
+        keys.push(key);
+    }
+    keys
+}
+
+fn is_optional_type(ty: &str) -> bool {
+    ty.trim_start().starts_with("Option<")
+}
+
+fn normalize_table_reference(
+    schema_name: Option<&str>,
+    table: &str,
+) -> anyhow::Result<(Option<String>, String)> {
+    let trimmed = strip_sql_identifier(table);
+    let parsed = split_table_reference(&trimmed);
+    match (schema_name.map(strip_sql_identifier), parsed.0, parsed.1) {
+        (Some(expected), Some(actual), table) => {
+            if !expected.eq_ignore_ascii_case(&actual) {
+                bail!(
+                    "schema mismatch: `--schema {}` does not match table `{}`",
+                    expected,
+                    actual
+                );
+            }
+            Ok((Some(actual), table))
+        }
+        (Some(schema), None, table) => Ok((Some(schema), table)),
+        (None, Some(schema), table) => Ok((Some(schema), table)),
+        (None, None, table) => Ok((None, table)),
+    }
 }
 
 fn split_table_reference(input: &str) -> (Option<String>, String) {
@@ -685,7 +1498,11 @@ fn split_table_reference(input: &str) -> (Option<String>, String) {
 
 fn table_key(schema_name: Option<&str>, table: &str) -> String {
     match schema_name {
-        Some(schema) if !schema.is_empty() => format!("{}.{}", strip_sql_identifier(schema), strip_sql_identifier(table)),
+        Some(schema) if !schema.is_empty() => format!(
+            "{}.{}",
+            strip_sql_identifier(schema),
+            strip_sql_identifier(table)
+        ),
         _ => strip_sql_identifier(table),
     }
 }
@@ -714,6 +1531,7 @@ pub fn parse_models_with_format(
         }
         ModelFormat::Dsl => parse_dsl_models(source),
         ModelFormat::Sql => parse_sql_models(source),
+        ModelFormat::Mongo => parse_dsl_models(source),
     }
 }
 
@@ -749,6 +1567,9 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         let mut primary = None;
         let mut cache = false;
         let mut cache_ttl_secs = None;
+        let mut negative_cache_ttl_secs = None;
+        let mut cache_keys = Vec::new();
+        let mut cache_prefix = None;
         let mut fields = Vec::new();
 
         while i < lines.len() {
@@ -778,14 +1599,31 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 cache_ttl_secs = Some(parse_u64(value.trim(), inner_line_no + 1)?);
                 continue;
             }
+            if let Some(value) = inner.strip_prefix("negative_cache_ttl_secs:") {
+                negative_cache_ttl_secs = Some(parse_u64(value.trim(), inner_line_no + 1)?);
+                continue;
+            }
+            if let Some(value) = inner.strip_prefix("cache_key:") {
+                cache_keys = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+                continue;
+            }
+            if let Some(value) = inner.strip_prefix("cache_prefix:") {
+                cache_prefix = Some(value.trim().trim_matches('"').to_string());
+                continue;
+            }
             if let Some(value) = inner.strip_prefix("field ") {
                 let mut parts = value.split_whitespace();
-                let field_name = parts
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("line {}: expected field name", inner_line_no + 1))?;
-                let field_ty = parts
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("line {}: expected field type", inner_line_no + 1))?;
+                let field_name = parts.next().ok_or_else(|| {
+                    anyhow::anyhow!("line {}: expected field name", inner_line_no + 1)
+                })?;
+                let field_ty = parts.next().ok_or_else(|| {
+                    anyhow::anyhow!("line {}: expected field type", inner_line_no + 1)
+                })?;
                 fields.push(ModelField {
                     name: field_name.to_string(),
                     ty: field_ty.to_string(),
@@ -796,7 +1634,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             }
 
             bail!(
-                "line {}: expected `table:`, `primary:`, `cache:`, `cache_ttl_secs:` or `field`",
+                "line {}: expected `table:`, `primary:`, `cache:`, `cache_key:`, `cache_prefix:`, `cache_ttl_secs:`, `negative_cache_ttl_secs:` or `field`",
                 inner_line_no + 1
             );
         }
@@ -809,6 +1647,17 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         if !fields.iter().any(|field| field.name == primary) {
             bail!("model `{name}` primary field `{primary}` not found in fields");
         }
+        if cache_keys.is_empty() {
+            cache_keys.push(primary.clone());
+        }
+        for key in &cache_keys {
+            let Some(field) = fields.iter().find(|field| &field.name == key) else {
+                bail!("model `{name}` cache key field `{key}` not found in fields");
+            };
+            if is_optional_type(&field.ty) {
+                bail!("model `{name}` cache key field `{key}` cannot be optional");
+            }
+        }
 
         models.push(ModelSpec {
             name,
@@ -817,6 +1666,9 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             primary,
             cache,
             cache_ttl_secs,
+            negative_cache_ttl_secs,
+            cache_keys,
+            cache_prefix,
             fields,
         });
     }
@@ -851,7 +1703,12 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         } else {
             None
         }
-        .ok_or_else(|| anyhow::anyhow!("line {}: expected `CREATE TABLE` or `COMMENT ON COLUMN`", line_no + 1))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "line {}: expected `CREATE TABLE` or `COMMENT ON COLUMN`",
+                line_no + 1
+            )
+        })?;
 
         let (statement, next_i) = collect_sql_statement(&lines, i - 1, line_no + 1)?;
         i = next_i;
@@ -935,7 +1792,10 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         .find('(')
         .ok_or_else(|| anyhow::anyhow!("line {}: expected `(` after table name", start_line))?;
     let close = find_matching_paren(statement, open).ok_or_else(|| {
-        anyhow::anyhow!("line {}: expected closing `)` for table definition", start_line)
+        anyhow::anyhow!(
+            "line {}: expected closing `)` for table definition",
+            start_line
+        )
     })?;
 
     let header = statement[..open].trim();
@@ -944,6 +1804,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
     let mut fields = Vec::new();
     let mut primary = None;
     let mut inline_primary_fields = Vec::new();
+    let mut unique_cache_keys = Vec::new();
 
     for entry in split_sql_items(body) {
         let entry = entry.trim();
@@ -954,17 +1815,24 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         if starts_with_ci(entry, "primary key") {
             let columns = parse_key_columns(entry, start_line)?;
             if columns.len() != 1 {
-                bail!("line {}: composite primary keys are not supported", start_line);
+                bail!(
+                    "line {}: composite primary keys are not supported",
+                    start_line
+                );
             }
             primary = columns.into_iter().next();
             continue;
         }
 
-        if starts_with_ci(entry, "key ")
-            || starts_with_ci(entry, "unique key")
-            || starts_with_ci(entry, "index ")
-            || starts_with_ci(entry, "unique index")
-        {
+        if is_unique_key_entry(entry) {
+            let columns = parse_key_columns(entry, start_line)?;
+            if columns.len() == 1 {
+                unique_cache_keys.push(columns[0].clone());
+            }
+            continue;
+        }
+
+        if starts_with_ci(entry, "key ") || starts_with_ci(entry, "index ") {
             continue;
         }
 
@@ -975,7 +1843,8 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
             bail!("line {}: foreign keys are not supported", start_line);
         }
 
-        if starts_with_ci(entry, "foreign key") || entry.to_ascii_lowercase().contains("references") {
+        if starts_with_ci(entry, "foreign key") || entry.to_ascii_lowercase().contains("references")
+        {
             bail!("line {}: foreign keys are not supported", start_line);
         }
 
@@ -987,14 +1856,20 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
     }
 
     if fields.is_empty() {
-        bail!("line {}: CREATE TABLE must declare at least one column", start_line);
+        bail!(
+            "line {}: CREATE TABLE must declare at least one column",
+            start_line
+        );
     }
 
     let primary = match primary {
         Some(primary) => primary,
         None if inline_primary_fields.len() == 1 => inline_primary_fields[0].clone(),
         None if inline_primary_fields.len() > 1 => {
-            bail!("line {}: composite primary keys are not supported", start_line)
+            bail!(
+                "line {}: composite primary keys are not supported",
+                start_line
+            )
         }
         None => fields
             .iter()
@@ -1011,31 +1886,36 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         );
     }
 
-    let name = model_name_from_table(&table);
     let primary_name = primary.clone();
+    let fields = fields
+        .into_iter()
+        .map(|field| {
+            let ty = if field.nullable && field.name != primary_name {
+                format!("Option<{}>", field.ty)
+            } else {
+                field.ty
+            };
+            ModelField {
+                name: field.name,
+                ty,
+                default_value: field.default_value,
+                comment: field.comment,
+            }
+        })
+        .collect::<Vec<_>>();
+    let cache_keys = normalize_cache_keys(&primary, unique_cache_keys, &fields);
+    let name = model_name_from_table(&table);
     Ok(ModelSpec {
         name,
         schema_name,
         table,
-        primary,
+        primary: primary.clone(),
         cache: true,
         cache_ttl_secs: None,
-        fields: fields
-            .into_iter()
-            .map(|field| {
-                let ty = if field.nullable && field.name != primary_name {
-                    format!("Option<{}>", field.ty)
-                } else {
-                    field.ty
-                };
-                ModelField {
-                    name: field.name,
-                    ty,
-                    default_value: field.default_value,
-                    comment: field.comment,
-                }
-            })
-            .collect(),
+        negative_cache_ttl_secs: None,
+        cache_keys,
+        cache_prefix: None,
+        fields,
     })
 }
 
@@ -1047,16 +1927,23 @@ fn parse_comment_on_column(
     let lower = statement.to_ascii_lowercase();
     let prefix = "comment on column ";
     if !lower.starts_with(prefix) {
-        bail!("line {}: expected `COMMENT ON COLUMN ... IS ...`", start_line);
+        bail!(
+            "line {}: expected `COMMENT ON COLUMN ... IS ...`",
+            start_line
+        );
     }
 
     let rest = statement[prefix.len()..].trim();
-    let (target, value) = split_once_ci(rest, " is ")
-        .ok_or_else(|| anyhow::anyhow!("line {}: expected `IS` in COMMENT ON COLUMN", start_line))?;
+    let (target, value) = split_once_ci(rest, " is ").ok_or_else(|| {
+        anyhow::anyhow!("line {}: expected `IS` in COMMENT ON COLUMN", start_line)
+    })?;
     let (schema_name, table_name, column) = parse_column_reference(target.trim(), start_line)?;
     let table = table_key(schema_name.as_deref(), &table_name);
     if table.is_empty() {
-        bail!("line {}: missing table name in COMMENT ON COLUMN", start_line);
+        bail!(
+            "line {}: missing table name in COMMENT ON COLUMN",
+            start_line
+        );
     }
 
     Ok((table, column, unquote_sql_string(value.trim())))
@@ -1136,7 +2023,11 @@ fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
     while i < tokens.len() {
         let token = tokens[i].as_str();
         match token.to_ascii_lowercase().as_str() {
-            "not" if tokens.get(i + 1).is_some_and(|next| next.eq_ignore_ascii_case("null")) => {
+            "not"
+                if tokens
+                    .get(i + 1)
+                    .is_some_and(|next| next.eq_ignore_ascii_case("null")) =>
+            {
                 attrs.nullable = false;
                 i += 2;
             }
@@ -1149,7 +2040,9 @@ fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
                 i += 1;
             }
             "primary"
-                if tokens.get(i + 1).is_some_and(|next| next.eq_ignore_ascii_case("key")) =>
+                if tokens
+                    .get(i + 1)
+                    .is_some_and(|next| next.eq_ignore_ascii_case("key")) =>
             {
                 attrs.inline_primary_key = true;
                 i += 2;
@@ -1205,10 +2098,16 @@ fn collect_sql_clause(tokens: &[String], start: usize) -> (String, usize) {
 
 fn unquote_sql_string(input: &str) -> String {
     let trimmed = input.trim();
-    if let Some(value) = trimmed.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) {
+    if let Some(value) = trimmed
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
         return value.replace("''", "'");
     }
-    if let Some(value) = trimmed.strip_prefix('"').and_then(|value| value.strip_suffix('"')) {
+    if let Some(value) = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
         return value.replace("\"\"", "\"");
     }
     trimmed.to_string()
@@ -1218,9 +2117,8 @@ fn parse_key_columns(entry: &str, start_line: usize) -> anyhow::Result<Vec<Strin
     let open = entry
         .find('(')
         .ok_or_else(|| anyhow::anyhow!("line {}: expected `(` in PRIMARY KEY", start_line))?;
-    let close = find_matching_paren(entry, open).ok_or_else(|| {
-        anyhow::anyhow!("line {}: expected `)` in PRIMARY KEY", start_line)
-    })?;
+    let close = find_matching_paren(entry, open)
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `)` in PRIMARY KEY", start_line))?;
     Ok(split_sql_items(&entry[open + 1..close])
         .into_iter()
         .map(|item| strip_sql_identifier(item.trim()))
@@ -1259,13 +2157,22 @@ fn parse_column_reference(
     reference: &str,
     start_line: usize,
 ) -> anyhow::Result<(Option<String>, String, String)> {
-    let mut parts = reference.split('.').map(strip_sql_identifier).filter(|part| !part.is_empty());
-    let column = parts
-        .next_back()
-        .ok_or_else(|| anyhow::anyhow!("line {}: missing column name in COMMENT ON COLUMN", start_line))?;
-    let table = parts
-        .next_back()
-        .ok_or_else(|| anyhow::anyhow!("line {}: missing table name in COMMENT ON COLUMN", start_line))?;
+    let mut parts = reference
+        .split('.')
+        .map(strip_sql_identifier)
+        .filter(|part| !part.is_empty());
+    let column = parts.next_back().ok_or_else(|| {
+        anyhow::anyhow!(
+            "line {}: missing column name in COMMENT ON COLUMN",
+            start_line
+        )
+    })?;
+    let table = parts.next_back().ok_or_else(|| {
+        anyhow::anyhow!(
+            "line {}: missing table name in COMMENT ON COLUMN",
+            start_line
+        )
+    })?;
     let schema_name = parts.next_back();
     Ok((schema_name, table, column))
 }
@@ -1277,9 +2184,9 @@ fn split_sql_items(body: &str) -> Vec<String> {
     let mut in_single = false;
     let mut in_double = false;
     let mut in_backtick = false;
-    let mut chars = body.chars().peekable();
+    let chars = body.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             '\'' if !in_double && !in_backtick => {
                 in_single = !in_single;
@@ -1459,6 +2366,12 @@ fn starts_with_ci(input: &str, prefix: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_unique_key_entry(entry: &str) -> bool {
+    starts_with_ci(entry, "unique key")
+        || starts_with_ci(entry, "unique index")
+        || (starts_with_ci(entry, "constraint ") && entry.to_ascii_lowercase().contains(" unique"))
+}
+
 fn split_once_ci<'a>(input: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
     let lower = input.to_ascii_lowercase();
     let idx = lower.find(&needle.to_ascii_lowercase())?;
@@ -1535,11 +2448,7 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
     }
 
     if normalized.contains("serial") {
-        return if normalized.contains("smallserial") || normalized.contains("smallint") {
-            "i64".to_string()
-        } else {
-            "i64".to_string()
-        };
+        return "i64".to_string();
     }
 
     if normalized.contains("int")
@@ -1565,7 +2474,8 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         return "f64".to_string();
     }
 
-    if normalized.contains("blob") || normalized.contains("binary") || normalized.contains("bytea") {
+    if normalized.contains("blob") || normalized.contains("binary") || normalized.contains("bytea")
+    {
         return "Vec<u8>".to_string();
     }
 
@@ -1635,7 +2545,10 @@ mod tests {
             table: users
             primary: id
             cache: true
+            cache_key: id
+            cache_prefix: account
             cache_ttl_secs: 300
+            negative_cache_ttl_secs: 30
             field id i64
             field name String
         }
@@ -1647,6 +2560,9 @@ mod tests {
         assert_eq!(models[0].table, "users");
         assert_eq!(models[0].primary, "id");
         assert!(models[0].cache);
+        assert_eq!(models[0].cache_keys, vec!["id"]);
+        assert_eq!(models[0].cache_prefix.as_deref(), Some("account"));
+        assert_eq!(models[0].negative_cache_ttl_secs, Some(30));
     }
 
     #[test]
@@ -1656,7 +2572,9 @@ mod tests {
             `id` bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
             `name` varchar(255) NOT NULL,
             `nickname` varchar(255) NULL DEFAULT 'guest' COMMENT 'Nickname',
-            `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+            `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY `uniq_users_name` (`name`),
+            UNIQUE KEY `uniq_users_name_created_at` (`name`, `created_at`)
         );
         COMMENT ON COLUMN users.nickname IS 'nickname from profile';
         "#;
@@ -1667,11 +2585,21 @@ mod tests {
         assert_eq!(models[0].table, "users");
         assert_eq!(models[0].primary, "id");
         assert!(models[0].cache);
+        assert_eq!(models[0].cache_keys, vec!["id", "name"]);
         assert_eq!(models[0].fields[0].ty, "u64");
         assert_eq!(models[0].fields[2].ty, "Option<String>");
-        assert_eq!(models[0].fields[2].default_value.as_deref(), Some("'guest'"));
-        assert_eq!(models[0].fields[2].comment.as_deref(), Some("nickname from profile"));
-        assert_eq!(models[0].fields[3].default_value.as_deref(), Some("CURRENT_TIMESTAMP"));
+        assert_eq!(
+            models[0].fields[2].default_value.as_deref(),
+            Some("'guest'")
+        );
+        assert_eq!(
+            models[0].fields[2].comment.as_deref(),
+            Some("nickname from profile")
+        );
+        assert_eq!(
+            models[0].fields[3].default_value.as_deref(),
+            Some("CURRENT_TIMESTAMP")
+        );
     }
 
     #[test]
@@ -1698,6 +2626,9 @@ mod tests {
             primary: "id".to_string(),
             cache: true,
             cache_ttl_secs: Some(300),
+            negative_cache_ttl_secs: None,
+            cache_keys: vec!["id".to_string()],
+            cache_prefix: None,
             fields: vec![
                 ModelField {
                     name: "id".to_string(),
@@ -1720,15 +2651,46 @@ mod tests {
         assert!(rendered.contains("pub async fn delete_by_id"));
     }
 
+    #[test]
+    fn renders_mongo_repository_with_cache_keys() {
+        let source = r#"
+        model User {
+            table: users
+            primary: id
+            cache: true
+            cache_key: id,username
+            cache_prefix: account
+            cache_ttl_secs: 120
+            negative_cache_ttl_secs: 10
+            field id ObjectId
+            field username String
+            field display_name Option<String>
+        }
+        "#;
+        let models = parse_models_with_format(source, ModelFormat::Mongo).expect("parse");
+        assert_eq!(models[0].cache_keys, vec!["id", "username"]);
+
+        let rendered = render_mongo_model_module(&models[0]);
+        assert!(rendered.contains("roze_mongo::bson"));
+        assert!(rendered.contains("#[serde(rename = \"_id\")]"));
+        assert!(rendered.contains("pub async fn find_by_username"));
+        assert!(rendered.contains("pub async fn cached_find_by_username"));
+        assert!(rendered.contains("Self::filter_by(\"_id\", &id)?"));
+        assert!(rendered.contains("format!(\"account:{}:{}\", field, value)"));
+        assert!(rendered.contains("cache.del(&self.cache_key(\"username\", &model.username))"));
+    }
+
     #[tokio::test]
     async fn inspects_sqlite_and_writes_model_project() {
-        let _ = SystemTime::now()
+        let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("rozectl-sqlite-{unique}.db"));
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
-            .connect("sqlite::memory:")
+            .connect(&db_url)
             .await
             .expect("connect");
         sqlx::query(
@@ -1743,20 +2705,11 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create table");
-
-        let spec = inspect_sqlite_table(&pool, "users")
+        sqlx::query("CREATE UNIQUE INDEX uniq_users_name ON users(name)")
+            .execute(&pool)
             .await
-            .expect("inspect");
-        assert_eq!(spec.name, "User");
-        assert_eq!(spec.primary, "id");
-        assert!(spec.cache);
-        assert_eq!(spec.fields[1].ty, "String");
-        assert_eq!(spec.fields[2].ty, "Option<String>");
+            .expect("create unique index");
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
         let out = std::env::temp_dir().join(format!("rozectl-inspect-out-{unique}"));
         fs::create_dir_all(out.join("src")).expect("out src");
         fs::write(
@@ -1768,15 +2721,22 @@ mod types;
         )
         .expect("main");
 
-        write_model_project(
-            &[spec],
+        inspect_model_project(
+            "users",
+            Some("audit"),
+            &db_url,
+            SqlxDatabaseKind::Sqlite,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
         )
-        .expect("write");
+        .await
+        .expect("inspect");
 
         assert!(out.join("src/model/mod.rs").is_file());
         assert!(out.join("src/model/user.rs").is_file());
+        let rendered = fs::read_to_string(out.join("src/model/user.rs")).expect("rendered");
+        assert!(rendered.contains("schema_name = \"audit\""));
+        assert!(rendered.contains("pub async fn find_by_name"));
         let main_rs = fs::read_to_string(out.join("src/main.rs")).expect("main read");
         assert!(main_rs.contains("mod model;"));
     }
@@ -1789,29 +2749,58 @@ mod types;
         };
 
         let pool = sqlx::PgPool::connect(&db_url).await.expect("connect");
-        sqlx::query(
+        let schema = format!(
+            "rozectl_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        );
+        sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#))
+            .execute(&pool)
+            .await
+            .expect("create schema");
+        sqlx::query(&format!(
             r#"
-            CREATE TABLE IF NOT EXISTS public.rozectl_users (
+            CREATE TABLE IF NOT EXISTS "{schema}".rozectl_users (
                 id BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 nickname TEXT DEFAULT 'guest'
-            );
-            "#,
-        )
+            )
+            "#
+        ))
         .execute(&pool)
         .await
         .expect("create table");
 
-        let spec = inspect_postgres_table(&pool, "public.rozectl_users")
+        let out = temp_model_output("postgres");
+        write_minimal_main(&out);
+
+        inspect_model_project(
+            &format!("{schema}.rozectl_users"),
+            Some(&schema),
+            &db_url,
+            SqlxDatabaseKind::Postgres,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .await
+        .expect("inspect");
+
+        let spec = inspect_postgres_table(&pool, Some(&schema), "rozectl_users")
             .await
             .expect("inspect");
-        assert_eq!(spec.schema_name.as_deref(), Some("public"));
+        assert_eq!(spec.schema_name.as_deref(), Some(schema.as_str()));
         assert_eq!(spec.table, "rozectl_users");
         assert_eq!(spec.primary, "id");
 
         let rendered = render_model_module(&spec);
-        assert!(rendered.contains("schema_name = \"public\""));
+        assert!(rendered.contains(&format!("schema_name = \"{schema}\"")));
         assert!(rendered.contains("table_name = \"rozectl_users\""));
+        assert!(out.join("src/model/mod.rs").is_file());
+        assert!(out.join("src/model/rozectl_user.rs").is_file());
+        let main_rs = fs::read_to_string(out.join("src/main.rs")).expect("main read");
+        assert!(main_rs.contains("mod model;"));
     }
 
     #[tokio::test]
@@ -1844,8 +2833,22 @@ mod types;
         .await
         .expect("create table");
 
+        let out = temp_model_output("mysql");
+        write_minimal_main(&out);
+
+        inspect_model_project(
+            &format!("{db_name}.rozectl_users"),
+            Some(&db_name),
+            &db_url,
+            SqlxDatabaseKind::MySql,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .await
+        .expect("inspect");
+
         let qualified = format!("{}.rozectl_users", db_name);
-        let spec = inspect_mysql_table(&pool, &qualified)
+        let spec = inspect_mysql_table(&pool, Some(&db_name), &qualified)
             .await
             .expect("inspect");
         assert_eq!(spec.schema_name.as_deref(), Some(db_name.as_str()));
@@ -1855,5 +2858,309 @@ mod types;
         let rendered = render_model_module(&spec);
         assert!(rendered.contains(&format!("schema_name = \"{}\"", db_name)));
         assert!(rendered.contains("table_name = \"rozectl_users\""));
+        assert!(out.join("src/model/mod.rs").is_file());
+        assert!(out.join("src/model/rozectl_user.rs").is_file());
+        let main_rs = fs::read_to_string(out.join("src/main.rs")).expect("main read");
+        assert!(main_rs.contains("mod model;"));
+    }
+
+    #[test]
+    fn schema_mismatch_is_rejected() {
+        let err = normalize_table_reference(Some("db"), "public.users").expect_err("mismatch");
+        assert!(
+            err.to_string().contains("schema mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_matches_generate_sql_for_sqlite_schema() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("rozectl-compare-{unique}.db"));
+        let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let ddl = r#"
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            nickname TEXT NULL
+        );
+        "#;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("connect");
+        sqlx::query(ddl).execute(&pool).await.expect("create table");
+
+        let inspect_out = std::env::temp_dir().join(format!("rozectl-inspect-compare-{unique}"));
+        let generate_out = std::env::temp_dir().join(format!("rozectl-generate-compare-{unique}"));
+        write_minimal_main(&inspect_out);
+        write_minimal_main(&generate_out);
+
+        inspect_model_project(
+            "users",
+            None,
+            &db_url,
+            SqlxDatabaseKind::Sqlite,
+            &inspect_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .await
+        .expect("inspect");
+
+        generate_model_project(
+            ddl,
+            &generate_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Sql,
+        )
+        .expect("generate");
+
+        let inspect_module =
+            fs::read_to_string(inspect_out.join("src/model/user.rs")).expect("inspect module");
+        let generate_module =
+            fs::read_to_string(generate_out.join("src/model/user.rs")).expect("generate module");
+        let inspect_mod =
+            fs::read_to_string(inspect_out.join("src/model/mod.rs")).expect("inspect mod");
+        let generate_mod =
+            fs::read_to_string(generate_out.join("src/model/mod.rs")).expect("generate mod");
+        assert_eq!(inspect_module, generate_module);
+        assert_eq!(inspect_mod, generate_mod);
+    }
+
+    #[tokio::test]
+    async fn inspect_with_schema_compares_against_generate_sql_for_postgres_if_available() {
+        let Some(db_url) = std::env::var("ROZECTL_TEST_POSTGRES_URL").ok() else {
+            eprintln!("skipping postgres compare test: ROZECTL_TEST_POSTGRES_URL not set");
+            return;
+        };
+
+        let pool = sqlx::PgPool::connect(&db_url).await.expect("connect");
+        let schema = format!(
+            "rozectl_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        );
+        sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#))
+            .execute(&pool)
+            .await
+            .expect("create schema");
+        sqlx::query(&format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS "{schema}".rozectl_users (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                nickname TEXT NULL
+            )
+            "#
+        ))
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        let ddl = format!(
+            r#"
+            CREATE TABLE "{schema}".rozectl_users (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                nickname TEXT NULL
+            );
+            "#
+        );
+
+        let inspect_out = temp_model_output("postgres-compare");
+        let generate_out = temp_model_output("postgres-generate");
+        write_minimal_main(&inspect_out);
+        write_minimal_main(&generate_out);
+
+        inspect_model_project(
+            "rozectl_users",
+            Some(&schema),
+            &db_url,
+            SqlxDatabaseKind::Postgres,
+            &inspect_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .await
+        .expect("inspect");
+
+        generate_model_project(
+            &ddl,
+            &generate_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Sql,
+        )
+        .expect("generate");
+
+        let inspect_module = fs::read_to_string(inspect_out.join("src/model/rozectl_user.rs"))
+            .expect("inspect module");
+        let generate_module = fs::read_to_string(generate_out.join("src/model/rozectl_user.rs"))
+            .expect("generate module");
+        assert_eq!(inspect_module, generate_module);
+    }
+
+    #[tokio::test]
+    async fn inspect_with_schema_compares_against_generate_sql_for_mysql_if_available() {
+        let Some(db_url) = std::env::var("ROZECTL_TEST_MYSQL_URL").ok() else {
+            eprintln!("skipping mysql compare test: ROZECTL_TEST_MYSQL_URL not set");
+            return;
+        };
+
+        let pool = sqlx::MySqlPool::connect(&db_url).await.expect("connect");
+        let db_name: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(&pool)
+            .await
+            .expect("database");
+        let Some(db_name) = db_name else {
+            eprintln!("skipping mysql compare test: connection has no default database");
+            return;
+        };
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS rozectl_users (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                nickname VARCHAR(255) NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create table");
+
+        let ddl = format!(
+            r#"
+            CREATE TABLE `{db_name}`.`rozectl_users` (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                nickname VARCHAR(255) NULL
+            );
+            "#
+        );
+
+        let inspect_out = temp_model_output("mysql-compare");
+        let generate_out = temp_model_output("mysql-generate");
+        write_minimal_main(&inspect_out);
+        write_minimal_main(&generate_out);
+
+        inspect_model_project(
+            "rozectl_users",
+            Some(&db_name),
+            &db_url,
+            SqlxDatabaseKind::MySql,
+            &inspect_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .await
+        .expect("inspect");
+
+        generate_model_project(
+            &ddl,
+            &generate_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Sql,
+        )
+        .expect("generate");
+
+        let inspect_module = fs::read_to_string(inspect_out.join("src/model/rozectl_user.rs"))
+            .expect("inspect module");
+        let generate_module = fs::read_to_string(generate_out.join("src/model/rozectl_user.rs"))
+            .expect("generate module");
+        assert_eq!(inspect_module, generate_module);
+    }
+
+    #[test]
+    fn build_inspected_model_preserves_nullable_defaults_and_comments() {
+        let model = build_inspected_model(
+            Some("public".to_string()),
+            "users",
+            vec![
+                InspectedColumn {
+                    name: "id".to_string(),
+                    ty: "i64".to_string(),
+                    nullable: false,
+                    auto_increment: true,
+                    default_value: None,
+                    comment: None,
+                },
+                InspectedColumn {
+                    name: "name".to_string(),
+                    ty: "String".to_string(),
+                    nullable: false,
+                    auto_increment: false,
+                    default_value: None,
+                    comment: None,
+                },
+                InspectedColumn {
+                    name: "nickname".to_string(),
+                    ty: "String".to_string(),
+                    nullable: true,
+                    auto_increment: false,
+                    default_value: Some("'guest'".to_string()),
+                    comment: Some("Nickname".to_string()),
+                },
+                InspectedColumn {
+                    name: "active".to_string(),
+                    ty: "bool".to_string(),
+                    nullable: true,
+                    auto_increment: false,
+                    default_value: Some("true".to_string()),
+                    comment: Some("Active flag".to_string()),
+                },
+            ],
+            Some("id".to_string()),
+            vec!["name".to_string(), "nickname".to_string()],
+        )
+        .expect("build");
+
+        assert_eq!(model.schema_name.as_deref(), Some("public"));
+        assert_eq!(model.table, "users");
+        assert_eq!(model.primary, "id");
+        assert_eq!(model.fields[0].ty, "i64");
+        assert_eq!(model.fields[2].ty, "Option<String>");
+        assert_eq!(model.fields[2].default_value.as_deref(), Some("'guest'"));
+        assert_eq!(model.fields[2].comment.as_deref(), Some("Nickname"));
+        assert_eq!(model.fields[3].ty, "Option<bool>");
+        assert_eq!(model.fields[3].default_value.as_deref(), Some("true"));
+        assert_eq!(model.fields[3].comment.as_deref(), Some("Active flag"));
+        assert_eq!(model.cache_keys, vec!["id", "name"]);
+
+        let rendered = render_model_module(&model);
+        assert!(rendered.contains("schema_name = \"public\""));
+        assert!(rendered.contains("/// Nickname"));
+        assert!(rendered.contains("/// default: 'guest'"));
+        assert!(rendered.contains("/// Active flag"));
+        assert!(rendered.contains("/// default: true"));
+        assert!(rendered.contains("pub nickname: Option<String>"));
+        assert!(rendered.contains("pub active: Option<bool>"));
+        assert!(rendered.contains("pub async fn find_by_name"));
+        assert!(!rendered.contains("pub async fn find_by_nickname"));
+    }
+
+    fn temp_model_output(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rozectl-{label}-{unique}"))
+    }
+
+    fn write_minimal_main(out: &std::path::Path) {
+        fs::create_dir_all(out.join("src")).expect("src dir");
+        fs::write(
+            out.join("src/main.rs"),
+            r#"mod config;
+mod svc;
+mod types;
+"#,
+        )
+        .expect("main");
     }
 }

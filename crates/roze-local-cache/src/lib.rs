@@ -58,19 +58,19 @@ where
         self.insert_with_ttl(key, value, self.default_ttl).await
     }
 
-    pub async fn insert_with_ttl(
-        &self,
-        key: K,
-        value: V,
-        ttl: Option<Duration>,
-    ) -> Option<V> {
+    pub async fn insert_with_ttl(&self, key: K, value: V, ttl: Option<Duration>) -> Option<V> {
         let mut entries = self.entries.write().await;
-        entries.insert(key, CacheEntry::new(value, ttl)).map(|entry| entry.value)
+        entries
+            .insert(key, CacheEntry::new(value, ttl))
+            .map(|entry| entry.value)
     }
 
     pub async fn get(&self, key: &K) -> Option<V> {
         let mut entries = self.entries.write().await;
-        let should_remove = entries.get(key).map(|entry| entry.is_expired()).unwrap_or(false);
+        let should_remove = entries
+            .get(key)
+            .map(|entry| entry.is_expired())
+            .unwrap_or(false);
         if should_remove {
             entries.remove(key);
             return None;
@@ -83,7 +83,11 @@ where
     }
 
     pub async fn remove(&self, key: &K) -> Option<V> {
-        self.entries.write().await.remove(key).map(|entry| entry.value)
+        self.entries
+            .write()
+            .await
+            .remove(key)
+            .map(|entry| entry.value)
     }
 
     pub async fn clear(&self) {

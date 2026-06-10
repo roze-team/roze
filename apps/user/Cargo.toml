@@ -8,19 +8,21 @@ version.workspace = true
 anyhow.workspace = true
 config.workspace = true
 poem.workspace = true
-roze-config = { git = "https://github.com/roze-team/roze.git" }
-roze-error = { git = "https://github.com/roze-team/roze.git" }
-roze-http = { git = "https://github.com/roze-team/roze.git" }
-roze-log = { git = "https://github.com/roze-team/roze.git" }
-roze-metrics = { git = "https://github.com/roze-team/roze.git" }
-roze-middleware = { git = "https://github.com/roze-team/roze.git" }
-roze-jwt = { git = "https://github.com/roze-team/roze.git" }
-roze-cache = { git = "https://github.com/roze-team/roze.git" }
-roze-context = { git = "https://github.com/roze-team/roze.git" }
-roze-db = { git = "https://github.com/roze-team/roze.git" }
-roze-openapi = { git = "https://github.com/roze-team/roze.git" }
-roze-result = { git = "https://github.com/roze-team/roze.git" }
-roze-validation = { git = "https://github.com/roze-team/roze.git" }
+roze-config = { path = "../../crates/roze-config" }
+roze-error = { path = "../../crates/roze-error" }
+roze-http = { path = "../../crates/roze-http" }
+roze-log = { path = "../../crates/roze-log" }
+roze-metrics = { path = "../../crates/roze-metrics" }
+roze-middleware = { path = "../../crates/roze-middleware" }
+roze-jwt = { path = "../../crates/roze-jwt" }
+roze-cache = { path = "../../crates/roze-cache" }
+roze-context = { path = "../../crates/roze-context" }
+roze-db = { path = "../../crates/roze-db" }
+roze-mongo = { path = "../../crates/roze-mongo" }
+roze-openapi = { path = "../../crates/roze-openapi" }
+roze-result = { path = "../../crates/roze-result" }
+roze-validation = { path = "../../crates/roze-validation" }
+roze-rpc = { path = "../../crates/roze-rpc" }
 serde.workspace = true
 serde_json.workspace = true
 sea-orm.workspace = true
@@ -29,4 +31,3 @@ tokio.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-

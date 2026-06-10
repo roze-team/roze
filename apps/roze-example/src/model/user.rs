@@ -1,9 +1,9 @@
 #![allow(dead_code, unused_imports)]
 
-use std::time::Duration;
 use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, DeleteResult, EntityTrait, IntoActiveModel};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::svc::ServiceContext;
 
@@ -32,7 +32,10 @@ impl<'a> UserRepository<'a> {
     }
 
     fn db(&self) -> anyhow::Result<&DatabaseConnection> {
-        self.ctx.db.as_ref().ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
+        self.ctx
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
     }
 
     pub fn table_name() -> &'static str {
@@ -90,12 +93,9 @@ impl<'a> UserRepository<'a> {
             let ttl = Duration::from_secs(300);
             let negative_ttl = Duration::from_secs((300 / 6).clamp(5, 60));
             return cache
-                .get_or_set_json_option(
-                    &key,
-                    Some(ttl),
-                    Some(negative_ttl),
-                    || async { self.find_by_id(id).await },
-                )
+                .get_or_set_json_option(&key, Some(ttl), Some(negative_ttl), || async {
+                    self.find_by_id(id).await
+                })
                 .await;
         }
 

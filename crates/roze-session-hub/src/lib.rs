@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -20,15 +23,27 @@ pub struct SessionEvent {
 
 impl SessionEvent {
     pub fn joined(session_id: impl Into<String>) -> Self {
-        Self { session_id: session_id.into(), kind: SessionEventKind::Joined, payload: serde_json::Value::Null }
+        Self {
+            session_id: session_id.into(),
+            kind: SessionEventKind::Joined,
+            payload: serde_json::Value::Null,
+        }
     }
 
     pub fn left(session_id: impl Into<String>) -> Self {
-        Self { session_id: session_id.into(), kind: SessionEventKind::Left, payload: serde_json::Value::Null }
+        Self {
+            session_id: session_id.into(),
+            kind: SessionEventKind::Left,
+            payload: serde_json::Value::Null,
+        }
     }
 
     pub fn message(session_id: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self { session_id: session_id.into(), kind: SessionEventKind::Message, payload }
+        Self {
+            session_id: session_id.into(),
+            kind: SessionEventKind::Message,
+            payload,
+        }
     }
 }
 
@@ -46,11 +61,17 @@ impl Default for SessionHub {
 
 impl SessionHub {
     pub fn new() -> Self {
-        Self { rooms: Arc::new(Mutex::new(HashMap::new())), capacity: 256 }
+        Self {
+            rooms: Arc::new(Mutex::new(HashMap::new())),
+            capacity: 256,
+        }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { rooms: Arc::new(Mutex::new(HashMap::new())), capacity: capacity.max(1) }
+        Self {
+            rooms: Arc::new(Mutex::new(HashMap::new())),
+            capacity: capacity.max(1),
+        }
     }
 
     fn room_for(&self, room: &str) -> broadcast::Sender<SessionEvent> {

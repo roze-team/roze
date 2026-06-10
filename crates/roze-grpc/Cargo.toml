@@ -9,3 +9,4 @@ anyhow.workspace = true
 roze-context = { path = "../roze-context" }
 roze-trace = { path = "../roze-trace" }
 tonic.workspace = true
+tonic-build.workspace = true

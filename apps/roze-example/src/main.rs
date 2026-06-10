@@ -1,13 +1,11 @@
 mod config;
 mod handler;
 mod logic;
+mod middleware;
+mod model;
 mod openapi;
-mod client;
-mod pb;
-mod rpc;
 mod svc;
 mod types;
-mod model;
 
 use roze_http::rest::RestServer;
 
@@ -20,9 +18,26 @@ async fn main() -> anyhow::Result<()> {
         .rest
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
+    let mut registration = if rest.register {
+        let registry = roze_rpc::registry::build_service_registry(&config)?
+            .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
+        Some(
+            roze_rpc::rpc::ServiceRegistrationGuard::start(
+                registry,
+                config.name.clone(),
+                rest.addr,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let ctx = svc::ServiceContext::new(config).await?;
     let app = roze_middleware::apply_common(handler::router(ctx));
     RestServer::new(rest.addr, app).serve().await?;
+    if let Some(registration) = registration.as_mut() {
+        registration.shutdown().await?;
+    }
 
     Ok(())
 }

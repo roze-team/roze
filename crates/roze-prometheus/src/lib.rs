@@ -76,7 +76,11 @@ mod tests {
             1,
         );
         exporter.set_gauge("roze_queue_depth", MetricLabels::new(), 2.0);
-        exporter.observe_duration("roze_job_duration", MetricLabels::new(), Duration::from_millis(5));
+        exporter.observe_duration(
+            "roze_job_duration",
+            MetricLabels::new(),
+            Duration::from_millis(5),
+        );
         let rendered = exporter.render();
         assert!(rendered.contains("roze_jobs_total"));
         assert!(rendered.contains("roze_queue_depth"));

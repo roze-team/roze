@@ -1,5 +1,5 @@
-pub mod rest;
 pub mod model;
+pub mod rest;
 pub mod rpc;
 pub mod types;
 
@@ -14,7 +14,7 @@ use anyhow::{bail, Context};
 use crate::parser::ApiSpec;
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 13] = [
+const REST_ROZE_CRATES: [&str; 15] = [
     "roze-config",
     "roze-error",
     "roze-http",
@@ -25,16 +25,20 @@ const REST_ROZE_CRATES: [&str; 13] = [
     "roze-cache",
     "roze-context",
     "roze-db",
+    "roze-mongo",
     "roze-openapi",
     "roze-result",
     "roze-validation",
+    "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 10] = [
+const RPC_ROZE_CRATES: [&str; 12] = [
     "roze-config",
     "roze-context",
     "roze-db",
+    "roze-mongo",
     "roze-error",
+    "roze-grpc",
     "roze-jwt",
     "roze-log",
     "roze-cache",
@@ -43,28 +47,10 @@ const RPC_ROZE_CRATES: [&str; 10] = [
     "roze-trace",
 ];
 
-const COMBINED_ROZE_CRATES: [&str; 14] = [
-    "roze-config",
-    "roze-error",
-    "roze-http",
-    "roze-log",
-    "roze-metrics",
-    "roze-middleware",
-    "roze-jwt",
-    "roze-cache",
-    "roze-context",
-    "roze-db",
-    "roze-openapi",
-    "roze-result",
-    "roze-rpc",
-    "roze-validation",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectKind {
     Rest,
     Rpc,
-    Combined,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +111,7 @@ pub enum GeneratorCommand {
     },
     ModelInspect {
         table: String,
+        schema: Option<String>,
         db_url: String,
         db_kind: roze_sqlx::SqlxDatabaseKind,
         out: PathBuf,
@@ -211,14 +198,71 @@ pub fn registry() -> GeneratorRegistry {
     GeneratorRegistry::new()
 }
 
+pub fn template(name: &str) -> anyhow::Result<String> {
+    match name {
+        "api" => Ok(api_template("demo")),
+        "rpc" => Ok(rpc_template("demo")),
+        "model" => Ok(
+            "model User {\n  table: users\n  primary: id\n  cache: true\n  cache_key: id,username\n  field id ObjectId\n  field username String\n}\n"
+                .to_string(),
+        ),
+        other => bail!("unknown template `{other}`; expected api, rpc or model"),
+    }
+}
+
+pub fn init_templates(out: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(out).with_context(|| format!("failed to create {}", out.display()))?;
+    fs::write(out.join("api.api"), template("api")?)?;
+    fs::write(out.join("rpc.api"), template("rpc")?)?;
+    fs::write(out.join("model.model"), template("model")?)?;
+    Ok(())
+}
+
+pub fn write_openapi_json(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    let mut paths = serde_json::Map::new();
+    for route in &spec.rest_routes {
+        let method = match route.method {
+            crate::parser::HttpMethod::Get => "get",
+            crate::parser::HttpMethod::Post => "post",
+            crate::parser::HttpMethod::Put => "put",
+            crate::parser::HttpMethod::Delete => "delete",
+        };
+        paths.insert(
+            rest::full_route_path_for_openapi(&spec, &route.path),
+            serde_json::json!({
+                method: {
+                    "operationId": route.handler.clone().unwrap_or_else(|| rest::handler_name_for_openapi(&route.method, &route.path)),
+                    "responses": { "200": { "description": "OK" } }
+                }
+            }),
+        );
+    }
+    let document = serde_json::json!({
+        "openapi": "3.0.0",
+        "info": { "title": spec.service, "version": "0.1.0" },
+        "paths": paths
+    });
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, serde_json::to_string_pretty(&document)?)
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
 fn api_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
         GeneratorCommand::ApiGenerate { api, out, options } => {
-            let source = fs::read_to_string(&api)
-                .with_context(|| format!("failed to read {}", api.display()))?;
+            let source = read_api_source(&api)?;
             let spec = crate::parser::parse_api(&source)?;
-            generate_project(&spec, &out, options)
-                .with_context(|| format!("failed to generate project at {}", out.display()))
+            validate_project_kind(&spec, ProjectKind::Rest)?;
+            if matches!(options.mode, GenerateMode::Force) {
+                cleanup_rest_project(&out)?;
+            }
+            generate_rest_project(&spec, &out, options)
+                .with_context(|| format!("failed to generate api project at {}", out.display()))
         }
         other => bail!("unexpected command variant for api.generate: {other:?}"),
     }
@@ -226,10 +270,8 @@ fn api_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
 
 fn api_new_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
-        GeneratorCommand::ApiNew { name, out, options } => {
-            create_api_project(&name, &out, options)
-                .with_context(|| format!("failed to create api project at {}", out.display()))
-        }
+        GeneratorCommand::ApiNew { name, out, options } => create_api_project(&name, &out, options)
+            .with_context(|| format!("failed to create api project at {}", out.display())),
         other => bail!("unexpected command variant for api.new: {other:?}"),
     }
 }
@@ -237,11 +279,14 @@ fn api_new_handler(command: GeneratorCommand) -> anyhow::Result<()> {
 fn rpc_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
         GeneratorCommand::RpcGenerate { api, out, options } => {
-            let source = fs::read_to_string(&api)
-                .with_context(|| format!("failed to read {}", api.display()))?;
+            let source = read_api_source(&api)?;
             let spec = crate::parser::parse_api(&source)?;
-            generate_project(&spec, &out, options)
-                .with_context(|| format!("failed to generate project at {}", out.display()))
+            validate_project_kind(&spec, ProjectKind::Rpc)?;
+            if matches!(options.mode, GenerateMode::Force) {
+                cleanup_rpc_project(&out)?;
+            }
+            generate_rpc_project(&spec, &out, options)
+                .with_context(|| format!("failed to generate rpc project at {}", out.display()))
         }
         other => bail!("unexpected command variant for rpc.generate: {other:?}"),
     }
@@ -249,10 +294,8 @@ fn rpc_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
 
 fn rpc_new_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
-        GeneratorCommand::RpcNew { name, out, options } => {
-            create_rpc_project(&name, &out, options)
-                .with_context(|| format!("failed to create rpc project at {}", out.display()))
-        }
+        GeneratorCommand::RpcNew { name, out, options } => create_rpc_project(&name, &out, options)
+            .with_context(|| format!("failed to create rpc project at {}", out.display())),
         other => bail!("unexpected command variant for rpc.new: {other:?}"),
     }
 }
@@ -278,6 +321,7 @@ fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
         GeneratorCommand::ModelInspect {
             table,
+            schema,
             db_url,
             db_kind,
             out,
@@ -288,55 +332,41 @@ fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
                 .build()
                 .context("failed to create async runtime for model inspection")?;
             rt.block_on(async move {
-                model::inspect_model_project(&table, &db_url, db_kind, &out, options)
-                    .await
-                    .with_context(|| format!("failed to inspect model for table `{table}`"))
+                model::inspect_model_project(
+                    &table,
+                    schema.as_deref(),
+                    &db_url,
+                    db_kind,
+                    &out,
+                    options,
+                )
+                .await
+                .with_context(|| format!("failed to inspect model for table `{table}`"))
             })
         }
         other => bail!("unexpected command variant for model.inspect: {other:?}"),
     }
 }
 
-pub fn generate_project(
-    spec: &ApiSpec,
-    out: &Path,
-    options: GenerateOptions,
-) -> anyhow::Result<()> {
-    ensure_output(out, options.mode)?;
-    let proto = render_proto(spec)?;
-
-    fs::create_dir_all(out.join("src"))?;
-    fs::create_dir_all(out.join("src/handler"))?;
-    fs::create_dir_all(out.join("src/logic"))?;
-    fs::create_dir_all(out.join("src/svc"))?;
-    fs::create_dir_all(out.join("proto"))?;
-    fs::create_dir_all(out.join(".cargo"))?;
-    write_cargo_toml(spec, out, options, ProjectKind::Combined)?;
-    fs::write(out.join(".cargo/config.toml"), cargo_config())?;
-    fs::write(out.join("README.md"), readme(spec, ProjectKind::Combined))?;
-    fs::write(out.join("build.rs"), build_rs())?;
-    write_preserved(
-        &out.join("config.yaml"),
-        config_yaml(spec, ProjectKind::Combined),
-        options.mode,
-    )?;
-    fs::write(out.join("src/config.rs"), config_rs())?;
-    fs::write(out.join("src/pb.rs"), render_pb(spec))?;
-    fs::write(out.join("src/types.rs"), types::render_types(&spec.types))?;
-    fs::write(out.join("src/openapi.rs"), rest::render_openapi(spec))?;
-    fs::write(out.join("src/handler/mod.rs"), rest::render_handlers(spec))?;
-    write_preserved(
-        &out.join("src/logic/mod.rs"),
-        rest::render_logic(spec),
-        options.mode,
-    )?;
-    fs::write(out.join("src/svc/mod.rs"), service_context_rs())?;
-    fs::write(out.join("src/rpc.rs"), rpc::render_rpc(spec))?;
-    fs::write(out.join("src/client.rs"), rpc::render_client(spec))?;
-    fs::write(out.join("src/main.rs"), rest::render_combined_main(spec))?;
-    ensure_model_module(&out)?;
-    fs::write(out.join("proto/service.proto"), proto)?;
-
+fn validate_project_kind(spec: &ApiSpec, kind: ProjectKind) -> anyhow::Result<()> {
+    match kind {
+        ProjectKind::Rest => {
+            if spec.rest_routes.is_empty() {
+                bail!("api projects require at least one REST route");
+            }
+            if !spec.rpc_methods.is_empty() {
+                bail!("api projects cannot contain `rpc` methods; use `rozectl rpc generate`");
+            }
+        }
+        ProjectKind::Rpc => {
+            if spec.rpc_methods.is_empty() {
+                bail!("rpc projects require at least one `rpc` method");
+            }
+            if !spec.rest_routes.is_empty() {
+                bail!("rpc projects cannot contain REST routes; use `rozectl api generate`");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -429,6 +459,11 @@ fn generate_rest_project(
     fs::write(out.join("src/openapi.rs"), rest::render_openapi(spec))?;
     fs::write(out.join("src/handler/mod.rs"), rest::render_handlers(spec))?;
     write_preserved(
+        &out.join("src/middleware.rs"),
+        rest::render_middleware(spec),
+        options.mode,
+    )?;
+    write_preserved(
         &out.join("src/logic/mod.rs"),
         rest::render_logic(spec),
         options.mode,
@@ -436,7 +471,7 @@ fn generate_rest_project(
     fs::write(out.join("src/types.rs"), types::render_types(&spec.types))?;
     fs::write(out.join("src/svc/mod.rs"), service_context_rs())?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
-    ensure_model_module(&out)?;
+    ensure_model_module(out)?;
     Ok(())
 }
 
@@ -499,8 +534,8 @@ fn ensure_model_module(out: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let content =
-        fs::read_to_string(&main_path).with_context(|| format!("failed to read {}", main_path.display()))?;
+    let content = fs::read_to_string(&main_path)
+        .with_context(|| format!("failed to read {}", main_path.display()))?;
     if content.contains("mod model;") {
         return Ok(());
     }
@@ -515,7 +550,8 @@ fn ensure_model_module(out: &Path) -> anyhow::Result<()> {
         format!("mod model;\n{content}")
     };
 
-    fs::write(&main_path, updated).with_context(|| format!("failed to write {}", main_path.display()))
+    fs::write(&main_path, updated)
+        .with_context(|| format!("failed to write {}", main_path.display()))
 }
 
 fn write_cargo_toml(
@@ -578,6 +614,49 @@ fn write_cargo_toml(
 
 fn has_entries(path: &Path) -> anyhow::Result<bool> {
     Ok(fs::read_dir(path)?.next().is_some())
+}
+
+fn read_api_source(path: &Path) -> anyhow::Result<String> {
+    let mut seen = HashSet::new();
+    read_api_source_inner(path, &mut seen)
+}
+
+fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Result<String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let absolute = absolute
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    if !seen.insert(absolute.clone()) {
+        return Ok(String::new());
+    }
+    let source = fs::read_to_string(&absolute)
+        .with_context(|| format!("failed to read {}", absolute.display()))?;
+    let base = absolute
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", absolute.display()))?;
+    let mut out = String::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        if let Some(import) = parse_import_line(line) {
+            let import_path = base.join(import);
+            out.push_str(&read_api_source_inner(&import_path, seen)?);
+            out.push('\n');
+        } else {
+            out.push_str(raw);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn parse_import_line(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("import ")?;
+    let rest = rest.trim();
+    rest.strip_prefix('"')?.strip_suffix('"')
 }
 
 fn cargo_config() -> &'static str {
@@ -649,6 +728,7 @@ prost = "0.12""#
                 r#"serde.workspace = true
 serde_json.workspace = true
 sea-orm.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tracing.workspace = true"#
@@ -656,56 +736,26 @@ tracing.workspace = true"#
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }
+async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.11"
 tracing = "0.1""#
             },
             if in_workspace {
                 r#"protoc-bin-vendored.workspace = true
-tonic-build.workspace = true"#
+roze-grpc.workspace = true"#
             } else {
                 r#"protoc-bin-vendored = "3"
-tonic-build = "0.11""#
-            },
-        ),
-        ProjectKind::Combined => (
-            if in_workspace {
-                r#"anyhow.workspace = true
-config.workspace = true
-poem.workspace = true
-prost.workspace = true"#
-            } else {
-                r#"anyhow = "1"
-config = { version = "0.14", default-features = false, features = ["json", "yaml", "toml"] }
-poem = "3"
-prost = "0.12""#
-            },
-            if in_workspace {
-                r#"serde.workspace = true
-serde_json.workspace = true
-sea-orm.workspace = true
-validator.workspace = true
-tokio.workspace = true
-tonic.workspace = true
-tracing.workspace = true"#
-            } else {
-                r#"serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }
-validator = { version = "0.20", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tonic = "0.11"
-tracing = "0.1""#
-            },
-            if in_workspace {
-                r#"protoc-bin-vendored.workspace = true
-tonic-build.workspace = true"#
-            } else {
-                r#"protoc-bin-vendored = "3"
-tonic-build = "0.11""#
+roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#
             },
         ),
     };
+    let build_dependencies_section = if build_dependencies.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n[build-dependencies]\n{build_dependencies}\n")
+    };
+
     format!(
         r#"[package]
 name = "{}-service"
@@ -715,16 +765,13 @@ name = "{}-service"
 {dependencies}
 {roze_dependencies}
 {remaining_dependencies}
-
-[build-dependencies]
-{build_dependencies}
-"#,
+{build_dependencies_section}"#,
         spec.service,
         package = package,
         dependencies = dependencies,
         roze_dependencies = roze_dependencies,
         remaining_dependencies = remaining_dependencies,
-        build_dependencies = build_dependencies,
+        build_dependencies_section = build_dependencies_section,
     )
 }
 
@@ -750,7 +797,6 @@ fn project_roze_crates(kind: ProjectKind) -> &'static [&'static str] {
     match kind {
         ProjectKind::Rest => &REST_ROZE_CRATES,
         ProjectKind::Rpc => &RPC_ROZE_CRATES,
-        ProjectKind::Combined => &COMBINED_ROZE_CRATES,
     }
 }
 
@@ -852,36 +898,6 @@ cargo run
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        ProjectKind::Combined => format!(
-            r#"# {name}
-
-Generated by `rozectl`.
-
-## Run
-
-```bash
-cargo run
-```
-
-## Endpoints
-
-- REST: `GET /healthz`
-- REST: `GET /metrics`
-- REST: `GET /openapi.json`
-{rest_routes}
-
-## Config
-
-`config.yaml` is loaded from the crate directory first, then falls back to the current working directory.
-"#,
-            name = spec.service,
-            rest_routes = spec
-                .rest_routes
-                .iter()
-                .map(|route| format!("- `{}` `{}`", method_name(&route.method), route.path))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
     }
 }
 
@@ -890,10 +906,7 @@ fn build_rs() -> String {
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     std::env::set_var("PROTOC", protoc);
 
-    tonic_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile(&["proto/service.proto"], &["proto"])?;
+    roze_grpc::build::compile(&["proto/service.proto"], &["proto"])?;
 
     println!("cargo:rerun-if-changed=proto/service.proto");
     Ok(())
@@ -908,13 +921,40 @@ fn config_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
             r#"name: {}
 rest:
   addr: 127.0.0.1:3000
+  register: false
 registry:
   kind: memory
   endpoints: []
   # ttl_seconds: 10
   # renew_interval_secs: 3
+governance:
+  timeout_ms: 5000
+  rate_limit:
+    burst: 100
+    refill_ms: 10
+  breaker:
+    failure_threshold: 5
+    reset_timeout_ms: 30000
+  routes: {{}}
 # database:
 #   url: sqlite://data/{}.db?mode=rwc
+# mongo:
+#   url: mongodb://127.0.0.1:27017
+#   database: {}
+# rpc_client:
+#   endpoints: ["127.0.0.1:4000"]
+#   # target: dns:///user.rpc
+#   # app: app-name
+#   # token: change-me
+#   # non_block: false
+#   timeout_ms: 2000
+#   keepalive_time_secs: 20
+#   middlewares:
+#     trace: true
+#     recover: true
+#     stat: true
+#     prometheus: true
+#     breaker: true
 # cache:
 #   url: redis://127.0.0.1/
 #   namespace: {}
@@ -923,7 +963,7 @@ registry:
 #   jwt_issuer: {}
 #   jwt_expiration_secs: 86400
 "#,
-            spec.service, spec.service, spec.service, spec.service
+            spec.service, spec.service, spec.service, spec.service, spec.service
         ),
         ProjectKind::Rpc => format!(
             r#"name: {}
@@ -934,8 +974,34 @@ registry:
   endpoints: []
   # ttl_seconds: 10
   # renew_interval_secs: 3
+governance:
+  timeout_ms: 5000
+  rate_limit:
+    burst: 100
+    refill_ms: 10
+  breaker:
+    failure_threshold: 5
+    reset_timeout_ms: 30000
+  routes: {{}}
 # database:
 #   url: sqlite://data/{}.db?mode=rwc
+# mongo:
+#   url: mongodb://127.0.0.1:27017
+#   database: {}
+# rpc_client:
+#   endpoints: ["127.0.0.1:4000"]
+#   # target: dns:///user.rpc
+#   # app: app-name
+#   # token: change-me
+#   # non_block: false
+#   timeout_ms: 2000
+#   keepalive_time_secs: 20
+#   middlewares:
+#     trace: true
+#     recover: true
+#     stat: true
+#     prometheus: true
+#     breaker: true
 # cache:
 #   url: redis://127.0.0.1/
 #   namespace: {}
@@ -944,28 +1010,7 @@ registry:
 #   jwt_issuer: {}
 #   jwt_expiration_secs: 86400
 "#,
-            spec.service, spec.service, spec.service, spec.service
-        ),
-        ProjectKind::Combined => format!(
-            r#"name: {}
-rest:
-  addr: 127.0.0.1:3000
-registry:
-  kind: memory
-  endpoints: []
-  # ttl_seconds: 10
-  # renew_interval_secs: 3
-# database:
-#   url: sqlite://data/{}.db?mode=rwc
-# cache:
-#   url: redis://127.0.0.1/
-#   namespace: {}
-# auth:
-#   jwt_secret: change-me
-#   jwt_issuer: {}
-#   jwt_expiration_secs: 86400
-"#,
-            spec.service, spec.service, spec.service, spec.service
+            spec.service, spec.service, spec.service, spec.service, spec.service
         ),
     }
 }
@@ -1111,12 +1156,14 @@ use sea_orm::DatabaseConnection;
 pub struct ServiceContext {
     pub config: Config,
     pub db: Option<DatabaseConnection>,
+    pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
 }
 
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let db = roze_db::connect_optional(config.database.as_ref()).await?;
+        let mongo = roze_mongo::connect_optional(config.mongo.as_ref()).await?;
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
@@ -1128,7 +1175,12 @@ impl ServiceContext {
             ),
             None => None,
         };
-        Ok(Self { config, db, cache })
+        Ok(Self {
+            config,
+            db,
+            mongo,
+            cache,
+        })
     }
 
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
@@ -1143,7 +1195,7 @@ fn render_pb(spec: &ApiSpec) -> String {
     let package = spec.service.replace('-', "_");
     format!(
         r#"pub mod {package} {{
-    tonic::include_proto!("{package}");
+    roze_grpc::include_proto!("{package}");
 }}
 "#
     )
@@ -1238,8 +1290,7 @@ fn route_name_from_path(path: &str) -> String {
     path.trim_matches('/')
         .replace(':', "")
         .replace(['{', '}'], "")
-        .replace('/', "_")
-        .replace('-', "_")
+        .replace(['/', '-'], "_")
 }
 
 fn proto_type<'a>(ty: &'a str, known_types: &HashSet<&str>) -> anyhow::Result<&'a str> {
@@ -1263,6 +1314,18 @@ mod tests {
     use crate::parser::{parse_api, HttpMethod};
 
     use super::*;
+
+    fn temp_test_root(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}-{}-{}",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn renders_valid_rpc_name_for_route_without_handler() {
@@ -1314,8 +1377,10 @@ mod tests {
         assert!(
             cargo.contains(r#"roze-config = { git = "https://github.com/roze-team/roze.git" }"#)
         );
-        assert!(!cargo.contains(r#"roze-rpc = { git = "https://github.com/roze-team/roze.git" }"#));
+        assert!(cargo.contains(r#"roze-mongo = { git = "https://github.com/roze-team/roze.git" }"#));
+        assert!(cargo.contains(r#"roze-rpc = { git = "https://github.com/roze-team/roze.git" }"#));
         assert!(!cargo.contains(r#"path = "../../crates/roze-"#));
+        assert!(!cargo.contains("[build-dependencies]"));
     }
 
     #[test]
@@ -1346,7 +1411,8 @@ mod tests {
         );
 
         assert!(cargo.contains(r#"roze-config = { path = "../../crates/roze-config" }"#));
-        assert!(!cargo.contains(r#"roze-rpc = { path = "../../crates/roze-rpc" }"#));
+        assert!(cargo.contains(r#"roze-mongo = { path = "../../crates/roze-mongo" }"#));
+        assert!(cargo.contains(r#"roze-rpc = { path = "../../crates/roze-rpc" }"#));
         assert!(!cargo.contains(ROZE_GIT_URL));
     }
 
@@ -1369,19 +1435,186 @@ mod tests {
         )
         .expect("valid api");
 
-        let cargo = cargo_toml(&spec, DependencySource::Git, None, false, ProjectKind::Combined);
+        let cargo = cargo_toml(&spec, DependencySource::Git, None, false, ProjectKind::Rpc);
 
         assert!(cargo.contains(r#"edition = "2021""#));
         assert!(cargo.contains(r#"version = "0.1.0""#));
         assert!(cargo.contains(r#"anyhow = "1""#));
         assert!(cargo.contains(r#"tokio = { version = "1""#));
-        assert!(cargo.contains(r#"tonic-build = "0.11""#));
+        assert!(cargo.contains(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#));
         assert!(!cargo.contains(".workspace = true"));
     }
 
     #[test]
     fn generated_cargo_config_uses_git_cli() {
         assert_eq!(cargo_config(), "[net]\ngit-fetch-with-cli = true\n");
+    }
+
+    #[test]
+    fn api_generate_outputs_rest_project_only() {
+        let root = temp_test_root("rozectl-api-generate-test");
+        let api = root.join("user.api");
+        let out = root.join("user");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(
+            &api,
+            r#"
+            service user-api {
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("write api");
+
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api,
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+            })
+            .expect("generate api project");
+
+        assert!(out.join("src/handler/mod.rs").is_file());
+        assert!(out.join("src/middleware.rs").is_file());
+        assert!(out.join("src/openapi.rs").is_file());
+        assert!(out.join("src/logic/mod.rs").is_file());
+        assert!(!out.join("src/rpc.rs").exists());
+        assert!(!out.join("src/client.rs").exists());
+        assert!(!out.join("src/pb.rs").exists());
+        assert!(!out.join("build.rs").exists());
+        assert!(!out.join("proto").exists());
+        assert!(fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read cargo")
+            .contains("roze-rpc"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_generate_outputs_rpc_project_only() {
+        let root = temp_test_root("rozectl-rpc-generate-test");
+        let api = root.join("user.api");
+        let out = root.join("user");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(
+            &api,
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (GetUserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type GetUserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("write api");
+
+        registry()
+            .dispatch(GeneratorCommand::RpcGenerate {
+                api,
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+            })
+            .expect("generate rpc project");
+
+        assert!(out.join("src/rpc.rs").is_file());
+        assert!(out.join("src/client.rs").is_file());
+        assert!(out.join("src/pb.rs").is_file());
+        assert!(out.join("build.rs").is_file());
+        assert!(out.join("proto/service.proto").is_file());
+        assert!(!out.join("src/handler").exists());
+        assert!(!out.join("src/openapi.rs").exists());
+        assert!(!out.join("src/logic").exists());
+        assert!(!fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read cargo")
+            .contains("roze-http"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn project_kind_validation_rejects_mixed_or_wrong_idl() {
+        let rest_spec = parse_api(
+            r#"
+            service user-api {
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid rest api");
+        let rpc_spec = parse_api(
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let mixed_spec = parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (UserResp)
+                rpc GetUser (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid mixed api");
+
+        assert!(validate_project_kind(&rest_spec, ProjectKind::Rest).is_ok());
+        assert!(validate_project_kind(&rpc_spec, ProjectKind::Rpc).is_ok());
+        assert!(validate_project_kind(&rest_spec, ProjectKind::Rpc)
+            .expect_err("rest spec is not rpc")
+            .to_string()
+            .contains("rpc projects require"));
+        assert!(validate_project_kind(&rpc_spec, ProjectKind::Rest)
+            .expect_err("rpc spec is not api")
+            .to_string()
+            .contains("api projects require"));
+        assert!(validate_project_kind(&mixed_spec, ProjectKind::Rest)
+            .expect_err("mixed spec is not rest-only")
+            .to_string()
+            .contains("cannot contain `rpc` methods"));
+        assert!(validate_project_kind(&mixed_spec, ProjectKind::Rpc)
+            .expect_err("mixed spec is not rpc-only")
+            .to_string()
+            .contains("cannot contain REST routes"));
     }
 
     #[test]
@@ -1415,7 +1648,7 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
             .expect("write workspace manifest");
 
-        generate_project(
+        generate_rest_project(
             &spec,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
@@ -1435,7 +1668,7 @@ mod tests {
             );
         fs::write(&cargo_path, cargo).expect("write custom cargo");
 
-        generate_project(
+        generate_rest_project(
             &spec,
             &out,
             GenerateOptions::new(GenerateMode::Update, DependencySource::Git),

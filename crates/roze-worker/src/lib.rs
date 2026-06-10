@@ -39,7 +39,10 @@ where
             }));
         }
 
-        Self { sender, workers: handles }
+        Self {
+            sender,
+            workers: handles,
+        }
     }
 
     pub async fn submit(&self, job: J) -> Result<(), mpsc::error::SendError<J>> {

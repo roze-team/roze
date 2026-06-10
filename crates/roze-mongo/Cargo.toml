@@ -1,10 +1,11 @@
 [package]
-name = "roze-result"
+name = "roze-mongo"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
-poem.workspace = true
+anyhow.workspace = true
+mongodb.workspace = true
+roze-config = { path = "../roze-config" }
 serde.workspace = true
-tokio.workspace = true

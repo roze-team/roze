@@ -1,3 +1,4 @@
+use roze_trace::generate_trace_id as trace_generate_trace_id;
 use std::{
     any::Any,
     collections::HashMap,
@@ -8,7 +9,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use roze_trace::generate_trace_id as trace_generate_trace_id;
 
 pub const TIMEOUT_HEADER: &str = "x-roze-timeout-ms";
 

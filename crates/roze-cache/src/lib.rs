@@ -24,7 +24,8 @@ enum CachedEnvelope<T> {
 
 impl RedisCache {
     pub async fn connect(config: &CacheConfig) -> anyhow::Result<Self> {
-        let client = RedisClient::open(config.url.as_str())?.with_namespace(config.namespace.clone());
+        let client =
+            RedisClient::open(config.url.as_str())?.with_namespace(config.namespace.clone());
         Ok(Self {
             client,
             config: config.clone(),
@@ -114,7 +115,11 @@ impl RedisCache {
         let result = self
             .flights
             .do_call(cache_key.clone(), || async {
-                if let Some(envelope) = self.get_envelope::<T>(key).await.map_err(|err| err.to_string())? {
+                if let Some(envelope) = self
+                    .get_envelope::<T>(key)
+                    .await
+                    .map_err(|err| err.to_string())?
+                {
                     return Ok(match envelope {
                         CachedEnvelope::Value(value) => Some(value),
                         CachedEnvelope::Missing => None,
@@ -124,7 +129,8 @@ impl RedisCache {
                 let loaded = loader().await.map_err(|err| err.to_string())?;
                 match loaded {
                     Some(value) => {
-                        let ttl = ttl.unwrap_or_else(|| Duration::from_secs(self.config.default_ttl_secs));
+                        let ttl = ttl
+                            .unwrap_or_else(|| Duration::from_secs(self.config.default_ttl_secs));
                         let ttl = jittered_ttl(self.key(key).as_str(), ttl, 0.05);
                         self.set_envelope(key, &CachedEnvelope::Value(value.clone()), Some(ttl))
                             .await

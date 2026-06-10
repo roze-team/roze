@@ -77,7 +77,9 @@ pub fn validate<T: Validate>(value: &T) -> Result<(), ValidationErrors> {
 }
 
 pub fn validate_report<T: Validate>(value: &T) -> Result<(), ValidationReport> {
-    value.validate().map_err(|errors| ValidationReport::from_errors(&errors))
+    value
+        .validate()
+        .map_err(|errors| ValidationReport::from_errors(&errors))
 }
 
 pub fn validation_message(errors: &ValidationErrors) -> String {
@@ -157,7 +159,10 @@ mod tests {
         assert_eq!(report.len(), 2);
         assert_eq!(
             report.messages(),
-            vec!["password: required".to_string(), "username: too short".to_string()]
+            vec![
+                "password: required".to_string(),
+                "username: too short".to_string()
+            ]
         );
     }
 
@@ -172,7 +177,10 @@ mod tests {
 
         let report = ValidationReport::from_errors(&errors);
 
-        assert_eq!(report.messages(), vec!["profile.name: too short".to_string()]);
+        assert_eq!(
+            report.messages(),
+            vec!["profile.name: too short".to_string()]
+        );
         assert_eq!(validation_message(&errors), "profile.name: too short");
     }
 

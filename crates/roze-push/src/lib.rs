@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -13,7 +16,11 @@ pub struct PushMessage {
 
 impl PushMessage {
     pub fn new(topic: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self { topic: topic.into(), metadata: HashMap::new(), payload }
+        Self {
+            topic: topic.into(),
+            metadata: HashMap::new(),
+            payload,
+        }
     }
 }
 
@@ -31,11 +38,17 @@ impl Default for PushBus {
 
 impl PushBus {
     pub fn new() -> Self {
-        Self { topics: Arc::new(Mutex::new(HashMap::new())), capacity: 256 }
+        Self {
+            topics: Arc::new(Mutex::new(HashMap::new())),
+            capacity: 256,
+        }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { topics: Arc::new(Mutex::new(HashMap::new())), capacity: capacity.max(1) }
+        Self {
+            topics: Arc::new(Mutex::new(HashMap::new())),
+            capacity: capacity.max(1),
+        }
     }
 
     fn sender_for(&self, topic: &str) -> broadcast::Sender<PushMessage> {
@@ -54,7 +67,11 @@ impl PushBus {
         Ok(self.sender_for(&message.topic).send(message)?)
     }
 
-    pub fn publish_json(&self, topic: impl Into<String>, payload: serde_json::Value) -> anyhow::Result<usize> {
+    pub fn publish_json(
+        &self,
+        topic: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<usize> {
         self.publish(PushMessage::new(topic, payload))
     }
 }

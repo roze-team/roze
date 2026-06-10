@@ -9,6 +9,7 @@ pub fn render_rest_main(_spec: &ApiSpec) -> String {
     r#"mod config;
 mod handler;
 mod logic;
+mod middleware;
 mod openapi;
 mod svc;
 mod types;
@@ -24,51 +25,24 @@ async fn main() -> anyhow::Result<()> {
         .rest
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
-    let ctx = svc::ServiceContext::new(config).await?;
-    let app = roze_middleware::apply_common(handler::router(ctx));
-    RestServer::new(rest.addr, app).serve().await?;
-
-    Ok(())
-}
-
-fn config_path() -> std::path::PathBuf {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let manifest_config = manifest_dir.join("config.yaml");
-    if manifest_config.exists() {
-        manifest_config
+    let mut registration = if rest.register {
+        let registry = roze_rpc::registry::build_service_registry(&config)?
+            .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
+        Some(roze_rpc::rpc::ServiceRegistrationGuard::start(
+            registry,
+            config.name.clone(),
+            rest.addr,
+        )
+        .await?)
     } else {
-        std::path::PathBuf::from("config.yaml")
-    }
-}
-"#
-    .to_string()
-}
-
-pub fn render_combined_main(_spec: &ApiSpec) -> String {
-    r#"mod config;
-mod handler;
-mod logic;
-mod openapi;
-mod client;
-mod pb;
-mod rpc;
-mod svc;
-mod types;
-
-use roze_http::rest::RestServer;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    roze_log::init_tracing();
-
-    let config = config::load(config_path())?;
-    let rest = config
-        .rest
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
+        None
+    };
     let ctx = svc::ServiceContext::new(config).await?;
     let app = roze_middleware::apply_common(handler::router(ctx));
     RestServer::new(rest.addr, app).serve().await?;
+    if let Some(registration) = registration.as_mut() {
+        registration.shutdown().await?;
+    }
 
     Ok(())
 }
@@ -87,9 +61,7 @@ fn config_path() -> std::path::PathBuf {
 }
 
 pub fn render_handlers(spec: &ApiSpec) -> String {
-    let mut out = String::from(
-        "#![allow(unused_imports)]\n\n",
-    );
+    let mut out = String::from("#![allow(unused_imports)]\n\n");
     out.push_str(
         "use poem::{handler, http::HeaderMap, web::{Data, Form, Json, Path, Query}, Endpoint, EndpointExt, Route};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
@@ -139,13 +111,21 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         "#[handler]\nasync fn openapi_doc() -> Json<serde_json::Value> {\n    Json(openapi::document())\n}\n\n",
     );
 
+    if spec.rest_routes.iter().any(|route| {
+        route_request_spec(spec, route).is_some_and(|spec| spec.has_header)
+            || route_uses_auth(spec, route)
+    }) {
+        out.push_str(
+            "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
+        );
+    }
     if spec
         .rest_routes
         .iter()
-        .any(|route| route_request_spec(spec, route).map_or(false, |spec| spec.has_header))
+        .any(|route| route_uses_auth(spec, route))
     {
         out.push_str(
-            "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
+            "fn authorize(headers: &HeaderMap, ctx: &ServiceContext) -> Result<(), RozeError> {\n    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;\n    let header_value = headers\n        .get(\"authorization\")\n        .and_then(|value| value.to_str().ok())\n        .ok_or(RozeError::Unauthorized)?;\n    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;\n    roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;\n    Ok(())\n}\n\n",
         );
     }
 
@@ -153,6 +133,24 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         out.push_str(&render_route_handler(spec, route));
     }
 
+    out
+}
+
+pub fn render_middleware(spec: &ApiSpec) -> String {
+    let custom = custom_middlewares(spec);
+    let mut out = String::from("#![allow(dead_code, unused_imports, unused_variables)]\n\n");
+    out.push_str("use roze_context::Context;\nuse roze_error::RozeError;\n\nuse crate::svc::ServiceContext;\n\n");
+    if custom.is_empty() {
+        out.push_str(
+            "// Add custom middleware hooks here when `.api` declares non-built-in middleware.\n",
+        );
+        return out;
+    }
+    for name in custom {
+        out.push_str(&format!(
+            "pub async fn {name}(ctx: &ServiceContext, request_ctx: &Context) -> Result<(), RozeError> {{\n    Ok(())\n}}\n\n"
+        ));
+    }
     out
 }
 
@@ -203,8 +201,14 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 }
 
 pub fn render_openapi(spec: &ApiSpec) -> String {
-    let needs_jwt = spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some();
-    let mut out = String::from("use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema");
+    let needs_jwt = spec
+        .server
+        .as_ref()
+        .and_then(|server| server.jwt.as_ref())
+        .is_some();
+    let mut out = String::from(
+        "use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema",
+    );
     if !spec.rest_routes.is_empty() {
         out.push_str(", HttpMethod, Operation");
     }
@@ -216,8 +220,7 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
     out.push_str(&format!(
         "    let mut builder = OpenApiBuilder::new({:?}, \"0.1.0\").description({:?});\n",
         spec.service,
-        spec
-            .server
+        spec.server
             .as_ref()
             .and_then(|server| server.group.as_ref())
             .map(|group| format!("service group: {}", group))
@@ -241,7 +244,12 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         ));
     }
 
-    if spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some() {
+    if spec
+        .server
+        .as_ref()
+        .and_then(|server| server.jwt.as_ref())
+        .is_some()
+    {
         out.push_str(
             "    builder = builder.security_scheme(\"bearerAuth\", SecurityScheme::Http { scheme: \"bearer\".to_string(), bearer_format: Some(\"JWT\".to_string()) });\n",
         );
@@ -283,7 +291,12 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
             out.push_str(&format!(".summary({:?})", doc));
         }
         out.push_str(&format!(".tag({:?})", spec.service));
-        if spec.server.as_ref().and_then(|server| server.jwt.as_ref()).is_some() {
+        if spec
+            .server
+            .as_ref()
+            .and_then(|server| server.jwt.as_ref())
+            .is_some()
+        {
             out.push_str(".require_security(\"bearerAuth\")");
         }
 
@@ -348,6 +361,16 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     let route_spec = route_request_spec(spec, route).expect("request spec");
     validate_route_bindings(route, &route_spec);
     let handler = resolved_handler_name(route);
+    let middlewares = route_middlewares(spec, route);
+    let plan = roze_middleware::resolve_middleware_plan(&middlewares);
+    let uses_auth = plan
+        .builtins
+        .contains(&roze_middleware::BuiltInMiddleware::Auth);
+    let custom = plan
+        .custom
+        .into_iter()
+        .map(|name| to_snake_case(&name))
+        .collect::<Vec<_>>();
 
     let mut out = String::new();
     if let Some(doc) = &route.doc {
@@ -394,7 +417,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
             partial_struct_name(&request_ty.name, FieldSource::Json)
         ));
     }
-    if route_spec.has_header {
+    if route_spec.has_header || uses_auth {
         params.push("headers: &HeaderMap".to_string());
     }
 
@@ -405,6 +428,19 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         params = params.join(", "),
         response = route.response
     ));
+    out.push_str(&format!(
+        "    let (request_ctx, route_guard) = roze_middleware::begin_route(ctx.config.name.clone(), {:?}, {:?}, (*request_ctx).clone(), Some(&ctx.config.governance))?;\n",
+        handler,
+        http_method_name(&route.method)
+    ));
+    if uses_auth {
+        out.push_str("    if let Err(err) = authorize(headers, ctx) {\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }\n");
+    }
+    for name in custom {
+        out.push_str(&format!(
+            "    if let Err(err) = crate::middleware::{name}(ctx, &request_ctx).await {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
     for source in [
         FieldSource::Path,
         FieldSource::Query,
@@ -420,7 +456,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
                 FieldSource::Header | FieldSource::Auto => unreachable!(),
             };
             out.push_str(&format!(
-                    "    roze_validation::validate_or_message(&{var}).map_err(RozeError::BadRequest)?;\n",
+                    "    if let Err(message) = roze_validation::validate_or_message(&{var}) {{\n        let err = RozeError::BadRequest(message);\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
                 var = var
             ));
         }
@@ -439,12 +475,44 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         out.push_str("    };\n");
     }
     out.push_str(&format!(
-        "    let resp = crate::logic::{handler}((*ctx).clone(), (*request_ctx).clone(), req).await?;\n",
+        "    let result = crate::logic::{handler}((*ctx).clone(), request_ctx, req).await;\n",
         handler = handler
     ));
-    out.push_str("    Ok(Json(ApiResponse::ok(resp)))\n");
+    out.push_str("    match result {\n        Ok(resp) => {\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(Json(ApiResponse::ok(resp)))\n        }\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }\n    }\n");
     out.push_str("}\n\n");
 
+    out
+}
+
+fn route_middlewares(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Vec<String> {
+    let mut names = spec
+        .server
+        .as_ref()
+        .map(|server| server.middlewares.clone())
+        .unwrap_or_default();
+    names.extend(route.middlewares.clone());
+    names
+}
+
+fn route_uses_auth(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
+    route_middlewares(spec, route).iter().any(|name| {
+        roze_middleware::BuiltInMiddleware::parse(name)
+            == Some(roze_middleware::BuiltInMiddleware::Auth)
+    })
+}
+
+fn custom_middlewares(spec: &ApiSpec) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for route in &spec.rest_routes {
+        let plan = roze_middleware::resolve_middleware_plan(&route_middlewares(spec, route));
+        for name in plan.custom {
+            let name = to_snake_case(&name);
+            if seen.insert(name.clone()) {
+                out.push(name);
+            }
+        }
+    }
     out
 }
 
@@ -564,7 +632,11 @@ fn route_request_spec<'a>(
 }
 
 fn validate_route_bindings(route: &crate::parser::RestRoute, spec: &RouteRequestSpec<'_>) {
-    let path_fields = spec.groups.get(&FieldSource::Path).cloned().unwrap_or_default();
+    let path_fields = spec
+        .groups
+        .get(&FieldSource::Path)
+        .cloned()
+        .unwrap_or_default();
 
     for param in &spec.path_params {
         let matched = path_fields
@@ -573,8 +645,7 @@ fn validate_route_bindings(route: &crate::parser::RestRoute, spec: &RouteRequest
         assert!(
             matched,
             "route `{}` path parameter `{}` has no matching `path:` field",
-            route.path,
-            param
+            route.path, param
         );
     }
 
@@ -663,7 +734,7 @@ fn route_path_params(path: &str) -> HashSet<String> {
             }
             '{' => {
                 let mut name = String::new();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if next == '}' {
                         break;
                     }
@@ -695,10 +766,22 @@ fn handler_name(method: &HttpMethod, path: &str) -> String {
         .trim_matches('/')
         .replace(':', "")
         .replace(['{', '}'], "")
-        .replace('/', "_")
-        .replace('-', "_");
+        .replace(['/', '-'], "_");
 
     format!("{}_{}", method, path_name)
+}
+
+pub fn handler_name_for_openapi(method: &HttpMethod, path: &str) -> String {
+    handler_name(method, path)
+}
+
+fn http_method_name(method: &HttpMethod) -> &'static str {
+    match method {
+        HttpMethod::Get => "GET",
+        HttpMethod::Post => "POST",
+        HttpMethod::Put => "PUT",
+        HttpMethod::Delete => "DELETE",
+    }
 }
 
 fn resolved_handler_name(route: &crate::parser::RestRoute) -> String {
@@ -723,6 +806,10 @@ fn full_route_path(spec: &ApiSpec, path: &str) -> String {
     let prefix = prefix.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     format!("{prefix}/{path}")
+}
+
+pub fn full_route_path_for_openapi(spec: &ApiSpec, path: &str) -> String {
+    full_route_path(spec, path)
 }
 
 fn escape_doc(doc: &str) -> String {

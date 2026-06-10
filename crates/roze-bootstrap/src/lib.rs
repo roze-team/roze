@@ -108,6 +108,9 @@ impl<C> BootstrapRuntime<C> {
     }
 }
 
-pub fn bootstrap_runtime<C>(name: impl Into<std::sync::Arc<str>>, config: C) -> BootstrapRuntime<C> {
+pub fn bootstrap_runtime<C>(
+    name: impl Into<std::sync::Arc<str>>,
+    config: C,
+) -> BootstrapRuntime<C> {
     BootstrapRuntime::new(name, config)
 }

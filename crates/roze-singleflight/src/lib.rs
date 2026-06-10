@@ -1,4 +1,8 @@
-use std::{any::Any, collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    any::Any,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use tokio::sync::Notify;
 
@@ -60,7 +64,10 @@ impl SingleFlightGroup {
             }
 
             let action = {
-                let mut state = entry.state.lock().expect("singleflight entry lock poisoned");
+                let mut state = entry
+                    .state
+                    .lock()
+                    .expect("singleflight entry lock poisoned");
                 if let Some(result) = &state.result {
                     return match result {
                         Ok(value) => value
@@ -81,11 +88,12 @@ impl SingleFlightGroup {
 
             match action {
                 Action::Load => {
-                    let output = loader
-                        .take()
-                        .expect("singleflight loader already consumed")()
-                        .await;
-                    let mut state = entry.state.lock().expect("singleflight entry lock poisoned");
+                    let output =
+                        loader.take().expect("singleflight loader already consumed")().await;
+                    let mut state = entry
+                        .state
+                        .lock()
+                        .expect("singleflight entry lock poisoned");
                     state.result = Some(match output {
                         Ok(value) => Ok(Arc::new(value) as Arc<dyn Any + Send + Sync>),
                         Err(err) => Err(err),

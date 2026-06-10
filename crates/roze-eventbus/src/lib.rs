@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -132,7 +136,11 @@ impl EventSubscriber for InMemoryEventBus {
     }
 }
 
-pub async fn publish_json<P>(publisher: &P, topic: impl Into<String>, payload: serde_json::Value) -> anyhow::Result<()>
+pub async fn publish_json<P>(
+    publisher: &P,
+    topic: impl Into<String>,
+    payload: serde_json::Value,
+) -> anyhow::Result<()>
 where
     P: EventPublisher,
 {
@@ -180,7 +188,10 @@ pub fn unix_millis_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[tokio::test]
     async fn publish_and_consume_event() {
@@ -195,9 +206,13 @@ mod tests {
                 }
                 Ok(())
             }
-        }).await.expect("consumer");
+        })
+        .await
+        .expect("consumer");
 
-        publish_json(&bus, "orders", serde_json::json!({"id": 1})).await.expect("publish");
+        publish_json(&bus, "orders", serde_json::json!({"id": 1}))
+            .await
+            .expect("publish");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(seen.load(Ordering::SeqCst), 1);
         handle.abort();

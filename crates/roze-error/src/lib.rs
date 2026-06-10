@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use poem::{error::ResponseError, http::StatusCode, IntoResponse, Response};
 use poem::web::Json;
+use poem::{error::ResponseError, http::StatusCode, IntoResponse, Response};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -35,7 +35,10 @@ impl RozeError {
     }
 
     pub fn is_client_error(&self) -> bool {
-        matches!(self, RozeError::BadRequest(_) | RozeError::Unauthorized | RozeError::NotFound(_))
+        matches!(
+            self,
+            RozeError::BadRequest(_) | RozeError::Unauthorized | RozeError::NotFound(_)
+        )
     }
 }
 
@@ -56,8 +59,8 @@ impl ResponseError for RozeError {
     }
 }
 
-impl From<tonic::Status> for RozeError {
-    fn from(status: tonic::Status) -> Self {
+impl From<roze_grpc::transport::Status> for RozeError {
+    fn from(status: roze_grpc::transport::Status) -> Self {
         Self::Internal(status.to_string())
     }
 }

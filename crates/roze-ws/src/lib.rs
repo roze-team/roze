@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WsFrame {
@@ -17,7 +21,12 @@ pub struct WsSession {
 
 impl WsSession {
     pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into(), peer: None, headers: HashMap::new(), connected_at: Instant::now() }
+        Self {
+            id: id.into(),
+            peer: None,
+            headers: HashMap::new(),
+            connected_at: Instant::now(),
+        }
     }
 
     pub fn uptime(&self) -> std::time::Duration {
@@ -32,15 +41,25 @@ pub struct WsHub {
 
 impl WsHub {
     pub fn register(&self, session: WsSession) {
-        self.sessions.lock().expect("ws hub lock poisoned").insert(session.id.clone(), session);
+        self.sessions
+            .lock()
+            .expect("ws hub lock poisoned")
+            .insert(session.id.clone(), session);
     }
 
     pub fn disconnect(&self, id: &str) -> Option<WsSession> {
-        self.sessions.lock().expect("ws hub lock poisoned").remove(id)
+        self.sessions
+            .lock()
+            .expect("ws hub lock poisoned")
+            .remove(id)
     }
 
     pub fn get(&self, id: &str) -> Option<WsSession> {
-        self.sessions.lock().expect("ws hub lock poisoned").get(id).cloned()
+        self.sessions
+            .lock()
+            .expect("ws hub lock poisoned")
+            .get(id)
+            .cloned()
     }
 
     pub fn len(&self) -> usize {

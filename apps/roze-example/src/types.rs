@@ -24,4 +24,3 @@ pub struct UserResp {
     pub username: String,
     pub created_at: i64,
 }
-

@@ -1,6 +1,4 @@
-use sea_orm::{
-    DatabaseConnection, DbErr, EntityTrait, FromQueryResult, PaginatorTrait, Select,
-};
+use sea_orm::{DatabaseConnection, DbErr, EntityTrait, FromQueryResult, PaginatorTrait, Select};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

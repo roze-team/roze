@@ -89,7 +89,9 @@ impl Delivery {
 
     pub async fn nack(&self) -> anyhow::Result<()> {
         self.state.nacked.store(true, Ordering::SeqCst);
-        self.broker.requeue_or_dead_letter(self.message.clone()).await
+        self.broker
+            .requeue_or_dead_letter(self.message.clone())
+            .await
     }
 }
 
@@ -130,7 +132,10 @@ impl InMemoryBroker {
     }
 
     pub fn dead_letters(&self) -> Vec<Message> {
-        self.dead_letters.lock().expect("broker lock poisoned").clone()
+        self.dead_letters
+            .lock()
+            .expect("broker lock poisoned")
+            .clone()
     }
 
     fn sender_for(&self, topic: &str) -> broadcast::Sender<Delivery> {
@@ -155,7 +160,9 @@ impl InMemoryBroker {
                 let mut routed = message.clone();
                 routed.topic = dead_letter_topic.clone();
                 routed.attempt = 0;
-                let _ = self.sender_for(dead_letter_topic).send(Delivery::new(routed, self.clone()));
+                let _ = self
+                    .sender_for(dead_letter_topic)
+                    .send(Delivery::new(routed, self.clone()));
             }
             return Ok(());
         }
@@ -181,12 +188,16 @@ impl InMemoryBroker {
                 let mut routed = next;
                 routed.topic = dead_letter_topic.clone();
                 routed.attempt = 0;
-                let _ = self.sender_for(&dead_letter_topic).send(Delivery::new(routed, self.clone()));
+                let _ = self
+                    .sender_for(&dead_letter_topic)
+                    .send(Delivery::new(routed, self.clone()));
             }
             return Ok(());
         }
 
-        let _ = self.sender_for(&next.topic).send(Delivery::new(next, self.clone()));
+        let _ = self
+            .sender_for(&next.topic)
+            .send(Delivery::new(next, self.clone()));
         Ok(())
     }
 }
@@ -346,7 +357,9 @@ mod tests {
         let mut dead_rx = broker.subscribe("dead").await.expect("subscribe");
         let mut rx = broker.subscribe("orders").await.expect("subscribe");
         broker
-            .publish(Message::new("orders", serde_json::json!({"id": 1})).with_dead_letter_topic("dead"))
+            .publish(
+                Message::new("orders", serde_json::json!({"id": 1})).with_dead_letter_topic("dead"),
+            )
             .await
             .expect("publish");
 

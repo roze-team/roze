@@ -5,10 +5,16 @@ use crate::model::UserRepository;
 use crate::svc::ServiceContext;
 use crate::types::*;
 
-pub async fn login(ctx: ServiceContext, request_ctx: roze_context::Context, req: LoginReq) -> Result<LoginResp, RozeError> {
+pub async fn login(
+    ctx: ServiceContext,
+    request_ctx: roze_context::Context,
+    req: LoginReq,
+) -> Result<LoginResp, RozeError> {
     let _ = request_ctx;
     if req.username.trim().is_empty() || req.password.trim().is_empty() {
-        return Err(RozeError::BadRequest("username and password are required".into()));
+        return Err(RozeError::BadRequest(
+            "username and password are required".into(),
+        ));
     }
 
     let jwt = ctx.jwt_config().unwrap_or_else(|| roze_jwt::JwtConfig {
@@ -24,10 +30,8 @@ pub async fn login(ctx: ServiceContext, request_ctx: roze_context::Context, req:
         iat: 0,
         exp: 0,
     };
-    let token = issue_token(&claims, &jwt)
-        .map_err(|err| RozeError::Internal(err.to_string()))?;
-    let expires_at = now_unix_secs()
-        .map_err(|err| RozeError::Internal(err.to_string()))?
+    let token = issue_token(&claims, &jwt).map_err(|err| RozeError::Internal(err.to_string()))?;
+    let expires_at = now_unix_secs().map_err(|err| RozeError::Internal(err.to_string()))?
         + jwt.jwt_expiration_secs;
 
     let _ = expires_at;
@@ -61,7 +65,11 @@ pub async fn get_user(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, svc::ServiceContext, types::{GetUserReq, LoginReq}};
+    use crate::{
+        config::Config,
+        svc::ServiceContext,
+        types::{GetUserReq, LoginReq},
+    };
 
     #[tokio::test]
     async fn issues_token_for_non_empty_credentials() {
@@ -70,12 +78,16 @@ mod tests {
                 name: "user-api".to_string(),
                 rest: None,
                 rpc: None,
+                rpc_client: None,
                 registry: None,
                 database: None,
+                mongo: None,
                 cache: None,
                 auth: None,
+                governance: Default::default(),
             },
             db: None,
+            mongo: None,
             cache: None,
         };
 
@@ -100,12 +112,16 @@ mod tests {
                 name: "user-api".to_string(),
                 rest: None,
                 rpc: None,
+                rpc_client: None,
                 registry: None,
                 database: None,
+                mongo: None,
                 cache: None,
                 auth: None,
+                governance: Default::default(),
             },
             db: None,
+            mongo: None,
             cache: None,
         };
 

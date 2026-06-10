@@ -338,7 +338,11 @@ impl Operation {
         self
     }
 
-    pub fn empty_response(mut self, status: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn empty_response(
+        mut self,
+        status: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         self.responses.insert(
             status.into(),
             Response {

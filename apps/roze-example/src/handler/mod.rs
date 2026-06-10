@@ -1,11 +1,16 @@
 #![allow(unused_imports)]
 
-use poem::{handler, http::HeaderMap, web::{Data, Form, Json, Path, Query}, Endpoint, EndpointExt, Route};
-use serde::Deserialize;
-use roze_validation::Validate;
+use poem::{
+    handler,
+    http::HeaderMap,
+    web::{Data, Form, Json, Path, Query},
+    Endpoint, EndpointExt, Route,
+};
 use roze_context::Context;
 use roze_error::RozeError;
 use roze_result::ApiResponse;
+use roze_validation::Validate;
+use serde::Deserialize;
 
 use crate::openapi;
 use crate::svc::ServiceContext;
@@ -45,7 +50,11 @@ struct LoginReqJson {
 }
 
 #[handler]
-async fn login(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Json(body): Json<LoginReqJson>) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
+async fn login(
+    Data(ctx): Data<&ServiceContext>,
+    Data(request_ctx): Data<&Context>,
+    Json(body): Json<LoginReqJson>,
+) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
     roze_validation::validate_or_message(&body).map_err(RozeError::BadRequest)?;
     let req = LoginReq {
         username: body.username,
@@ -61,12 +70,13 @@ struct GetUserReqPath {
 }
 
 #[handler]
-async fn get_user(Data(ctx): Data<&ServiceContext>, Data(request_ctx): Data<&Context>, Path(path): Path<GetUserReqPath>) -> Result<Json<ApiResponse<UserResp>>, RozeError> {
+async fn get_user(
+    Data(ctx): Data<&ServiceContext>,
+    Data(request_ctx): Data<&Context>,
+    Path(path): Path<GetUserReqPath>,
+) -> Result<Json<ApiResponse<UserResp>>, RozeError> {
     roze_validation::validate_or_message(&path).map_err(RozeError::BadRequest)?;
-    let req = GetUserReq {
-        id: path.id,
-    };
+    let req = GetUserReq { id: path.id };
     let resp = crate::logic::get_user((*ctx).clone(), (*request_ctx).clone(), req).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
-

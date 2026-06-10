@@ -1,0 +1,125 @@
+name: rozectl
+
+on:
+  push:
+    paths:
+      - "apps/rozectl/**"
+      - "crates/roze-grpc/**"
+      - "crates/roze-sqlx/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rozectl.yml"
+  pull_request:
+    paths:
+      - "apps/rozectl/**"
+      - "crates/roze-grpc/**"
+      - "crates/roze-sqlx/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rozectl.yml"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt --check
+        run: rustfmt --edition 2021 --check apps/rozectl/src/main.rs apps/rozectl/src/generator/mod.rs apps/rozectl/src/generator/model.rs
+
+      - name: cargo clippy
+        run: cargo clippy --manifest-path apps/rozectl/Cargo.toml -p rozectl --all-targets -- -D warnings
+
+  sqlite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test (sqlite + local)
+        run: cargo test -p rozectl -- --skip postgres --skip mysql
+
+      - name: cargo check
+        run: cargo check -p rozectl
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      ROZECTL_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test (postgres only)
+        run: cargo test -p rozectl postgres
+
+      - name: cargo check
+        run: cargo check -p rozectl
+
+  mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: roze
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      ROZECTL_TEST_MYSQL_URL: mysql://root:root@127.0.0.1:3306/roze
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test (mysql only)
+        run: cargo test -p rozectl mysql
+
+      - name: cargo check
+        run: cargo check -p rozectl

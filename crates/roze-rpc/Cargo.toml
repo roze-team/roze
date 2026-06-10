@@ -12,10 +12,11 @@ roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
 roze-jwt = { path = "../roze-jwt" }
+roze-grpc = { path = "../roze-grpc" }
+roze-metrics = { path = "../roze-metrics" }
 roze-trace = { path = "../roze-trace" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tonic.workspace = true
 tracing.workspace = true

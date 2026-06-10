@@ -28,6 +28,7 @@ enum ModelFormat {
     Auto,
     Dsl,
     Sql,
+    Mongo,
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -54,6 +55,7 @@ impl From<ModelFormat> for generator::model::ModelFormat {
             ModelFormat::Auto => Self::Auto,
             ModelFormat::Dsl => Self::Dsl,
             ModelFormat::Sql => Self::Sql,
+            ModelFormat::Mongo => Self::Mongo,
         }
     }
 }
@@ -81,6 +83,14 @@ enum Commands {
     Model {
         #[command(subcommand)]
         command: ModelCommands,
+    },
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommands,
+    },
+    Openapi {
+        #[command(subcommand)]
+        command: OpenApiCommands,
     },
     #[command(hide = true)]
     Generate {
@@ -118,6 +128,17 @@ enum ApiCommands {
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
     },
+    Goctl {
+        api: PathBuf,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -142,6 +163,38 @@ enum RpcCommands {
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
     },
+    Protoc {
+        api: PathBuf,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TemplateCommands {
+    List,
+    Show {
+        name: String,
+    },
+    Init {
+        #[arg(long, default_value = "templates")]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpenApiCommands {
+    Generate {
+        api: PathBuf,
+        #[arg(long, default_value = "openapi.json")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -161,6 +214,8 @@ enum ModelCommands {
     },
     Inspect {
         table: String,
+        #[arg(long)]
+        schema: Option<String>,
         #[arg(long)]
         db_url: String,
         #[arg(long, value_enum, default_value_t)]
@@ -224,6 +279,17 @@ fn main() -> anyhow::Result<()> {
                     ),
                 })?;
             }
+            ApiCommands::Goctl {
+                api,
+                out,
+                force,
+                update,
+                roze_source,
+            } => registry.dispatch(GeneratorCommand::ApiGenerate {
+                api,
+                out,
+                options: options(force, update, roze_source),
+            })?,
         },
         Commands::Rpc { command } => match command {
             RpcCommands::Generate {
@@ -257,6 +323,17 @@ fn main() -> anyhow::Result<()> {
                     ),
                 })?;
             }
+            RpcCommands::Protoc {
+                api,
+                out,
+                force,
+                update,
+                roze_source,
+            } => registry.dispatch(GeneratorCommand::RpcGenerate {
+                api,
+                out,
+                options: options(force, update, roze_source),
+            })?,
         },
         Commands::Model { command } => match command {
             ModelCommands::Generate {
@@ -283,6 +360,7 @@ fn main() -> anyhow::Result<()> {
             })?,
             ModelCommands::Inspect {
                 table,
+                schema,
                 db_url,
                 db_kind,
                 out,
@@ -291,6 +369,7 @@ fn main() -> anyhow::Result<()> {
                 roze_source,
             } => registry.dispatch(GeneratorCommand::ModelInspect {
                 table,
+                schema,
                 db_url,
                 db_kind: db_kind.into(),
                 out,
@@ -305,6 +384,22 @@ fn main() -> anyhow::Result<()> {
                     roze_source.into(),
                 ),
             })?,
+        },
+        Commands::Template { command } => match command {
+            TemplateCommands::List => {
+                println!("api\nrpc\nmodel");
+            }
+            TemplateCommands::Show { name } => {
+                println!("{}", generator::template(&name)?);
+            }
+            TemplateCommands::Init { out } => {
+                generator::init_templates(&out)?;
+            }
+        },
+        Commands::Openapi { command } => match command {
+            OpenApiCommands::Generate { api, out } => {
+                generator::write_openapi_json(&api, &out)?;
+            }
         },
     }
 
@@ -345,6 +440,71 @@ mod tests {
     }
 
     #[test]
+    fn parses_compatibility_commands() {
+        let api = Cli::try_parse_from(["rozectl", "api", "goctl", "user.api", "--out", "out"])
+            .expect("parse api goctl");
+        assert!(matches!(
+            api.command,
+            Commands::Api {
+                command: ApiCommands::Goctl { .. }
+            }
+        ));
+
+        let rpc = Cli::try_parse_from(["rozectl", "rpc", "protoc", "user.api"])
+            .expect("parse rpc protoc");
+        assert!(matches!(
+            rpc.command,
+            Commands::Rpc {
+                command: RpcCommands::Protoc { .. }
+            }
+        ));
+
+        let template =
+            Cli::try_parse_from(["rozectl", "template", "show", "api"]).expect("parse template");
+        assert!(matches!(
+            template.command,
+            Commands::Template {
+                command: TemplateCommands::Show { .. }
+            }
+        ));
+
+        let openapi = Cli::try_parse_from([
+            "rozectl",
+            "openapi",
+            "generate",
+            "user.api",
+            "--out",
+            "openapi.json",
+        ])
+        .expect("parse openapi");
+        assert!(matches!(
+            openapi.command,
+            Commands::Openapi {
+                command: OpenApiCommands::Generate { .. }
+            }
+        ));
+
+        let mongo = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "generate",
+            "user.model",
+            "--format",
+            "mongo",
+        ])
+        .expect("parse mongo model generate");
+        assert!(matches!(
+            mongo.command,
+            Commands::Model {
+                command: ModelCommands::Generate {
+                    format: ModelFormat::Mongo,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn model_inspect_accepts_schema_qualified_tables() {
         let cli = Cli::try_parse_from([
             "rozectl",
@@ -363,12 +523,14 @@ mod tests {
                 command:
                     ModelCommands::Inspect {
                         table,
+                        schema,
                         db_url,
                         db_kind,
                         ..
                     },
             } => {
                 assert_eq!(table, "public.users");
+                assert!(schema.is_none());
                 assert_eq!(db_url, "postgres://postgres:postgres@localhost:5432/roze");
                 assert!(matches!(db_kind, DbKind::Postgres));
             }
@@ -379,7 +541,9 @@ mod tests {
             "rozectl",
             "model",
             "inspect",
-            "db.users",
+            "users",
+            "--schema",
+            "db",
             "--db-kind",
             "mysql",
             "--db-url",
@@ -392,13 +556,77 @@ mod tests {
                 command:
                     ModelCommands::Inspect {
                         table,
+                        schema,
                         db_url,
                         db_kind,
                         ..
                     },
             } => {
-                assert_eq!(table, "db.users");
+                assert_eq!(table, "users");
+                assert_eq!(schema.as_deref(), Some("db"));
                 assert_eq!(db_url, "mysql://root:root@localhost:3306/roze");
+                assert!(matches!(db_kind, DbKind::MySql));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "inspect",
+            "public.users",
+            "--schema",
+            "public",
+            "--db-kind",
+            "postgres",
+            "--db-url",
+            "postgres://postgres:postgres@localhost:5432/roze",
+        ])
+        .expect("parse postgres inspect with schema");
+
+        match cli.command {
+            Commands::Model {
+                command:
+                    ModelCommands::Inspect {
+                        table,
+                        schema,
+                        db_kind,
+                        ..
+                    },
+            } => {
+                assert_eq!(table, "public.users");
+                assert_eq!(schema.as_deref(), Some("public"));
+                assert!(matches!(db_kind, DbKind::Postgres));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "inspect",
+            "db.users",
+            "--schema",
+            "db",
+            "--db-kind",
+            "mysql",
+            "--db-url",
+            "mysql://root:root@localhost:3306/roze",
+        ])
+        .expect("parse mysql inspect with schema");
+
+        match cli.command {
+            Commands::Model {
+                command:
+                    ModelCommands::Inspect {
+                        table,
+                        schema,
+                        db_kind,
+                        ..
+                    },
+            } => {
+                assert_eq!(table, "db.users");
+                assert_eq!(schema.as_deref(), Some("db"));
                 assert!(matches!(db_kind, DbKind::MySql));
             }
             other => panic!("unexpected command: {other:?}"),

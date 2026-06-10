@@ -13,7 +13,6 @@ cargo run
 - REST: `GET /healthz`
 - REST: `GET /metrics`
 - REST: `GET /openapi.json`
-- REST: `GET /docs`
 - `POST` `/roze_sample/login`
 
 ## Config

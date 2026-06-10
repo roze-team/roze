@@ -1,11 +1,44 @@
 //! gRPC transport helpers built on tonic.
+//!
+//! This crate intentionally centralizes the transport-facing API so the rest of the
+//! workspace depends on `roze_grpc::transport` instead of importing `tonic`
+//! directly. That keeps the transport boundary easy to swap in the future.
 
 use std::{net::SocketAddr, time::Duration};
 
 use roze_context::Context;
 use roze_trace::{generate_trace_id, TRACE_ID_HEADER};
-use tonic::transport::{Channel, Endpoint, Server};
-use tonic::{metadata::MetadataValue, Request};
+
+pub mod transport {
+    pub use tonic::metadata::MetadataValue;
+    pub use tonic::transport::{Channel, Endpoint, Server};
+    pub use tonic::{Code, Request, Response, Status};
+}
+
+pub mod build {
+    use std::{error::Error, path::Path};
+
+    pub fn compile<P, I>(proto_files: &[P], includes: &[I]) -> Result<(), Box<dyn Error>>
+    where
+        P: AsRef<Path>,
+        I: AsRef<Path>,
+    {
+        tonic_build::configure()
+            .build_server(true)
+            .build_client(true)
+            .compile(proto_files, includes)?;
+        Ok(())
+    }
+}
+
+#[macro_export]
+macro_rules! include_proto {
+    ($package:literal) => {
+        tonic::include_proto!($package);
+    };
+}
+
+use self::transport::{Channel, Endpoint, MetadataValue, Request, Server};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GrpcClientOptions {
@@ -131,7 +164,7 @@ pub fn metadata_timeout<T>(request: &Request<T>) -> Option<Duration> {
 
 pub fn with_trace_interceptor(
     context: Context,
-) -> impl FnMut(Request<()>) -> Result<Request<()>, tonic::Status> + Clone {
+) -> impl FnMut(Request<()>) -> Result<Request<()>, transport::Status> + Clone {
     move |mut request: Request<()>| {
         apply_context(&mut request, &context);
         Ok(request)
@@ -144,8 +177,14 @@ mod tests {
 
     #[test]
     fn normalizes_addresses() {
-        assert_eq!(normalize_endpoint("127.0.0.1:50051").expect("url"), "http://127.0.0.1:50051");
-        assert_eq!(normalize_endpoint("http://127.0.0.1:50051").expect("url"), "http://127.0.0.1:50051");
+        assert_eq!(
+            normalize_endpoint("127.0.0.1:50051").expect("url"),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(
+            normalize_endpoint("http://127.0.0.1:50051").expect("url"),
+            "http://127.0.0.1:50051"
+        );
     }
 
     #[test]

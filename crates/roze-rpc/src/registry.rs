@@ -638,13 +638,16 @@ where
     }
 
     fn store(&self, name: &str, instances: Vec<ServiceInstance>) {
-        self.cache.lock().expect("registry cache lock poisoned").insert(
-            name.to_string(),
-            CachedEntry {
-                discovered_at: Instant::now(),
-                instances,
-            },
-        );
+        self.cache
+            .lock()
+            .expect("registry cache lock poisoned")
+            .insert(
+                name.to_string(),
+                CachedEntry {
+                    discovered_at: Instant::now(),
+                    instances,
+                },
+            );
     }
 
     fn ensure_refresh_task(&self, name: String) {
@@ -667,16 +670,13 @@ where
                 ticker.tick().await;
                 match registry.discover(&name_for_task).await {
                     Ok(instances) => {
-                        cache
-                            .lock()
-                            .expect("registry cache lock poisoned")
-                            .insert(
-                                name_for_task.clone(),
-                                CachedEntry {
-                                    discovered_at: Instant::now(),
-                                    instances,
-                                },
-                            );
+                        cache.lock().expect("registry cache lock poisoned").insert(
+                            name_for_task.clone(),
+                            CachedEntry {
+                                discovered_at: Instant::now(),
+                                instances,
+                            },
+                        );
                     }
                     Err(err) => {
                         tracing::warn!(service = %name_for_task, error = %err, "registry refresh failed");
@@ -888,8 +888,13 @@ mod tests {
         assert_eq!(initial.len(), 1);
 
         tokio::time::sleep(Duration::from_millis(30)).await;
-        let discoveries = registry.discoveries.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(discoveries >= 2, "expected background refresh to run, got {discoveries}");
+        let discoveries = registry
+            .discoveries
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            discoveries >= 2,
+            "expected background refresh to run, got {discoveries}"
+        );
 
         resolver.invalidate("user");
     }

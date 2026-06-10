@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -10,6 +10,8 @@ use std::{
 static REQUEST_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REQUEST_FAILED: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
+static ROUTE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static RPC_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetricLabels(BTreeMap<String, String>);
@@ -108,13 +110,53 @@ pub fn record_http_request(success: bool, elapsed: Duration) {
     REQUEST_ELAPSED_MS.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
 }
 
+pub fn record_http_route(
+    service: impl Into<String>,
+    route: impl Into<String>,
+    method: impl Into<String>,
+    status: impl Into<String>,
+    elapsed: Duration,
+) {
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("route", route.into())
+        .insert("method", method.into())
+        .insert("status", status.into());
+    let registry = route_metrics_registry();
+    registry.inc_counter("roze_http_route_requests_total", labels.clone(), 1);
+    registry.inc_counter(
+        "roze_http_route_request_duration_ms_total",
+        labels,
+        elapsed.as_millis() as u64,
+    );
+}
+
+pub fn record_rpc_method(
+    service: impl Into<String>,
+    method: impl Into<String>,
+    code: impl Into<String>,
+    elapsed: Duration,
+) {
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("method", method.into())
+        .insert("code", code.into());
+    let registry = rpc_metrics_registry();
+    registry.inc_counter("roze_rpc_method_requests_total", labels.clone(), 1);
+    registry.inc_counter(
+        "roze_rpc_method_request_duration_ms_total",
+        labels,
+        elapsed.as_millis() as u64,
+    );
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
     let elapsed_ms = REQUEST_ELAPSED_MS.load(Ordering::Relaxed);
     let avg_ms = if total == 0 { 0 } else { elapsed_ms / total };
 
-    format!(
+    let mut out = format!(
         concat!(
             "# HELP roze_http_requests_total Total HTTP requests\n",
             "# TYPE roze_http_requests_total counter\n",
@@ -130,11 +172,22 @@ pub fn http_metrics() -> String {
             "roze_http_request_duration_ms_avg {}\n"
         ),
         total, failed, elapsed_ms, avg_ms
-    )
+    );
+    out.push_str(&route_metrics_registry().render());
+    out.push_str(&rpc_metrics_registry().render());
+    out
 }
 
 pub fn service_registry() -> MetricRegistry {
     MetricRegistry::new()
+}
+
+pub fn route_metrics_registry() -> &'static MetricRegistry {
+    ROUTE_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn rpc_metrics_registry() -> &'static MetricRegistry {
+    RPC_METRICS.get_or_init(MetricRegistry::new)
 }
 
 #[cfg(test)]
@@ -153,10 +206,27 @@ mod tests {
     #[test]
     fn renders_registry_metrics() {
         let registry = MetricRegistry::new();
-        registry.inc_counter("roze_jobs_total", MetricLabels::new().insert("job", "sync"), 2);
+        registry.inc_counter(
+            "roze_jobs_total",
+            MetricLabels::new().insert("job", "sync"),
+            2,
+        );
         registry.set_gauge("roze_queue_depth", MetricLabels::new(), 7.0);
         let rendered = registry.render();
         assert!(rendered.contains("roze_jobs_total"));
         assert!(rendered.contains("roze_queue_depth"));
+    }
+
+    #[test]
+    fn renders_route_and_rpc_metrics_with_labels() {
+        record_http_route("svc", "/users/:id", "GET", "200", Duration::from_millis(7));
+        record_rpc_method("svc", "GetUser", "ok", Duration::from_millis(11));
+
+        let metrics = http_metrics();
+        assert!(metrics.contains("roze_http_route_requests_total"));
+        assert!(metrics.contains(r#"service="svc""#));
+        assert!(metrics.contains(r#"route="/users/:id""#));
+        assert!(metrics.contains("roze_rpc_method_requests_total"));
+        assert!(metrics.contains(r#"method="GetUser""#));
     }
 }
