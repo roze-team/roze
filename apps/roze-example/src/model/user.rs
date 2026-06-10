@@ -31,11 +31,12 @@ impl<'a> UserRepository<'a> {
         Self { ctx }
     }
 
-    fn db(&self) -> anyhow::Result<&DatabaseConnection> {
-        self.ctx
-            .db
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
+    fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {
+        self.ctx.read_db()
+    }
+
+    fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {
+        self.ctx.write_db()
     }
 
     pub fn table_name() -> &'static str {
@@ -43,17 +44,22 @@ impl<'a> UserRepository<'a> {
     }
 
     pub async fn find_by_id(&self, id: i64) -> anyhow::Result<Option<Model>> {
-        let db = self.db()?;
+        let db = self.read_db()?;
+        Ok(Entity::find_by_id(id).one(db).await?)
+    }
+
+    pub async fn find_by_id_primary(&self, id: i64) -> anyhow::Result<Option<Model>> {
+        let db = self.write_db()?;
         Ok(Entity::find_by_id(id).one(db).await?)
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<Model>> {
-        let db = self.db()?;
+        let db = self.read_db()?;
         Ok(Entity::find().all(db).await?)
     }
 
     pub async fn insert(&self, model: Model) -> anyhow::Result<Model> {
-        let db = self.db()?;
+        let db = self.write_db()?;
         let active: ActiveModel = model.into_active_model();
         let inserted = active.insert(db).await?;
         self.invalidate_cache(inserted.id).await?;
@@ -61,7 +67,7 @@ impl<'a> UserRepository<'a> {
     }
 
     pub async fn update(&self, model: Model) -> anyhow::Result<Model> {
-        let db = self.db()?;
+        let db = self.write_db()?;
         let active: ActiveModel = model.into_active_model();
         let updated = active.update(db).await?;
         self.invalidate_cache(updated.id).await?;
@@ -69,7 +75,7 @@ impl<'a> UserRepository<'a> {
     }
 
     pub async fn delete_by_id(&self, id: i64) -> anyhow::Result<DeleteResult> {
-        let db = self.db()?;
+        let db = self.write_db()?;
         let result = Entity::delete_by_id(id).exec(db).await?;
         self.invalidate_cache(id).await?;
         Ok(result)

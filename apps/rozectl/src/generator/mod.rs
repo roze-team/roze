@@ -938,6 +938,9 @@ governance:
   routes: {{}}
 # database:
 #   url: sqlite://data/{}.db?mode=rwc
+#   # policy: round-robin # round-robin or random
+#   # replicas:
+#   #   - sqlite://data/{}.replica.db?mode=rwc
 # mongo:
 #   url: mongodb://127.0.0.1:27017
 #   database: {}
@@ -963,7 +966,7 @@ governance:
 #   jwt_issuer: {}
 #   jwt_expiration_secs: 86400
 "#,
-            spec.service, spec.service, spec.service, spec.service, spec.service
+            spec.service, spec.service, spec.service, spec.service, spec.service, spec.service
         ),
         ProjectKind::Rpc => format!(
             r#"name: {}
@@ -985,6 +988,9 @@ governance:
   routes: {{}}
 # database:
 #   url: sqlite://data/{}.db?mode=rwc
+#   # policy: round-robin # round-robin or random
+#   # replicas:
+#   #   - sqlite://data/{}.replica.db?mode=rwc
 # mongo:
 #   url: mongodb://127.0.0.1:27017
 #   database: {}
@@ -1010,7 +1016,7 @@ governance:
 #   jwt_issuer: {}
 #   jwt_expiration_secs: 86400
 "#,
-            spec.service, spec.service, spec.service, spec.service, spec.service
+            spec.service, spec.service, spec.service, spec.service, spec.service, spec.service
         ),
     }
 }
@@ -1156,13 +1162,15 @@ use sea_orm::DatabaseConnection;
 pub struct ServiceContext {
     pub config: Config,
     pub db: Option<DatabaseConnection>,
+    pub db_connections: Option<roze_db::DatabaseConnections>,
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
 }
 
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
-        let db = roze_db::connect_optional(config.database.as_ref()).await?;
+        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
+        let db = db_connections.as_ref().map(|connections| connections.primary().clone());
         let mongo = roze_mongo::connect_optional(config.mongo.as_ref()).await?;
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
@@ -1178,9 +1186,26 @@ impl ServiceContext {
         Ok(Self {
             config,
             db,
+            db_connections,
             mongo,
             cache,
         })
+    }
+
+    pub fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {
+        self.db_connections
+            .as_ref()
+            .map(|connections| connections.read())
+            .or(self.db.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
+    }
+
+    pub fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {
+        self.db_connections
+            .as_ref()
+            .map(|connections| connections.write())
+            .or(self.db.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
     }
 
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {

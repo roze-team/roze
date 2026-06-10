@@ -277,14 +277,18 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "    fn db(&self) -> anyhow::Result<&DatabaseConnection> {{"
+        "    fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
     )
     .unwrap();
+    writeln!(&mut out, "        self.ctx.read_db()").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "        self.ctx.db.as_ref().ok_or_else(|| anyhow::anyhow!(\"database connection is not configured\"))"
+        "    fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
     )
     .unwrap();
+    writeln!(&mut out, "        self.ctx.write_db()").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "    pub fn table_name() -> &'static str {{").unwrap();
@@ -313,7 +317,22 @@ fn render_model_module(model: &ModelSpec) -> String {
         )
         .unwrap();
     }
-    writeln!(&mut out, "        let db = self.db()?;").unwrap();
+    writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
+    writeln!(
+        &mut out,
+        "        Ok(Entity::find_by_id({}).one(db).await?)",
+        primary
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn find_by_{}_primary(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+        primary, primary, primary_ty
+    )
+    .unwrap();
+    writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
     writeln!(
         &mut out,
         "        Ok(Entity::find_by_id({}).one(db).await?)",
@@ -348,7 +367,22 @@ fn render_model_module(model: &ModelSpec) -> String {
             )
             .unwrap();
         }
-        writeln!(&mut out, "        let db = self.db()?;").unwrap();
+        writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
+        writeln!(
+            &mut out,
+            "        Ok(Entity::find().filter(Column::{}.eq({})).one(db).await?)",
+            column, field_name
+        )
+        .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    pub async fn find_by_{}_primary(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            field_name, field_name, field_ty
+        )
+        .unwrap();
+        writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
         writeln!(
             &mut out,
             "        Ok(Entity::find().filter(Column::{}.eq({})).one(db).await?)",
@@ -363,7 +397,7 @@ fn render_model_module(model: &ModelSpec) -> String {
         "    pub async fn list(&self) -> anyhow::Result<Vec<Model>> {{"
     )
     .unwrap();
-    writeln!(&mut out, "        let db = self.db()?;").unwrap();
+    writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
     writeln!(&mut out, "        Ok(Entity::find().all(db).await?)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
@@ -372,7 +406,7 @@ fn render_model_module(model: &ModelSpec) -> String {
         "    pub async fn insert(&self, model: Model) -> anyhow::Result<Model> {{"
     )
     .unwrap();
-    writeln!(&mut out, "        let db = self.db()?;").unwrap();
+    writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
     writeln!(
         &mut out,
         "        let active: ActiveModel = model.into_active_model();"
@@ -394,7 +428,7 @@ fn render_model_module(model: &ModelSpec) -> String {
         "    pub async fn update(&self, model: Model) -> anyhow::Result<Model> {{"
     )
     .unwrap();
-    writeln!(&mut out, "        let db = self.db()?;").unwrap();
+    writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
     writeln!(
         &mut out,
         "        let active: ActiveModel = model.into_active_model();"
@@ -417,7 +451,7 @@ fn render_model_module(model: &ModelSpec) -> String {
         primary, primary, primary_ty
     )
     .unwrap();
-    writeln!(&mut out, "        let db = self.db()?;").unwrap();
+    writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
     if model.cache {
         writeln!(
             &mut out,

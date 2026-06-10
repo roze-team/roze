@@ -136,6 +136,10 @@ pub struct CacheConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String,
+    #[serde(default)]
+    pub replicas: Vec<String>,
+    #[serde(default)]
+    pub policy: DatabaseReadPolicy,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
     #[serde(default = "default_min_connections")]
@@ -146,6 +150,19 @@ pub struct DatabaseConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_sqlx_logging")]
     pub sqlx_logging: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DatabaseReadPolicy {
+    RoundRobin,
+    Random,
+}
+
+impl Default for DatabaseReadPolicy {
+    fn default() -> Self {
+        Self::RoundRobin
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

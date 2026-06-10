@@ -18,6 +18,9 @@ governance:
   routes: {}
 # database:
 #   url: sqlite://data/user.db?mode=rwc
+#   # policy: round-robin # round-robin or random
+#   # replicas:
+#   #   - sqlite://data/user.replica.db?mode=rwc
 # mongo:
 #   url: mongodb://127.0.0.1:27017
 #   database: user
