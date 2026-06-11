@@ -965,8 +965,19 @@ governance:
 #   jwt_secret: change-me
 #   jwt_issuer: {}
 #   jwt_expiration_secs: 86400
+# telemetry:
+#   name: {}
+#   endpoint: http://127.0.0.1:4317
+#   sampler: 1.0
+#   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
-            spec.service, spec.service, spec.service, spec.service, spec.service, spec.service
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service
         ),
         ProjectKind::Rpc => format!(
             r#"name: {}
@@ -1015,8 +1026,19 @@ governance:
 #   jwt_secret: change-me
 #   jwt_issuer: {}
 #   jwt_expiration_secs: 86400
+# telemetry:
+#   name: {}
+#   endpoint: http://127.0.0.1:4317
+#   sampler: 1.0
+#   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
-            spec.service, spec.service, spec.service, spec.service, spec.service, spec.service
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service
         ),
     }
 }

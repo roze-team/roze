@@ -4,8 +4,22 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+default = ["memory"]
+memory = []
+rdkafka = ["dep:rdkafka"]
+
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 roze-eventbus = { path = "../roze-eventbus" }
+
+[dependencies.rdkafka]
+version = "0.36"
+optional = true
+default-features = false
+features = ["tokio"]

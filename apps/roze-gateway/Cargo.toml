@@ -1,0 +1,19 @@
+[package]
+name = "roze-gateway-app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+config.workspace = true
+poem.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+
+roze-config = { path = "../../crates/roze-config" }
+roze-gateway = { path = "../../crates/roze-gateway" }
+roze-http = { path = "../../crates/roze-http" }
+roze-jwt = { path = "../../crates/roze-jwt" }
+roze-log = { path = "../../crates/roze-log" }

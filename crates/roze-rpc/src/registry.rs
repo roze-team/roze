@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::time::interval;
 
 use crate::balance::{self, Balancer};
-use roze_config::{RegistryConfig, RegistryKind, ServiceConfig};
+use roze_config::{RegistryConfig, RegistryKind, RpcClientEtcdConfig, ServiceConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct ServiceInstance {
@@ -184,7 +184,7 @@ impl Registry for EtcdRegistry {
         let payload = serde_json::to_vec(&instance)?;
         let key = etcd_instance_key(&instance.name, &instance.addr);
         let endpoint = first_registry_endpoint(self.endpoints(), "http://127.0.0.1:2379");
-        let lease_id = self.grant_lease(endpoint).await?;
+        let lease_id = self.grant_lease(&endpoint).await?;
         let body = serde_json::json!({
             "key": STANDARD.encode(key.as_bytes()),
             "value": STANDARD.encode(payload),
@@ -200,7 +200,6 @@ impl Registry for EtcdRegistry {
 
         let lease = lease_id.clone();
         let client = self.client.clone();
-        let endpoint = endpoint.to_string();
         let renew_interval = self.renew_interval_secs;
         let renew_handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(renew_interval));
@@ -323,7 +322,6 @@ impl Registry for ConsulRegistry {
             .error_for_status()?;
 
         let client = self.client.clone();
-        let endpoint = endpoint.to_string();
         let renew_interval = self.renew_interval_secs;
         let ttl_seconds = self.ttl_seconds;
         let check_id = self.check_id(&service_id);
@@ -427,16 +425,30 @@ struct ConsulServiceRecord {
     meta: Option<HashMap<String, String>>,
 }
 
-fn registry_endpoints<'a>(configured: &'a [String], default: &'a str) -> Vec<&'a str> {
+fn registry_endpoints(configured: &[String], default: &str) -> Vec<String> {
     if configured.is_empty() {
-        vec![default]
+        vec![default.to_string()]
     } else {
-        configured.iter().map(String::as_str).collect()
+        configured
+            .iter()
+            .map(|endpoint| normalize_registry_endpoint(endpoint))
+            .collect()
     }
 }
 
-fn first_registry_endpoint<'a>(configured: &'a [String], default: &'a str) -> &'a str {
-    configured.first().map(String::as_str).unwrap_or(default)
+fn first_registry_endpoint(configured: &[String], default: &str) -> String {
+    configured
+        .first()
+        .map(|endpoint| normalize_registry_endpoint(endpoint))
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn normalize_registry_endpoint(endpoint: &str) -> String {
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    }
 }
 
 fn etcd_service_prefix(name: &str) -> String {
@@ -525,6 +537,15 @@ pub fn registry_from_kind(kind: RegistryKind) -> anyhow::Result<Arc<dyn Registry
         ttl_seconds: 10,
         renew_interval_secs: 3,
     })
+}
+
+pub fn registry_config_from_rpc_client_etcd(config: &RpcClientEtcdConfig) -> RegistryConfig {
+    RegistryConfig {
+        kind: RegistryKind::Etcd,
+        endpoints: config.hosts.clone(),
+        ttl_seconds: 10,
+        renew_interval_secs: 3,
+    }
 }
 
 pub struct RegistryResolver<R, B> {
@@ -796,6 +817,33 @@ mod tests {
     fn registry_from_kind_builds_memory_registry() {
         let registry = registry_from_kind(RegistryKind::Memory).expect("registry");
         let _ = registry;
+    }
+
+    #[test]
+    fn registry_endpoint_accepts_hosts_without_scheme() {
+        assert_eq!(
+            normalize_registry_endpoint("127.0.0.1:2379"),
+            "http://127.0.0.1:2379"
+        );
+        assert_eq!(
+            normalize_registry_endpoint("https://etcd.example:2379"),
+            "https://etcd.example:2379"
+        );
+    }
+
+    #[test]
+    fn rpc_client_etcd_config_builds_registry_config() {
+        let config = RpcClientEtcdConfig {
+            hosts: vec!["127.0.0.1:2379".to_string()],
+            key: "order.rpc".to_string(),
+            ..Default::default()
+        };
+        let registry = registry_config_from_rpc_client_etcd(&config);
+
+        assert_eq!(registry.kind, RegistryKind::Etcd);
+        assert_eq!(registry.endpoints, config.hosts);
+        assert_eq!(registry.ttl_seconds, 10);
+        assert_eq!(registry.renew_interval_secs, 3);
     }
 
     #[test]

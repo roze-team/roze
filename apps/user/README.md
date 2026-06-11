@@ -18,3 +18,192 @@ cargo run
 ## Config
 
 `config.yaml` is loaded from the crate directory first, then falls back to the current working directory.
+
+### 配置中心热更新（Kafka 示例）
+
+当设置如下环境变量时，服务会按 `Etcd -> Env -> File` 加载配置并监听更新：
+
+- `ROZE_CONFIG_CENTER_NAMESPACE` + `ROZE_CONFIG_CENTER_APP`（可选，生成默认 key）
+- `ROZE_CONFIG_CENTER_ETCD_ENDPOINTS`（逗号分隔）
+- `ROZE_CONFIG_CENTER_ETCD_KEY`（或 `ROZE_CONFIG_CENTER_KEY`）
+- `ROZE_CONFIG_CENTER_ENV_KEY`（可选）
+- `ROZE_CONFIG_CENTER_FORMAT`（可选，json/yaml/toml，默认 yaml）
+- `ROZE_CONFIG_CENTER_POLL_SECS`（可选，默认 5）
+- `ROZE_CONFIG_CENTER_DEBOUNCE_MS`（可选，默认 400）
+
+`config.yaml` 中可放置 `kafka` 段（示例见 `apps/user/config.yaml` 注释）：
+
+- `brokers`（bootstrap servers）
+- `bootstrap`（兼容字段）
+- `bootstrap_servers`（兼容字段）
+- `group`（兼容 `group_id`）
+- `group_id`
+- `acks`
+- `enable_auto_commit`（示例 `false`，演示手工提交）
+- `enable_manual_ack`（示例 `true`，演示手工提交）
+- `retry_topic`
+- `dead_letter_topic`
+- `max_retries`
+- `retry_backoff_ms`
+- `session_timeout_ms`
+- `heartbeat_interval_ms`
+- `max_poll_interval_ms`
+- `consumer_workers`
+
+## 验收示例（最小）
+
+### A. 本地文件启动（无中心）
+
+```bash
+export ROZE_CONFIG_CENTER_FILE=./apps/user/config.yaml
+cargo run -p user-service
+```
+
+### B. 仅 Etcd 驱动（优先级 Etcd）
+
+```bash
+export ROZE_CONFIG_CENTER_ETCD_ENDPOINTS=127.0.0.1:2379
+export ROZE_CONFIG_CENTER_ETCD_KEY=roze/user/config
+cargo run -p user-service
+```
+
+### C. 手工提交 + 重试/DLQ 演练
+
+1. 推送 payload：`{\"should_fail\":true}`
+2. 观察 `kafka.message.nack`、重试与死信落地
+3. 下发有效配置时观察 `kafka.pipeline.started` 与 `kafka.pipeline.disabled`
+
+### C2. Etcd 无效配置回滚
+
+1. 在 Etcd 写入一段错误配置（非 JSON/YAML/ Toml，或字段类型错）；
+2. 观察日志出现 `config.reload.failed`；
+3. 验证服务仍持续运行，并继续处理旧配置（可见 `kafka.signature.unchanged` 或最近一次 `kafka.signature.changed` 之后的运行日志）；
+4. 修正 Etcd 配置并写回后，观察 `config.reload.applied` 及 pipeline 重建日志。
+
+### D. 热更新变更
+
+- 修改 etcd 中的 `kafka` 配置（`group`、`acks`、`enable_manual_ack`、`max_retries`）；
+- 检查日志出现 `config.reload.applied`，并在 1 分钟内看到 pipeline 重建。
+
+```bash
+export ROZE_CONFIG_CENTER_ETCD_ENDPOINTS=127.0.0.1:2379
+export ROZE_CONFIG_CENTER_ETCD_KEY=roze/user/config
+export ROZE_CONFIG_CENTER_KEY=roze/user/config
+export ROZE_CONFIG_CENTER_DEBOUNCE_MS=400
+```
+
+### E. 可观测事件（建议 grep）
+
+```bash
+cargo run -p user-service 2>&1 | rg "kafka\.signature\.(changed|unchanged)|kafka\.pipeline\.(started|disabled|create_failed|empty_brokers)|kafka\.message\.(received|acked|nack|nack_failed|ack_failed)|config\.reload\.(applied|failed)"
+```
+
+关键字段约定：`app/topic/group/version/manual_ack/auto_commit/bootstrap/signature`。
+
+### F. 可复用的最小验收命令
+
+```bash
+# 停止服务，启动前设置：
+export ROZE_CONFIG_CENTER_NAMESPACE=roze
+export ROZE_CONFIG_CENTER_APP=user
+export ROZE_CONFIG_CENTER_FILE=/Users/yangcuiwang/go/src/hualiang/roze/apps/user/config.yaml
+export ROZE_CONFIG_CENTER_DEBOUNCE_MS=400
+
+# 基线：先跑本地文件
+cargo run -p user-service
+
+# 场景：Etcd 配置异常（service 不退出）
+INVALID_CFG=$(printf 'not-a-valid-json-config' | base64 | tr -d '\n')
+curl -s -X POST http://127.0.0.1:2379/v3/kv/put \
+  -H 'Content-Type: application/json' \
+  -d "{\"key\":\"cm96ZS91c2VyL2NvbmZpZw==\",\"value\":\"$INVALID_CFG\"}"
+
+# 场景：恢复有效配置（示例）
+cat >/tmp/user-config.json <<'EOF'
+{"name":"user","rest":{"addr":"127.0.0.1:3000","register":false},"registry":{"kind":"memory","endpoints":[],"ttl_seconds":10,"renew_interval_secs":3},"governance":{"timeout_ms":5000,"rate_limit":{"burst":100,"refill_ms":10},"breaker":{"failure_threshold":5,"reset_timeout_ms":30000},"routes":{}},"kafka":{"group":"user-service","enable_manual_ack":true,"enable_auto_commit":false,"max_retries":3,"retry_topic":"user.retry","dead_letter_topic":"user.dlq","retry_backoff_ms":1000,"session_timeout_ms":10000,"heartbeat_interval_ms":3000,"max_poll_interval_ms":300000}}
+EOF
+VALID_CFG=$(cat /tmp/user-config.json | base64 | tr -d '\n')
+curl -s -X POST http://127.0.0.1:2379/v3/kv/put \
+  -H 'Content-Type: application/json' \
+  -d "{\"key\":\"cm96ZS91c2VyL2NvbmZpZw==\",\"value\":\"$VALID_CFG\"}"
+```
+
+### G. 事件核对清单（脚本化）
+
+在服务运行时，把日志重定向到文件 `./user.log`，按顺序执行如下校验：
+
+```bash
+# 1) 启动后应能看到启动成功链路（至少一次）
+rg -n 'kafka\.pipeline\.(started|restarted|restarting)|kafka\.signature\.changed' ./user.log
+
+# 2) 下发错误配置后，出现失败但不中断服务
+rg -n 'config\.reload\.failed' ./user.log
+
+# 3) 下发合法配置后，出现配置应用与重建事件（重建前后顺序可在窗口内出现）
+rg -n 'config\.reload\.applied|kafka\.pipeline\.restarting|kafka\.pipeline\.restarted|kafka\.pipeline\.restart_failed' ./user.log
+
+# 4) 手工提交链路：成功 + 失败 + 重试/DLQ 观测
+rg -n 'kafka\.message\.(received|acked|nack|nack_failed|ack_failed|requeue_retry|retry_topic_missing|dead_letter_missing|dead_lettered|recover_dropped)' ./user.log
+
+# 5) 可选：检查重建期间无异常退出
+rg -n 'kafka\.runtime\.stop_timeout|kafka\.runtime\.stop_error|panic' ./user.log
+
+# 6) 重建/关闭主链路关键事件
+rg -n 'kafka\.pipeline\.(restarting|restarted|restart_failed|started|disabled|create_failed|empty_brokers|stop_timeout|stop_error|stopped)' ./user.log
+```
+
+可用于演示场景E（1分钟内重建）的小脚本示例：
+
+```bash
+timeout 60 bash -lc 'while true; do
+  if rg -q "kafka\.pipeline\.restarting" ./user.log; then
+    if rg -q "kafka\.pipeline\.restarted" ./user.log; then
+      echo "rebuild completed"; break
+    fi
+  fi
+  sleep 1
+done'
+```
+
+### H. 场景E：1分钟内变更验证（示例）
+
+```bash
+# 启动前设置
+export ROZE_CONFIG_CENTER_ETCD_ENDPOINTS=127.0.0.1:2379
+export ROZE_CONFIG_CENTER_NAMESPACE=roze
+export ROZE_CONFIG_CENTER_APP=user
+export ROZE_CONFIG_CENTER_KEY=roze/user/config
+
+# 写入基线配置（manual_ack=true）
+cat >/tmp/user-config-a.json <<'JSON'
+{"name":"user","rest":{"addr":"127.0.0.1:3000","register":false},"registry":{"kind":"memory","endpoints":[],"ttl_seconds":10,"renew_interval_secs":3},"governance":{"timeout_ms":5000,"rate_limit":{"burst":100,"refill_ms":10},"breaker":{"failure_threshold":5,"reset_timeout_ms":30000},"routes":{}},"kafka":{"group":"user-service-a","enable_manual_ack":true,"enable_auto_commit":false,"max_retries":1,"retry_topic":"user.retry","dead_letter_topic":"user.dlq","retry_backoff_ms":300,"session_timeout_ms":10000,"heartbeat_interval_ms":3000,"max_poll_interval_ms":300000}}
+JSON
+BASE64_A=$(cat /tmp/user-config-a.json | base64 | tr -d '\n')
+curl -s -X POST http://127.0.0.1:2379/v3/kv/put \
+  -H 'Content-Type: application/json' \
+  -d "{\"key\":\"$(printf 'roze/user/config' | base64 | tr -d '\n')\",\"value\":\"$BASE64_A\"}"
+
+# 写入新版本配置（触发重建）
+sleep 3
+cat >/tmp/user-config-b.json <<'JSON'
+{"name":"user","rest":{"addr":"127.0.0.1:3000","register":false},"registry":{"kind":"memory","endpoints":[],"ttl_seconds":10,"renew_interval_secs":3},"governance":{"timeout_ms":5000,"rate_limit":{"burst":100,"refill_ms":10},"breaker":{"failure_threshold":5,"reset_timeout_ms":30000},"routes":{}},"kafka":{"group":"user-service-b","enable_manual_ack":false,"enable_auto_commit":true,"max_retries":2,"retry_topic":"user.retry","dead_letter_topic":"user.dlq","retry_backoff_ms":300,"session_timeout_ms":10000,"heartbeat_interval_ms":3000,"max_poll_interval_ms":300000}}
+JSON
+BASE64_B=$(cat /tmp/user-config-b.json | base64 | tr -d '\n')
+curl -s -X POST http://127.0.0.1:2379/v3/kv/put \
+  -H 'Content-Type: application/json' \
+  -d "{\"key\":\"$(printf 'roze/user/config' | base64 | tr -d '\n')\",\"value\":\"$BASE64_B\"}"
+
+# 预期 60 秒内看到重建成功
+timeout 60 bash -lc '
+if rg -q "kafka\.pipeline\.restarting|kafka\.pipeline\.restarted" ./user.log; then
+  echo "pipeline restart observed"
+fi
+'
+
+# 验证重建失败可见时有 restart_failed 且服务继续运行
+timeout 60 bash -lc '
+if rg -q "kafka\.pipeline\.restart_failed|kafka\.pipeline\.restarted" ./user.log; then
+  echo "restart events observed"
+fi
+'
+```

@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -62,7 +62,7 @@ impl Balancer for WeightedRoundRobinBalancer {
 
 #[derive(Debug, Default, Clone)]
 pub struct PowerOfTwoChoicesBalancer {
-    cursor: Arc<AtomicUsize>,
+    cursor: Arc<AtomicU64>,
 }
 
 impl Balancer for PowerOfTwoChoicesBalancer {
@@ -74,8 +74,14 @@ impl Balancer for PowerOfTwoChoicesBalancer {
             return Some(instances[0].clone());
         }
 
-        let first_idx = self.cursor.fetch_add(1, Ordering::Relaxed) % instances.len();
-        let second_idx = self.cursor.fetch_add(1, Ordering::Relaxed) % instances.len();
+        let seed = self.cursor.fetch_add(1, Ordering::Relaxed) as usize;
+        let first_idx = mix_index(seed, instances.len());
+        let second_idx = mix_index(seed.wrapping_add(0x9e37_79b9), instances.len() - 1);
+        let second_idx = if second_idx >= first_idx {
+            second_idx + 1
+        } else {
+            second_idx
+        };
         let first = &instances[first_idx];
         let second = &instances[second_idx];
         if instance_score(first) >= instance_score(second) {
@@ -84,6 +90,17 @@ impl Balancer for PowerOfTwoChoicesBalancer {
             Some(second.clone())
         }
     }
+}
+
+fn mix_index(seed: usize, len: usize) -> usize {
+    debug_assert!(len > 0);
+    let mut value = seed as u64;
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^= value >> 33;
+    value as usize % len
 }
 
 #[derive(Debug, Default, Clone)]

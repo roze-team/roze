@@ -16,6 +16,34 @@ governance:
     failure_threshold: 5
     reset_timeout_ms: 30000
   routes: {}
+# Example Kafka config: config center can be used to replace this section dynamically.
+#kafka:
+#  brokers:
+#    - 127.0.0.1:9092
+#  # brokers -> bootstrap.servers
+#  topic_prefix: user
+#  bootstrap: "127.0.0.1:9092"
+#  bootstrap_servers:
+#    - 127.0.0.1:9092
+#  group_id: user-service
+#  group: user-service
+#  client_id: user-service-producer
+#  acks: all
+#  auto_offset_reset: earliest
+#  enable_auto_commit: false
+#  enable_manual_ack: false
+#  session_timeout_ms: 10000
+#  heartbeat_interval_ms: 3000
+#  max_poll_interval_ms: 300000
+#  flush_timeout_ms: 5000
+#  linger_ms: 10
+#  batch_size: 16384
+#  retry_backoff_ms: 1000
+#  max_retries: 3
+#  retry_topic: user.retry
+#  dead_letter_topic: user.dlq
+#  topic_regex: "^user\\."
+#  consumer_workers: 1
 # database:
 #   url: sqlite://data/user.db?mode=rwc
 #   # policy: round-robin # round-robin or random
@@ -31,3 +59,8 @@ governance:
 #   jwt_secret: change-me
 #   jwt_issuer: user
 #   jwt_expiration_secs: 86400
+# telemetry:
+#   name: user
+#   endpoint: http://127.0.0.1:4317
+#   sampler: 1.0
+#   batcher: otlpgrpc # otlpgrpc or otlphttp

@@ -35,6 +35,7 @@ members = [
     "crates/roze-openapi",
     "crates/roze-mq",
     "crates/roze-kafka",
+    "crates/roze-gateway",
     "crates/roze-nats",
     "crates/roze-eventbus",
     "crates/roze-job",
@@ -52,6 +53,7 @@ members = [
     "apps/roze-example",
     "apps/roze-sample",
     "apps/user",
+    "apps/roze-gateway",
 ]
 resolver = "2"
 

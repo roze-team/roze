@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, net::SocketAddr, path::Path};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub mod config_center;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -21,7 +24,87 @@ pub struct ServiceConfig {
     pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub kafka: Option<KafkaConfig>,
+    #[serde(default)]
+    pub gateway: Option<GatewayConfig>,
+    #[serde(default)]
+    pub telemetry: Option<TelemetryConfig>,
     pub governance: GovernanceConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
+    #[serde(default)]
+    pub services: Vec<GatewayService>,
+    #[serde(default)]
+    pub routes: Vec<GatewayRoute>,
+    #[serde(default)]
+    pub middlewares: Vec<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub request_body_limit_bytes: Option<usize>,
+    #[serde(default)]
+    pub fallback: Option<GatewayFallbackResponse>,
+    #[serde(default)]
+    pub cors: Option<GatewayCorsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayService {
+    pub name: String,
+    pub upstream: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayRoute {
+    pub path: String,
+    pub service: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub middlewares: Vec<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub rewrite: Option<String>,
+    #[serde(default)]
+    pub fallback: Option<GatewayFallbackResponse>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+    #[serde(default)]
+    pub breaker: Option<BreakerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayFallbackResponse {
+    #[serde(default = "default_gateway_fallback_status")]
+    pub status: u16,
+    #[serde(default)]
+    pub body: Option<Value>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GatewayCorsConfig {
+    #[serde(default)]
+    pub allow_origins: Vec<String>,
+    #[serde(default)]
+    pub allow_methods: Vec<String>,
+    #[serde(default)]
+    pub allow_headers: Vec<String>,
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
+}
+
+fn default_gateway_fallback_status() -> u16 {
+    503
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +205,81 @@ pub struct AuthConfig {
     pub jwt_issuer: String,
     #[serde(default = "default_jwt_expiration_secs")]
     pub jwt_expiration_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KafkaConfig {
+    #[serde(default)]
+    pub brokers: Vec<String>,
+    #[serde(default, alias = "bootstrap")]
+    pub bootstrap: Option<String>,
+    #[serde(default)]
+    pub bootstrap_servers: Option<Vec<String>>,
+    #[serde(default)]
+    pub topic_prefix: String,
+    #[serde(default, alias = "group")]
+    pub group_id: Option<String>,
+    #[serde(default = "default_kafka_client_id")]
+    pub client_id: String,
+    #[serde(default = "default_kafka_acks")]
+    pub acks: String,
+    #[serde(default = "default_kafka_auto_offset_reset")]
+    pub auto_offset_reset: String,
+    #[serde(default = "default_kafka_enable_auto_commit", alias = "auto_commit")]
+    pub enable_auto_commit: bool,
+    #[serde(default)]
+    pub enable_manual_ack: bool,
+    #[serde(default = "default_kafka_linger_ms")]
+    pub linger_ms: u64,
+    #[serde(default = "default_kafka_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_kafka_session_timeout_ms")]
+    pub session_timeout_ms: u64,
+    #[serde(default = "default_kafka_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+    #[serde(default = "default_kafka_max_poll_interval_ms")]
+    pub max_poll_interval_ms: u64,
+    #[serde(default = "default_kafka_flush_timeout_ms")]
+    pub flush_timeout_ms: u64,
+    #[serde(default = "default_kafka_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_kafka_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
+    #[serde(default)]
+    pub retry_topic: Option<String>,
+    #[serde(default)]
+    pub dead_letter_topic: Option<String>,
+    #[serde(default)]
+    pub topic_regex: Option<String>,
+    #[serde(default = "default_kafka_consumers")]
+    pub consumer_workers: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default = "default_telemetry_sampler")]
+    pub sampler: f64,
+    #[serde(default)]
+    pub batcher: TelemetryBatcher,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TelemetryBatcher {
+    #[serde(alias = "otlpgrpc")]
+    OtlpGrpc,
+    #[serde(alias = "otlphttp")]
+    OtlpHttp,
+}
+
+impl Default for TelemetryBatcher {
+    fn default() -> Self {
+        Self::OtlpGrpc
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,7 +391,7 @@ impl Default for BreakerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistryKind {
     Memory,
@@ -306,6 +464,10 @@ fn default_mongo_min_pool_size() -> u32 {
     0
 }
 
+fn default_telemetry_sampler() -> f64 {
+    1.0
+}
+
 fn default_rate_limit_burst() -> u32 {
     100
 }
@@ -322,6 +484,58 @@ fn default_breaker_reset_timeout_ms() -> u64 {
     30_000
 }
 
+fn default_kafka_client_id() -> String {
+    "roze-kafka".to_string()
+}
+
+fn default_kafka_acks() -> String {
+    "all".to_string()
+}
+
+fn default_kafka_auto_offset_reset() -> String {
+    "earliest".to_string()
+}
+
+fn default_kafka_enable_auto_commit() -> bool {
+    false
+}
+
+fn default_kafka_linger_ms() -> u64 {
+    0
+}
+
+fn default_kafka_batch_size() -> usize {
+    0
+}
+
+fn default_kafka_heartbeat_interval_ms() -> u64 {
+    3_000
+}
+
+fn default_kafka_max_poll_interval_ms() -> u64 {
+    300_000
+}
+
+fn default_kafka_flush_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_kafka_max_retries() -> u32 {
+    3
+}
+
+fn default_kafka_retry_backoff_ms() -> u64 {
+    200
+}
+
+fn default_kafka_session_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_kafka_consumers() -> u32 {
+    1
+}
+
 pub fn load<T>(path: impl AsRef<Path>) -> Result<T, config::ConfigError>
 where
     T: for<'de> Deserialize<'de>,
@@ -332,6 +546,8 @@ where
         .build()?
         .try_deserialize()
 }
+
+pub use config_center::*;
 
 #[cfg(test)]
 mod tests {
@@ -435,6 +651,79 @@ database = "demo"
     }
 
     #[test]
+    fn loads_cache_defaults() {
+        let source = r#"
+name = "demo"
+
+[cache]
+url = "redis://127.0.0.1/"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let cache = config.cache.expect("cache");
+        assert_eq!(cache.url, "redis://127.0.0.1/");
+        assert_eq!(cache.namespace, default_cache_namespace());
+        assert_eq!(cache.default_ttl_secs, default_cache_ttl_secs());
+    }
+
+    #[test]
+    fn loads_telemetry_defaults() {
+        let source = r#"
+name = "demo"
+
+[telemetry]
+endpoint = "http://127.0.0.1:4317"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let telemetry = config.telemetry.expect("telemetry");
+        assert_eq!(telemetry.name, None);
+        assert_eq!(telemetry.endpoint.as_deref(), Some("http://127.0.0.1:4317"));
+        assert_eq!(telemetry.sampler, default_telemetry_sampler());
+        assert_eq!(telemetry.batcher, TelemetryBatcher::OtlpGrpc);
+    }
+
+    #[test]
+    fn loads_go_zero_style_telemetry_batcher() {
+        let source = r#"
+name = "demo"
+
+[telemetry]
+name = "demo-api"
+endpoint = "http://127.0.0.1:4318"
+sampler = 0.25
+batcher = "otlphttp"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let telemetry = config.telemetry.expect("telemetry");
+        assert_eq!(telemetry.name.as_deref(), Some("demo-api"));
+        assert_eq!(telemetry.sampler, 0.25);
+        assert_eq!(telemetry.batcher, TelemetryBatcher::OtlpHttp);
+    }
+
+    #[test]
     fn loads_rpc_client_defaults() {
         let source = r#"
 name = "demo"
@@ -460,5 +749,29 @@ endpoints = ["127.0.0.1:4000"]
         );
         assert!(client.middlewares.trace);
         assert!(client.middlewares.breaker);
+    }
+
+    #[test]
+    fn loads_rpc_client_etcd_config() {
+        let source = r#"
+name = "demo"
+
+[rpc_client.etcd]
+hosts = ["127.0.0.1:2379", "127.0.0.2:2379"]
+key = "order.rpc"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let etcd = config.rpc_client.expect("rpc client").etcd.expect("etcd");
+        assert_eq!(etcd.hosts, vec!["127.0.0.1:2379", "127.0.0.2:2379"]);
+        assert_eq!(etcd.key, "order.rpc");
+        assert_eq!(etcd.pass, None);
     }
 }

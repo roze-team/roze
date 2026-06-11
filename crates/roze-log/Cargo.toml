@@ -5,5 +5,11 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+opentelemetry = "0.27"
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "http-proto", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+roze-config = { path = "../roze-config" }
 tracing.workspace = true
+tracing-opentelemetry = "0.28"
 tracing-subscriber.workspace = true

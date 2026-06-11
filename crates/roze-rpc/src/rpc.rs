@@ -1,13 +1,19 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
 use crate::{
-    balance::Balancer,
-    registry::{CachedRegistryResolver, Registry, ServiceInstance},
+    balance::{Balancer, PowerOfTwoChoicesBalancer},
+    registry::{
+        registry_config_from_rpc_client_etcd, CachedRegistryResolver, EtcdRegistry, Registry,
+        ServiceInstance,
+    },
 };
 use roze_auth::principal_from_claims;
 use roze_context::Context;
@@ -20,6 +26,7 @@ use tracing::info;
 
 static METHOD_RATE_LIMITS: OnceLock<Mutex<HashMap<String, MethodRateLimitState>>> = OnceLock::new();
 static METHOD_BREAKERS: OnceLock<Mutex<HashMap<String, MethodBreakerState>>> = OnceLock::new();
+static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone)]
 pub struct RpcConfig {
@@ -193,8 +200,58 @@ pub async fn connect_channel_with_options(
 pub async fn connect_channel_from_config(
     config: &roze_config::RpcClientConfig,
 ) -> anyhow::Result<Channel> {
+    let options = RpcClientOptions::from_config(config);
+    if let Some(target) = config.target.as_deref().filter(|target| !target.is_empty()) {
+        return connect_channel_with_options(target, options).await;
+    }
+
+    if rpc_client_has_static_endpoints(config) {
+        let target = rpc_client_round_robin_endpoint(config, &RPC_ENDPOINT_CURSOR)?;
+        return connect_channel_with_options(target, options).await;
+    }
+
+    if let Some(etcd) = config.etcd.as_ref() {
+        let registry_config = registry_config_from_rpc_client_etcd(etcd);
+        let registry = EtcdRegistry::new(&registry_config);
+        return connect_via_registry_with_options(
+            &etcd.key,
+            &registry,
+            &PowerOfTwoChoicesBalancer::default(),
+            options,
+        )
+        .await;
+    }
+
     let target = rpc_client_target(config)?;
-    connect_channel_with_options(target, RpcClientOptions::from_config(config)).await
+    connect_channel_with_options(target, options).await
+}
+
+pub fn rpc_client_has_direct_target(config: &roze_config::RpcClientConfig) -> bool {
+    config
+        .target
+        .as_deref()
+        .is_some_and(|target| !target.is_empty())
+}
+
+pub fn rpc_client_has_static_endpoints(config: &roze_config::RpcClientConfig) -> bool {
+    config.endpoints.iter().any(|endpoint| !endpoint.is_empty())
+}
+
+pub fn rpc_client_round_robin_endpoint<'a>(
+    config: &'a roze_config::RpcClientConfig,
+    cursor: &AtomicUsize,
+) -> anyhow::Result<&'a str> {
+    let endpoints = config
+        .endpoints
+        .iter()
+        .map(String::as_str)
+        .filter(|endpoint| !endpoint.is_empty())
+        .collect::<Vec<_>>();
+    if endpoints.is_empty() {
+        anyhow::bail!("rpc client config must set at least one endpoint")
+    }
+    let idx = cursor.fetch_add(1, Ordering::Relaxed) % endpoints.len();
+    Ok(endpoints[idx])
 }
 
 pub fn rpc_client_target(config: &roze_config::RpcClientConfig) -> anyhow::Result<&str> {
@@ -684,6 +741,58 @@ mod tests {
             rpc_client_target(&config).expect("target"),
             "127.0.0.1:4000"
         );
+    }
+
+    #[test]
+    fn rpc_client_static_endpoints_round_robin() {
+        let config = roze_config::RpcClientConfig {
+            etcd: None,
+            endpoints: vec!["127.0.0.1:4000".to_string(), "127.0.0.1:4001".to_string()],
+            target: None,
+            app: None,
+            token: None,
+            non_block: false,
+            timeout_ms: 2_000,
+            keepalive_time_secs: 20,
+            middlewares: Default::default(),
+        };
+        let cursor = AtomicUsize::new(0);
+
+        assert!(rpc_client_has_static_endpoints(&config));
+        assert_eq!(
+            rpc_client_round_robin_endpoint(&config, &cursor).expect("endpoint"),
+            "127.0.0.1:4000"
+        );
+        assert_eq!(
+            rpc_client_round_robin_endpoint(&config, &cursor).expect("endpoint"),
+            "127.0.0.1:4001"
+        );
+        assert_eq!(
+            rpc_client_round_robin_endpoint(&config, &cursor).expect("endpoint"),
+            "127.0.0.1:4000"
+        );
+    }
+
+    #[test]
+    fn rpc_client_etcd_config_is_not_a_direct_target() {
+        let config = roze_config::RpcClientConfig {
+            etcd: Some(roze_config::RpcClientEtcdConfig {
+                hosts: vec!["127.0.0.1:2379".to_string()],
+                key: "order.rpc".to_string(),
+                ..Default::default()
+            }),
+            endpoints: Vec::new(),
+            target: None,
+            app: None,
+            token: None,
+            non_block: false,
+            timeout_ms: 2_000,
+            keepalive_time_secs: 20,
+            middlewares: Default::default(),
+        };
+
+        assert!(!rpc_client_has_direct_target(&config));
+        assert!(rpc_client_target(&config).is_err());
     }
 
     #[test]

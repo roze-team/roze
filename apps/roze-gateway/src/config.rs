@@ -15,9 +15,8 @@ pub async fn load_with_config_center_with_center(
     path: impl AsRef<Path>,
 ) -> anyhow::Result<(Config, Option<roze_config::ConfigCenter<Config>>)> {
     let path = path.as_ref();
-
     let center_input = match parse_config_center_from_env(path) {
-        Some(config) => config,
+        Some(center_input) => center_input,
         None => {
             return load(path)
                 .map_err(anyhow::Error::from)
@@ -26,16 +25,13 @@ pub async fn load_with_config_center_with_center(
     };
 
     let mut subscriber = roze_config::CascadingSubscriber::new();
-    if let Some(endpoints) = center_input.endpoints.as_ref() {
-        subscriber.push(roze_config::EtcdSubscriber::new(
-            endpoints.clone(),
-            center_input.key.clone(),
-        ));
+    if let Some(endpoints) = center_input.endpoints {
+        subscriber.push(roze_config::EtcdSubscriber::new(endpoints, center_input.key.clone()));
     }
-    if let Some(key) = center_input.env_key.clone() {
-        subscriber.push(roze_config::EnvVarSubscriber::new(key));
+    if let Some(env_key) = center_input.env_key {
+        subscriber.push(roze_config::EnvVarSubscriber::new(env_key));
     }
-    for file_path in dedupe_file_candidates(&center_input.file_paths) {
+    for file_path in center_input.file_paths {
         subscriber.push(roze_config::FileConfigSubscriber::new(file_path));
     }
 
@@ -56,50 +52,50 @@ struct ConfigCenterInput {
 fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
     let namespace = std::env::var("ROZE_CONFIG_CENTER_NAMESPACE").ok();
     let app = std::env::var("ROZE_CONFIG_CENTER_APP").ok();
-    let raw_key = std::env::var("ROZE_CONFIG_CENTER_KEY")
+    let env_key = std::env::var("ROZE_CONFIG_CENTER_ENV_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let key = std::env::var("ROZE_CONFIG_CENTER_KEY")
         .ok()
         .or_else(|| std::env::var("ROZE_CONFIG_CENTER_ETCD_KEY").ok())
         .or_else(|| {
-            namespace.as_ref().and_then(|ns| {
-                app.as_ref().map(|app_name| format!("{}/{}", ns.trim_end_matches('/'), app_name))
-            })
-        });
-    // backward compatible: keep app as fallback key only when namespace/app exists
-    let config_key = raw_key
+            namespace
+                .as_ref()
+                .zip(app.as_ref())
+                .map(|(namespace, app)| format!("{namespace}/{app}"))
+        })
         .or_else(|| app.clone())?;
 
     let endpoints = std::env::var("ROZE_CONFIG_CENTER_ETCD_ENDPOINTS")
         .ok()
-        .and_then(|raw| split_endpoints(&raw));
-    let env_key = std::env::var("ROZE_CONFIG_CENTER_ENV_KEY")
+        .and_then(split_endpoints);
+
+    let configured_file = std::env::var("ROZE_CONFIG_CENTER_FILE")
         .ok()
-        .filter(|value| !value.trim().is_empty());
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.to_path_buf());
+    let fallback = PathBuf::from("config.yaml");
+    let file_paths = dedupe_file_candidates(&[configured_file, fallback]);
+
+    if file_paths.is_empty() && endpoints.is_none() && env_key.is_none() {
+        return None;
+    }
 
     let format = std::env::var("ROZE_CONFIG_CENTER_FORMAT")
         .ok()
         .and_then(|value| value.parse::<roze_config::ConfigFormat>().ok())
         .unwrap_or(roze_config::ConfigFormat::Yaml);
+
     let poll_interval = std::env::var("ROZE_CONFIG_CENTER_POLL_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map_or(Duration::from_secs(5), Duration::from_secs);
-    let debounce_ms = std::env::var("ROZE_CONFIG_CENTER_DEBOUNCE_MS")
+
+    let debounce = std::env::var("ROZE_CONFIG_CENTER_DEBOUNCE_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_millis);
-
-    let configured_file = std::env::var("ROZE_CONFIG_CENTER_FILE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from);
-
-    let configured_file = configured_file.unwrap_or_else(|| path.to_path_buf());
-    let fallback_file = PathBuf::from("config.yaml");
-    let file_paths = dedupe_file_candidates(&[configured_file, fallback_file]);
-
-    if file_paths.is_empty() && endpoints.is_none() && env_key.is_none() {
-        return None;
-    }
+        .map_or(Duration::from_millis(400), Duration::from_millis);
 
     let source = if endpoints.is_some() {
         "etcd".to_string()
@@ -112,16 +108,16 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
     Some(ConfigCenterInput {
         endpoints,
         env_key,
-        key: config_key,
+        key,
         file_paths,
         options: roze_config::ConfigCenterConfig {
             format,
             poll_interval,
-            debounce: debounce_ms.unwrap_or_else(|| Duration::from_millis(400)),
+            debounce,
             source: Some(source),
             namespace,
             app,
-            key: Some(config_key.clone()),
+            key: Some(key.clone()),
         },
     })
 }
@@ -144,8 +140,9 @@ fn split_endpoints(raw: &str) -> Option<Vec<String>> {
         .split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(String::from)
+        .map(str::to_string)
         .collect::<Vec<_>>();
+
     if endpoints.is_empty() {
         None
     } else {
