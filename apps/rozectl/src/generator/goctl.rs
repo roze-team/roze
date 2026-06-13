@@ -172,7 +172,13 @@ pub fn generate_mongo_model_type(
         "model {ty} {{\n  table: {}\n  primary: id\n  cache: false\n  field id ObjectId\n}}\n",
         super::to_snake_case(ty)
     );
-    model::generate_model_project(&source, out, options, model::ModelFormat::Mongo)
+    model::generate_model_project(
+        &source,
+        out,
+        options,
+        model::ModelFormat::Mongo,
+        model::ModelOrm::SeaOrm,
+    )
 }
 
 fn render_dockerfile(options: &DockerOptions) -> String {

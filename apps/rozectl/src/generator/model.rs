@@ -18,6 +18,12 @@ pub enum ModelFormat {
     Mongo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelOrm {
+    SeaOrm,
+    Toasty,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     pub name: String,
@@ -36,6 +42,7 @@ pub struct ModelSpec {
 pub struct ModelField {
     pub name: String,
     pub ty: String,
+    pub auto_increment: bool,
     pub default_value: Option<String>,
     pub comment: Option<String>,
 }
@@ -45,11 +52,12 @@ pub fn generate_model_project(
     out: &Path,
     options: GenerateOptions,
     format: ModelFormat,
+    orm: ModelOrm,
 ) -> anyhow::Result<()> {
     let models = parse_models_with_format(source, format)?;
     match format {
         ModelFormat::Mongo => write_mongo_model_project(&models, out, options),
-        _ => write_model_project(&models, out, options),
+        _ => write_model_project(&models, out, options, orm),
     }
 }
 
@@ -60,6 +68,7 @@ pub async fn inspect_model_project(
     db_kind: SqlxDatabaseKind,
     out: &Path,
     options: GenerateOptions,
+    orm: ModelOrm,
 ) -> anyhow::Result<()> {
     let pool = roze_sqlx::connect(&SqlxConfig {
         kind: db_kind,
@@ -74,24 +83,30 @@ pub async fn inspect_model_project(
         SqlxPool::MySql(pool) => inspect_mysql_table(&pool, schema_name, table).await?,
     };
 
-    write_model_project(&[model], out, options)
+    write_model_project(&[model], out, options, orm)
 }
 
 fn write_model_project(
     models: &[ModelSpec],
     out: &Path,
     options: GenerateOptions,
+    orm: ModelOrm,
 ) -> anyhow::Result<()> {
     ensure_model_output(out, options.mode)?;
     let model_dir = out.join("src/model");
     fs::create_dir_all(&model_dir)?;
 
-    fs::write(model_dir.join("mod.rs"), render_model_mod(models))?;
+    fs::write(model_dir.join("mod.rs"), render_model_mod(models, orm))?;
     for model in models {
         let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
-        fs::write(module_path, render_model_module(model))?;
+        let rendered = match orm {
+            ModelOrm::SeaOrm => render_model_module(model),
+            ModelOrm::Toasty => render_toasty_model_module(model),
+        };
+        fs::write(module_path, rendered)?;
     }
 
+    update_model_dependencies(out, orm)?;
     update_main_rs(out)?;
     Ok(())
 }
@@ -144,6 +159,49 @@ fn update_main_rs(out: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", main_path.display()))
 }
 
+fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
+    if orm != ModelOrm::Toasty {
+        return Ok(());
+    }
+
+    let manifest_path = out.join("Cargo.toml");
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let mut document = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let dependencies = document
+        .get_mut("dependencies")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| {
+            anyhow::anyhow!("{} has no [dependencies] table", manifest_path.display())
+        })?;
+
+    if dependencies.contains_key("toasty") {
+        return Ok(());
+    }
+
+    let uses_workspace = content.contains("edition.workspace = true")
+        || content.contains("sea-orm.workspace = true");
+
+    let item = if uses_workspace {
+        let mut table = toml_edit::InlineTable::new();
+        table.insert("workspace", true.into());
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(table))
+    } else {
+        r#"{ version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }"#
+            .parse::<toml_edit::Item>()
+            .expect("valid toml dependency value")
+    };
+    dependencies.insert("toasty", item);
+    fs::write(&manifest_path, document.to_string())
+        .with_context(|| format!("failed to write {}", manifest_path.display()))
+}
+
 fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<String> {
     let idx = content.find(needle)?;
     let mut updated = String::with_capacity(content.len() + insert.len());
@@ -157,15 +215,20 @@ fn has_entries(path: &Path) -> anyhow::Result<bool> {
     Ok(fs::read_dir(path)?.next().is_some())
 }
 
-fn render_model_mod(models: &[ModelSpec]) -> String {
+fn render_model_mod(models: &[ModelSpec], orm: ModelOrm) -> String {
     let mut out = String::from("#![allow(dead_code, unused_imports)]\n\n");
     for model in models {
         let module = to_snake_case(&model.name);
         let pascal = to_pascal_case(&model.name);
         out.push_str(&format!("pub mod {module};\n"));
-        out.push_str(&format!(
-            "pub use {module}::{{{pascal}Repository, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
-        ));
+        match orm {
+            ModelOrm::SeaOrm => out.push_str(&format!(
+                "pub use {module}::{{{pascal}Repository, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
+            )),
+            ModelOrm::Toasty => out.push_str(&format!(
+                "pub use {module}::{{{pascal}, {pascal}Repository}};\n"
+            )),
+        }
     }
     out
 }
@@ -463,8 +526,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "        let delete_key = {}.clone();", primary).unwrap();
     writeln!(
         &mut out,
-        "        let result = Entity::delete_by_id({}).exec(db).await?;",
-        "delete_key"
+        "        let result = Entity::delete_by_id(delete_key).exec(db).await?;"
     )
     .unwrap();
     if model.cache {
@@ -656,6 +718,178 @@ fn render_model_module(model: &ModelSpec) -> String {
             writeln!(&mut out, "    }}").unwrap();
         }
     }
+    writeln!(&mut out, "}}").unwrap();
+
+    out
+}
+
+fn render_toasty_model_module(model: &ModelSpec) -> String {
+    let pascal = to_pascal_case(&model.name);
+    let primary = &model.primary;
+    let primary_ty = model
+        .fields
+        .iter()
+        .find(|field| field.name == *primary)
+        .map(|field| field.ty.clone())
+        .expect("primary field present");
+    let table_name = &model.table;
+    let cache_fields = cache_lookup_fields(model);
+    let mut out = String::new();
+    use std::fmt::Write as _;
+
+    writeln!(&mut out, "#![allow(dead_code, unused_imports)]").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"
+    )
+    .unwrap();
+    if model.schema_name.is_some() {
+        writeln!(
+            &mut out,
+            "/// Toasty maps models by table name; configure schema/database selection in the Toasty driver."
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "#[table = \"{}\"]", table_name).unwrap();
+    writeln!(&mut out, "pub struct {} {{", pascal).unwrap();
+    for field in &model.fields {
+        if field.name == *primary {
+            writeln!(&mut out, "    #[key]").unwrap();
+            if field.auto_increment {
+                writeln!(&mut out, "    #[auto]").unwrap();
+            }
+        } else if cache_fields
+            .iter()
+            .any(|cache_field| cache_field.name == field.name)
+        {
+            writeln!(&mut out, "    #[unique]").unwrap();
+        }
+        if let Some(comment) = &field.comment {
+            writeln!(&mut out, "    /// {}", comment.replace('\n', " ")).unwrap();
+        }
+        if let Some(default_value) = &field.default_value {
+            writeln!(
+                &mut out,
+                "    /// default: {}",
+                default_value.replace('\n', " ")
+            )
+            .unwrap();
+        }
+        writeln!(&mut out, "    pub {}: {},", field.name, field.ty).unwrap();
+    }
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "pub struct {}Repository;", pascal).unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "impl {}Repository {{", pascal).unwrap();
+    writeln!(&mut out, "    pub fn table_name() -> &'static str {{").unwrap();
+    writeln!(&mut out, "        \"{}\"", table_name).unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn find_by_{}(db: &mut toasty::Db, {}: &{}) -> toasty::Result<{}> {{",
+        primary, primary, primary_ty, pascal
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        {}::get_by_{}(db, {}).await",
+        pascal, primary, primary
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    for field in cache_fields.iter().filter(|field| field.name != *primary) {
+        writeln!(
+            &mut out,
+            "    pub async fn find_by_{}(db: &mut toasty::Db, {}: &{}) -> toasty::Result<{}> {{",
+            field.name, field.name, field.ty, pascal
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        {}::get_by_{}(db, {}).await",
+            pascal, field.name, field.name
+        )
+        .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+    }
+    writeln!(
+        &mut out,
+        "    pub async fn list(db: &mut toasty::Db) -> toasty::Result<Vec<{}>> {{",
+        pascal
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        {}::all().collect::<Vec<_>>(db).await",
+        pascal
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn insert(db: &mut toasty::Db, model: {}) -> toasty::Result<{}> {{",
+        pascal, pascal
+    )
+    .unwrap();
+    write!(&mut out, "        {}::create()", pascal).unwrap();
+    for field in &model.fields {
+        if field.auto_increment {
+            continue;
+        }
+        write!(
+            &mut out,
+            "\n            .{}(model.{})",
+            field.name, field.name
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "\n            .exec(db)\n            .await").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn update(db: &mut toasty::Db, mut model: {}) -> toasty::Result<{}> {{",
+        pascal, pascal
+    )
+    .unwrap();
+    write!(&mut out, "        model.update()").unwrap();
+    for field in &model.fields {
+        if field.name == *primary {
+            continue;
+        }
+        write!(
+            &mut out,
+            "\n            .{}(model.{}.clone())",
+            field.name, field.name
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "\n            .exec(db)\n            .await?;").unwrap();
+    writeln!(&mut out, "        Ok(model)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn delete_by_{}(db: &mut toasty::Db, {}: &{}) -> toasty::Result<()> {{",
+        primary, primary, primary_ty
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let model = {}::get_by_{}(db, {}).await?;",
+        pascal, primary, primary
+    )
+    .unwrap();
+    writeln!(&mut out, "        model.delete().exec(db).await").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out, "}}").unwrap();
 
     out
@@ -1441,6 +1675,7 @@ fn build_inspected_model(
         fields.push(ModelField {
             name: column.name,
             ty,
+            auto_increment: column.auto_increment,
             default_value: column.default_value,
             comment: column.comment,
         });
@@ -1661,6 +1896,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 fields.push(ModelField {
                     name: field_name.to_string(),
                     ty: field_ty.to_string(),
+                    auto_increment: false,
                     default_value: None,
                     comment: None,
                 });
@@ -1932,6 +2168,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
             ModelField {
                 name: field.name,
                 ty,
+                auto_increment: field.auto_increment,
                 default_value: field.default_value,
                 comment: field.comment,
             }
@@ -2667,12 +2904,14 @@ mod tests {
                 ModelField {
                     name: "id".to_string(),
                     ty: "i64".to_string(),
+                    auto_increment: true,
                     default_value: None,
                     comment: None,
                 },
                 ModelField {
                     name: "name".to_string(),
                     ty: "String".to_string(),
+                    auto_increment: false,
                     default_value: None,
                     comment: None,
                 },
@@ -2683,6 +2922,79 @@ mod tests {
         assert!(rendered.contains("DeriveEntityModel"));
         assert!(rendered.contains("pub async fn cached_find_by_id"));
         assert!(rendered.contains("pub async fn delete_by_id"));
+    }
+
+    #[test]
+    fn renders_toasty_model_and_repository() {
+        let source = r#"
+        CREATE TABLE users (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            email VARCHAR(255) NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            nickname VARCHAR(255) NULL,
+            UNIQUE KEY uniq_users_email (email)
+        );
+        "#;
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let rendered = render_toasty_model_module(&models[0]);
+
+        assert!(rendered
+            .contains("#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"));
+        assert!(rendered.contains("#[table = \"users\"]"));
+        assert!(rendered.contains("#[key]\n    #[auto]\n    pub id: u64"));
+        assert!(rendered.contains("#[unique]\n    pub email: String"));
+        assert!(rendered.contains("pub async fn find_by_id(db: &mut toasty::Db, id: &u64)"));
+        assert!(
+            rendered.contains("pub async fn find_by_email(db: &mut toasty::Db, email: &String)")
+        );
+        assert!(rendered.contains("User::all().collect::<Vec<_>>(db).await"));
+        assert!(rendered.contains(".email(model.email)"));
+        assert!(!rendered.contains(".id(model.id)"));
+    }
+
+    #[test]
+    fn toasty_generation_updates_manifest_dependency() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-toasty-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "user-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+sea-orm.workspace = true
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            CREATE TABLE users (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Sql,
+            ModelOrm::Toasty,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains("toasty = { workspace = true }"));
+        let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
+        assert!(module.contains("toasty::Model"));
+        let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
+        assert!(mod_rs.contains("pub use user::{User, UserRepository};"));
     }
 
     #[test]
@@ -2762,6 +3074,7 @@ mod types;
             SqlxDatabaseKind::Sqlite,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelOrm::SeaOrm,
         )
         .await
         .expect("inspect");
@@ -2817,6 +3130,7 @@ mod types;
             SqlxDatabaseKind::Postgres,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelOrm::SeaOrm,
         )
         .await
         .expect("inspect");
@@ -2877,6 +3191,7 @@ mod types;
             SqlxDatabaseKind::MySql,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelOrm::SeaOrm,
         )
         .await
         .expect("inspect");
@@ -2942,6 +3257,7 @@ mod types;
             SqlxDatabaseKind::Sqlite,
             &inspect_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelOrm::SeaOrm,
         )
         .await
         .expect("inspect");
@@ -2951,6 +3267,7 @@ mod types;
             &generate_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelFormat::Sql,
+            ModelOrm::SeaOrm,
         )
         .expect("generate");
 
@@ -3020,6 +3337,7 @@ mod types;
             SqlxDatabaseKind::Postgres,
             &inspect_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelOrm::SeaOrm,
         )
         .await
         .expect("inspect");
@@ -3029,6 +3347,7 @@ mod types;
             &generate_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelFormat::Sql,
+            ModelOrm::SeaOrm,
         )
         .expect("generate");
 
@@ -3091,6 +3410,7 @@ mod types;
             SqlxDatabaseKind::MySql,
             &inspect_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelOrm::SeaOrm,
         )
         .await
         .expect("inspect");
@@ -3100,6 +3420,7 @@ mod types;
             &generate_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelFormat::Sql,
+            ModelOrm::SeaOrm,
         )
         .expect("generate");
 

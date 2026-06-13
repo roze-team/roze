@@ -110,6 +110,7 @@ pub enum GeneratorCommand {
         out: PathBuf,
         options: GenerateOptions,
         format: model::ModelFormat,
+        orm: model::ModelOrm,
     },
     ModelInspect {
         table: String,
@@ -118,6 +119,7 @@ pub enum GeneratorCommand {
         db_kind: roze_sqlx::SqlxDatabaseKind,
         out: PathBuf,
         options: GenerateOptions,
+        orm: model::ModelOrm,
     },
 }
 
@@ -719,10 +721,11 @@ fn model_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
             out,
             options,
             format,
+            orm,
         } => {
             let source = fs::read_to_string(&schema)
                 .with_context(|| format!("failed to read {}", schema.display()))?;
-            model::generate_model_project(&source, &out, options, format)
+            model::generate_model_project(&source, &out, options, format, orm)
                 .with_context(|| format!("failed to generate model scaffold at {}", out.display()))
         }
         other => bail!("unexpected command variant for model.generate: {other:?}"),
@@ -738,6 +741,7 @@ fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
             db_kind,
             out,
             options,
+            orm,
         } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -751,6 +755,7 @@ fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
                     db_kind,
                     &out,
                     options,
+                    orm,
                 )
                 .await
                 .with_context(|| format!("failed to inspect model for table `{table}`"))

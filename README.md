@@ -107,6 +107,25 @@ The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
 inspects an existing database schema and emits the same SeaORM-based model
 scaffold. SeaORM remains the default ORM for generated database code.
+Pass `--orm toasty` to generate Toasty model structs and repository helpers
+instead:
+
+```bash
+rozectl model generate example/user.sql \
+  --out apps/roze-example \
+  --format sql \
+  --orm toasty
+
+rozectl model mysql ddl \
+  -src example/user.sql \
+  -dir apps/roze-example \
+  --orm toasty
+```
+
+The Toasty output uses `#[derive(toasty::Model)]`, preserves auto-increment
+primary keys with `#[auto]`, marks generated cache-key lookups as `#[unique]`,
+and adds `toasty` to the target service manifest when a `Cargo.toml` is
+present. It expects application code to pass a configured `toasty::Db`.
 
 Use `--schema` to make the target schema explicit when the table name is
 shared across namespaces:
@@ -136,7 +155,8 @@ rozectl model inspect db.users \
   --out apps/roze-example
 ```
 
-The generated model keeps the schema name in the SeaORM entity attributes.
+The generated SeaORM model keeps the schema name in the entity attributes.
+For Toasty, choose the schema/database through the Toasty driver configuration.
 
 Example SQL input:
 

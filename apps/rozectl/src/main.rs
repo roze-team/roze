@@ -35,6 +35,14 @@ enum ModelFormat {
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum ModelOrm {
+    #[default]
+    #[value(name = "sea-orm")]
+    SeaOrm,
+    Toasty,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum DbKind {
     #[default]
     Sqlite,
@@ -59,6 +67,15 @@ impl From<ModelFormat> for generator::model::ModelFormat {
             ModelFormat::Dsl => Self::Dsl,
             ModelFormat::Sql => Self::Sql,
             ModelFormat::Mongo => Self::Mongo,
+        }
+    }
+}
+
+impl From<ModelOrm> for generator::model::ModelOrm {
+    fn from(value: ModelOrm) -> Self {
+        match value {
+            ModelOrm::SeaOrm => Self::SeaOrm,
+            ModelOrm::Toasty => Self::Toasty,
         }
     }
 }
@@ -365,6 +382,8 @@ enum ModelCommands {
         roze_source: RozeSource,
         #[arg(long, value_enum, default_value_t)]
         format: ModelFormat,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
     },
     Inspect {
         table: String,
@@ -382,6 +401,8 @@ enum ModelCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
     },
     Mysql {
         #[command(subcommand)]
@@ -418,6 +439,8 @@ enum MysqlModelCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
     },
     Datasource {
         #[arg(short = 'u', long = "url")]
@@ -432,6 +455,8 @@ enum MysqlModelCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
     },
 }
 
@@ -452,6 +477,8 @@ enum PgModelCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
     },
 }
 
@@ -615,6 +642,7 @@ fn main() -> anyhow::Result<()> {
                 update,
                 roze_source,
                 format,
+                orm,
             } => registry.dispatch(GeneratorCommand::ModelGenerate {
                 schema,
                 out,
@@ -629,6 +657,7 @@ fn main() -> anyhow::Result<()> {
                     roze_source.into(),
                 ),
                 format: format.into(),
+                orm: orm.into(),
             })?,
             ModelCommands::Inspect {
                 table,
@@ -639,6 +668,7 @@ fn main() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
+                orm,
             } => registry.dispatch(GeneratorCommand::ModelInspect {
                 table,
                 schema,
@@ -655,6 +685,7 @@ fn main() -> anyhow::Result<()> {
                     },
                     roze_source.into(),
                 ),
+                orm: orm.into(),
             })?,
             ModelCommands::Mysql { command } => match command {
                 MysqlModelCommands::Ddl {
@@ -663,11 +694,13 @@ fn main() -> anyhow::Result<()> {
                     force,
                     update,
                     roze_source,
+                    orm,
                 } => registry.dispatch(GeneratorCommand::ModelGenerate {
                     schema: src,
                     out: dir,
                     options: options(force, update, roze_source),
                     format: generator::model::ModelFormat::Sql,
+                    orm: orm.into(),
                 })?,
                 MysqlModelCommands::Datasource {
                     url,
@@ -676,6 +709,7 @@ fn main() -> anyhow::Result<()> {
                     force,
                     update,
                     roze_source,
+                    orm,
                 } => registry.dispatch(GeneratorCommand::ModelInspect {
                     table,
                     schema: None,
@@ -683,6 +717,7 @@ fn main() -> anyhow::Result<()> {
                     db_kind: SqlxDatabaseKind::MySql,
                     out: dir,
                     options: options(force, update, roze_source),
+                    orm: orm.into(),
                 })?,
             },
             ModelCommands::Pg { command } => match command {
@@ -694,6 +729,7 @@ fn main() -> anyhow::Result<()> {
                     force,
                     update,
                     roze_source,
+                    orm,
                 } => registry.dispatch(GeneratorCommand::ModelInspect {
                     table,
                     schema,
@@ -701,6 +737,7 @@ fn main() -> anyhow::Result<()> {
                     db_kind: SqlxDatabaseKind::Postgres,
                     out: dir,
                     options: options(force, update, roze_source),
+                    orm: orm.into(),
                 })?,
             },
             ModelCommands::Mongo {
@@ -971,6 +1008,21 @@ mod tests {
             }
         ));
 
+        let toasty = Cli::try_parse_from([
+            "rozectl", "model", "generate", "user.sql", "--format", "sql", "--orm", "toasty",
+        ])
+        .expect("parse toasty model generate");
+        assert!(matches!(
+            toasty.command,
+            Commands::Model {
+                command: ModelCommands::Generate {
+                    format: ModelFormat::Sql,
+                    orm: ModelOrm::Toasty,
+                    ..
+                }
+            }
+        ));
+
         let api_go = parse(["rozectl", "api", "go", "-api", "user.api", "-dir", "out"]);
         assert!(matches!(
             api_go.command,
@@ -1065,6 +1117,22 @@ mod tests {
             Commands::Model {
                 command: ModelCommands::Mysql {
                     command: MysqlModelCommands::Ddl { .. }
+                }
+            }
+        ));
+
+        let mysql_ddl_toasty = parse([
+            "rozectl", "model", "mysql", "ddl", "-src", "user.sql", "-dir", "out", "--orm",
+            "toasty",
+        ]);
+        assert!(matches!(
+            mysql_ddl_toasty.command,
+            Commands::Model {
+                command: ModelCommands::Mysql {
+                    command: MysqlModelCommands::Ddl {
+                        orm: ModelOrm::Toasty,
+                        ..
+                    }
                 }
             }
         ));

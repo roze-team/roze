@@ -379,6 +379,7 @@ SQL DDL:
 ```bash
 rozectl model generate example/user.sql --out services/user-api --format sql
 rozectl model mysql ddl -src example/user.sql -dir services/user-api
+rozectl model generate example/user.sql --out services/user-api --format sql --orm toasty
 ```
 
 Database inspection:
@@ -387,7 +388,12 @@ Database inspection:
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
 rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api
 rozectl model pg datasource -url postgres://postgres:postgres@127.0.0.1:5432/roze -schema public -table users -dir services/user-api
+rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api --orm toasty
 ```
+
+SeaORM is the default SQL ORM. `--orm toasty` switches SQL/DSL/inspection output
+to Toasty model structs with repository helpers that accept `&mut toasty::Db`.
+Mongo generation is separate and is not affected by `--orm`.
 
 Mongo model generation does not require a DSL file:
 
