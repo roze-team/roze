@@ -267,19 +267,14 @@ pub struct TelemetryConfig {
     pub batcher: TelemetryBatcher,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TelemetryBatcher {
+    #[default]
     #[serde(alias = "otlpgrpc")]
     OtlpGrpc,
     #[serde(alias = "otlphttp")]
     OtlpHttp,
-}
-
-impl Default for TelemetryBatcher {
-    fn default() -> Self {
-        Self::OtlpGrpc
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,17 +305,12 @@ pub struct DatabaseConfig {
     pub sqlx_logging: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DatabaseReadPolicy {
+    #[default]
     RoundRobin,
     Random,
-}
-
-impl Default for DatabaseReadPolicy {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

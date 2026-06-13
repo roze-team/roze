@@ -70,7 +70,7 @@ impl MetricRegistry {
                     let joined = labels
                         .0
                         .iter()
-                        .map(|(key, value)| format!(r#"{key}="{value}""#))
+                        .map(|(key, value)| format!(r#"{key}="{}""#, escape_label_value(value)))
                         .collect::<Vec<_>>()
                         .join(",");
                     format!("{{{joined}}}")
@@ -154,7 +154,7 @@ pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
     let elapsed_ms = REQUEST_ELAPSED_MS.load(Ordering::Relaxed);
-    let avg_ms = if total == 0 { 0 } else { elapsed_ms / total };
+    let avg_ms = elapsed_ms.checked_div(total).unwrap_or(0);
 
     let mut out = format!(
         concat!(
@@ -190,6 +190,13 @@ pub fn rpc_metrics_registry() -> &'static MetricRegistry {
     RPC_METRICS.get_or_init(MetricRegistry::new)
 }
 
+fn escape_label_value(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +222,19 @@ mod tests {
         let rendered = registry.render();
         assert!(rendered.contains("roze_jobs_total"));
         assert!(rendered.contains("roze_queue_depth"));
+    }
+
+    #[test]
+    fn escapes_label_values() {
+        let registry = MetricRegistry::new();
+        registry.inc_counter(
+            "roze_events_total",
+            MetricLabels::new().insert("path", "C:\\tmp\n\"quoted\""),
+            1,
+        );
+
+        let rendered = registry.render();
+        assert!(rendered.contains(r#"path="C:\\tmp\n\"quoted\"""#));
     }
 
     #[test]

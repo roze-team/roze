@@ -7,6 +7,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, config::ConfigError> {
     roze_config::load(path)
 }
 
+#[allow(dead_code)]
 pub async fn load_with_config_center(path: impl AsRef<Path>) -> anyhow::Result<Config> {
     Ok(load_with_config_center_with_center(path).await?.0)
 }

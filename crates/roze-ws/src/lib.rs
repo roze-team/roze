@@ -65,6 +65,13 @@ impl WsHub {
     pub fn len(&self) -> usize {
         self.sessions.lock().expect("ws hub lock poisoned").len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions
+            .lock()
+            .expect("ws hub lock poisoned")
+            .is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -74,8 +81,10 @@ mod tests {
     #[test]
     fn registers_sessions() {
         let hub = WsHub::default();
+        assert!(hub.is_empty());
         hub.register(WsSession::new("s1"));
         assert_eq!(hub.len(), 1);
+        assert!(!hub.is_empty());
         assert!(hub.get("s1").is_some());
     }
 }

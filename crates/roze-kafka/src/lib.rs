@@ -29,9 +29,6 @@ use regex::Regex;
 #[cfg(feature = "rdkafka")]
 use rdkafka::message::OwnedHeaders;
 
-#[cfg(feature = "rdkafka")]
-use tracing;
-
 type DeliveryActionFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 type DeliveryAction = Arc<dyn Fn() -> DeliveryActionFuture + Send + Sync + 'static>;
 
@@ -450,13 +447,13 @@ impl RdkafkaProducer {
         }
 
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &config.brokers_csv())
-            .set("client.id", &config.client_id_or_default())
-            .set("acks", &config.acks)
-            .set("batch.size", &config.batch_size.to_string())
-            .set("linger.ms", &config.linger_ms.to_string())
-            .set("message.send.max.retries", &config.max_retries.to_string())
-            .set("retry.backoff.ms", &config.retry_backoff_ms.to_string())
+            .set("bootstrap.servers", config.brokers_csv())
+            .set("client.id", config.client_id_or_default())
+            .set("acks", config.acks.as_str())
+            .set("batch.size", config.batch_size.to_string())
+            .set("linger.ms", config.linger_ms.to_string())
+            .set("message.send.max.retries", config.max_retries.to_string())
+            .set("retry.backoff.ms", config.retry_backoff_ms.to_string())
             .create()?;
 
         Ok(Self { producer, config })
@@ -669,21 +666,21 @@ impl RdkafkaSubscriber {
         }
 
         let consumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.config.brokers_csv())
-            .set("client.id", &self.config.client_id_or_default())
-            .set("group.id", &self.config.group_id_or_default())
-            .set("auto.offset.reset", &self.config.auto_offset_reset)
+            .set("bootstrap.servers", self.config.brokers_csv())
+            .set("client.id", self.config.client_id_or_default())
+            .set("group.id", self.config.group_id_or_default())
+            .set("auto.offset.reset", self.config.auto_offset_reset.as_str())
             .set(
                 "session.timeout.ms",
-                &self.config.session_timeout_ms.to_string(),
+                self.config.session_timeout_ms.to_string(),
             )
             .set(
                 "heartbeat.interval.ms",
-                &self.config.heartbeat_interval_ms.to_string(),
+                self.config.heartbeat_interval_ms.to_string(),
             )
             .set(
                 "max.poll.interval.ms",
-                &self.config.max_poll_interval_ms.to_string(),
+                self.config.max_poll_interval_ms.to_string(),
             )
             .set(
                 "enable.auto.commit",

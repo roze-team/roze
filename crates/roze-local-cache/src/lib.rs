@@ -99,6 +99,10 @@ where
         self.entries.read().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
+
     pub async fn get_or_insert_with<F, Fut>(&self, key: K, factory: F) -> V
     where
         F: FnOnce() -> Fut,
@@ -137,8 +141,10 @@ mod tests {
     async fn respects_ttl() {
         let cache = LocalCache::with_ttl(Duration::from_millis(15));
         cache.insert("key", "value").await;
-        assert_eq!(cache.get(&"key").await.as_deref(), Some("value"));
+        assert!(!cache.is_empty().await);
+        assert_eq!(cache.get(&"key").await, Some("value"));
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert_eq!(cache.get(&"key").await, None);
+        assert!(cache.is_empty().await);
     }
 }

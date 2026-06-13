@@ -551,7 +551,7 @@ fn parse_rpc_method(input: &str, line_no: usize) -> Result<RpcMethod, ParseError
     })
 }
 
-fn parse_signature(input: &str, line_no: usize) -> Result<(String, String), ParseError> {
+fn parse_signature(input: &str, _line_no: usize) -> Result<(String, String), ParseError> {
     let trimmed = input.trim();
     let Some(returns_at) = trimmed.find("returns") else {
         return Ok((

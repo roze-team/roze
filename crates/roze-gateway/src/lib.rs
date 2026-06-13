@@ -106,7 +106,7 @@ pub fn build_router(
     }
 
     let mut routes = compile_routes(config.routes);
-    routes.sort_by(|left, right| right.path.len().cmp(&left.path.len()));
+    routes.sort_by_key(|route| std::cmp::Reverse(route.path.len()));
     if routes.is_empty() && !runtime.services.is_empty() {
         if let Some(service) = first_service_name(runtime.services.keys().collect::<Vec<_>>()) {
             warn!(
@@ -146,7 +146,7 @@ pub fn build_router(
                 cors.max_age_seconds,
             )
         })
-        .unwrap_or_else(Cors::new);
+        .unwrap_or_default();
 
     app.with_if(has_cors, cors)
 }
@@ -183,7 +183,7 @@ impl GatewayRuntime {
             ));
         };
 
-        let _ = self.inject_trace_headers(&mut req);
+        self.inject_trace_headers(&mut req);
 
         if !route.method_allowed(&request_method) {
             warn!(
@@ -673,10 +673,7 @@ async fn build_upstream_response(upstream_response: ReqwestResponse) -> anyhow::
     let headers = upstream_response.headers().clone();
     let body = upstream_response.bytes().await?;
     let mut poem_response = Response::builder()
-        .status(
-            StatusCode::from_u16(status.as_u16())
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR),
-        )
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .body(body.to_vec());
 
     for (name, value) in &headers {
@@ -699,7 +696,7 @@ fn build_cors(
         if allow_origins.len() == 1 {
             cors = cors.allow_origin(&allow_origins[0]);
         } else {
-            cors = cors.allow_origin_regex(&allow_origins.join("|"));
+            cors = cors.allow_origin_regex(allow_origins.join("|"));
         }
     }
     if !allow_methods.is_empty() {

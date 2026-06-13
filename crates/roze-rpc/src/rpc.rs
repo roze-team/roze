@@ -150,6 +150,7 @@ impl Drop for ServiceRegistrationGuard {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn auth_interceptor(
     config: JwtConfig,
 ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
@@ -484,6 +485,7 @@ pub fn method_policy(
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn begin_method(
     service: impl Into<String>,
     method: impl Into<String>,
@@ -558,6 +560,7 @@ fn retry_delay(base: Duration, attempt: usize) -> Duration {
     base.saturating_mul(factor)
 }
 
+#[allow(clippy::result_large_err)]
 fn enforce_method_rate_limit(key: &str, config: &MethodRateLimitConfig) -> Result<(), Status> {
     let mut states = METHOD_RATE_LIMITS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -831,8 +834,10 @@ mod tests {
 
     #[test]
     fn method_policy_prefers_method_override() {
-        let mut governance = roze_config::GovernanceConfig::default();
-        governance.timeout_ms = Some(1000);
+        let mut governance = roze_config::GovernanceConfig {
+            timeout_ms: Some(1000),
+            ..Default::default()
+        };
         governance.routes.insert(
             "GetUser".into(),
             roze_config::RouteGovernanceConfig {

@@ -127,9 +127,8 @@ where
                 .headers()
                 .get("authorization")
                 .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| RozeError::Unauthorized)?;
-            let token =
-                extract_bearer_token(header_value).ok_or_else(|| RozeError::Unauthorized)?;
+                .ok_or(RozeError::Unauthorized)?;
+            let token = extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;
             let claims =
                 verify_token(token, &config).map_err(|err| RozeError::Internal(err.to_string()))?;
             req.extensions_mut().insert(principal_from_claims(&claims));
@@ -730,12 +729,14 @@ mod tests {
 
     #[test]
     fn route_policy_prefers_route_over_global() {
-        let mut governance = GovernanceConfig::default();
-        governance.timeout_ms = Some(1000);
-        governance.rate_limit = Some(roze_config::RateLimitConfig {
-            burst: 10,
-            refill_ms: 20,
-        });
+        let mut governance = GovernanceConfig {
+            timeout_ms: Some(1000),
+            rate_limit: Some(roze_config::RateLimitConfig {
+                burst: 10,
+                refill_ms: 20,
+            }),
+            ..Default::default()
+        };
         governance.routes.insert(
             "login".into(),
             RouteGovernanceConfig {

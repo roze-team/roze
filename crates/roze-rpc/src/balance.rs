@@ -121,7 +121,7 @@ pub fn build_balancer(kind: BalancerKind) -> Box<dyn Balancer> {
         BalancerKind::RoundRobin => Box::new(RoundRobinBalancer::default()),
         BalancerKind::WeightedRoundRobin => Box::new(WeightedRoundRobinBalancer::default()),
         BalancerKind::PowerOfTwoChoices => Box::new(PowerOfTwoChoicesBalancer::default()),
-        BalancerKind::HealthAware => Box::new(HealthAwareBalancer::default()),
+        BalancerKind::HealthAware => Box::new(HealthAwareBalancer),
     }
 }
 
@@ -160,7 +160,7 @@ mod tests {
         b.metadata.insert("healthy".into(), "true".into());
         b.metadata.insert("load".into(), "1".into());
 
-        let balancer = HealthAwareBalancer::default();
+        let balancer = HealthAwareBalancer;
         let picked = balancer.pick(&[a, b.clone()]).expect("pick");
         assert_eq!(picked.addr, b.addr);
     }

@@ -33,6 +33,7 @@ impl std::fmt::Display for PipelineFailureReason {
 
 const USER_TOPIC: &str = "events";
 
+#[derive(Default)]
 struct RunningKafkaPipeline {
     producer: Option<roze_kafka::RdkafkaProducer>,
     consumer_handles: Vec<tokio::task::JoinHandle<()>>,
@@ -99,15 +100,6 @@ impl RunningKafkaPipeline {
             signature = %signature,
             "kafka pipeline stopped"
         );
-    }
-}
-
-impl Default for RunningKafkaPipeline {
-    fn default() -> Self {
-        Self {
-            producer: None,
-            consumer_handles: Vec::new(),
-        }
     }
 }
 

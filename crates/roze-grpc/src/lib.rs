@@ -162,6 +162,7 @@ pub fn metadata_timeout<T>(request: &Request<T>) -> Option<Duration> {
     Some(Duration::from_millis(millis))
 }
 
+#[allow(clippy::result_large_err)]
 pub fn with_trace_interceptor(
     context: Context,
 ) -> impl FnMut(Request<()>) -> Result<Request<()>, transport::Status> + Clone {

@@ -74,59 +74,52 @@ where
     pub config: Option<T>,
 }
 
+#[derive(Debug, Clone)]
+struct ReloadMetadata {
+    version: u64,
+    old_version: u64,
+    hash: String,
+    old_hash: String,
+    namespace: Option<String>,
+    app: Option<String>,
+    key: Option<String>,
+    source: String,
+}
+
 impl<T> ReloadResult<T>
 where
     T: Clone,
 {
-    fn success(
-        version: u64,
-        old_version: u64,
-        hash: String,
-        old_hash: String,
-        namespace: Option<String>,
-        app: Option<String>,
-        key: Option<String>,
-        source: String,
-        config: T,
-    ) -> Self {
+    fn success(meta: ReloadMetadata, config: T) -> Self {
+        let changed = meta.old_hash != meta.hash;
         Self {
-            version,
-            old_version,
-            hash: hash.clone(),
-            old_hash: old_hash.clone(),
+            version: meta.version,
+            old_version: meta.old_version,
+            hash: meta.hash,
+            old_hash: meta.old_hash,
             ts_millis: current_millis(),
-            source,
-            namespace,
-            app,
-            key,
-            changed: old_hash != hash,
+            source: meta.source,
+            namespace: meta.namespace,
+            app: meta.app,
+            key: meta.key,
+            changed,
             success: true,
             error: None,
             config: Some(config),
         }
     }
 
-    fn failed(
-        version: u64,
-        old_version: u64,
-        hash: String,
-        old_hash: String,
-        namespace: Option<String>,
-        app: Option<String>,
-        key: Option<String>,
-        source: String,
-        error: impl Into<String>,
-    ) -> Self {
+    fn failed(meta: ReloadMetadata, error: impl Into<String>) -> Self {
         Self {
-            version,
-            old_version,
-            hash,
-            old_hash,
+            version: meta.version,
+            old_version: meta.old_version,
+            hash: meta.hash,
+            old_hash: meta.old_hash,
             ts_millis: current_millis(),
-            source,
-            namespace,
-            app,
-            key,
+            source: meta.source,
+            namespace: meta.namespace,
+            app: meta.app,
+            key: meta.key,
             changed: false,
             success: false,
             error: Some(error.into()),
@@ -396,14 +389,16 @@ async fn watch_loop<T>(
             Err(err) => {
                 let old_version = inner.version.load(Ordering::SeqCst);
                 let result = ReloadResult::failed(
-                    old_version + 1,
-                    old_version,
-                    snapshot_hash,
-                    last_hash.clone(),
-                    options.namespace.clone(),
-                    options.app.clone(),
-                    options.key.clone(),
-                    source.clone(),
+                    ReloadMetadata {
+                        version: old_version + 1,
+                        old_version,
+                        hash: snapshot_hash,
+                        old_hash: last_hash.clone(),
+                        namespace: options.namespace.clone(),
+                        app: options.app.clone(),
+                        key: options.key.clone(),
+                        source: source.clone(),
+                    },
                     err.to_string(),
                 );
 
@@ -433,14 +428,16 @@ async fn watch_loop<T>(
         }
 
         let result = ReloadResult::success(
-            next_version,
-            old_version,
-            last_hash.clone(),
-            old_hash,
-            options.namespace.clone(),
-            options.app.clone(),
-            options.key.clone(),
-            source.clone(),
+            ReloadMetadata {
+                version: next_version,
+                old_version,
+                hash: last_hash.clone(),
+                old_hash,
+                namespace: options.namespace.clone(),
+                app: options.app.clone(),
+                key: options.key.clone(),
+                source: source.clone(),
+            },
             parsed.clone(),
         );
 
