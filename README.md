@@ -32,6 +32,7 @@ The Loco/Rails lesson applied here is convention over configuration: generated s
 
 - [Usage documentation](docs/usage/README.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
+- [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)
 
 ## Quick Start
 
@@ -77,6 +78,19 @@ parameters, query parameters, headers, and JSON bodies.
 `rozectl openapi generate example/user.api --out openapi.json` writes an
 OpenAPI 3 document with component schemas, route parameters, JSON/form request
 bodies, response schemas, tags, and bearer security when JWT is declared.
+
+goctl-compatible aliases are available for the common generator flow:
+
+```bash
+rozectl api go -api example/user.api -dir apps/roze-example
+rozectl rpc protoc example/user.proto --zrpc_out apps/user-rpc
+rozectl model mysql ddl -src example/user.sql -dir apps/roze-example
+rozectl model mongo --type User -dir apps/roze-example
+rozectl docker -go main.go --binary user-api --port 8080
+rozectl kube deploy --name user-api --image registry.example.com/user-api:latest
+rozectl api swagger -api example/user.api -dir docs/openapi --format yaml
+rozectl api doc -api example/user.api -dir . -o docs/api
+```
 
 `rozectl model generate example/user.model --out apps/roze-example` writes a
 SeaORM-style model scaffold into an existing service. The model generator

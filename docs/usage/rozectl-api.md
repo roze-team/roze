@@ -13,6 +13,12 @@ Generate a REST service:
 cargo run -p rozectl -- api generate example/user.api --out apps/roze-example --roze-source path
 ```
 
+The goctl-compatible alias is also supported:
+
+```bash
+rozectl api go -api example/user.api -dir apps/roze-example --roze-source path
+```
+
 Regenerate framework-owned files while preserving user logic and config:
 
 ```bash
@@ -30,11 +36,57 @@ rozectl api client js example/user.api --out sdk/user.js
 rozectl api client dart example/user.api --out sdk/user.dart
 ```
 
+goctl-compatible client aliases:
+
+```bash
+rozectl api ts -api example/user.api -dir sdk
+rozectl api dart -api example/user.api -dir sdk
+```
+
 Generate an OpenAPI 3 document:
 
 ```bash
 rozectl openapi generate example/user.api --out openapi.json
+rozectl api swagger -api example/user.api -dir docs/openapi --format json
+rozectl api swagger -api example/user.api -dir docs/openapi --format yaml
 ```
+
+Generate Markdown API documentation:
+
+```bash
+rozectl api doc -api example/user.api -dir . -o docs/api
+```
+
+Run a custom API plugin:
+
+```bash
+rozectl api plugin -p ./tools/rozectl-plugin.sh -api example/user.api -dir generated
+```
+
+Generate an RPC service from a real `.proto` file:
+
+```bash
+rozectl rpc protoc example/user.proto --zrpc_out services/user-rpc
+```
+
+Generate models:
+
+```bash
+rozectl model mysql ddl -src example/user.sql -dir services/user-api
+rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api
+rozectl model pg datasource -url postgres://postgres:postgres@127.0.0.1:5432/roze -schema public -table users -dir services/user-api
+rozectl model mongo --type User -dir services/user-api
+```
+
+Generate deployment files:
+
+```bash
+rozectl docker -go main.go --port 8080 --binary user-api
+rozectl kube deploy --name user-api --image registry.example.com/user-api:latest --port 8080
+```
+
+See [goctl compatibility](./rozectl-goctl-compat.md) for a direct command
+mapping table.
 
 ## Supported `.api` syntax
 
@@ -265,7 +317,8 @@ for scalar request-level checks: `required`, `min`, `max`, `len`, `oneof`,
 
 ## OpenAPI output
 
-`rozectl openapi generate` and generated REST services expose OpenAPI data with:
+`rozectl openapi generate`, `rozectl api swagger`, and generated REST services
+expose OpenAPI data with:
 
 - component schemas for `.api` types
 - route parameters for path/query/header/form fields
@@ -278,6 +331,121 @@ for scalar request-level checks: `required`, `min`, `max`, `len`, `oneof`,
 
 The generated service also serves the document at `/openapi.json`, including
 route-scoped prefixes.
+
+`rozectl api swagger` writes `swagger.json` by default and `swagger.yaml` when
+`--format yaml` is used.
+
+## RPC proto generation
+
+`rozectl rpc protoc` accepts proto3 source directly. It parses package,
+message, field, service, and `rpc` method declarations, then generates a
+Rust-native tonic service project:
+
+```text
+Cargo.toml
+build.rs
+config.yaml
+proto/service.proto
+proto/source.proto
+src/config.rs
+src/pb.rs
+src/rpc.rs
+src/client.rs
+src/logic/mod.rs
+src/svc/mod.rs
+```
+
+`proto/source.proto` preserves the input file. `proto/service.proto` is the
+normalized build input used by the generated Rust project.
+
+## Model generation
+
+The model generator supports the original Roze commands and goctl-compatible
+aliases.
+
+SQL DDL:
+
+```bash
+rozectl model generate example/user.sql --out services/user-api --format sql
+rozectl model mysql ddl -src example/user.sql -dir services/user-api
+```
+
+Database inspection:
+
+```bash
+rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
+rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api
+rozectl model pg datasource -url postgres://postgres:postgres@127.0.0.1:5432/roze -schema public -table users -dir services/user-api
+```
+
+Mongo model generation does not require a DSL file:
+
+```bash
+rozectl model mongo --type User -dir services/user-api
+```
+
+The Mongo output creates a Rust module with a model type, repository, typed CRUD
+helpers, cache helper stubs, and common error helpers.
+
+## Dockerfile generation
+
+`rozectl docker -go main.go` is a compatibility command. Roze services are
+Rust-native, so the generated file is a multi-stage Rust build:
+
+```bash
+rozectl docker -go main.go \
+  --builder-image rust:1.87-bookworm \
+  --base-image debian:bookworm-slim \
+  --binary user-api \
+  --port 8080 \
+  --timezone Asia/Shanghai \
+  --out Dockerfile
+```
+
+The `-go` value is accepted for goctl command shape compatibility; the runtime
+binary is controlled by `--binary`.
+
+## Kubernetes generation
+
+`rozectl kube deploy` writes a manifest with Deployment, Service, and HPA
+resources. The default output path is `deploy/kubernetes.yaml`.
+
+```bash
+rozectl kube deploy \
+  --name user-api \
+  --namespace default \
+  --image registry.example.com/user-api:latest \
+  --replicas 2 \
+  --port 8080 \
+  --cpu-request 100m \
+  --memory-request 128Mi \
+  --cpu-limit 500m \
+  --memory-limit 512Mi \
+  --min-replicas 2 \
+  --max-replicas 5 \
+  --target-cpu 70 \
+  --env-file .env \
+  --config-map user-api-config
+```
+
+## Plugin contract
+
+`rozectl api plugin` parses `.api` once, serializes the normalized API spec to
+JSON, then runs the plugin command.
+
+```bash
+rozectl api plugin -p ./tools/api-plugin.sh -api example/user.api -dir generated
+```
+
+The plugin receives the same JSON payload through stdin and environment:
+
+| Name | Value |
+| --- | --- |
+| `ROZECTL_API_SPEC_JSON` | normalized API spec JSON |
+| `ROZECTL_API_FILE` | source `.api` path |
+| `ROZECTL_OUT_DIR` | output directory passed by `-dir` |
+
+The plugin owns any files it writes under `ROZECTL_OUT_DIR`.
 
 ## Current limitations
 

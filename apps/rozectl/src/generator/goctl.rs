@@ -1,0 +1,864 @@
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
+use anyhow::{bail, Context};
+
+use crate::parser::{
+    ApiSpec, Field, FieldSource, InfoPair, RestRoute, RpcMethod, ServerSpec, TypeDef,
+};
+
+use super::{model, read_api_source, GenerateMode, GenerateOptions};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenApiOutputFormat {
+    Json,
+    Yaml,
+}
+
+#[derive(Debug, Clone)]
+pub struct DockerOptions {
+    pub main: PathBuf,
+    pub out: PathBuf,
+    pub builder_image: String,
+    pub base_image: String,
+    pub port: u16,
+    pub timezone: String,
+    pub binary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KubeDeployOptions {
+    pub name: String,
+    pub image: String,
+    pub namespace: String,
+    pub replicas: u32,
+    pub port: u16,
+    pub cpu_request: String,
+    pub cpu_limit: String,
+    pub memory_request: String,
+    pub memory_limit: String,
+    pub min_replicas: u32,
+    pub max_replicas: u32,
+    pub target_cpu: u32,
+    pub env: Vec<String>,
+    pub env_file: Option<PathBuf>,
+    pub config_map: Option<String>,
+    pub out: PathBuf,
+}
+
+pub fn write_swagger(api: &Path, dir: &Path, format: OpenApiOutputFormat) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    let document = super::openapi_document(&spec);
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let (name, content) = match format {
+        OpenApiOutputFormat::Json => ("swagger.json", serde_json::to_string_pretty(&document)?),
+        OpenApiOutputFormat::Yaml => ("swagger.yaml", json_to_yaml(&document)),
+    };
+    fs::write(dir.join(name), content).with_context(|| format!("failed to write {name}"))
+}
+
+pub fn write_api_markdown_doc(api: Option<&Path>, dir: &Path, out: &Path) -> anyhow::Result<()> {
+    let api_path = match api {
+        Some(api) => api.to_path_buf(),
+        None => find_first_api_file(dir)?,
+    };
+    let source = read_api_source(&api_path)?;
+    let spec = crate::parser::parse_api(&source)?;
+    fs::create_dir_all(out).with_context(|| format!("failed to create {}", out.display()))?;
+    fs::write(out.join("api.md"), render_markdown_doc(&spec))
+        .with_context(|| format!("failed to write {}", out.join("api.md").display()))
+}
+
+pub fn run_api_plugin(plugin: &str, api: &Path, dir: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let payload = api_spec_json(&spec);
+    let payload_text = serde_json::to_string_pretty(&payload)?;
+
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = Command::new("cmd");
+        command.args(["/C", plugin]);
+        command
+    } else {
+        let mut command = Command::new("sh");
+        command.args(["-c", plugin]);
+        command
+    };
+    let mut child = command
+        .current_dir(dir)
+        .env("ROZECTL_API_SPEC_JSON", &payload_text)
+        .env("ROZECTL_API_FILE", api)
+        .env("ROZECTL_OUT_DIR", dir)
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to start plugin `{plugin}`"))?;
+    child
+        .stdin
+        .as_mut()
+        .context("plugin stdin was not available")?
+        .write_all(payload_text.as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("plugin `{plugin}` exited with status {status}");
+    }
+    Ok(())
+}
+
+pub fn write_dockerfile(options: DockerOptions) -> anyhow::Result<()> {
+    if let Some(parent) = options
+        .out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&options.out, render_dockerfile(&options))
+        .with_context(|| format!("failed to write {}", options.out.display()))
+}
+
+pub fn write_kube_deploy(options: KubeDeployOptions) -> anyhow::Result<()> {
+    if let Some(parent) = options
+        .out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&options.out, render_kube_deploy(&options))
+        .with_context(|| format!("failed to write {}", options.out.display()))
+}
+
+pub fn generate_rpc_from_proto(
+    proto: &Path,
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let source =
+        fs::read_to_string(proto).with_context(|| format!("failed to read {}", proto.display()))?;
+    let spec = parse_proto_api_spec(&source)?;
+    if matches!(options.mode, GenerateMode::Force) {
+        super::cleanup_rpc_project(out)?;
+    }
+    super::generate_rpc_project(&spec, out, options)?;
+    fs::create_dir_all(out.join("proto"))?;
+    fs::write(out.join("proto/source.proto"), source).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("proto/source.proto").display()
+        )
+    })
+}
+
+pub fn generate_mongo_model_type(
+    ty: &str,
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let source = format!(
+        "model {ty} {{\n  table: {}\n  primary: id\n  cache: false\n  field id ObjectId\n}}\n",
+        super::to_snake_case(ty)
+    );
+    model::generate_model_project(&source, out, options, model::ModelFormat::Mongo)
+}
+
+fn render_dockerfile(options: &DockerOptions) -> String {
+    let binary = options.binary.clone().unwrap_or_else(|| {
+        options
+            .main
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("app")
+            .to_string()
+    });
+    format!(
+        r#"# Generated by rozectl.
+FROM {builder} AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin {binary}
+
+FROM {base}
+ENV TZ={timezone}
+WORKDIR /app
+COPY --from=builder /app/target/release/{binary} /usr/local/bin/{binary}
+COPY config.yaml ./config.yaml
+EXPOSE {port}
+CMD ["/usr/local/bin/{binary}"]
+"#,
+        builder = options.builder_image,
+        base = options.base_image,
+        timezone = options.timezone,
+        binary = binary,
+        port = options.port
+    )
+}
+
+fn render_kube_deploy(options: &KubeDeployOptions) -> String {
+    let env = render_kube_env(options);
+    let env_from = render_kube_env_from(options);
+    format!(
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  replicas: {replicas}
+  selector:
+    matchLabels:
+      app: {name}
+  template:
+    metadata:
+      labels:
+        app: {name}
+    spec:
+      containers:
+      - name: {name}
+        image: {image}
+        ports:
+        - containerPort: {port}
+{env}{env_from}        resources:
+          requests:
+            cpu: {cpu_request}
+            memory: {memory_request}
+          limits:
+            cpu: {cpu_limit}
+            memory: {memory_limit}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  selector:
+    app: {name}
+  ports:
+  - port: {port}
+    targetPort: {port}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {name}
+  minReplicas: {min_replicas}
+  maxReplicas: {max_replicas}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {target_cpu}
+"#,
+        name = options.name,
+        namespace = options.namespace,
+        replicas = options.replicas,
+        image = options.image,
+        port = options.port,
+        env = env,
+        env_from = env_from,
+        cpu_request = options.cpu_request,
+        memory_request = options.memory_request,
+        cpu_limit = options.cpu_limit,
+        memory_limit = options.memory_limit,
+        min_replicas = options.min_replicas,
+        max_replicas = options.max_replicas,
+        target_cpu = options.target_cpu
+    )
+}
+
+fn render_kube_env(options: &KubeDeployOptions) -> String {
+    let entries = options
+        .env
+        .iter()
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(name, value)| format!("        - name: {name}\n          value: {value:?}\n"))
+        .collect::<String>();
+    if entries.is_empty() {
+        String::new()
+    } else {
+        format!("        env:\n{entries}")
+    }
+}
+
+fn render_kube_env_from(options: &KubeDeployOptions) -> String {
+    let mut refs = Vec::new();
+    if let Some(name) = options.config_map.as_deref() {
+        refs.push(name.to_string());
+    }
+    if options.env_file.is_some() {
+        refs.push(format!("{}-env", options.name));
+    }
+    if refs.is_empty() {
+        return String::new();
+    }
+    let refs = refs
+        .into_iter()
+        .map(|name| format!("        - configMapRef:\n            name: {name}\n"))
+        .collect::<String>();
+    format!("        envFrom:\n{refs}")
+}
+
+fn render_markdown_doc(spec: &ApiSpec) -> String {
+    let mut out = format!("# {} API\n\n", spec.service);
+    if !spec.info.is_empty() {
+        out.push_str("## Info\n\n");
+        for pair in &spec.info {
+            out.push_str(&format!("- `{}`: {}\n", pair.key, pair.value));
+        }
+        out.push('\n');
+    }
+    out.push_str("## Routes\n\n| Method | Path | Handler | Request | Response | Middleware | JWT |\n| --- | --- | --- | --- | --- | --- | --- |\n");
+    for route in &spec.rest_routes {
+        let server = route.server.as_ref().or(spec.server.as_ref());
+        out.push_str(&format!(
+            "| {} | `{}` | `{}` | `{}` | `{}` | `{}` | {} |\n",
+            method_name(&route.method),
+            route.path,
+            route.handler.as_deref().unwrap_or("-"),
+            route.request,
+            route.response,
+            route.middlewares.join(", "),
+            if server.and_then(|server| server.jwt.as_ref()).is_some() {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
+    }
+    out.push_str("\n## Types\n\n");
+    for ty in &spec.types {
+        out.push_str(&format!("### {}\n\n| Field | Type | Source | Wire name | Validate |\n| --- | --- | --- | --- | --- |\n", ty.name));
+        for field in &ty.fields {
+            out.push_str(&format!(
+                "| `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+                field.name,
+                field.ty,
+                field_source_name(field.source),
+                field
+                    .wire_name
+                    .as_deref()
+                    .or(field.json_name.as_deref())
+                    .unwrap_or("-"),
+                field.validate.as_deref().unwrap_or("-")
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn find_first_api_file(dir: &Path) -> anyhow::Result<PathBuf> {
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("api") {
+            return Ok(path);
+        }
+    }
+    bail!(
+        "no .api file found in {}; pass --api explicitly",
+        dir.display()
+    )
+}
+
+fn api_spec_json(spec: &ApiSpec) -> serde_json::Value {
+    serde_json::json!({
+        "service": spec.service,
+        "info": spec.info.iter().map(info_pair_json).collect::<Vec<_>>(),
+        "server": spec.server.as_ref().map(server_json),
+        "types": spec.types.iter().map(type_json).collect::<Vec<_>>(),
+        "rest_routes": spec.rest_routes.iter().map(route_json).collect::<Vec<_>>(),
+        "rpc_methods": spec.rpc_methods.iter().map(rpc_method_json).collect::<Vec<_>>(),
+    })
+}
+
+fn info_pair_json(pair: &InfoPair) -> serde_json::Value {
+    serde_json::json!({ "key": pair.key, "value": pair.value })
+}
+
+fn server_json(server: &ServerSpec) -> serde_json::Value {
+    serde_json::json!({
+        "prefix": server.prefix,
+        "group": server.group,
+        "middlewares": server.middlewares,
+        "jwt": server.jwt,
+    })
+}
+
+fn type_json(ty: &TypeDef) -> serde_json::Value {
+    serde_json::json!({
+        "name": ty.name,
+        "fields": ty.fields.iter().map(field_json).collect::<Vec<_>>(),
+    })
+}
+
+fn field_json(field: &Field) -> serde_json::Value {
+    serde_json::json!({
+        "name": field.name,
+        "ty": field.ty,
+        "json_name": field.json_name,
+        "source": field_source_name(field.source),
+        "wire_name": field.wire_name,
+        "validate": field.validate,
+    })
+}
+
+fn route_json(route: &RestRoute) -> serde_json::Value {
+    serde_json::json!({
+        "handler": route.handler,
+        "doc": route.doc,
+        "middlewares": route.middlewares,
+        "server": route.server.as_ref().map(server_json),
+        "method": method_name(&route.method),
+        "path": route.path,
+        "request": route.request,
+        "response": route.response,
+    })
+}
+
+fn rpc_method_json(method: &RpcMethod) -> serde_json::Value {
+    serde_json::json!({
+        "name": method.name,
+        "request": method.request,
+        "response": method.response,
+    })
+}
+
+fn field_source_name(source: FieldSource) -> &'static str {
+    match source {
+        FieldSource::Auto => "auto",
+        FieldSource::Json => "json",
+        FieldSource::Query => "query",
+        FieldSource::Form => "form",
+        FieldSource::Path => "path",
+        FieldSource::Header => "header",
+    }
+}
+
+fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
+    match method {
+        crate::parser::HttpMethod::Get => "GET",
+        crate::parser::HttpMethod::Post => "POST",
+        crate::parser::HttpMethod::Put => "PUT",
+        crate::parser::HttpMethod::Patch => "PATCH",
+        crate::parser::HttpMethod::Delete => "DELETE",
+    }
+}
+
+fn parse_proto_api_spec(source: &str) -> anyhow::Result<ApiSpec> {
+    let source = strip_proto_comments(source);
+    let package = parse_proto_package(&source).unwrap_or_else(|| "service".to_string());
+    let types = parse_proto_messages(&source)?;
+    let rpc_methods = parse_proto_rpcs(&source)?;
+    if rpc_methods.is_empty() {
+        bail!("proto file must contain at least one rpc method");
+    }
+    Ok(ApiSpec {
+        service: package,
+        server: None,
+        info: Vec::new(),
+        types,
+        rest_routes: Vec::new(),
+        rpc_methods,
+    })
+}
+
+fn strip_proto_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(left, _)| left))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_proto_package(source: &str) -> Option<String> {
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("package ")
+            .and_then(|rest| rest.trim_end_matches(';').split('.').next_back())
+            .map(|name| name.trim().replace('-', "_"))
+    })
+}
+
+fn parse_proto_messages(source: &str) -> anyhow::Result<Vec<TypeDef>> {
+    let mut types = Vec::new();
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let line = lines[idx].trim();
+        if let Some(name) = line
+            .strip_prefix("message ")
+            .and_then(|rest| rest.split_whitespace().next())
+        {
+            idx += 1;
+            let mut fields = Vec::new();
+            while idx < lines.len() {
+                let field_line = lines[idx].trim();
+                idx += 1;
+                if field_line.starts_with('}') {
+                    break;
+                }
+                if field_line.is_empty() || field_line.starts_with("option ") {
+                    continue;
+                }
+                if let Some(field) = parse_proto_field(field_line)? {
+                    fields.push(field);
+                }
+            }
+            types.push(TypeDef {
+                name: name.trim_end_matches('{').to_string(),
+                fields,
+            });
+            continue;
+        }
+        idx += 1;
+    }
+    Ok(types)
+}
+
+fn parse_proto_field(line: &str) -> anyhow::Result<Option<Field>> {
+    let Some((left, _)) = line.split_once('=') else {
+        return Ok(None);
+    };
+    let parts = left.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return Ok(None);
+    }
+    let (repeated, ty, name) = if parts[0] == "repeated" {
+        (true, parts[1], parts[2])
+    } else {
+        (false, parts[0], parts[1])
+    };
+    let ty = proto_to_api_type(ty, repeated);
+    Ok(Some(Field {
+        name: name.to_string(),
+        ty,
+        json_name: Some(name.to_string()),
+        source: FieldSource::Auto,
+        wire_name: Some(name.to_string()),
+        validate: None,
+    }))
+}
+
+fn proto_to_api_type(ty: &str, repeated: bool) -> String {
+    let base = match ty {
+        "string" => "string",
+        "bool" => "bool",
+        "int32" | "sint32" | "fixed32" | "sfixed32" => "i32",
+        "int64" | "sint64" | "fixed64" | "sfixed64" => "i64",
+        "uint32" => "u32",
+        "uint64" => "u64",
+        "float" => "f32",
+        "double" => "f64",
+        other => other,
+    };
+    if repeated {
+        format!("[]{base}")
+    } else {
+        base.to_string()
+    }
+}
+
+fn parse_proto_rpcs(source: &str) -> anyhow::Result<Vec<RpcMethod>> {
+    let mut methods = Vec::new();
+    for line in source.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix("rpc ") else {
+            continue;
+        };
+        let Some((name, rest)) = rest.split_once('(') else {
+            continue;
+        };
+        let Some((request, rest)) = rest.split_once(')') else {
+            continue;
+        };
+        let Some((_, rest)) = rest.split_once("returns") else {
+            continue;
+        };
+        let Some((_, rest)) = rest.split_once('(') else {
+            continue;
+        };
+        let Some((response, _)) = rest.split_once(')') else {
+            continue;
+        };
+        methods.push(RpcMethod {
+            name: name.trim().to_string(),
+            request: request.trim().to_string(),
+            response: response.trim().to_string(),
+        });
+    }
+    Ok(methods)
+}
+
+fn json_to_yaml(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_yaml_value(value, 0, &mut out);
+    out
+}
+
+fn write_yaml_value(value: &serde_json::Value, indent: usize, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                out.push_str(&" ".repeat(indent));
+                out.push_str(key);
+                match value {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        out.push_str(":\n");
+                        write_yaml_value(value, indent + 2, out);
+                    }
+                    _ => {
+                        out.push_str(": ");
+                        write_yaml_scalar(value, out);
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                out.push_str(&" ".repeat(indent));
+                out.push_str("- ");
+                match value {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        out.push('\n');
+                        write_yaml_value(value, indent + 2, out);
+                    }
+                    _ => {
+                        write_yaml_scalar(value, out);
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        _ => {
+            out.push_str(&" ".repeat(indent));
+            write_yaml_scalar(value, out);
+            out.push('\n');
+        }
+    }
+}
+
+fn write_yaml_scalar(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Null => out.push_str("null"),
+        serde_json::Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => out.push_str(&value.to_string()),
+        serde_json::Value::String(value) => out.push_str(&format!("{value:?}")),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rozectl-goctl-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
+    fn sample_api() -> &'static str {
+        r#"
+        syntax = "v1"
+
+        info (
+          title: "User API"
+        )
+
+        @server (
+          prefix: /api/v1
+          jwt: Auth
+        )
+        service user-api {
+          @handler getUser
+          @doc "Get user"
+          get /users/:id (GetUserReq) returns (UserResp)
+        }
+
+        type GetUserReq {
+          id u64 `path:"id" validate:"gte=1"`
+        }
+
+        type UserResp {
+          name string `json:"name"`
+        }
+        "#
+    }
+
+    #[test]
+    fn parses_proto_service_into_api_spec() {
+        let spec = parse_proto_api_spec(
+            r#"
+            syntax = "proto3";
+            package user;
+            service User {
+              rpc GetUser (GetUserReq) returns (UserResp);
+            }
+            message GetUserReq {
+              uint64 id = 1;
+              repeated string tags = 2;
+            }
+            message UserResp {
+              string name = 1;
+            }
+            "#,
+        )
+        .expect("parse proto");
+
+        assert_eq!(spec.service, "user");
+        assert_eq!(spec.rpc_methods[0].name, "GetUser");
+        assert_eq!(spec.types[0].fields[0].ty, "u64");
+        assert_eq!(spec.types[0].fields[1].ty, "[]string");
+    }
+
+    #[test]
+    fn renders_dockerfile() {
+        let rendered = render_dockerfile(&DockerOptions {
+            main: PathBuf::from("src/main.rs"),
+            out: PathBuf::from("Dockerfile"),
+            builder_image: "rust:1-bookworm".to_string(),
+            base_image: "debian:bookworm-slim".to_string(),
+            port: 8080,
+            timezone: "UTC".to_string(),
+            binary: Some("user".to_string()),
+        });
+        assert!(rendered.contains("FROM rust:1-bookworm AS builder"));
+        assert!(rendered.contains("EXPOSE 8080"));
+        assert!(rendered.contains("CMD [\"/usr/local/bin/user\"]"));
+    }
+
+    #[test]
+    fn renders_kubernetes_manifest() {
+        let rendered = render_kube_deploy(&KubeDeployOptions {
+            name: "user".to_string(),
+            image: "user:latest".to_string(),
+            namespace: "default".to_string(),
+            replicas: 2,
+            port: 3000,
+            cpu_request: "100m".to_string(),
+            cpu_limit: "500m".to_string(),
+            memory_request: "128Mi".to_string(),
+            memory_limit: "512Mi".to_string(),
+            min_replicas: 1,
+            max_replicas: 5,
+            target_cpu: 70,
+            env: vec!["RUST_LOG=info".to_string()],
+            env_file: Some(PathBuf::from(".env")),
+            config_map: Some("user-config".to_string()),
+            out: PathBuf::from("deploy/kubernetes.yaml"),
+        });
+        assert!(rendered.contains("kind: Deployment"));
+        assert!(rendered.contains("kind: Service"));
+        assert!(rendered.contains("kind: HorizontalPodAutoscaler"));
+        assert!(rendered.contains("name: RUST_LOG"));
+        assert!(rendered.contains("envFrom:"));
+        assert!(rendered.contains("name: user-config"));
+        assert!(rendered.contains("name: user-env"));
+    }
+
+    #[test]
+    fn writes_swagger_json_and_yaml() {
+        let root = temp_root("swagger");
+        fs::create_dir_all(&root).expect("create temp");
+        let api = root.join("user.api");
+        fs::write(&api, sample_api()).expect("write api");
+
+        write_swagger(&api, &root, OpenApiOutputFormat::Json).expect("write json");
+        write_swagger(&api, &root, OpenApiOutputFormat::Yaml).expect("write yaml");
+
+        let json = fs::read_to_string(root.join("swagger.json")).expect("read json");
+        let yaml = fs::read_to_string(root.join("swagger.yaml")).expect("read yaml");
+        assert!(json.contains("\"openapi\""));
+        assert!(json.contains("/api/v1/users/{id}"));
+        assert!(yaml.contains("openapi:"));
+        assert!(yaml.contains("/api/v1/users/{id}:"));
+    }
+
+    #[test]
+    fn writes_markdown_doc() {
+        let root = temp_root("doc");
+        fs::create_dir_all(&root).expect("create temp");
+        let api = root.join("user.api");
+        fs::write(&api, sample_api()).expect("write api");
+        let out = root.join("doc");
+
+        write_api_markdown_doc(Some(&api), &root, &out).expect("write docs");
+
+        let doc = fs::read_to_string(out.join("api.md")).expect("read doc");
+        assert!(doc.contains("# user-api API"));
+        assert!(doc.contains("| GET |"));
+        assert!(doc.contains("GetUserReq"));
+    }
+
+    #[test]
+    fn runs_api_plugin_with_json_payload() {
+        let root = temp_root("plugin");
+        fs::create_dir_all(&root).expect("create temp");
+        let api = root.join("user.api");
+        fs::write(&api, sample_api()).expect("write api");
+        let out = root.join("out");
+
+        run_api_plugin("cat > plugin.json", &api, &out).expect("run plugin");
+
+        let payload = fs::read_to_string(out.join("plugin.json")).expect("read plugin output");
+        assert!(payload.contains("\"service\": \"user-api\""));
+        assert!(payload.contains("\"rest_routes\""));
+    }
+
+    #[test]
+    fn generates_rpc_project_from_real_proto() {
+        let root = temp_root("proto");
+        fs::create_dir_all(&root).expect("create temp");
+        let proto = root.join("user.proto");
+        fs::write(
+            &proto,
+            r#"
+            syntax = "proto3";
+            package user;
+            service User {
+              rpc GetUser (GetUserReq) returns (UserResp);
+            }
+            message GetUserReq {
+              uint64 id = 1;
+            }
+            message UserResp {
+              string name = 1;
+            }
+            "#,
+        )
+        .expect("write proto");
+        let out = root.join("rpc");
+
+        generate_rpc_from_proto(
+            &proto,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, super::super::DependencySource::Git),
+        )
+        .expect("generate rpc");
+
+        assert!(out.join("proto/service.proto").is_file());
+        assert!(out.join("proto/source.proto").is_file());
+        assert!(out.join("src/rpc.rs").is_file());
+        assert!(out.join("src/client.rs").is_file());
+    }
+}

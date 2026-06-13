@@ -1,4 +1,5 @@
 pub mod client;
+pub mod goctl;
 pub mod model;
 pub mod rest;
 pub mod rpc;
@@ -231,7 +232,7 @@ pub fn write_openapi_json(api: &Path, out: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", out.display()))
 }
 
-fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
+pub(super) fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
     let mut paths = serde_json::Map::<String, serde_json::Value>::new();
     for route in &spec.rest_routes {
         let path = openapi_path(&rest::full_route_path_for_openapi(spec, route));
@@ -467,6 +468,18 @@ fn openapi_request_body(content_type: &str, fields: &[&crate::parser::Field]) ->
 }
 
 fn openapi_schema(ty: &str) -> serde_json::Value {
+    if let Some((_, value)) = map_key_value_types(ty) {
+        return serde_json::json!({
+            "type": "object",
+            "additionalProperties": openapi_schema(&value)
+        });
+    }
+    if let Some(inner) = collection_element_type(ty) {
+        return serde_json::json!({
+            "type": "array",
+            "items": openapi_schema(&inner)
+        });
+    }
     match ty {
         "String" | "string" => serde_json::json!({ "type": "string" }),
         "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
@@ -478,6 +491,36 @@ fn openapi_schema(ty: &str) -> serde_json::Value {
         "f64" | "double" => serde_json::json!({ "type": "number", "format": "double" }),
         other => serde_json::json!({ "$ref": format!("#/components/schemas/{other}") }),
     }
+}
+
+fn collection_element_type(ty: &str) -> Option<String> {
+    let ty = ty.trim();
+    if let Some(inner) = ty.strip_prefix("[]") {
+        return Some(inner.trim_start_matches('*').trim().to_string());
+    }
+    if let Some(inner) = ty
+        .strip_prefix("Vec<")
+        .and_then(|raw| raw.strip_suffix('>'))
+    {
+        return Some(inner.trim_start_matches('*').trim().to_string());
+    }
+    None
+}
+
+fn map_key_value_types(ty: &str) -> Option<(String, String)> {
+    let ty = ty.trim();
+    if let Some(rest) = ty.strip_prefix("map[") {
+        let (key, value) = rest.split_once(']')?;
+        return Some((key.trim().to_string(), value.trim().to_string()));
+    }
+    if let Some(inner) = ty
+        .strip_prefix("HashMap<")
+        .and_then(|raw| raw.strip_suffix('>'))
+    {
+        let (key, value) = inner.split_once(',')?;
+        return Some((key.trim().to_string(), value.trim().to_string()));
+    }
+    None
 }
 
 fn openapi_field_source(
@@ -786,7 +829,7 @@ fn cleanup_rest_project(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cleanup_rpc_project(out: &Path) -> anyhow::Result<()> {
+pub(super) fn cleanup_rpc_project(out: &Path) -> anyhow::Result<()> {
     remove_path_if_exists(&out.join("src/handler"))?;
     remove_path_if_exists(&out.join("src/logic"))?;
     remove_path_if_exists(&out.join("src/openapi.rs"))?;
@@ -844,7 +887,7 @@ fn generate_rest_project(
     Ok(())
 }
 
-fn generate_rpc_project(
+pub(super) fn generate_rpc_project(
     spec: &ApiSpec,
     out: &Path,
     options: GenerateOptions,
@@ -985,7 +1028,7 @@ fn has_entries(path: &Path) -> anyhow::Result<bool> {
     Ok(fs::read_dir(path)?.next().is_some())
 }
 
-fn read_api_source(path: &Path) -> anyhow::Result<String> {
+pub(super) fn read_api_source(path: &Path) -> anyhow::Result<String> {
     let mut seen = HashSet::new();
     read_api_source_inner(path, &mut seen)
 }

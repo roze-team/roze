@@ -7,6 +7,8 @@ services.
 
 - [rozectl API generator](./rozectl-api.md): `.api` syntax, REST generation,
   client SDKs, OpenAPI output, type mapping, and validator tag support.
+- [rozectl goctl compatibility](./rozectl-goctl-compat.md): direct mapping from
+  common `goctl` commands to Rust-native `rozectl` commands.
 
 ## Verification
 
