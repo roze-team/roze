@@ -4,6 +4,12 @@
 command shapes used for HTTP API, RPC, model, deployment, docs, clients, and
 plugins.
 
+The compatibility target is generator coverage, not automatic business
+implementation. `rozectl` generates scaffolding and glue code such as routing,
+protocol bindings, basic CRUD modules, SDKs, docs, Dockerfiles, and Kubernetes
+templates. Product-specific logic still needs to be implemented in generated
+logic modules and supporting application code.
+
 ## Command mapping
 
 | goctl command | rozectl command | Status |

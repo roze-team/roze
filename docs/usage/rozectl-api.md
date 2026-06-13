@@ -5,6 +5,12 @@ Poem-based REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
 `src/logic/mod.rs` and `config.yaml` when `--update` is used.
 
+Think of `rozectl` as a generator for project structure and integration code.
+It can generate API layers, RPC layers, model scaffolds, documentation, client
+code, and deployment files. Business logic is still written by developers:
+handler-driven logic, complex SQL, domain checks, transactions, authorization,
+permissions, and other product-specific behavior live in the application.
+
 ## Commands
 
 Generate a REST service:

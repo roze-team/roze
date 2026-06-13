@@ -28,6 +28,12 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.
 
+`rozectl` generates the scaffold and glue code: API projects, RPC projects,
+model modules, documentation, client SDKs, Dockerfiles, and Kubernetes
+manifests. Real business behavior still belongs in application code, including
+logic handlers, complex SQL, domain validation, transactions, authorization,
+and permission checks.
+
 ## Usage Documentation
 
 - [Usage documentation](docs/usage/README.md)
