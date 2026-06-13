@@ -364,6 +364,11 @@ src/svc/mod.rs
 `proto/source.proto` preserves the input file. `proto/service.proto` is the
 normalized build input used by the generated Rust project.
 
+The proto parser supports line and block comments, multi-line `rpc`
+signatures, qualified type names, `stream` request/response markers,
+`optional`/`required` labels, `repeated` fields, and `map<K,V>` fields. The
+generated normalized proto keeps `repeated` and `map` field shapes.
+
 ## Model generation
 
 The model generator supports the original Roze commands and goctl-compatible
@@ -433,6 +438,11 @@ rozectl kube deploy \
   --env-file .env \
   --config-map user-api-config
 ```
+
+`--env KEY=VALUE` entries are validated before writing the manifest.
+`--config-map` adds an `envFrom.configMapRef` reference. `--env-file` reads a
+dotenv-style file, validates each `KEY=VALUE` line, emits a generated
+`<name>-env` ConfigMap, and wires it through `envFrom`.
 
 ## Plugin contract
 

@@ -123,6 +123,11 @@ pub fn write_dockerfile(options: DockerOptions) -> anyhow::Result<()> {
 }
 
 pub fn write_kube_deploy(options: KubeDeployOptions) -> anyhow::Result<()> {
+    validate_kube_options(&options)?;
+    let env_file_entries = match options.env_file.as_deref() {
+        Some(path) => Some(read_env_file(path)?),
+        None => None,
+    };
     if let Some(parent) = options
         .out
         .parent()
@@ -130,8 +135,11 @@ pub fn write_kube_deploy(options: KubeDeployOptions) -> anyhow::Result<()> {
     {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&options.out, render_kube_deploy(&options))
-        .with_context(|| format!("failed to write {}", options.out.display()))
+    fs::write(
+        &options.out,
+        render_kube_deploy(&options, env_file_entries.as_deref()),
+    )
+    .with_context(|| format!("failed to write {}", options.out.display()))
 }
 
 pub fn generate_rpc_from_proto(
@@ -200,11 +208,17 @@ CMD ["/usr/local/bin/{binary}"]
     )
 }
 
-fn render_kube_deploy(options: &KubeDeployOptions) -> String {
+fn render_kube_deploy(
+    options: &KubeDeployOptions,
+    env_file_entries: Option<&[(String, String)]>,
+) -> String {
     let env = render_kube_env(options);
     let env_from = render_kube_env_from(options);
+    let env_config_map = env_file_entries
+        .map(|entries| render_kube_config_map(&format!("{}-env", options.name), options, entries))
+        .unwrap_or_default();
     format!(
-        r#"apiVersion: apps/v1
+        r#"{env_config_map}apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {name}
@@ -269,6 +283,7 @@ spec:
         replicas = options.replicas,
         image = options.image,
         port = options.port,
+        env_config_map = env_config_map,
         env = env,
         env_from = env_from,
         cpu_request = options.cpu_request,
@@ -278,6 +293,94 @@ spec:
         min_replicas = options.min_replicas,
         max_replicas = options.max_replicas,
         target_cpu = options.target_cpu
+    )
+}
+
+fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
+    if options.min_replicas > options.max_replicas {
+        bail!("--min-replicas must be less than or equal to --max-replicas");
+    }
+    if options.target_cpu == 0 || options.target_cpu > 100 {
+        bail!("--target-cpu must be between 1 and 100");
+    }
+    for entry in &options.env {
+        let Some((name, _)) = entry.split_once('=') else {
+            bail!("--env entries must use KEY=VALUE format: {entry}");
+        };
+        validate_env_name(name)?;
+    }
+    Ok(())
+}
+
+fn read_env_file(path: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut entries = Vec::new();
+    for (idx, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            bail!("{}:{} must use KEY=VALUE format", path.display(), idx + 1);
+        };
+        let name = name.trim();
+        validate_env_name(name).with_context(|| format!("{}:{}", path.display(), idx + 1))?;
+        entries.push((
+            name.to_string(),
+            unquote_env_value(value.trim()).to_string(),
+        ));
+    }
+    Ok(entries)
+}
+
+fn validate_env_name(name: &str) -> anyhow::Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("environment variable name cannot be empty");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("invalid environment variable name `{name}`");
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        bail!("invalid environment variable name `{name}`");
+    }
+    Ok(())
+}
+
+fn unquote_env_value(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value)
+}
+
+fn render_kube_config_map(
+    name: &str,
+    options: &KubeDeployOptions,
+    entries: &[(String, String)],
+) -> String {
+    let data = entries
+        .iter()
+        .map(|(name, value)| format!("  {name}: {value:?}\n"))
+        .collect::<String>();
+    format!(
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {name}
+  namespace: {namespace}
+data:
+{data}---
+"#,
+        name = name,
+        namespace = options.namespace,
+        data = data
     )
 }
 
@@ -478,11 +581,36 @@ fn parse_proto_api_spec(source: &str) -> anyhow::Result<ApiSpec> {
 }
 
 fn strip_proto_comments(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| line.split_once("//").map_or(line, |(left, _)| left))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_block = false;
+    while let Some(ch) = chars.next() {
+        if in_block {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            } else if ch == '\n' {
+                out.push('\n');
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn parse_proto_package(source: &str) -> Option<String> {
@@ -531,76 +659,142 @@ fn parse_proto_messages(source: &str) -> anyhow::Result<Vec<TypeDef>> {
 }
 
 fn parse_proto_field(line: &str) -> anyhow::Result<Option<Field>> {
+    let line = line.trim_end_matches(';').trim();
+    if line.is_empty()
+        || line.starts_with("reserved ")
+        || line.starts_with("extensions ")
+        || line.starts_with("oneof ")
+        || line.starts_with("option ")
+    {
+        return Ok(None);
+    }
     let Some((left, _)) = line.split_once('=') else {
         return Ok(None);
     };
     let parts = left.split_whitespace().collect::<Vec<_>>();
-    if parts.len() < 2 {
+    if parts.is_empty() {
         return Ok(None);
     }
-    let (repeated, ty, name) = if parts[0] == "repeated" {
-        (true, parts[1], parts[2])
+    let mut left = left.trim();
+    let mut repeated = false;
+    if let Some(rest) = left
+        .strip_prefix("optional ")
+        .or_else(|| left.strip_prefix("required "))
+    {
+        left = rest.trim_start();
+    }
+    if let Some(rest) = left.strip_prefix("repeated ") {
+        repeated = true;
+        left = rest.trim_start();
+    }
+    let (ty, name) = if let Some(rest) = left.strip_prefix("map<") {
+        let Some(end) = rest.find('>') else {
+            bail!("invalid proto map field `{line}`");
+        };
+        let ty = &left[..end + "map<>".len()];
+        let name = rest[end + 1..].split_whitespace().next();
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        (ty, name)
     } else {
-        (false, parts[0], parts[1])
+        let parts = left.split_whitespace().collect::<Vec<_>>();
+        let (Some(ty), Some(name)) = (parts.first(), parts.get(1)) else {
+            return Ok(None);
+        };
+        (*ty, *name)
     };
     let ty = proto_to_api_type(ty, repeated);
     Ok(Some(Field {
-        name: name.to_string(),
+        name: name.trim_end_matches(';').to_string(),
         ty,
-        json_name: Some(name.to_string()),
+        json_name: Some(name.trim_end_matches(';').to_string()),
         source: FieldSource::Auto,
-        wire_name: Some(name.to_string()),
+        wire_name: Some(name.trim_end_matches(';').to_string()),
         validate: None,
     }))
 }
 
 fn proto_to_api_type(ty: &str, repeated: bool) -> String {
-    let base = match ty {
-        "string" => "string",
-        "bool" => "bool",
-        "int32" | "sint32" | "fixed32" | "sfixed32" => "i32",
-        "int64" | "sint64" | "fixed64" | "sfixed64" => "i64",
-        "uint32" => "u32",
-        "uint64" => "u64",
-        "float" => "f32",
-        "double" => "f64",
-        other => other,
+    let ty = ty.trim_start_matches('.');
+    let base = if let Some(map) = proto_map_to_api_type(ty) {
+        map
+    } else {
+        match canonical_proto_type(ty) {
+            "string" => "string",
+            "bool" => "bool",
+            "int32" | "sint32" | "fixed32" | "sfixed32" => "i32",
+            "int64" | "sint64" | "fixed64" | "sfixed64" => "i64",
+            "uint32" => "u32",
+            "uint64" => "u64",
+            "float" => "f32",
+            "double" => "f64",
+            "bytes" => "bytes",
+            other => other,
+        }
+        .to_string()
     };
     if repeated {
         format!("[]{base}")
     } else {
-        base.to_string()
+        base
     }
+}
+
+fn canonical_proto_type(ty: &str) -> &str {
+    ty.rsplit('.').next().unwrap_or(ty)
+}
+
+fn proto_map_to_api_type(ty: &str) -> Option<String> {
+    let inner = ty.strip_prefix("map<")?.strip_suffix('>')?;
+    let (key, value) = inner.split_once(',')?;
+    Some(format!(
+        "map[{}]{}",
+        proto_to_api_type(key.trim(), false),
+        proto_to_api_type(value.trim(), false)
+    ))
 }
 
 fn parse_proto_rpcs(source: &str) -> anyhow::Result<Vec<RpcMethod>> {
     let mut methods = Vec::new();
-    for line in source.lines().map(str::trim) {
-        let Some(rest) = line.strip_prefix("rpc ") else {
-            continue;
+    let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut rest = normalized.as_str();
+    while let Some(pos) = rest.find("rpc ") {
+        rest = &rest[pos + "rpc ".len()..];
+        let Some((name, after_name)) = rest.split_once('(') else {
+            break;
         };
-        let Some((name, rest)) = rest.split_once('(') else {
-            continue;
+        let Some((request, after_request)) = after_name.split_once(')') else {
+            break;
         };
-        let Some((request, rest)) = rest.split_once(')') else {
-            continue;
+        let Some((_, after_returns_keyword)) = after_request.split_once("returns") else {
+            break;
         };
-        let Some((_, rest)) = rest.split_once("returns") else {
-            continue;
+        let Some((_, after_returns_open)) = after_returns_keyword.split_once('(') else {
+            break;
         };
-        let Some((_, rest)) = rest.split_once('(') else {
-            continue;
-        };
-        let Some((response, _)) = rest.split_once(')') else {
-            continue;
+        let Some((response, after_response)) = after_returns_open.split_once(')') else {
+            break;
         };
         methods.push(RpcMethod {
             name: name.trim().to_string(),
-            request: request.trim().to_string(),
-            response: response.trim().to_string(),
+            request: normalize_proto_rpc_type(request),
+            response: normalize_proto_rpc_type(response),
         });
+        rest = after_response
+            .split_once(';')
+            .map_or(after_response, |(_, tail)| tail);
     }
     Ok(methods)
+}
+
+fn normalize_proto_rpc_type(ty: &str) -> String {
+    canonical_proto_type(
+        ty.trim()
+            .trim_start_matches("stream ")
+            .trim_start_matches('.'),
+    )
+    .to_string()
 }
 
 fn json_to_yaml(value: &serde_json::Value) -> String {
@@ -710,13 +904,20 @@ mod tests {
         let spec = parse_proto_api_spec(
             r#"
             syntax = "proto3";
-            package user;
+            /* generated API package */
+            package company.user;
             service User {
-              rpc GetUser (GetUserReq) returns (UserResp);
+              rpc GetUser (
+                .company.user.GetUserReq
+              ) returns (
+                stream .company.user.UserResp
+              );
             }
             message GetUserReq {
               uint64 id = 1;
               repeated string tags = 2;
+              optional string trace_id = 3;
+              map<string, int32> scores = 4;
             }
             message UserResp {
               string name = 1;
@@ -727,8 +928,12 @@ mod tests {
 
         assert_eq!(spec.service, "user");
         assert_eq!(spec.rpc_methods[0].name, "GetUser");
+        assert_eq!(spec.rpc_methods[0].request, "GetUserReq");
+        assert_eq!(spec.rpc_methods[0].response, "UserResp");
         assert_eq!(spec.types[0].fields[0].ty, "u64");
         assert_eq!(spec.types[0].fields[1].ty, "[]string");
+        assert_eq!(spec.types[0].fields[2].ty, "string");
+        assert_eq!(spec.types[0].fields[3].ty, "map[string]i32");
     }
 
     #[test]
@@ -749,7 +954,48 @@ mod tests {
 
     #[test]
     fn renders_kubernetes_manifest() {
-        let rendered = render_kube_deploy(&KubeDeployOptions {
+        let entries = vec![
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://localhost/roze".to_string(),
+            ),
+            ("FEATURE_FLAG".to_string(), "enabled".to_string()),
+        ];
+        let rendered = render_kube_deploy(
+            &KubeDeployOptions {
+                name: "user".to_string(),
+                image: "user:latest".to_string(),
+                namespace: "default".to_string(),
+                replicas: 2,
+                port: 3000,
+                cpu_request: "100m".to_string(),
+                cpu_limit: "500m".to_string(),
+                memory_request: "128Mi".to_string(),
+                memory_limit: "512Mi".to_string(),
+                min_replicas: 1,
+                max_replicas: 5,
+                target_cpu: 70,
+                env: vec!["RUST_LOG=info".to_string()],
+                env_file: Some(PathBuf::from(".env")),
+                config_map: Some("user-config".to_string()),
+                out: PathBuf::from("deploy/kubernetes.yaml"),
+            },
+            Some(&entries),
+        );
+        assert!(rendered.contains("kind: Deployment"));
+        assert!(rendered.contains("kind: Service"));
+        assert!(rendered.contains("kind: HorizontalPodAutoscaler"));
+        assert!(rendered.contains("kind: ConfigMap"));
+        assert!(rendered.contains("DATABASE_URL"));
+        assert!(rendered.contains("name: RUST_LOG"));
+        assert!(rendered.contains("envFrom:"));
+        assert!(rendered.contains("name: user-config"));
+        assert!(rendered.contains("name: user-env"));
+    }
+
+    #[test]
+    fn rejects_invalid_kubernetes_env() {
+        let err = validate_kube_options(&KubeDeployOptions {
             name: "user".to_string(),
             image: "user:latest".to_string(),
             namespace: "default".to_string(),
@@ -759,21 +1005,16 @@ mod tests {
             cpu_limit: "500m".to_string(),
             memory_request: "128Mi".to_string(),
             memory_limit: "512Mi".to_string(),
-            min_replicas: 1,
-            max_replicas: 5,
+            min_replicas: 5,
+            max_replicas: 1,
             target_cpu: 70,
-            env: vec!["RUST_LOG=info".to_string()],
-            env_file: Some(PathBuf::from(".env")),
-            config_map: Some("user-config".to_string()),
+            env: vec!["bad-entry".to_string()],
+            env_file: None,
+            config_map: None,
             out: PathBuf::from("deploy/kubernetes.yaml"),
-        });
-        assert!(rendered.contains("kind: Deployment"));
-        assert!(rendered.contains("kind: Service"));
-        assert!(rendered.contains("kind: HorizontalPodAutoscaler"));
-        assert!(rendered.contains("name: RUST_LOG"));
-        assert!(rendered.contains("envFrom:"));
-        assert!(rendered.contains("name: user-config"));
-        assert!(rendered.contains("name: user-env"));
+        })
+        .expect_err("reject invalid kube options");
+        assert!(err.to_string().contains("--min-replicas"));
     }
 
     #[test]
@@ -840,6 +1081,8 @@ mod tests {
             }
             message GetUserReq {
               uint64 id = 1;
+              repeated string tags = 2;
+              map<string, int64> scores = 3;
             }
             message UserResp {
               string name = 1;
@@ -860,5 +1103,9 @@ mod tests {
         assert!(out.join("proto/source.proto").is_file());
         assert!(out.join("src/rpc.rs").is_file());
         assert!(out.join("src/client.rs").is_file());
+        let service_proto =
+            fs::read_to_string(out.join("proto/service.proto")).expect("read proto");
+        assert!(service_proto.contains("repeated string tags"));
+        assert!(service_proto.contains("map<string, int64> scores"));
     }
 }

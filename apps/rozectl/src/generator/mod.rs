@@ -1791,10 +1791,21 @@ fn route_name_from_path(path: &str) -> String {
         .replace(['/', '-'], "_")
 }
 
-fn proto_type<'a>(ty: &'a str, known_types: &HashSet<&str>) -> anyhow::Result<&'a str> {
+fn proto_type(ty: &str, known_types: &HashSet<&str>) -> anyhow::Result<String> {
+    if let Some(inner) = collection_element_type(ty) {
+        return Ok(format!("repeated {}", proto_type(&inner, known_types)?));
+    }
+    if let Some((key, value)) = map_key_value_types(ty) {
+        return Ok(format!(
+            "map<{}, {}>",
+            proto_type(&key, known_types)?,
+            proto_type(&value, known_types)?
+        ));
+    }
     let proto = match ty {
         "String" | "string" => "string",
         "bool" => "bool",
+        "bytes" => "bytes",
         "i32" | "int32" => "int32",
         "i64" | "int" | "int64" => "int64",
         "u32" | "uint32" => "uint32",
@@ -1804,7 +1815,7 @@ fn proto_type<'a>(ty: &'a str, known_types: &HashSet<&str>) -> anyhow::Result<&'
         known if known_types.contains(known) => known,
         other => anyhow::bail!("unsupported proto field type `{other}`"),
     };
-    Ok(proto)
+    Ok(proto.to_string())
 }
 
 #[cfg(test)]
