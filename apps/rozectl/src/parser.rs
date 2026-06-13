@@ -47,6 +47,7 @@ pub struct Field {
     pub json_name: Option<String>,
     pub source: FieldSource,
     pub wire_name: Option<String>,
+    pub validate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct RestRoute {
     pub handler: Option<String>,
     pub doc: Option<String>,
     pub middlewares: Vec<String>,
+    pub server: Option<ServerSpec>,
     pub method: HttpMethod,
     pub path: String,
     pub request: String,
@@ -65,8 +67,12 @@ pub enum HttpMethod {
     Get,
     Post,
     Put,
+    Patch,
     Delete,
 }
+
+const EMPTY_REQUEST_TYPE: &str = "EmptyReq";
+const EMPTY_RESPONSE_TYPE: &str = "EmptyResp";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcMethod {
@@ -103,7 +109,11 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
             continue;
         }
 
-        if line == "info (" {
+        if is_syntax_decl(line) {
+            continue;
+        }
+
+        if is_block_start(line, "info") {
             while i < lines.len() {
                 let (info_line_no, info_raw) = lines[i];
                 i += 1;
@@ -134,12 +144,12 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
             continue;
         }
 
-        if line == "@server (" {
+        if is_block_start(line, "@server") {
             server = Some(parse_server_block(&lines, &mut i)?);
             continue;
         }
 
-        if line == "type (" {
+        if is_block_start(line, "type") {
             while i < lines.len() {
                 let (type_line_no, type_raw) = lines[i];
                 let type_line = strip_comment(type_raw).trim();
@@ -172,6 +182,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                 let mut current_handler = None;
                 let mut current_doc = None;
                 let mut current_middlewares: Vec<String> = Vec::new();
+                let mut current_server = None;
                 let mut service_server = None;
 
                 while i < lines.len() {
@@ -185,19 +196,22 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                     if svc_line == "}" {
                         break;
                     }
-                    if svc_line == "@server (" {
-                        service_server = Some(parse_server_block(&lines, &mut i)?);
+                    if is_block_start(svc_line, "@server") {
+                        current_server = Some(parse_server_block(&lines, &mut i)?);
+                        if service_server.is_none() {
+                            service_server = current_server.clone();
+                        }
                         continue;
                     }
-                    if let Some(doc) = svc_line.strip_prefix("@doc ") {
-                        current_doc = Some(doc.trim().to_string());
+                    if let Some(doc) = parse_annotation_arg(svc_line, "@doc") {
+                        current_doc = Some(trim_annotation_string(doc).to_string());
                         continue;
                     }
-                    if let Some(handler) = svc_line.strip_prefix("@handler ") {
-                        current_handler = Some(handler.trim().to_string());
+                    if let Some(handler) = parse_annotation_arg(svc_line, "@handler") {
+                        current_handler = Some(trim_annotation_string(handler).to_string());
                         continue;
                     }
-                    if let Some(middleware) = svc_line.strip_prefix("@middleware ") {
+                    if let Some(middleware) = parse_annotation_arg(svc_line, "@middleware") {
                         current_middlewares.extend(parse_name_list(middleware));
                         continue;
                     }
@@ -209,6 +223,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         route.handler = current_handler.take();
                         route.doc = current_doc.take();
                         route.middlewares = std::mem::take(&mut current_middlewares);
+                        route.server = current_server.clone();
                         rest_routes.push(route);
                         continue;
                     }
@@ -219,7 +234,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                     );
                 }
 
-                if service_server.is_some() {
+                if server.is_none() && service_server.is_some() {
                     server = service_server;
                 }
             } else {
@@ -256,6 +271,8 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
         return invalid(line_no, "unrecognized declaration");
     }
 
+    normalize_empty_requests(&mut types, &mut rest_routes, &mut rpc_methods);
+
     Ok(ApiSpec {
         service: service.ok_or(ParseError::MissingService)?,
         server,
@@ -266,28 +283,82 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
     })
 }
 
+fn normalize_empty_requests(
+    types: &mut Vec<TypeDef>,
+    rest_routes: &mut [RestRoute],
+    rpc_methods: &mut [RpcMethod],
+) {
+    let mut needs_empty_req = false;
+    let mut needs_empty_resp = false;
+    for route in rest_routes {
+        if route.request.trim().is_empty() {
+            route.request = EMPTY_REQUEST_TYPE.to_string();
+            needs_empty_req = true;
+        } else if route.request == EMPTY_REQUEST_TYPE {
+            needs_empty_req = true;
+        }
+        if route.response.trim().is_empty() {
+            route.response = EMPTY_RESPONSE_TYPE.to_string();
+            needs_empty_resp = true;
+        } else if route.response == EMPTY_RESPONSE_TYPE {
+            needs_empty_resp = true;
+        }
+    }
+    for method in rpc_methods {
+        if method.request.trim().is_empty() {
+            method.request = EMPTY_REQUEST_TYPE.to_string();
+            needs_empty_req = true;
+        } else if method.request == EMPTY_REQUEST_TYPE {
+            needs_empty_req = true;
+        }
+        if method.response.trim().is_empty() {
+            method.response = EMPTY_RESPONSE_TYPE.to_string();
+            needs_empty_resp = true;
+        } else if method.response == EMPTY_RESPONSE_TYPE {
+            needs_empty_resp = true;
+        }
+    }
+    if needs_empty_req && !types.iter().any(|ty| ty.name == EMPTY_REQUEST_TYPE) {
+        types.push(TypeDef {
+            name: EMPTY_REQUEST_TYPE.to_string(),
+            fields: Vec::new(),
+        });
+    }
+    if needs_empty_resp && !types.iter().any(|ty| ty.name == EMPTY_RESPONSE_TYPE) {
+        types.push(TypeDef {
+            name: EMPTY_RESPONSE_TYPE.to_string(),
+            fields: Vec::new(),
+        });
+    }
+}
+
 fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, ParseError> {
-    let (method, rest) = match line.split_once(' ') {
-        Some(("get", rest)) => (HttpMethod::Get, rest),
-        Some(("post", rest)) => (HttpMethod::Post, rest),
-        Some(("put", rest)) => (HttpMethod::Put, rest),
-        Some(("delete", rest)) => (HttpMethod::Delete, rest),
+    let Some((method_name, rest)) = split_first_token(line) else {
+        return Ok(None);
+    };
+    let method = match method_name {
+        "get" => HttpMethod::Get,
+        "post" => HttpMethod::Post,
+        "put" => HttpMethod::Put,
+        "patch" => HttpMethod::Patch,
+        "delete" => HttpMethod::Delete,
         _ => return Ok(None),
     };
 
-    let (path, signature) = rest
-        .trim()
-        .split_once(' ')
-        .ok_or_else(|| ParseError::InvalidLine {
+    let (path, signature) = split_first_token(rest).unwrap_or((rest.trim(), ""));
+    if path.is_empty() {
+        return Err(ParseError::InvalidLine {
             line: line_no + 1,
-            message: "expected route path and `(Req) returns (Resp)`".to_string(),
-        })?;
+            message: "expected route path and optional `(Req) returns (Resp)`".to_string(),
+        });
+    }
     let (request, response) = parse_signature(signature, line_no)?;
 
     Ok(Some(RestRoute {
         handler: None,
         doc: None,
         middlewares: Vec::new(),
+        server: None,
         method,
         path: path.to_string(),
         request,
@@ -339,6 +410,7 @@ fn parse_name_list(input: &str) -> Vec<String> {
     input
         .split(|ch: char| ch == ',' || ch.is_whitespace())
         .map(str::trim)
+        .map(trim_annotation_string)
         .filter(|part| !part.is_empty())
         .map(ToString::to_string)
         .collect()
@@ -392,6 +464,7 @@ fn parse_field(line: &str, line_no: usize) -> Result<Field, ParseError> {
             json_name: None,
             source: FieldSource::Auto,
             wire_name: None,
+            validate: None,
         }
     } else {
         let mut parts = line.split_whitespace();
@@ -407,6 +480,7 @@ fn parse_field(line: &str, line_no: usize) -> Result<Field, ParseError> {
             json_name: None,
             source: FieldSource::Auto,
             wire_name: None,
+            validate: None,
         }
     };
 
@@ -434,15 +508,15 @@ fn parse_field(line: &str, line_no: usize) -> Result<Field, ParseError> {
         field.source = FieldSource::Header;
         field.wire_name = Some(value);
     }
+    if let Some(value) = parse_tag_value_full(line, "validate") {
+        field.validate = Some(value);
+    }
 
     Ok(field)
 }
 
 fn parse_tag_value(line: &str, tag: &str) -> Option<String> {
-    let needle = format!("{tag}:\"");
-    let start = line.find(&needle)? + needle.len();
-    let rest = &line[start..];
-    let value = rest.split_once('"')?.0;
+    let value = parse_tag_value_full(line, tag)?;
     let name = value.split(',').next().unwrap_or_default();
     if name.is_empty() || name == "-" {
         None
@@ -451,15 +525,23 @@ fn parse_tag_value(line: &str, tag: &str) -> Option<String> {
     }
 }
 
+fn parse_tag_value_full(line: &str, tag: &str) -> Option<String> {
+    let needle = format!("{tag}:\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let value = rest.split_once('"')?.0;
+    if value.is_empty() || value == "-" {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 fn parse_rpc_method(input: &str, line_no: usize) -> Result<RpcMethod, ParseError> {
-    let (name, signature) =
-        input
-            .trim()
-            .split_once(' ')
-            .ok_or_else(|| ParseError::InvalidLine {
-                line: line_no + 1,
-                message: "expected `rpc Name (Req) returns (Resp)`".to_string(),
-            })?;
+    let (name, signature) = split_first_token(input).ok_or_else(|| ParseError::InvalidLine {
+        line: line_no + 1,
+        message: "expected `rpc Name (Req) returns (Resp)`".to_string(),
+    })?;
     let (request, response) = parse_signature(signature, line_no)?;
 
     Ok(RpcMethod {
@@ -471,18 +553,77 @@ fn parse_rpc_method(input: &str, line_no: usize) -> Result<RpcMethod, ParseError
 
 fn parse_signature(input: &str, line_no: usize) -> Result<(String, String), ParseError> {
     let trimmed = input.trim();
-    let (request, response) =
-        trimmed
-            .split_once(" returns ")
-            .ok_or_else(|| ParseError::InvalidLine {
-                line: line_no + 1,
-                message: "expected `(Req) returns (Resp)`".to_string(),
-            })?;
+    let Some(returns_at) = trimmed.find("returns") else {
+        return Ok((
+            trim_wrapping_parens(trimmed).to_string(),
+            EMPTY_RESPONSE_TYPE.to_string(),
+        ));
+    };
+    let request = &trimmed[..returns_at];
+    let response = &trimmed[returns_at + "returns".len()..];
 
     Ok((
-        request.trim().trim_matches(['(', ')']).to_string(),
-        response.trim().trim_matches(['(', ')']).to_string(),
+        trim_wrapping_parens(request).to_string(),
+        trim_wrapping_parens(response).to_string(),
     ))
+}
+
+fn is_block_start(line: &str, name: &str) -> bool {
+    let Some(rest) = line.strip_prefix(name) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest == "("
+}
+
+fn is_syntax_decl(line: &str) -> bool {
+    let Some((key, _)) = line.split_once('=') else {
+        return false;
+    };
+    key.trim() == "syntax"
+}
+
+fn parse_annotation_arg<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(name)?;
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some(inner) = rest
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Some(inner.trim());
+    }
+    Some(rest.trim())
+}
+
+fn trim_annotation_string(input: &str) -> &str {
+    let trimmed = input.trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed)
+        .trim()
+}
+
+fn split_first_token(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    let idx = input.find(char::is_whitespace)?;
+    let (head, tail) = input.split_at(idx);
+    Some((head, tail.trim_start()))
+}
+
+fn trim_wrapping_parens(input: &str) -> &str {
+    let trimmed = input.trim();
+    trimmed
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .map(str::trim)
+        .unwrap_or(trimmed)
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -619,6 +760,195 @@ mod tests {
         assert_eq!(spec.rest_routes[0].handler.as_deref(), Some("login"));
         assert_eq!(spec.rest_routes[0].doc.as_deref(), Some("登录接口"));
         assert_eq!(spec.rest_routes[0].middlewares, vec!["auth"]);
+        assert_eq!(
+            spec.rest_routes[0]
+                .server
+                .as_ref()
+                .and_then(|server| server.prefix.as_deref()),
+            Some("/api/v1")
+        );
+    }
+
+    #[test]
+    fn parses_multiple_server_blocks_as_route_scoped_config() {
+        let spec = parse_api(
+            r#"
+            @server (
+                prefix: /api
+                middleware: global
+            )
+
+            service user-api {
+                @server (
+                    prefix: /api/v1
+                    group: user
+                    middleware: auth
+                    jwt: Auth
+                )
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+
+                @server (
+                    prefix: /internal
+                    group: admin
+                    middleware: audit
+                )
+                @handler getStats
+                get /stats (StatsReq) returns (StatsResp)
+            }
+
+            type (
+                GetUserReq {
+                    id u64 `path:"id"`
+                }
+                UserResp {
+                    id u64 `json:"id"`
+                }
+                StatsReq {
+                    q string `query:"q"`
+                }
+                StatsResp {
+                    ok bool `json:"ok"`
+                }
+            )
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.server
+                .as_ref()
+                .and_then(|server| server.prefix.as_deref()),
+            Some("/api")
+        );
+        assert_eq!(
+            spec.rest_routes[0]
+                .server
+                .as_ref()
+                .and_then(|server| server.prefix.as_deref()),
+            Some("/api/v1")
+        );
+        assert_eq!(
+            spec.rest_routes[0]
+                .server
+                .as_ref()
+                .and_then(|server| server.group.as_deref()),
+            Some("user")
+        );
+        assert_eq!(
+            spec.rest_routes[0]
+                .server
+                .as_ref()
+                .and_then(|server| server.jwt.as_deref()),
+            Some("Auth")
+        );
+        assert_eq!(
+            spec.rest_routes[1]
+                .server
+                .as_ref()
+                .and_then(|server| server.prefix.as_deref()),
+            Some("/internal")
+        );
+        assert_eq!(
+            spec.rest_routes[1]
+                .server
+                .as_ref()
+                .map(|server| server.middlewares.as_slice()),
+            Some(&["audit".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn parses_compact_go_zero_block_and_signature_spacing() {
+        let spec = parse_api(
+            r#"
+            syntax = "v1"
+
+            info(
+                title: "用户服务"
+            )
+
+            type(
+                GetUserReq {
+                    id u64 `path:"id"`
+                }
+                UserResp {
+                    id u64 `json:"id"`
+                }
+            )
+
+            service user-api {
+                @server(
+                    prefix: /api/v1
+                )
+                @doc("获取用户")
+                @middleware(auth, trace)
+                @handler(getUser)
+                patch   /users/:id   (GetUserReq)returns(UserResp)
+                rpc   Ping   (GetUserReq)returns(UserResp)
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.info[0].key, "title");
+        assert_eq!(spec.types.len(), 2);
+        assert_eq!(spec.rest_routes.len(), 1);
+        assert_eq!(spec.rest_routes[0].method, HttpMethod::Patch);
+        assert_eq!(spec.rest_routes[0].doc.as_deref(), Some("获取用户"));
+        assert_eq!(spec.rest_routes[0].middlewares, vec!["auth", "trace"]);
+        assert_eq!(spec.rest_routes[0].handler.as_deref(), Some("getUser"));
+        assert_eq!(spec.rest_routes[0].request, "GetUserReq");
+        assert_eq!(spec.rest_routes[0].response, "UserResp");
+        assert_eq!(
+            spec.rest_routes[0]
+                .server
+                .as_ref()
+                .and_then(|server| server.prefix.as_deref()),
+            Some("/api/v1")
+        );
+        assert_eq!(spec.rpc_methods.len(), 1);
+        assert_eq!(spec.rpc_methods[0].request, "GetUserReq");
+        assert_eq!(spec.rpc_methods[0].response, "UserResp");
+    }
+
+    #[test]
+    fn parses_route_without_request_as_empty_request() {
+        let spec = parse_api(
+            r#"
+            service health-api {
+                @handler health
+                get /health returns (HealthResp)
+                @handler ping
+                get /ping
+                @handler logout
+                post /logout (LogoutReq)
+            }
+
+            type LogoutReq {
+                token string `json:"token"`
+            }
+
+            type HealthResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.rest_routes[0].request, "EmptyReq");
+        assert_eq!(spec.rest_routes[1].request, "EmptyReq");
+        assert_eq!(spec.rest_routes[1].response, "EmptyResp");
+        assert_eq!(spec.rest_routes[2].request, "LogoutReq");
+        assert_eq!(spec.rest_routes[2].response, "EmptyResp");
+        assert!(spec
+            .types
+            .iter()
+            .any(|ty| ty.name == "EmptyReq" && ty.fields.is_empty()));
+        assert!(spec
+            .types
+            .iter()
+            .any(|ty| ty.name == "EmptyResp" && ty.fields.is_empty()));
     }
 
     #[test]
@@ -632,6 +962,7 @@ mod tests {
                 query String `query:"q"`
                 form_name String `form:"name"`
                 token String `header:"X-Token"`
+                nickname String `json:"nickname" validate:"required,min=2,max=16"`
             }
             "#,
         )
@@ -647,6 +978,10 @@ mod tests {
         assert_eq!(
             spec.types[0].fields[3].wire_name.as_deref(),
             Some("X-Token")
+        );
+        assert_eq!(
+            spec.types[0].fields[4].validate.as_deref(),
+            Some("required,min=2,max=16")
         );
     }
 }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     generator::to_snake_case,
-    parser::{ApiSpec, Field, FieldSource, HttpMethod},
+    parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute},
 };
 
 pub fn render_rest_main(_spec: &ApiSpec) -> String {
@@ -85,11 +85,12 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
             HttpMethod::Get => "poem::get",
             HttpMethod::Post => "poem::post",
             HttpMethod::Put => "poem::put",
+            HttpMethod::Patch => "poem::patch",
             HttpMethod::Delete => "poem::delete",
         };
         out.push_str(&format!(
             "        .at(\"{}\", {}({}))\n",
-            full_route_path(spec, &route.path),
+            full_route_path_for_route(spec, route),
             routing_fn,
             handler
         ));
@@ -176,7 +177,7 @@ pub fn render_logic(spec: &ApiSpec) -> String {
                 out.push_str("    let _ = request_ctx;\n");
                 out.push_str("    let _ = req;\n");
             }
-            HttpMethod::Post | HttpMethod::Put => {
+            HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
                 out.push_str(&format!(
                     "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
                     handler = handler,
@@ -201,10 +202,9 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 
 pub fn render_openapi(spec: &ApiSpec) -> String {
     let needs_jwt = spec
-        .server
-        .as_ref()
-        .and_then(|server| server.jwt.as_ref())
-        .is_some();
+        .rest_routes
+        .iter()
+        .any(|route| route_has_jwt(spec, route));
     let mut out = String::from(
         "use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema",
     );
@@ -243,12 +243,7 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         ));
     }
 
-    if spec
-        .server
-        .as_ref()
-        .and_then(|server| server.jwt.as_ref())
-        .is_some()
-    {
+    if needs_jwt {
         out.push_str(
             "    builder = builder.security_scheme(\"bearerAuth\", SecurityScheme::Http { scheme: \"bearer\".to_string(), bearer_format: Some(\"JWT\".to_string()) });\n",
         );
@@ -290,12 +285,7 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
             out.push_str(&format!(".summary({:?})", doc));
         }
         out.push_str(&format!(".tag({:?})", spec.service));
-        if spec
-            .server
-            .as_ref()
-            .and_then(|server| server.jwt.as_ref())
-            .is_some()
-        {
+        if route_has_jwt(spec, route) {
             out.push_str(".require_security(\"bearerAuth\")");
         }
 
@@ -326,7 +316,11 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         }
 
         if route_spec.groups.contains_key(&FieldSource::Json)
-            || matches!(route.method, HttpMethod::Post | HttpMethod::Put)
+            || (!route_spec.groups.is_empty()
+                && matches!(
+                    route.method,
+                    HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
+                ))
         {
             out.push_str(&format!(".request_body({:?})", route.request));
         }
@@ -337,11 +331,12 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         ));
         out.push_str(&format!(
             "    builder.add_operation({:?}, HttpMethod::{}, op);\n",
-            full_route_path(spec, &route.path),
+            full_route_path_for_route(spec, route),
             match route.method {
                 HttpMethod::Get => "Get",
                 HttpMethod::Post => "Post",
                 HttpMethod::Put => "Put",
+                HttpMethod::Patch => "Patch",
                 HttpMethod::Delete => "Delete",
             }
         ));
@@ -362,9 +357,10 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     let handler = resolved_handler_name(route);
     let middlewares = route_middlewares(spec, route);
     let plan = roze_middleware::resolve_middleware_plan(&middlewares);
-    let uses_auth = plan
-        .builtins
-        .contains(&roze_middleware::BuiltInMiddleware::Auth);
+    let uses_auth = route_has_jwt(spec, route)
+        || plan
+            .builtins
+            .contains(&roze_middleware::BuiltInMiddleware::Auth);
     let custom = plan
         .custom
         .into_iter()
@@ -473,6 +469,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         }
         out.push_str("    };\n");
     }
+    out.push_str(&render_request_validation_checks(&request_ty.fields));
     out.push_str(&format!(
         "    let result = crate::logic::{handler}((*ctx).clone(), request_ctx, req).await;\n",
         handler = handler
@@ -489,15 +486,28 @@ fn route_middlewares(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Vec<St
         .as_ref()
         .map(|server| server.middlewares.clone())
         .unwrap_or_default();
+    if let Some(server) = &route.server {
+        names.extend(server.middlewares.clone());
+    }
     names.extend(route.middlewares.clone());
     names
 }
 
+fn route_has_jwt(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
+    route
+        .server
+        .as_ref()
+        .and_then(|server| server.jwt.as_ref())
+        .or_else(|| spec.server.as_ref().and_then(|server| server.jwt.as_ref()))
+        .is_some()
+}
+
 fn route_uses_auth(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
-    route_middlewares(spec, route).iter().any(|name| {
-        roze_middleware::BuiltInMiddleware::parse(name)
-            == Some(roze_middleware::BuiltInMiddleware::Auth)
-    })
+    route_has_jwt(spec, route)
+        || route_middlewares(spec, route).iter().any(|name| {
+            roze_middleware::BuiltInMiddleware::parse(name)
+                == Some(roze_middleware::BuiltInMiddleware::Auth)
+        })
 }
 
 fn custom_middlewares(spec: &ApiSpec) -> Vec<String> {
@@ -529,11 +539,7 @@ fn render_default_impls(spec: &ApiSpec) -> String {
             for field in &ty.fields {
                 out.push_str(&format!(
                     "            {}: {},\n",
-                    field
-                        .json_name
-                        .clone()
-                        .or_else(|| field.wire_name.clone())
-                        .unwrap_or_else(|| to_snake_case(&field.name)),
+                    rust_field_name(field),
                     default_value(&field.ty)
                 ));
             }
@@ -553,8 +559,8 @@ fn render_partial_struct(name: &str, fields: &[&Field]) -> String {
         if let Some(rename) = serde_rename(field) {
             out.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
         }
-        if should_validate(field) {
-            out.push_str("    #[validate(length(min = 1))]\n");
+        if let Some(validate) = validation_attr(field) {
+            out.push_str(&format!("    #[validate({validate})]\n"));
         }
         out.push_str(&format!(
             "    {}: {},\n",
@@ -564,6 +570,369 @@ fn render_partial_struct(name: &str, fields: &[&Field]) -> String {
     }
     out.push_str("}\n\n");
     out
+}
+
+fn render_request_validation_checks(fields: &[Field]) -> String {
+    let mut out = String::new();
+    for field in fields {
+        out.push_str(&custom_validation_checks(
+            field,
+            fields,
+            &format!("req.{}", rust_field_name(field)),
+        ));
+    }
+    out
+}
+
+fn custom_validation_checks(field: &Field, fields: &[Field], expr: &str) -> String {
+    let Some(rules) = field.validate.as_deref() else {
+        return String::new();
+    };
+    if is_optional_rule(rules) {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let field_name = field_wire_name(field);
+    let field_label = format!("field `{field_name}`");
+    out.push_str(&cross_field_validation_checks(field, fields, rules, expr));
+    if let Some(values) = oneof_values(rules) {
+        let allowed = values
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let allowed_message = values.join(", ");
+        out.push_str(&format!(
+            "    {{\n        let value = {expr}.to_string();\n        if ![{allowed}].contains(&value.as_str()) {{\n            let err = RozeError::BadRequest(format!(\"{field_label} must be one of: {{}}\", {allowed_message:?}));\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n    }}\n"
+        ));
+    }
+
+    if let Some((key_ty, value_ty)) = map_key_value_types(&field.ty) {
+        out.push_str(&map_dive_validation_checks(
+            field, rules, expr, &key_ty, &value_ty,
+        ));
+        return out;
+    }
+
+    if let Some(element_ty) = collection_element_type(&field.ty) {
+        out.push_str(&dive_validation_checks(field, rules, expr, &element_ty));
+        return out;
+    }
+
+    if map_type(&field.ty) != "String" {
+        return out;
+    }
+    out.push_str(&conditional_required_checks(field, fields, rules, expr));
+
+    if let Some(prefix) = rule_value(rules, "startswith") {
+        out.push_str(&format!(
+            "    if !{expr}.starts_with({prefix:?}) {{\n        let err = RozeError::BadRequest(format!(\"{field_label} must start with {{}}\", {prefix:?}));\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if let Some(suffix) = rule_value(rules, "endswith") {
+        out.push_str(&format!(
+            "    if !{expr}.ends_with({suffix:?}) {{\n        let err = RozeError::BadRequest(format!(\"{field_label} must end with {{}}\", {suffix:?}));\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if has_rule(rules, "alpha") {
+        out.push_str(&format!(
+            "    if !{expr}.chars().all(|ch| ch.is_alphabetic()) {{\n        let err = RozeError::BadRequest(\"{field_label} must contain letters only\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if has_rule(rules, "alphanum") {
+        out.push_str(&format!(
+            "    if !{expr}.chars().all(|ch| ch.is_alphanumeric()) {{\n        let err = RozeError::BadRequest(\"{field_label} must contain letters and numbers only\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if has_rule(rules, "ascii") {
+        out.push_str(&format!(
+            "    if !{expr}.is_ascii() {{\n        let err = RozeError::BadRequest(\"{field_label} must contain ASCII characters only\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if has_rule(rules, "numeric") {
+        out.push_str(&format!(
+            "    if {expr}.parse::<f64>().is_err() {{\n        let err = RozeError::BadRequest(\"{field_label} must be numeric\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+
+    out
+}
+
+fn dive_validation_checks(field: &Field, rules: &str, expr: &str, element_ty: &str) -> String {
+    let Some(element_rules) = rules_after_dive(rules) else {
+        return String::new();
+    };
+    if element_rules.is_empty() {
+        return String::new();
+    }
+
+    let field_name = field_wire_name(field);
+    let field_label = format!("field `{field_name}` item");
+    let body = dive_element_body(element_rules, "item", element_ty, &field_label, "        ");
+
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("    for item in &{expr} {{\n{body}    }}\n")
+    }
+}
+
+fn map_dive_validation_checks(
+    field: &Field,
+    rules: &str,
+    expr: &str,
+    key_ty: &str,
+    value_ty: &str,
+) -> String {
+    let Some(element_rules) = rules_after_dive(rules) else {
+        return String::new();
+    };
+    let (key_rules, value_rules) = split_map_dive_rules(element_rules);
+    let field_name = field_wire_name(field);
+    let mut body = String::new();
+    if let Some(key_rules) = key_rules {
+        body.push_str(&dive_element_body(
+            &key_rules,
+            "key",
+            key_ty,
+            &format!("field `{field_name}` key"),
+            "        ",
+        ));
+    }
+    if let Some(value_rules) = value_rules {
+        body.push_str(&dive_element_body(
+            &value_rules,
+            "value",
+            value_ty,
+            &format!("field `{field_name}` value"),
+            "        ",
+        ));
+    }
+
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("    for (key, value) in &{expr} {{\n{body}    }}\n")
+    }
+}
+
+fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent: &str) -> String {
+    let mut body = String::new();
+
+    if let Some(values) = oneof_values(rules) {
+        let allowed = values
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let allowed_message = values.join(", ");
+        body.push_str(&format!(
+            "{indent}{{\n{indent}    let value = {var}.to_string();\n{indent}    if ![{allowed}].contains(&value.as_str()) {{\n{indent}        let err = RozeError::BadRequest(format!(\"{field_label} must be one of: {{}}\", {allowed_message:?}));\n{indent}        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}        return Err(err);\n{indent}    }}\n{indent}}}\n"
+        ));
+    }
+
+    match map_type(ty).as_str() {
+        "String" => {
+            let (mut min, max) = min_max_rules(rules);
+            let equal = rule_value(rules, "len").and_then(parse_usize);
+            if has_rule(rules, "required") {
+                min.get_or_insert(1usize);
+            }
+            if let Some(equal) = equal {
+                body.push_str(&format!(
+                    "{indent}if {var}.chars().count() != {equal} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} length is invalid\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            } else {
+                if let Some(min) = min {
+                    body.push_str(&format!(
+                        "{indent}if {var}.chars().count() < {min} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} is too short\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                    ));
+                }
+                if let Some(max) = max {
+                    body.push_str(&format!(
+                        "{indent}if {var}.chars().count() > {max} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} is too long\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                    ));
+                }
+            }
+            if has_rule(rules, "alpha") {
+                body.push_str(&format!(
+                    "{indent}if !{var}.chars().all(|ch| ch.is_alphabetic()) {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must contain letters only\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "alphanum") {
+                body.push_str(&format!(
+                    "{indent}if !{var}.chars().all(|ch| ch.is_alphanumeric()) {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must contain letters and numbers only\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "ascii") {
+                body.push_str(&format!(
+                    "{indent}if !{var}.is_ascii() {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must contain ASCII characters only\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "numeric") {
+                body.push_str(&format!(
+                    "{indent}if {var}.parse::<f64>().is_err() {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be numeric\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+        }
+        "i64" | "u64" | "i32" | "u32" => {
+            body.push_str(&numeric_range_checks(rules, var, field_label, indent));
+        }
+        _ => {}
+    }
+
+    body
+}
+
+fn numeric_range_checks(rules: &str, expr: &str, field_label: &str, indent: &str) -> String {
+    let mut out = String::new();
+    if let Some(min) = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .filter(|value| is_number_literal(value))
+    {
+        out.push_str(&format!(
+            "{indent}if {expr} < &{min} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} is too small\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
+    if let Some(max) = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .filter(|value| is_number_literal(value))
+    {
+        out.push_str(&format!(
+            "{indent}if {expr} > &{max} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} is too large\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
+    if let Some(min) = rule_value(rules, "gt").filter(|value| is_number_literal(value)) {
+        out.push_str(&format!(
+            "{indent}if {expr} <= &{min} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} is too small\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
+    if let Some(max) = rule_value(rules, "lt").filter(|value| is_number_literal(value)) {
+        out.push_str(&format!(
+            "{indent}if {expr} >= &{max} {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} is too large\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
+    out
+}
+
+fn cross_field_validation_checks(
+    field: &Field,
+    fields: &[Field],
+    rules: &str,
+    expr: &str,
+) -> String {
+    let mut out = String::new();
+    let field_name = field_wire_name(field);
+    for (tag, op, message) in [
+        ("eqfield", "==", "must equal"),
+        ("nefield", "!=", "must not equal"),
+        ("gtfield", ">", "must be greater than"),
+        ("gtefield", ">=", "must be greater than or equal to"),
+        ("ltfield", "<", "must be less than"),
+        ("ltefield", "<=", "must be less than or equal to"),
+    ] {
+        let Some(other_name) = rule_value(rules, tag) else {
+            continue;
+        };
+        let Some(other) = comparable_field_ref_expr(fields, other_name, &field.ty) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "    if !({expr} {op} {other}) {{\n        let err = RozeError::BadRequest(\"field `{field_name}` {message} field `{other_name}`\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    out
+}
+
+fn conditional_required_checks(field: &Field, fields: &[Field], rules: &str, expr: &str) -> String {
+    let mut out = String::new();
+    let field_name = field_wire_name(field);
+
+    if let Some(condition) = rule_value(rules, "required_if") {
+        let conditions = condition_pairs(condition)
+            .into_iter()
+            .filter_map(|(other_name, expected)| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("{other}.to_string() == {expected:?}"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "    if ({}) && {expr}.is_empty() {{\n        let err = RozeError::BadRequest(\"field `{field_name}` is required\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+                conditions.join(" && ")
+            ));
+        }
+    }
+
+    if let Some(condition) = rule_value(rules, "required_unless") {
+        let conditions = condition_pairs(condition)
+            .into_iter()
+            .filter_map(|(other_name, expected)| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("{other}.to_string() == {expected:?}"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "    if !({}) && {expr}.is_empty() {{\n        let err = RozeError::BadRequest(\"field `{field_name}` is required\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+                conditions.join(" || ")
+            ));
+        }
+    }
+
+    if let Some(names) = rule_value(rules, "required_with") {
+        let conditions = condition_names(names)
+            .into_iter()
+            .filter_map(|other_name| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("!{other}.to_string().is_empty()"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "    if ({}) && {expr}.is_empty() {{\n        let err = RozeError::BadRequest(\"field `{field_name}` is required\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+                conditions.join(" || ")
+            ));
+        }
+    }
+
+    if let Some(names) = rule_value(rules, "required_without") {
+        let conditions = condition_names(names)
+            .into_iter()
+            .filter_map(|other_name| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("{other}.to_string().is_empty()"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "    if ({}) && {expr}.is_empty() {{\n        let err = RozeError::BadRequest(\"field `{field_name}` is required\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+                conditions.join(" || ")
+            ));
+        }
+    }
+
+    out
+}
+
+fn field_ref_expr(fields: &[Field], name: &str) -> Option<String> {
+    field_by_name(fields, name).map(|field| format!("req.{}", rust_field_name(field)))
+}
+
+fn comparable_field_ref_expr(fields: &[Field], name: &str, ty: &str) -> Option<String> {
+    field_by_name(fields, name)
+        .filter(|field| map_type(&field.ty) == map_type(ty))
+        .map(|field| format!("req.{}", rust_field_name(field)))
+}
+
+fn field_by_name<'a>(fields: &'a [Field], name: &str) -> Option<&'a Field> {
+    fields.iter().find(|field| {
+        field.name == name
+            || rust_field_name(field) == name
+            || field.wire_name.as_deref() == Some(name)
+            || field.json_name.as_deref() == Some(name)
+    })
 }
 
 fn field_value_expr(
@@ -759,6 +1128,7 @@ fn handler_name(method: &HttpMethod, path: &str) -> String {
         HttpMethod::Get => "get",
         HttpMethod::Post => "post",
         HttpMethod::Put => "put",
+        HttpMethod::Patch => "patch",
         HttpMethod::Delete => "delete",
     };
     let path_name = path
@@ -779,6 +1149,7 @@ fn http_method_name(method: &HttpMethod) -> &'static str {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",
         HttpMethod::Put => "PUT",
+        HttpMethod::Patch => "PATCH",
         HttpMethod::Delete => "DELETE",
     }
 }
@@ -807,8 +1178,29 @@ fn full_route_path(spec: &ApiSpec, path: &str) -> String {
     format!("{prefix}/{path}")
 }
 
-pub fn full_route_path_for_openapi(spec: &ApiSpec, path: &str) -> String {
-    full_route_path(spec, path)
+pub fn full_route_path_for_route(spec: &ApiSpec, route: &RestRoute) -> String {
+    let prefix = route
+        .server
+        .as_ref()
+        .and_then(|server| server.prefix.as_deref())
+        .or_else(|| {
+            spec.server
+                .as_ref()
+                .and_then(|server| server.prefix.as_deref())
+        })
+        .unwrap_or("");
+
+    if prefix.is_empty() {
+        return route.path.to_string();
+    }
+
+    let prefix = prefix.trim_end_matches('/');
+    let path = route.path.trim_start_matches('/');
+    format!("{prefix}/{path}")
+}
+
+pub fn full_route_path_for_openapi(spec: &ApiSpec, route: &RestRoute) -> String {
+    full_route_path_for_route(spec, route)
 }
 
 fn escape_doc(doc: &str) -> String {
@@ -823,17 +1215,36 @@ fn default_value(ty: &str) -> &'static str {
     }
 }
 
-fn map_type(ty: &str) -> &str {
+fn map_type(ty: &str) -> String {
+    let ty = ty.trim();
+    if let Some((key, value)) = map_key_value_types(ty) {
+        return format!(
+            "std::collections::HashMap<{}, {}>",
+            map_type(&key),
+            map_type(&value)
+        );
+    }
+    if let Some(inner) = collection_element_type(ty) {
+        return format!("Vec<{}>", map_type(&inner));
+    }
+
     match ty {
-        "string" => "String",
-        "int" => "i64",
-        "uint" => "u64",
-        "bool" => "bool",
-        other => other,
+        "string" => "String".to_string(),
+        "int" => "i64".to_string(),
+        "uint" => "u64".to_string(),
+        "bool" => "bool".to_string(),
+        other => other.to_string(),
     }
 }
 
 fn openapi_schema_expr(ty: &str) -> String {
+    if map_key_value_types(ty).is_some() {
+        return "Schema::object(BTreeMap::new(), Vec::new())".to_string();
+    }
+    if let Some(inner) = collection_element_type(ty) {
+        return format!("Schema::array({})", openapi_schema_expr(&inner));
+    }
+
     match ty {
         "String" | "string" => "Schema::string()".to_string(),
         "bool" => "Schema::boolean()".to_string(),
@@ -847,8 +1258,279 @@ fn openapi_schema_expr(ty: &str) -> String {
     }
 }
 
-fn should_validate(field: &Field) -> bool {
-    matches!(map_type(&field.ty), "String")
+fn validation_attr(field: &Field) -> Option<String> {
+    let rules = field.validate.as_deref()?;
+    if is_optional_rule(rules) {
+        return None;
+    }
+
+    if map_key_value_types(&field.ty).is_some() || collection_element_type(&field.ty).is_some() {
+        return collection_validation_attr(rules_before_dive(rules));
+    }
+
+    match map_type(&field.ty).as_str() {
+        "String" => string_validation_attr(rules),
+        "i64" | "u64" | "i32" | "u32" => number_validation_attr(rules),
+        _ => None,
+    }
+}
+
+fn string_validation_attr(rules: &str) -> Option<String> {
+    let mut attrs = Vec::new();
+    if has_rule(rules, "email") {
+        attrs.push("email".to_string());
+    }
+    if has_rule(rules, "url") || has_rule(rules, "uri") {
+        attrs.push("url".to_string());
+    }
+    if has_rule(rules, "ip") {
+        attrs.push("ip".to_string());
+    } else if has_rule(rules, "ipv4") {
+        attrs.push("ip(v4 = true)".to_string());
+    } else if has_rule(rules, "ipv6") {
+        attrs.push("ip(v6 = true)".to_string());
+    }
+    if let Some(pattern) = rule_value(rules, "contains") {
+        attrs.push(format!("contains = {pattern:?}"));
+    }
+    if let Some(pattern) = rule_value(rules, "excludes") {
+        attrs.push(format!("does_not_contain = {pattern:?}"));
+    }
+
+    let (mut min, max) = min_max_rules(rules);
+    let equal = rule_value(rules, "len").and_then(parse_usize);
+    for rule in rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
+        if rule == "required" {
+            min.get_or_insert(1usize);
+        }
+    }
+
+    if let Some(equal) = equal {
+        attrs.push(format!("length(equal = {equal})"));
+    } else {
+        match (min, max) {
+            (Some(min), Some(max)) => attrs.push(format!("length(min = {min}, max = {max})")),
+            (Some(min), None) => attrs.push(format!("length(min = {min})")),
+            (None, Some(max)) => attrs.push(format!("length(max = {max})")),
+            (None, None) => {}
+        }
+    }
+
+    if attrs.is_empty() {
+        None
+    } else {
+        Some(attrs.join(", "))
+    }
+}
+
+fn number_validation_attr(rules: &str) -> Option<String> {
+    let min = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .filter(|value| is_number_literal(value));
+    let max = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .filter(|value| is_number_literal(value));
+    let exclusive_min = rule_value(rules, "gt").filter(|value| is_number_literal(value));
+    let exclusive_max = rule_value(rules, "lt").filter(|value| is_number_literal(value));
+
+    let mut parts = Vec::new();
+    if let Some(min) = min {
+        parts.push(format!("min = {min}"));
+    }
+    if let Some(max) = max {
+        parts.push(format!("max = {max}"));
+    }
+    if let Some(exclusive_min) = exclusive_min {
+        parts.push(format!("exclusive_min = {exclusive_min}"));
+    }
+    if let Some(exclusive_max) = exclusive_max {
+        parts.push(format!("exclusive_max = {exclusive_max}"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("range({})", parts.join(", ")))
+    }
+}
+
+fn collection_validation_attr(rules: &str) -> Option<String> {
+    let (mut min, max) = min_max_rules(rules);
+    let equal = rule_value(rules, "len").and_then(parse_usize);
+    if has_rule(rules, "required") {
+        min.get_or_insert(1usize);
+    }
+
+    if let Some(equal) = equal {
+        Some(format!("length(equal = {equal})"))
+    } else {
+        match (min, max) {
+            (Some(min), Some(max)) => Some(format!("length(min = {min}, max = {max})")),
+            (Some(min), None) => Some(format!("length(min = {min})")),
+            (None, Some(max)) => Some(format!("length(max = {max})")),
+            (None, None) => None,
+        }
+    }
+}
+
+fn min_max_rules(rules: &str) -> (Option<usize>, Option<usize>) {
+    let min = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .and_then(parse_usize);
+    let max = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .and_then(parse_usize);
+    (min, max)
+}
+
+fn has_rule(rules: &str, name: &str) -> bool {
+    for rule in rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
+        if rule == name {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_optional_rule(rules: &str) -> bool {
+    has_rule(rules, "optional") || has_rule(rules, "omitempty")
+}
+
+fn rules_before_dive(rules: &str) -> &str {
+    rules
+        .split_once(",dive")
+        .map(|(before, _)| before)
+        .unwrap_or(rules)
+        .trim()
+}
+
+fn rules_after_dive(rules: &str) -> Option<&str> {
+    rules
+        .split_once("dive,")
+        .map(|(_, after)| after.trim())
+        .filter(|after| !after.is_empty())
+}
+
+fn split_map_dive_rules(rules: &str) -> (Option<String>, Option<String>) {
+    let parts = rules
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.first() != Some(&"keys") {
+        return (None, Some(rules.trim().to_string()));
+    }
+
+    let Some(end_idx) = parts.iter().position(|part| *part == "endkeys") else {
+        return (None, Some(rules.trim().to_string()));
+    };
+    let key_rules = parts[1..end_idx].join(",");
+    let value_rules = parts[end_idx + 1..].join(",");
+    (
+        (!key_rules.is_empty()).then_some(key_rules),
+        (!value_rules.is_empty()).then_some(value_rules),
+    )
+}
+
+fn map_key_value_types(ty: &str) -> Option<(String, String)> {
+    let ty = ty.trim();
+    if let Some(rest) = ty.strip_prefix("map[") {
+        let (key, value) = rest.split_once(']')?;
+        return Some((
+            key.trim_start_matches('*').trim().to_string(),
+            value.trim_start_matches('*').trim().to_string(),
+        ));
+    }
+    if let Some(inner) = ty
+        .strip_prefix("HashMap<")
+        .and_then(|raw| raw.strip_suffix('>'))
+    {
+        let (key, value) = inner.split_once(',')?;
+        return Some((
+            key.trim_start_matches('*').trim().to_string(),
+            value.trim_start_matches('*').trim().to_string(),
+        ));
+    }
+    None
+}
+
+fn collection_element_type(ty: &str) -> Option<String> {
+    let ty = ty.trim();
+    if let Some(inner) = ty.strip_prefix("[]") {
+        return Some(inner.trim_start_matches('*').trim().to_string());
+    }
+    if let Some(inner) = ty
+        .strip_prefix("Vec<")
+        .and_then(|raw| raw.strip_suffix('>'))
+    {
+        return Some(inner.trim_start_matches('*').trim().to_string());
+    }
+    None
+}
+
+fn oneof_values(rules: &str) -> Option<Vec<&str>> {
+    let values = rule_value(rules, "oneof")?
+        .split_whitespace()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn condition_pairs(value: &str) -> Vec<(&str, &str)> {
+    let parts = condition_names(value);
+    parts
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>()
+}
+
+fn condition_names(value: &str) -> Vec<&str> {
+    value
+        .split_whitespace()
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn rule_value<'a>(rules: &'a str, name: &str) -> Option<&'a str> {
+    for rule in rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
+        if let Some((key, value)) = rule.split_once('=') {
+            if key.trim() == name {
+                return Some(value.trim());
+            }
+        }
+    }
+    None
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok()
+}
+
+fn is_number_literal(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    value
+        .chars()
+        .enumerate()
+        .all(|(idx, ch)| ch.is_ascii_digit() || ch == '.' || (idx == 0 && ch == '-'))
 }
 
 #[cfg(test)]
@@ -868,6 +1550,38 @@ mod tests {
                 q String `query:"q"`
                 token String `header:"X-Token"`
                 name String `form:"name"`
+                password string `query:"password"`
+                confirm string `query:"confirm" validate:"eqfield=password"`
+                nickname String `query:"nickname" validate:"required,min=2,max=16"`
+                age int `query:"age" validate:"min=1,max=120"`
+                min_age int `query:"minAge"`
+                max_age int `query:"maxAge" validate:"gtefield=min_age"`
+                score int `query:"score" validate:"gt=0,lt=100"`
+                page uint `query:"page" validate:"gte=1,lte=500"`
+                email string `query:"email" validate:"required,email"`
+                website string `query:"website" validate:"url"`
+                code string `query:"code" validate:"len=6"`
+                remote_ip string `query:"remoteIp" validate:"ip"`
+                client_ip string `query:"clientIp" validate:"ipv4"`
+                domain string `query:"domain" validate:"contains=example"`
+                slug string `query:"slug" validate:"excludes=admin"`
+                status string `query:"status" validate:"oneof=active disabled"`
+                role_id int `query:"roleId" validate:"oneof=1 2"`
+                reason string `query:"reason" validate:"required_if=status disabled"`
+                comment string `query:"comment" validate:"required_unless=status active"`
+                backup string `query:"backup" validate:"required_with=account"`
+                fallback string `query:"fallback" validate:"required_without=account"`
+                tags []string `query:"tags" validate:"min=1,dive,required,min=2,alphanum"`
+                scores []int `query:"scores" validate:"len=2,dive,gte=1,lte=99"`
+                labels map[string]string `json:"labels" validate:"min=1,dive,keys,min=2,endkeys,required,min=1,alphanum"`
+                weights map[string]int `json:"weights" validate:"dive,keys,oneof=gold silver,endkeys,gte=1,lte=10"`
+                account string `query:"account" validate:"startswith=user_"`
+                resource string `query:"resource" validate:"endswith=_id"`
+                alpha_name string `query:"alphaName" validate:"alpha"`
+                code_name string `query:"codeName" validate:"alphanum"`
+                trace string `query:"trace" validate:"ascii"`
+                amount string `query:"amount" validate:"numeric"`
+                note String `query:"note" validate:"optional"`
             }
 
             type UserResp {
@@ -885,5 +1599,165 @@ mod tests {
         assert!(handlers.contains("GetUserReqForm"));
         assert!(handlers.contains("HeaderMap"));
         assert!(handlers.contains("header_value::<String>(headers, \"X-Token\")?"));
+        assert!(handlers.contains("#[validate(length(min = 2, max = 16))]"));
+        assert!(handlers.contains("#[validate(range(min = 1, max = 120))]"));
+        assert!(handlers.contains("#[validate(range(exclusive_min = 0, exclusive_max = 100))]"));
+        assert!(handlers.contains("#[validate(range(min = 1, max = 500))]"));
+        assert!(handlers.contains("#[validate(email, length(min = 1))]"));
+        assert!(handlers.contains("#[validate(url)]"));
+        assert!(handlers.contains("#[validate(length(equal = 6))]"));
+        assert!(handlers.contains("#[validate(ip)]"));
+        assert!(handlers.contains("#[validate(ip(v4 = true))]"));
+        assert!(handlers.contains("#[validate(contains = \"example\")]"));
+        assert!(handlers.contains("#[validate(does_not_contain = \"admin\")]"));
+        assert!(handlers.contains("if !(req.confirm == req.password)"));
+        assert!(handlers.contains("if !(req.max_age >= req.min_age)"));
+        assert!(handlers.contains("if ![\"active\", \"disabled\"].contains(&value.as_str())"));
+        assert!(handlers.contains("if ![\"1\", \"2\"].contains(&value.as_str())"));
+        assert!(handlers
+            .contains("if (req.status.to_string() == \"disabled\") && req.reason.is_empty()"));
+        assert!(handlers
+            .contains("if !(req.status.to_string() == \"active\") && req.comment.is_empty()"));
+        assert!(
+            handlers.contains("if (!req.account.to_string().is_empty()) && req.backup.is_empty()")
+        );
+        assert!(
+            handlers.contains("if (req.account.to_string().is_empty()) && req.fallback.is_empty()")
+        );
+        assert!(handlers.contains("tags: Vec<String>"));
+        assert!(handlers.contains("#[validate(length(min = 1))]"));
+        assert!(handlers.contains("for item in &req.tags"));
+        assert!(handlers.contains("if item.chars().count() < 2"));
+        assert!(handlers.contains("if !item.chars().all(|ch| ch.is_alphanumeric())"));
+        assert!(handlers.contains("scores: Vec<i64>"));
+        assert!(handlers.contains("#[validate(length(equal = 2))]"));
+        assert!(handlers.contains("for item in &req.scores"));
+        assert!(handlers.contains("if item < &1"));
+        assert!(handlers.contains("if item > &99"));
+        assert!(handlers.contains("labels: std::collections::HashMap<String, String>"));
+        assert!(handlers.contains("for (key, value) in &req.labels"));
+        assert!(handlers.contains("if key.chars().count() < 2"));
+        assert!(handlers.contains("if value.chars().count() < 1"));
+        assert!(handlers.contains("if !value.chars().all(|ch| ch.is_alphanumeric())"));
+        assert!(handlers.contains("weights: std::collections::HashMap<String, i64>"));
+        assert!(handlers.contains("for (key, value) in &req.weights"));
+        assert!(handlers.contains("if ![\"gold\", \"silver\"].contains(&value.as_str())"));
+        assert!(handlers.contains("if value < &1"));
+        assert!(handlers.contains("if value > &10"));
+        assert!(handlers.contains("if !req.account.starts_with(\"user_\")"));
+        assert!(handlers.contains("if !req.resource.ends_with(\"_id\")"));
+        assert!(handlers.contains("if !req.alpha_name.chars().all(|ch| ch.is_alphabetic())"));
+        assert!(handlers.contains("if !req.code_name.chars().all(|ch| ch.is_alphanumeric())"));
+        assert!(handlers.contains("if !req.trace.is_ascii()"));
+        assert!(handlers.contains("if req.amount.parse::<f64>().is_err()"));
+        assert!(!handlers.contains("note:\n    #[validate"));
+    }
+
+    #[test]
+    fn renders_route_without_request() {
+        let spec = parse_api(
+            r#"
+            service health-api {
+                @handler health
+                get /health returns (HealthResp)
+                @handler ping
+                get /ping
+                @handler logout
+                post /logout (LogoutReq)
+            }
+
+            type LogoutReq {
+                token string `json:"token"`
+            }
+
+            type HealthResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let handlers = render_handlers(&spec);
+        assert!(handlers.contains(".at(\"/health\", poem::get(health))"));
+        assert!(handlers.contains(".at(\"/ping\", poem::get(ping))"));
+        assert!(handlers.contains(".at(\"/logout\", poem::post(logout))"));
+        assert!(handlers.contains("let req = EmptyReq {};"));
+        assert!(handlers.contains("Result<Json<ApiResponse<EmptyResp>>, RozeError>"));
+
+        let logic = render_logic(&spec);
+        assert!(logic.contains("Ok(EmptyResp::default_response())"));
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi.contains("builder.add_operation(\"/health\", HttpMethod::Get"));
+        assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
+        assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
+    }
+
+    #[test]
+    fn renders_route_scoped_server_blocks() {
+        let spec = parse_api(
+            r#"
+            @server (
+                prefix: /api
+                middleware: trace
+            )
+
+            service user-api {
+                @server (
+                    prefix: /api/v1
+                    middleware: auth
+                    jwt: Auth
+                )
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+
+                @server (
+                    prefix: /internal
+                    middleware: audit
+                )
+                @handler getStats
+                get /stats (StatsReq) returns (StatsResp)
+
+                @handler updateUser
+                patch /users/:id (UpdateUserReq) returns (UserResp)
+            }
+
+            type (
+                GetUserReq {
+                    id u64 `path:"id"`
+                }
+                UserResp {
+                    id u64
+                }
+                StatsReq {
+                    q string `query:"q"`
+                }
+                StatsResp {
+                    ok bool
+                }
+                UpdateUserReq {
+                    id u64 `path:"id"`
+                    name string `json:"name"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let handlers = render_handlers(&spec);
+        assert!(handlers.contains(".at(\"/api/v1/users/:id\", poem::get(get_user))"));
+        assert!(handlers.contains(".at(\"/internal/stats\", poem::get(get_stats))"));
+        assert!(handlers.contains(".at(\"/internal/users/:id\", poem::patch(update_user))"));
+        assert!(handlers.contains("authorize(headers, ctx)"));
+        assert!(handlers.contains("crate::middleware::audit(ctx, &request_ctx).await"));
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi.contains("builder.security_scheme(\"bearerAuth\""));
+        assert!(openapi.contains("builder.add_operation(\"/api/v1/users/:id\""));
+        assert!(openapi.contains("builder.add_operation(\"/internal/stats\""));
+        assert!(
+            openapi.contains("builder.add_operation(\"/internal/users/:id\", HttpMethod::Patch")
+        );
+        assert!(openapi.contains(".require_security(\"bearerAuth\")"));
     }
 }

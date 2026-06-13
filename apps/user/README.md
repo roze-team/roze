@@ -207,3 +207,36 @@ if rg -q "kafka\.pipeline\.restart_failed|kafka\.pipeline\.restarted" ./user.log
 fi
 '
 ```
+
+## I. 自动验收脚本（新增）
+
+新增 `apps/user/ops/reload-e2e.sh`，用于一键跑阶段1+2验收场景：
+
+- `invalid`：非法配置不重启服务（回滚）
+- `reload`：更新 `group/manual_ack/max_retries` 触发重建
+- `nack`：发送 `should_fail=true`，验收失败分支事件
+- `success`：发送正常消息，验收成功分支事件（含 `kafka.message.acked`）
+- `all`：顺序执行全部场景
+
+脚本会额外校验并输出（若触发则作为“可选事件”）：
+- `kafka.pipeline.startup_degraded`（部分 worker 启动失败场景）
+- `kafka.message.requeue_retry` / `kafka.message.dead_lettered`（重试或死信场景）
+
+示例：
+
+```bash
+cd /Users/yangcuiwang/go/src/hualiang/roze/apps/user
+chmod +x ops/reload-e2e.sh
+export LOG_FILE=./user.log
+export ROZE_CONFIG_CENTER_ETCD_ENDPOINTS=127.0.0.1:2379
+export ROZE_CONFIG_CENTER_KEY=roze/user/config
+export ROZE_KAFKA_BROKERS=127.0.0.1:9092
+export ROZE_KAFKA_TOPIC=user.events
+./ops/reload-e2e.sh all
+```
+
+说明：
+- 脚本默认将日志读到 `apps/user/ops/user.log`；
+- 脚本默认下发 Kafka `brokers/bootstrap=127.0.0.1:9092`，并向 `user.events` 投递验收消息；
+- 若缺失 `kcat`，`nack/success` 场景会跳过，仍可执行配置中心热更新与重建验收；
+- 输出可直接对齐 `kafka.pipeline.*` 与 `kafka.message.*` 事件契约。

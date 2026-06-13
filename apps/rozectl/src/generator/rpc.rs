@@ -354,6 +354,7 @@ fn handler_name(method: &HttpMethod, path: &str) -> String {
         HttpMethod::Get => "get",
         HttpMethod::Post => "post",
         HttpMethod::Put => "put",
+        HttpMethod::Patch => "patch",
         HttpMethod::Delete => "delete",
     };
     let path_name = path

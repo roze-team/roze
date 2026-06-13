@@ -1,9 +1,9 @@
 mod config;
 mod handler;
+mod kafka;
 mod logic;
 mod middleware;
 mod openapi;
-mod kafka;
 mod svc;
 mod types;
 
@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -73,10 +73,11 @@ async fn main() -> anyhow::Result<()> {
             .await;
     }
 
-    let kafka_task = kafka::start_center_driven_kafka(
+    let app_name = config.name.clone();
+    let mut kafka_task = kafka::start_center_driven_kafka(
         config_rx.clone(),
         reload_version.clone(),
-        config.name.clone(),
+        app_name.clone(),
     );
 
     let mut registration = if rest.register {
@@ -93,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let ctx = svc::ServiceContext::new(config).await?;
+    let ctx = svc::ServiceContext::new(config.clone()).await?;
     let app = roze_middleware::apply_common(handler::router(ctx));
     RestServer::new(rest.addr, app).serve().await?;
     if let Some(registration) = registration.as_mut() {
@@ -102,30 +103,30 @@ async fn main() -> anyhow::Result<()> {
 
     drop(config_tx);
     tracing::info!(
-        app = %config.name,
+        app = %app_name,
         event = "kafka.runtime.shutdown_requested",
         "kafka background runtime shutdown requested"
     );
 
-    match timeout(Duration::from_secs(5), kafka_task).await {
-        Ok(result) => {
+    tokio::select! {
+        result = &mut kafka_task => {
             if let Err(err) = result {
                 tracing::warn!(
-                    app = %config.name,
+                    app = %app_name,
                     event = "kafka.runtime.stop_error",
                     error = %err,
                     "kafka background runtime stopped with error"
                 );
             }
         }
-        Err(_) => {
+        _ = sleep(Duration::from_secs(5)) => {
             tracing::warn!(
-                app = %config.name,
+                app = %app_name,
                 event = "kafka.runtime.stop_timeout",
                 "kafka background runtime stop timeout, forcing abort"
             );
             kafka_task.abort();
-            let _ = timeout(Duration::from_secs(2), kafka_task).await;
+            let _ = timeout(Duration::from_secs(2), &mut kafka_task).await;
         }
     }
 

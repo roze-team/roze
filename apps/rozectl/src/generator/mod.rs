@@ -1,3 +1,4 @@
+pub mod client;
 pub mod model;
 pub mod rest;
 pub mod rpc;
@@ -222,33 +223,401 @@ pub fn write_openapi_json(api: &Path, out: &Path) -> anyhow::Result<()> {
     let source = read_api_source(api)?;
     let spec = crate::parser::parse_api(&source)?;
     validate_project_kind(&spec, ProjectKind::Rest)?;
-    let mut paths = serde_json::Map::new();
-    for route in &spec.rest_routes {
-        let method = match route.method {
-            crate::parser::HttpMethod::Get => "get",
-            crate::parser::HttpMethod::Post => "post",
-            crate::parser::HttpMethod::Put => "put",
-            crate::parser::HttpMethod::Delete => "delete",
-        };
-        paths.insert(
-            rest::full_route_path_for_openapi(&spec, &route.path),
-            serde_json::json!({
-                method: {
-                    "operationId": route.handler.clone().unwrap_or_else(|| rest::handler_name_for_openapi(&route.method, &route.path)),
-                    "responses": { "200": { "description": "OK" } }
-                }
-            }),
-        );
-    }
-    let document = serde_json::json!({
-        "openapi": "3.0.0",
-        "info": { "title": spec.service, "version": "0.1.0" },
-        "paths": paths
-    });
+    let document = openapi_document(&spec);
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     fs::write(out, serde_json::to_string_pretty(&document)?)
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
+    let mut paths = serde_json::Map::<String, serde_json::Value>::new();
+    for route in &spec.rest_routes {
+        let path = openapi_path(&rest::full_route_path_for_openapi(spec, route));
+        let method = openapi_method_name(&route.method);
+        let path_item = paths
+            .entry(path)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let serde_json::Value::Object(path_item) = path_item else {
+            continue;
+        };
+        path_item.insert(method.to_string(), openapi_operation(spec, route));
+    }
+
+    let mut schemas = serde_json::Map::new();
+    for ty in &spec.types {
+        schemas.insert(ty.name.clone(), openapi_type_schema(ty));
+    }
+
+    let mut components = serde_json::Map::new();
+    components.insert("schemas".to_string(), serde_json::Value::Object(schemas));
+    if spec
+        .rest_routes
+        .iter()
+        .any(|route| route_has_jwt(spec, route))
+    {
+        components.insert(
+            "securitySchemes".to_string(),
+            serde_json::json!({
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT"
+                }
+            }),
+        );
+    }
+
+    serde_json::json!({
+        "openapi": "3.0.0",
+        "info": { "title": spec.service, "version": "0.1.0" },
+        "servers": openapi_servers(spec),
+        "paths": paths,
+        "components": components
+    })
+}
+
+fn openapi_operation(spec: &ApiSpec, route: &crate::parser::RestRoute) -> serde_json::Value {
+    let request_ty = spec.types.iter().find(|ty| ty.name == route.request);
+    let mut operation = serde_json::Map::new();
+    operation.insert(
+        "operationId".to_string(),
+        serde_json::json!(route
+            .handler
+            .clone()
+            .unwrap_or_else(|| rest::handler_name_for_openapi(&route.method, &route.path))),
+    );
+    operation.insert("tags".to_string(), serde_json::json!([spec.service]));
+    if let Some(doc) = &route.doc {
+        operation.insert("summary".to_string(), serde_json::json!(doc));
+    }
+    if route_has_jwt(spec, route)
+        || route
+            .middlewares
+            .iter()
+            .any(|mw| mw == "auth" || mw == "jwt")
+    {
+        operation.insert(
+            "security".to_string(),
+            serde_json::json!([{ "bearerAuth": [] }]),
+        );
+    }
+
+    let mut parameters = Vec::new();
+    let mut json_body_fields = Vec::new();
+    let mut form_body_fields = Vec::new();
+    if let Some(request_ty) = request_ty {
+        for field in &request_ty.fields {
+            match openapi_field_source(field, route) {
+                crate::parser::FieldSource::Path => {
+                    parameters.push(openapi_parameter(field, "path", true))
+                }
+                crate::parser::FieldSource::Query => {
+                    parameters.push(openapi_parameter(field, "query", false))
+                }
+                crate::parser::FieldSource::Header => {
+                    parameters.push(openapi_parameter(field, "header", false))
+                }
+                crate::parser::FieldSource::Form => form_body_fields.push(field),
+                crate::parser::FieldSource::Json => json_body_fields.push(field),
+                crate::parser::FieldSource::Auto => {}
+            }
+        }
+    }
+    if !parameters.is_empty() {
+        operation.insert(
+            "parameters".to_string(),
+            serde_json::Value::Array(parameters),
+        );
+    }
+
+    if !form_body_fields.is_empty() {
+        operation.insert(
+            "requestBody".to_string(),
+            openapi_request_body("application/x-www-form-urlencoded", &form_body_fields),
+        );
+    } else if !json_body_fields.is_empty()
+        || (request_ty.is_some_and(|ty| !ty.fields.is_empty())
+            && matches!(
+                route.method,
+                crate::parser::HttpMethod::Post
+                    | crate::parser::HttpMethod::Put
+                    | crate::parser::HttpMethod::Patch
+            ))
+    {
+        operation.insert(
+            "requestBody".to_string(),
+            if json_body_fields.is_empty() {
+                serde_json::json!({
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": format!("#/components/schemas/{}", route.request) }
+                        }
+                    }
+                })
+            } else {
+                openapi_request_body("application/json", &json_body_fields)
+            },
+        );
+    }
+
+    operation.insert(
+        "responses".to_string(),
+        serde_json::json!({
+            "200": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": format!("#/components/schemas/{}", route.response) }
+                    }
+                }
+            }
+        }),
+    );
+
+    serde_json::Value::Object(operation)
+}
+
+fn openapi_servers(spec: &ApiSpec) -> serde_json::Value {
+    let mut seen = HashSet::new();
+    let mut servers = Vec::new();
+    if let Some(prefix) = spec
+        .server
+        .as_ref()
+        .and_then(|server| server.prefix.as_deref())
+    {
+        if seen.insert(prefix.to_string()) {
+            servers.push(serde_json::json!({ "url": prefix }));
+        }
+    }
+    for route in &spec.rest_routes {
+        if let Some(prefix) = route
+            .server
+            .as_ref()
+            .and_then(|server| server.prefix.as_deref())
+        {
+            if seen.insert(prefix.to_string()) {
+                servers.push(serde_json::json!({ "url": prefix }));
+            }
+        }
+    }
+    if servers.is_empty() {
+        servers.push(serde_json::json!({ "url": "/" }));
+    }
+    serde_json::Value::Array(servers)
+}
+
+fn route_has_jwt(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
+    route
+        .server
+        .as_ref()
+        .and_then(|server| server.jwt.as_ref())
+        .or_else(|| spec.server.as_ref().and_then(|server| server.jwt.as_ref()))
+        .is_some()
+}
+
+fn openapi_type_schema(ty: &crate::parser::TypeDef) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for field in &ty.fields {
+        properties.insert(field_wire_name(field), openapi_schema(&field.ty));
+        required.push(serde_json::Value::String(field_wire_name(field)));
+    }
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required
+    })
+}
+
+fn openapi_parameter(
+    field: &crate::parser::Field,
+    location: &str,
+    required: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": field_wire_name(field),
+        "in": location,
+        "required": required,
+        "schema": openapi_schema(&field.ty)
+    })
+}
+
+fn openapi_request_body(content_type: &str, fields: &[&crate::parser::Field]) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for field in fields {
+        properties.insert(field_wire_name(field), openapi_schema(&field.ty));
+        required.push(serde_json::Value::String(field_wire_name(field)));
+    }
+    serde_json::json!({
+        "required": true,
+        "content": {
+            content_type: {
+                "schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            }
+        }
+    })
+}
+
+fn openapi_schema(ty: &str) -> serde_json::Value {
+    match ty {
+        "String" | "string" => serde_json::json!({ "type": "string" }),
+        "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
+        "i32" | "int32" => serde_json::json!({ "type": "integer", "format": "int32" }),
+        "i64" | "int" | "int64" => serde_json::json!({ "type": "integer", "format": "int64" }),
+        "u32" | "uint32" => serde_json::json!({ "type": "integer", "format": "uint32" }),
+        "u64" | "uint" | "uint64" => serde_json::json!({ "type": "integer", "format": "uint64" }),
+        "f32" | "float" => serde_json::json!({ "type": "number", "format": "float" }),
+        "f64" | "double" => serde_json::json!({ "type": "number", "format": "double" }),
+        other => serde_json::json!({ "$ref": format!("#/components/schemas/{other}") }),
+    }
+}
+
+fn openapi_field_source(
+    field: &crate::parser::Field,
+    route: &crate::parser::RestRoute,
+) -> crate::parser::FieldSource {
+    match field.source {
+        crate::parser::FieldSource::Auto => {
+            let name = normalize_ident(&field_wire_name(field));
+            if route_path_params(&route.path).contains(&name) {
+                crate::parser::FieldSource::Path
+            } else if matches!(
+                route.method,
+                crate::parser::HttpMethod::Get | crate::parser::HttpMethod::Delete
+            ) {
+                crate::parser::FieldSource::Query
+            } else {
+                crate::parser::FieldSource::Json
+            }
+        }
+        other => other,
+    }
+}
+
+fn openapi_path(path: &str) -> String {
+    let mut out = String::new();
+    let mut chars = path.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == ':' {
+            let mut name = String::new();
+            while let Some(&next) = chars.peek() {
+                if next == '/' {
+                    break;
+                }
+                name.push(next);
+                chars.next();
+            }
+            if name.is_empty() {
+                out.push(':');
+            } else {
+                out.push('{');
+                out.push_str(&name);
+                out.push('}');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn route_path_params(path: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut chars = path.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            ':' => {
+                let mut name = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next == '/' {
+                        break;
+                    }
+                    name.push(next);
+                    chars.next();
+                }
+                if !name.is_empty() {
+                    names.push(normalize_ident(&name));
+                }
+            }
+            '{' => {
+                let mut name = String::new();
+                for next in chars.by_ref() {
+                    if next == '}' {
+                        break;
+                    }
+                    name.push(next);
+                }
+                if !name.is_empty() {
+                    names.push(normalize_ident(&name));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn field_wire_name(field: &crate::parser::Field) -> String {
+    field
+        .wire_name
+        .as_deref()
+        .or(field.json_name.as_deref())
+        .unwrap_or(&field.name)
+        .to_string()
+}
+
+fn normalize_ident(input: &str) -> String {
+    input.replace('-', "_")
+}
+
+fn openapi_method_name(method: &crate::parser::HttpMethod) -> &'static str {
+    match method {
+        crate::parser::HttpMethod::Get => "get",
+        crate::parser::HttpMethod::Post => "post",
+        crate::parser::HttpMethod::Put => "put",
+        crate::parser::HttpMethod::Patch => "patch",
+        crate::parser::HttpMethod::Delete => "delete",
+    }
+}
+
+pub fn write_ts_client(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, client::render_ts_client(&spec))
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+pub fn write_js_client(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, client::render_js_client(&spec))
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+pub fn write_dart_client(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, client::render_dart_client(&spec))
         .with_context(|| format!("failed to write {}", out.display()))
 }
 
@@ -639,12 +1008,34 @@ fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Re
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", absolute.display()))?;
     let mut out = String::new();
-    for raw in source.lines() {
+    let mut lines = source.lines();
+    while let Some(raw) = lines.next() {
         let line = raw.trim();
         if let Some(import) = parse_import_line(line) {
             let import_path = base.join(import);
             out.push_str(&read_api_source_inner(&import_path, seen)?);
             out.push('\n');
+        } else if is_import_block_start(line) {
+            for import_raw in lines.by_ref() {
+                let import_line = strip_inline_comment(import_raw).trim();
+                if import_line == ")" {
+                    break;
+                }
+                if import_line.is_empty() {
+                    continue;
+                }
+                if let Some(import) = parse_import_path(import_line) {
+                    let import_path = base.join(import);
+                    out.push_str(&read_api_source_inner(&import_path, seen)?);
+                    out.push('\n');
+                } else {
+                    anyhow::bail!(
+                        "invalid import entry `{}` in {}",
+                        import_line,
+                        absolute.display()
+                    );
+                }
+            }
         } else {
             out.push_str(raw);
             out.push('\n');
@@ -655,8 +1046,23 @@ fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Re
 
 fn parse_import_line(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("import ")?;
-    let rest = rest.trim();
+    parse_import_path(rest)
+}
+
+fn is_import_block_start(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("import") else {
+        return false;
+    };
+    rest.trim_start() == "("
+}
+
+fn parse_import_path(line: &str) -> Option<&str> {
+    let rest = line.trim();
     rest.strip_prefix('"')?.strip_suffix('"')
+}
+
+fn strip_inline_comment(line: &str) -> &str {
+    line.split_once("//").map_or(line, |(left, _)| left)
 }
 
 fn cargo_config() -> &'static str {
@@ -1101,6 +1507,7 @@ fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
         crate::parser::HttpMethod::Get => "GET",
         crate::parser::HttpMethod::Post => "POST",
         crate::parser::HttpMethod::Put => "PUT",
+        crate::parser::HttpMethod::Patch => "PATCH",
         crate::parser::HttpMethod::Delete => "DELETE",
     }
 }
@@ -1292,6 +1699,7 @@ fn render_proto(spec: &ApiSpec) -> anyhow::Result<String> {
                 crate::parser::HttpMethod::Get => "get",
                 crate::parser::HttpMethod::Post => "post",
                 crate::parser::HttpMethod::Put => "put",
+                crate::parser::HttpMethod::Patch => "patch",
                 crate::parser::HttpMethod::Delete => "delete",
             };
             format!("{}_{}", method, route_name_from_path(&route.path))
@@ -1375,6 +1783,46 @@ mod tests {
     }
 
     #[test]
+    fn read_api_source_expands_import_blocks() {
+        let root = temp_test_root("roze-import-block");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::write(
+            root.join("types.api"),
+            r#"
+            type GetUserReq {
+                id u64 `path:"id"`
+            }
+
+            type UserResp {
+                id u64 `json:"id"`
+            }
+            "#,
+        )
+        .expect("write imported api");
+        std::fs::write(
+            root.join("main.api"),
+            r#"
+            import (
+                "types.api"
+            )
+
+            service user-api {
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+            "#,
+        )
+        .expect("write main api");
+
+        let source = read_api_source(&root.join("main.api")).expect("read api source");
+        let spec = parse_api(&source).expect("parse expanded api");
+
+        assert_eq!(spec.types.len(), 2);
+        assert_eq!(spec.rest_routes.len(), 1);
+
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
     fn renders_valid_rpc_name_for_route_without_handler() {
         let spec = parse_api(
             r#"
@@ -1398,6 +1846,63 @@ mod tests {
         assert!(proto.contains("rpc GetUsersId (GetUserReq) returns (UserResp);"));
         assert!(!proto.contains('/'));
         assert!(!proto.contains(':'));
+    }
+
+    #[test]
+    fn openapi_document_contains_parameters_bodies_and_schemas() {
+        let spec = parse_api(
+            r#"
+            @server (
+                prefix: /api/v1
+                jwt: Auth
+            )
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+                @handler login
+                post /login (LoginReq) returns (LoginResp)
+            }
+            type (
+                GetUserReq {
+                    id u64 `path:"id"`
+                    token string `header:"Authorization"`
+                    q string `query:"q"`
+                }
+                UserResp {
+                    id u64 `json:"id"`
+                    name string `json:"name"`
+                }
+                LoginReq {
+                    username string `json:"username"`
+                    password string `json:"password"`
+                }
+                LoginResp {
+                    token string `json:"token"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let document = openapi_document(&spec);
+        assert_eq!(
+            document["paths"]["/api/v1/users/{id}"]["get"]["parameters"][0]["in"],
+            "path"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/users/{id}"]["get"]["parameters"][1]["in"],
+            "header"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/login"]["post"]["requestBody"]["content"]
+                ["application/json"]["schema"]["properties"]["username"]["type"],
+            "string"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["UserResp"]["properties"]["id"]["format"],
+            "uint64"
+        );
+        assert!(document["components"]["securitySchemes"]["bearerAuth"].is_object());
     }
 
     #[test]
@@ -1935,6 +2440,7 @@ mod tests {
             handler: None,
             doc: None,
             middlewares: Vec::new(),
+            server: None,
             method: HttpMethod::Get,
             path: "/users/:id".to_string(),
             request: "GetUserReq".to_string(),

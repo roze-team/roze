@@ -30,6 +30,8 @@ pub struct PathItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub put: Option<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delete: Option<Operation>,
 }
 
@@ -166,6 +168,7 @@ pub enum HttpMethod {
     Get,
     Post,
     Put,
+    Patch,
     Delete,
 }
 
@@ -229,6 +232,7 @@ impl OpenApiBuilder {
             HttpMethod::Get => item.get = Some(operation),
             HttpMethod::Post => item.post = Some(operation),
             HttpMethod::Put => item.put = Some(operation),
+            HttpMethod::Patch => item.patch = Some(operation),
             HttpMethod::Delete => item.delete = Some(operation),
         }
     }
@@ -463,6 +467,11 @@ mod tests {
             ),
         );
         builder.add_operation("/login", HttpMethod::Post, op);
+        builder.add_operation(
+            "/profile",
+            HttpMethod::Patch,
+            Operation::new("updateProfile").response("200", "OK", "LoginResp"),
+        );
 
         let json = to_json_value(&builder.finish());
 
@@ -470,6 +479,10 @@ mod tests {
         assert_eq!(json["info"]["title"], "roze");
         assert_eq!(json["servers"][0]["url"], "/api");
         assert_eq!(json["paths"]["/login"]["post"]["operation_id"], "login");
+        assert_eq!(
+            json["paths"]["/profile"]["patch"]["operation_id"],
+            "updateProfile"
+        );
         assert_eq!(
             json["paths"]["/login"]["post"]["request_body"]["schema"]["$ref"],
             "#/components/schemas/LoginReq"

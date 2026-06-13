@@ -2,54 +2,50 @@ mod config;
 
 use std::sync::Arc;
 
-use poem::{
-    Endpoint, Request, Response, Result,
-};
+use poem::{Request, Response, Result};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-#[derive(Clone)]
-struct DynamicGatewayEndpoint {
-    current: Arc<RwLock<RouteEntry>>,
+struct DynamicGatewayEndpoint<E> {
+    current: Arc<RwLock<RouteEntry<E>>>,
 }
 
-#[derive(Clone)]
-struct RouteEntry {
-    route: poem::Route,
+impl<E> Clone for DynamicGatewayEndpoint<E> {
+    fn clone(&self) -> Self {
+        Self {
+            current: self.current.clone(),
+        }
+    }
 }
 
-impl DynamicGatewayEndpoint {
-    fn new(initial: poem::Route) -> Self {
+struct RouteEntry<E> {
+    route: E,
+}
+
+impl<E> DynamicGatewayEndpoint<E> {
+    fn new(initial: E) -> Self {
         Self {
             current: Arc::new(RwLock::new(RouteEntry { route: initial })),
         }
     }
 
-    async fn set_route(&self, route: poem::Route) {
+    async fn set_route(&self, route: E) {
         let mut guard = self.current.write().await;
         *guard = RouteEntry { route };
     }
 }
 
-impl poem::Endpoint for DynamicGatewayEndpoint {
+impl<E> poem::Endpoint for DynamicGatewayEndpoint<E>
+where
+    E: poem::Endpoint<Output = Response> + Send + Sync + 'static,
+{
     type Output = Response;
 
     fn call(&self, req: Request) -> impl std::future::Future<Output = Result<Self::Output>> + Send {
         let this = self.current.clone();
         async move {
-            let snapshot = {
-                let guard = this.read().await;
-                guard.route.clone()
-            };
-            snapshot.call(req).await
-        }
-    }
-}
-
-impl Default for RouteEntry {
-    fn default() -> Self {
-        Self {
-            route: poem::Route::new(),
+            let guard = this.read().await;
+            guard.route.call(req).await
         }
     }
 }
@@ -90,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             while let Some(updated_config) = config_rx.recv().await {
                 let Some(updated_gateway) = updated_config.gateway else {
-                    warn!(event = "gateway.config.reload", message = "missing gateway config in hot-reload payload");
+                    warn!(
+                        event = "gateway.config.reload",
+                        message = "missing gateway config in hot-reload payload"
+                    );
                     continue;
                 };
 
@@ -109,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let next = roze_gateway::build_router(updated_gateway, center_jwt.clone());
                 center_router.set_route(next).await;
-                *current_signature = next_signature;
+                *current_signature = next_signature.clone();
 
                 tracing::info!(
                     event = "gateway.config.hot_reloaded",
@@ -155,13 +154,14 @@ async fn main() -> anyhow::Result<()> {
         addr = %listen,
         "start roze-gateway with dynamic route table"
     );
-    roze_http::rest::RestServer::new(listen, dynamic_router).serve().await?;
+    roze_http::rest::RestServer::new(listen, dynamic_router)
+        .serve()
+        .await?;
     Ok(())
 }
 
-fn route_signature(config: &config::GatewayConfig) -> String {
-    serde_json::to_string(config)
-        .unwrap_or_else(|_| String::new())
+fn route_signature(config: &roze_config::GatewayConfig) -> String {
+    serde_json::to_string(config).unwrap_or_else(|_| String::new())
 }
 
 fn config_path() -> std::path::PathBuf {

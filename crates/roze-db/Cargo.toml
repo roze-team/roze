@@ -8,3 +8,6 @@ version.workspace = true
 anyhow.workspace = true
 roze-config = { path = "../roze-config" }
 sea-orm.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -7,7 +7,7 @@ version.workspace = true
 [features]
 default = ["memory"]
 memory = []
-rdkafka = ["dep:rdkafka"]
+rdkafka = ["dep:rdkafka", "dep:regex"]
 
 [dependencies]
 anyhow.workspace = true
@@ -23,3 +23,7 @@ version = "0.36"
 optional = true
 default-features = false
 features = ["tokio"]
+
+[dependencies.regex]
+version = "1"
+optional = true

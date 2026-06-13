@@ -1,15 +1,15 @@
 use std::{
     future::Future,
     hash::{Hash, Hasher},
-    pin::Pin,
     path::PathBuf,
+    pin::Pin,
     str::FromStr,
     string::ToString,
+    sync::Arc as StdArc,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    sync::Arc as StdArc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -161,9 +161,7 @@ impl Default for ConfigCenterConfig {
 }
 
 pub trait Subscriber: Send + Sync {
-    fn value(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+    fn value(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
 }
 
 #[derive(Debug, Clone)]
@@ -178,9 +176,7 @@ impl EnvVarSubscriber {
 }
 
 impl Subscriber for EnvVarSubscriber {
-    fn value(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    fn value(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         let key = self.key.clone();
         Box::pin(async move {
             std::env::var(&key).map_err(|_| anyhow!("environment config key not found: {key}"))
@@ -200,14 +196,11 @@ impl FileConfigSubscriber {
 }
 
 impl Subscriber for FileConfigSubscriber {
-    fn value(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    fn value(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         let path = self.path.clone();
         Box::pin(async move {
-            tokio::fs::read_to_string(&path).await.map_err(|err| {
-                anyhow!("read config from file {} failed: {err}", path.display())
-            })
+            std::fs::read_to_string(&path)
+                .map_err(|err| anyhow!("read config from file {} failed: {err}", path.display()))
         })
     }
 }
@@ -228,9 +221,7 @@ impl EtcdSubscriber {
 }
 
 impl Subscriber for EtcdSubscriber {
-    fn value(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    fn value(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         let endpoints = self.endpoints.clone();
         let key = self.key.clone();
         Box::pin(async move {
@@ -253,7 +244,7 @@ impl Subscriber for EtcdSubscriber {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CascadingSubscriber {
     sources: Vec<StdArc<dyn Subscriber>>,
 }
@@ -272,9 +263,7 @@ impl CascadingSubscriber {
 }
 
 impl Subscriber for CascadingSubscriber {
-    fn value(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+    fn value(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         let sources = self.sources.clone();
         Box::pin(async move {
             let mut last_error: Option<anyhow::Error> = None;
@@ -295,7 +284,7 @@ impl Subscriber for CascadingSubscriber {
 type Listener<T> = Arc<dyn Fn(&T) + Send + Sync + 'static>;
 type ReloadListener<T> = Arc<dyn Fn(&ReloadResult<T>) + Send + Sync + 'static>;
 
-struct ConfigCenterInner<T> {
+struct ConfigCenterInner<T: Clone> {
     value: RwLock<T>,
     listeners: RwLock<Vec<Listener<T>>>,
     reload_listeners: RwLock<Vec<ReloadListener<T>>>,
@@ -303,7 +292,7 @@ struct ConfigCenterInner<T> {
 }
 
 #[derive(Clone)]
-pub struct ConfigCenter<T> {
+pub struct ConfigCenter<T: Clone> {
     inner: Arc<ConfigCenterInner<T>>,
 }
 
@@ -311,10 +300,7 @@ impl<T> ConfigCenter<T>
 where
     T: DeserializeOwned + Clone + Send + Sync + 'static,
 {
-    pub async fn new<S>(
-        subscriber: S,
-        options: ConfigCenterConfig,
-    ) -> Result<Self>
+    pub async fn new<S>(subscriber: S, options: ConfigCenterConfig) -> Result<Self>
     where
         S: Subscriber + 'static,
     {
@@ -345,11 +331,7 @@ where
     where
         F: Fn(&T) + Send + Sync + 'static,
     {
-        self.inner
-            .listeners
-            .write()
-            .await
-            .push(Arc::new(listener));
+        self.inner.listeners.write().await.push(Arc::new(listener));
     }
 
     pub async fn add_reload_listener<F>(&self, listener: F)

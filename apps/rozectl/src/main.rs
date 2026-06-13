@@ -139,6 +139,29 @@ enum ApiCommands {
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
     },
+    Client {
+        #[command(subcommand)]
+        command: ClientCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClientCommands {
+    Ts {
+        api: PathBuf,
+        #[arg(long, default_value = "client.ts")]
+        out: PathBuf,
+    },
+    Js {
+        api: PathBuf,
+        #[arg(long, default_value = "client.js")]
+        out: PathBuf,
+    },
+    Dart {
+        api: PathBuf,
+        #[arg(long, default_value = "client.dart")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -290,6 +313,17 @@ fn main() -> anyhow::Result<()> {
                 out,
                 options: options(force, update, roze_source),
             })?,
+            ApiCommands::Client { command } => match command {
+                ClientCommands::Ts { api, out } => {
+                    generator::write_ts_client(&api, &out)?;
+                }
+                ClientCommands::Js { api, out } => {
+                    generator::write_js_client(&api, &out)?;
+                }
+                ClientCommands::Dart { api, out } => {
+                    generator::write_dart_client(&api, &out)?;
+                }
+            },
         },
         Commands::Rpc { command } => match command {
             RpcCommands::Generate {
@@ -481,6 +515,63 @@ mod tests {
             openapi.command,
             Commands::Openapi {
                 command: OpenApiCommands::Generate { .. }
+            }
+        ));
+
+        let client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "ts",
+            "user.api",
+            "--out",
+            "sdk/user.ts",
+        ])
+        .expect("parse api client ts");
+        assert!(matches!(
+            client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Ts { .. }
+                }
+            }
+        ));
+
+        let js_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "js",
+            "user.api",
+            "--out",
+            "sdk/user.js",
+        ])
+        .expect("parse api client js");
+        assert!(matches!(
+            js_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Js { .. }
+                }
+            }
+        ));
+
+        let dart_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "dart",
+            "user.api",
+            "--out",
+            "sdk/user.dart",
+        ])
+        .expect("parse api client dart");
+        assert!(matches!(
+            dart_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Dart { .. }
+                }
             }
         ));
 

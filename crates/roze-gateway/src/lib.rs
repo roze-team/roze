@@ -8,7 +8,7 @@ use poem::{
     endpoint,
     http::{header, HeaderName, HeaderValue, Method, StatusCode},
     middleware::Cors,
-    Endpoint, Request, Response, Result, Route,
+    EndpointExt, Request, Response, Result, Route,
 };
 use reqwest::Response as ReqwestResponse;
 use serde_json::Value;
@@ -16,7 +16,8 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use roze_config::{
-    BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayRoute, GatewayService, RateLimitConfig,
+    BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayRoute, GatewayService,
+    RateLimitConfig,
 };
 use roze_jwt::{verify_token, JwtConfig};
 use roze_trace::TRACE_ID_HEADER;
@@ -85,7 +86,10 @@ impl Default for GatewayRuntime {
     }
 }
 
-pub fn build_router(config: GatewayConfig, jwt: Option<JwtConfig>) -> Route {
+pub fn build_router(
+    config: GatewayConfig,
+    jwt: Option<JwtConfig>,
+) -> impl poem::Endpoint<Output = Response> {
     let mut runtime = GatewayRuntime {
         global_timeout_ms: config.timeout_ms,
         global_fallback: config.fallback,
@@ -130,14 +134,21 @@ pub fn build_router(config: GatewayConfig, jwt: Option<JwtConfig>) -> Route {
         async move { runtime.handle_request(req).await }
     });
 
-    let mut app = Route::new().at("/*path", handler);
+    let app = Route::new().at("/*path", handler);
+    let has_cors = config.cors.is_some();
+    let cors = config
+        .cors
+        .map(|cors| {
+            build_cors(
+                cors.allow_origins,
+                cors.allow_methods,
+                cors.allow_headers,
+                cors.max_age_seconds,
+            )
+        })
+        .unwrap_or_else(Cors::new);
 
-    if let Some(cors) = config.cors {
-        let mut cors = build_cors(cors.allow_origins, cors.allow_methods, cors.allow_headers, cors.max_age_seconds);
-        app = app.with(cors);
-    }
-
-    app
+    app.with_if(has_cors, cors)
 }
 
 impl GatewayRuntime {
@@ -223,6 +234,15 @@ impl GatewayRuntime {
             ));
         }
 
+        let upstream_method = request_method.clone();
+        let upstream_path = request_path.clone();
+        let upstream_query = req.uri().query().map(str::to_string);
+        let upstream_headers = req
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+
         let body = match req
             .into_body()
             .into_bytes_limit(
@@ -255,7 +275,14 @@ impl GatewayRuntime {
 
         let result = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
-            self.proxy_to_upstream(route, req, body),
+            self.proxy_to_upstream(
+                &route,
+                upstream_method,
+                upstream_path,
+                upstream_query,
+                upstream_headers,
+                body,
+            ),
         )
         .await;
 
@@ -316,7 +343,10 @@ impl GatewayRuntime {
     async fn proxy_to_upstream(
         self: &Arc<Self>,
         route: &CompiledRoute,
-        mut req: Request,
+        method: Method,
+        incoming_path: String,
+        incoming_query: Option<String>,
+        headers: Vec<(HeaderName, HeaderValue)>,
         body: Vec<u8>,
     ) -> anyhow::Result<Response> {
         let service = self
@@ -324,22 +354,16 @@ impl GatewayRuntime {
             .get(&route.service)
             .ok_or_else(|| anyhow::anyhow!("service '{}' is not registered", route.service))?;
 
-        let method = parse_reqwest_method(req.method())?;
-        let incoming_path = req.uri().path();
-        let incoming_query = req.uri().query().unwrap_or_default();
-        let rewritten_path = rewrite_path(&route.path, route.rewrite.as_deref(), incoming_path);
+        let method = parse_reqwest_method(&method)?;
+        let rewritten_path = rewrite_path(&route.path, route.rewrite.as_deref(), &incoming_path);
         let upstream_url = build_upstream_url(
             &service.upstream,
             &rewritten_path,
-            if incoming_query.is_empty() {
-                None
-            } else {
-                Some(incoming_query)
-            },
+            incoming_query.as_deref().filter(|query| !query.is_empty()),
         );
 
         let mut upstream_req = self.client.request(method, upstream_url);
-        for (name, value) in req.headers() {
+        for (name, value) in headers {
             if !is_hop_by_hop_header(name.as_str()) {
                 upstream_req = upstream_req.header(name, value);
             }
@@ -451,7 +475,7 @@ impl GatewayRuntime {
 
 fn first_service_name(mut services: Vec<&String>) -> Option<&str> {
     services.sort();
-    services.first().map(String::as_str)
+    services.first().map(|service| service.as_str())
 }
 
 fn compile_routes(routes: Vec<GatewayRoute>) -> Vec<CompiledRoute> {
@@ -491,7 +515,9 @@ impl CompiledRoute {
         &self,
         services: &HashMap<String, ServiceEndpoint>,
     ) -> Option<u64> {
-        services.get(&self.service).and_then(|service| service.timeout_ms)
+        services
+            .get(&self.service)
+            .and_then(|service| service.timeout_ms)
     }
 }
 
@@ -542,9 +568,7 @@ fn normalize_middlewares(raw: Vec<String>) -> Vec<String> {
 
 fn has_middleware(items: &[String], name: &str) -> bool {
     items.iter().any(|item| {
-        item == name
-            || item == &format!("builtin:{name}")
-            || item == &format!("builtin::{name}")
+        item == name || item == &format!("builtin:{name}") || item == &format!("builtin::{name}")
     })
 }
 
@@ -569,7 +593,9 @@ fn ensure_header(req: &mut Request, key: &str) -> String {
 
     let generated = roze_trace::generate_trace_id();
     if let Ok(value) = HeaderValue::from_str(&generated) {
-        let _ = req.headers_mut().insert(HeaderName::from_static(key), value);
+        if let Ok(name) = HeaderName::from_bytes(key.as_bytes()) {
+            let _ = req.headers_mut().insert(name, value);
+        }
     }
     generated
 }
@@ -579,13 +605,7 @@ fn rewrite_path(route_path: &str, rewrite: Option<&str>, request_path: &str) -> 
 
     if route_path == "/" {
         return rewrite
-            .map(|to| {
-                if to == "/" {
-                    "/".to_string()
-                } else {
-                    to
-                }
-            })
+            .map(|to| if to == "/" { "/".to_string() } else { to })
             .unwrap_or_else(|| request_path.to_string());
     }
 
@@ -637,24 +657,32 @@ fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
 fn is_hop_by_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
-            | "te" | "trailers" | "transfer-encoding" | "upgrade"
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
     )
 }
 
 async fn build_upstream_response(upstream_response: ReqwestResponse) -> anyhow::Result<Response> {
     let status = upstream_response.status();
+    let headers = upstream_response.headers().clone();
     let body = upstream_response.bytes().await?;
     let mut poem_response = Response::builder()
         .status(
             StatusCode::from_u16(status.as_u16())
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR),
         )
-        .body(body.to_vec())
-        .unwrap_or_else(|_| Response::from("gateway upstream response build failed"));
+        .body(body.to_vec());
 
-    for (name, value) in upstream_response.headers() {
-        poem_response.headers_mut().insert(name.clone(), value.clone());
+    for (name, value) in &headers {
+        poem_response
+            .headers_mut()
+            .insert(name.clone(), value.clone());
     }
 
     Ok(poem_response)
@@ -687,12 +715,16 @@ fn build_cors(
         cors = cors.allow_headers(allow_headers);
     }
     if let Some(max_age) = max_age_seconds {
-        cors = cors.max_age(Duration::from_secs(max_age));
+        cors = cors.max_age(max_age.min(i32::MAX as u64) as i32);
     }
     cors
 }
 
-fn build_fallback(config: Option<&GatewayFallbackResponse>, status: StatusCode, message: &str) -> Response {
+fn build_fallback(
+    config: Option<&GatewayFallbackResponse>,
+    status: StatusCode,
+    message: &str,
+) -> Response {
     let status = config
         .and_then(|cfg| StatusCode::from_u16(cfg.status).ok())
         .unwrap_or(status);
@@ -702,9 +734,8 @@ fn build_fallback(config: Option<&GatewayFallbackResponse>, status: StatusCode, 
 
     let mut response = Response::builder()
         .status(status)
-        .body(serde_json::to_vec(&body).unwrap_or_else(|_| message.as_bytes().to_vec()))
-        .unwrap_or_else(|_| Response::from(message.to_string()));
-    response.set_content_type("application/json");
+        .body(serde_json::to_vec(&body).unwrap_or_else(|_| message.as_bytes().to_vec()));
+    response = response.set_content_type("application/json");
 
     if let Some(cfg) = config {
         for (name, value) in &cfg.headers {

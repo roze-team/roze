@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use roze_kafka::Publisher;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -32,7 +33,6 @@ impl std::fmt::Display for PipelineFailureReason {
 
 const USER_TOPIC: &str = "events";
 
-#[derive(Debug)]
 struct RunningKafkaPipeline {
     producer: Option<roze_kafka::RdkafkaProducer>,
     consumer_handles: Vec<tokio::task::JoinHandle<()>>,
@@ -123,9 +123,12 @@ pub fn start_center_driven_kafka(
         loop {
             let config = config_rx.borrow().clone();
             let version = reload_version.load(Ordering::SeqCst);
-            let kafka_signature = config.kafka.as_ref().map(serialize_signature).unwrap_or_default();
-            let bootstrap = config
-                .kafka
+            let kafka_config = map_kafka_config(&config);
+            let kafka_signature = kafka_config
+                .as_ref()
+                .map(serialize_signature)
+                .unwrap_or_default();
+            let bootstrap = kafka_config
                 .as_ref()
                 .map(|k| k.brokers_csv())
                 .unwrap_or_default();
@@ -259,13 +262,7 @@ async fn restart_kafka_pipeline(
 ) {
     let started_at = tokio::time::Instant::now();
 
-    running
-        .stop(
-            &app_name,
-            version,
-            previous_signature,
-        )
-        .await;
+    running.stop(&app_name, version, previous_signature).await;
 
     let bootstrap = bootstrap.to_string();
 
@@ -354,22 +351,28 @@ async fn restart_kafka_pipeline(
     for worker_id in 0..workers {
         let subscriber = subscriber.clone();
         let config = kafka_config_for_loop.clone();
-        let app_name = app_name.clone();
-        let producer = producer.clone();
-        let topic = topic.clone();
-        let signature = signature.to_string();
-        let group = group.clone();
+        let worker_app_name = app_name.clone();
+        let worker_producer = producer.clone();
+        let worker_topic = topic.clone();
+        let worker_signature = signature.to_string();
+        let worker_group = group.clone();
 
         let spawn_result = if config.enable_manual_ack {
+            let handler_app_name = worker_app_name.clone();
+            let handler_producer = worker_producer.clone();
+            let handler_topic = worker_topic.clone();
+            let handler_signature = worker_signature.clone();
+            let handler_group = worker_group.clone();
             roze_kafka::spawn_consumer_with_auto_ack(
                 &subscriber,
-                topic.clone(),
+                worker_topic.clone(),
                 move |delivery| {
                     let config = config.clone();
-                    let app_name = app_name.clone();
-                    let producer = producer.clone();
-                    let topic = topic.clone();
-                    let signature = signature.clone();
+                    let app_name = handler_app_name.clone();
+                    let producer = handler_producer.clone();
+                    let topic = handler_topic.clone();
+                    let signature = handler_signature.clone();
+                    let group = handler_group.clone();
                     async move {
                         tracing::info!(
                             app = %app_name,
@@ -474,42 +477,41 @@ async fn restart_kafka_pipeline(
             )
             .await
         } else {
-            roze_kafka::spawn_consumer(
-                &subscriber,
-                topic.clone(),
-                move |delivery| {
-                    let config = config.clone();
-                    let app_name = app_name.clone();
-                    let signature = signature.clone();
-                    let group = group.clone();
-                    async move {
-                        tracing::info!(
-                            app = %app_name,
-                            event = "kafka.message.received",
-                            worker = worker_id,
-                            topic = %delivery.message().topic,
-                            key = ?delivery.message().key,
-                            attempt = %delivery.message().attempt,
-                            group = %group,
-                            auto_commit = %config.enable_auto_commit,
-                            signature = %signature,
-                            "received kafka message in user service"
-                        );
-                        delivery.ack().await?;
-                        tracing::info!(
-                            app = %app_name,
-                            event = "kafka.message.acked",
-                            worker = worker_id,
-                            topic = %delivery.message().topic,
-                            attempt = %delivery.message().attempt,
-                            group = %group,
-                            signature = %signature,
-                            "kafka message auto ack done"
-                        );
-                        Ok(())
-                    }
-                },
-            )
+            let handler_app_name = worker_app_name.clone();
+            let handler_signature = worker_signature.clone();
+            let handler_group = worker_group.clone();
+            roze_kafka::spawn_consumer(&subscriber, worker_topic.clone(), move |delivery| {
+                let config = config.clone();
+                let app_name = handler_app_name.clone();
+                let signature = handler_signature.clone();
+                let group = handler_group.clone();
+                async move {
+                    tracing::info!(
+                        app = %app_name,
+                        event = "kafka.message.received",
+                        worker = worker_id,
+                        topic = %delivery.message().topic,
+                        key = ?delivery.message().key,
+                        attempt = %delivery.message().attempt,
+                        group = %group,
+                        auto_commit = %config.enable_auto_commit,
+                        signature = %signature,
+                        "received kafka message in user service"
+                    );
+                    delivery.ack().await?;
+                    tracing::info!(
+                        app = %app_name,
+                        event = "kafka.message.acked",
+                        worker = worker_id,
+                        topic = %delivery.message().topic,
+                        attempt = %delivery.message().attempt,
+                        group = %group,
+                        signature = %signature,
+                        "kafka message auto ack done"
+                    );
+                    Ok(())
+                }
+            })
             .await
         };
 
@@ -521,21 +523,22 @@ async fn restart_kafka_pipeline(
                     worker: worker_id,
                     err: err.clone(),
                 };
+                let reason_text = format!("{reason}");
                 restart_failure = Some(reason);
                 spawn_failed_count = spawn_failed_count.saturating_add(1);
                 tracing::error!(
-                    app = %app_name,
+                    app = %worker_app_name,
                     worker = worker_id,
                     error = %err,
                     event = "kafka.consumer.spawn_failed",
                     version = version,
-                    signature = %signature,
-                    topic = %topic,
-                    group = %group,
+                    signature = %worker_signature,
+                    topic = %worker_topic,
+                    group = %worker_group,
                     auto_commit = %auto_commit,
                     manual_ack = %manual_ack,
                     bootstrap = %bootstrap,
-                    reason = %format!("{reason}"),
+                    reason = %reason_text,
                     elapsed_ms = elapsed_ms(started_at),
                     "start consumer failed"
                 );
@@ -586,7 +589,7 @@ async fn restart_kafka_pipeline(
         );
     }
 
-    running.producer = Some(producer);
+    running.producer = Some(producer.clone());
     running.consumer_handles = handles;
 
     tracing::info!(
@@ -630,9 +633,13 @@ async fn restart_kafka_pipeline(
     let startup_group = group.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let payload = json!({"source": app_name_for_push, "type": "startup", "topic": topic_for_push});
+        let payload =
+            json!({"source": app_name_for_push, "type": "startup", "topic": topic_for_push});
         if let Err(err) = producer_for_push
-            .publish(roze_kafka::KafkaRecord::new(topic_for_push.clone(), payload))
+            .publish(roze_kafka::KafkaRecord::new(
+                topic_for_push.clone(),
+                payload,
+            ))
             .await
         {
             tracing::warn!(

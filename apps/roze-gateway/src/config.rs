@@ -26,7 +26,10 @@ pub async fn load_with_config_center_with_center(
 
     let mut subscriber = roze_config::CascadingSubscriber::new();
     if let Some(endpoints) = center_input.endpoints {
-        subscriber.push(roze_config::EtcdSubscriber::new(endpoints, center_input.key.clone()));
+        subscriber.push(roze_config::EtcdSubscriber::new(
+            endpoints,
+            center_input.key.clone(),
+        ));
     }
     if let Some(env_key) = center_input.env_key {
         subscriber.push(roze_config::EnvVarSubscriber::new(env_key));
@@ -68,7 +71,7 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
 
     let endpoints = std::env::var("ROZE_CONFIG_CENTER_ETCD_ENDPOINTS")
         .ok()
-        .and_then(split_endpoints);
+        .and_then(|value| split_endpoints(&value));
 
     let configured_file = std::env::var("ROZE_CONFIG_CENTER_FILE")
         .ok()
@@ -108,7 +111,7 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
     Some(ConfigCenterInput {
         endpoints,
         env_key,
-        key,
+        key: key.clone(),
         file_paths,
         options: roze_config::ConfigCenterConfig {
             format,

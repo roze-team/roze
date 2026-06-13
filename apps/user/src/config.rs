@@ -61,12 +61,12 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
         .or_else(|| std::env::var("ROZE_CONFIG_CENTER_ETCD_KEY").ok())
         .or_else(|| {
             namespace.as_ref().and_then(|ns| {
-                app.as_ref().map(|app_name| format!("{}/{}", ns.trim_end_matches('/'), app_name))
+                app.as_ref()
+                    .map(|app_name| format!("{}/{}", ns.trim_end_matches('/'), app_name))
             })
         });
     // backward compatible: keep app as fallback key only when namespace/app exists
-    let config_key = raw_key
-        .or_else(|| app.clone())?;
+    let config_key = raw_key.or_else(|| app.clone())?;
 
     let endpoints = std::env::var("ROZE_CONFIG_CENTER_ETCD_ENDPOINTS")
         .ok()
@@ -112,7 +112,7 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
     Some(ConfigCenterInput {
         endpoints,
         env_key,
-        key: config_key,
+        key: config_key.clone(),
         file_paths,
         options: roze_config::ConfigCenterConfig {
             format,

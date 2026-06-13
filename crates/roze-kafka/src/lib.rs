@@ -18,10 +18,10 @@ use tokio::{
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
-    message::{Headers, Message},
-    producer::{FutureProducer, FutureRecord},
-    types::{Offset, TopicPartitionList},
+    message::{Header, Headers, Message},
+    producer::{FutureProducer, FutureRecord, Producer},
     util::Timeout,
+    Offset, TopicPartitionList,
 };
 #[cfg(feature = "rdkafka")]
 use regex::Regex;
@@ -257,7 +257,7 @@ impl DeliveryState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Delivery {
     message: KafkaRecord,
     state: Arc<DeliveryState>,
@@ -314,7 +314,7 @@ pub trait Subscriber: Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct InMemoryKafkaBroker {
-    topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>,
+    topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>>,
     dead_letters: Arc<Mutex<VecDeque<KafkaRecord>>>,
     dead_letter_topic: Option<String>,
     max_attempts: u32,
@@ -374,10 +374,8 @@ impl InMemoryKafkaBroker {
             let broker = broker.clone();
             let message = message_for_nack.clone();
             Box::pin(async move {
-                broker
-                    .requeue_or_dead_letter(message)
-                    .await
-                    .map(|_| ())
+                broker.requeue_or_dead_letter(message).await;
+                Ok(())
             })
         });
 
@@ -388,18 +386,15 @@ impl InMemoryKafkaBroker {
         message.attempt = message.attempt.saturating_add(1);
         if message.attempt > self.max_attempts {
             self.push_dead_letter(message.clone());
-            if let Some(dead_letter_topic) =
-                message
-                    .dead_letter_topic
-                    .clone()
-                    .or_else(|| self.dead_letter_topic.clone())
+            if let Some(dead_letter_topic) = message
+                .dead_letter_topic
+                .clone()
+                .or_else(|| self.dead_letter_topic.clone())
             {
                 let mut dead = message;
                 dead.topic = dead_letter_topic;
                 dead.attempt = 0;
-                let _ = self
-                    .sender_for(&dead.topic)
-                    .send(self.make_delivery(dead));
+                let _ = self.sender_for(&dead.topic).send(self.make_delivery(dead));
             }
             return;
         }
@@ -440,7 +435,7 @@ impl Subscriber for InMemoryKafkaBroker {
 }
 
 #[cfg(feature = "rdkafka")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RdkafkaProducer {
     producer: FutureProducer,
     config: KafkaConfig,
@@ -492,9 +487,16 @@ impl Publisher for RdkafkaProducer {
         let payload = serde_json::to_vec(&message.payload)?;
         let mut headers = OwnedHeaders::new();
         for (key, value) in &message.headers {
-            headers = headers.add(key.as_str(), value.as_bytes());
+            headers = headers.insert(Header {
+                key: key.as_str(),
+                value: Some(value.as_bytes()),
+            });
         }
-        headers = headers.add("roze-attempt", message.attempt.to_string().as_bytes());
+        let attempt = message.attempt.to_string();
+        headers = headers.insert(Header {
+            key: "roze-attempt",
+            value: Some(attempt.as_bytes()),
+        });
 
         let mut record = FutureRecord::to(&topic).payload(&payload).headers(headers);
         if let Some(key) = message.key.as_ref() {
@@ -503,7 +505,10 @@ impl Publisher for RdkafkaProducer {
 
         match self
             .producer
-            .send(record, Timeout::After(Duration::from_millis(self.config.flush_timeout_ms)))
+            .send(
+                record,
+                Timeout::After(Duration::from_millis(self.config.flush_timeout_ms)),
+            )
             .await
         {
             Ok((_partition, _offset)) => Ok(()),
@@ -527,9 +532,13 @@ struct TopicOffsetMetadata {
 }
 
 #[cfg(feature = "rdkafka")]
-fn parse_attempt(headers: Option<&Headers>) -> u32 {
+fn parse_attempt<H>(headers: Option<&H>) -> u32
+where
+    H: Headers,
+{
     if let Some(headers) = headers {
-        for item in headers.iter() {
+        for index in 0..headers.count() {
+            let item = headers.get(index);
             if item.key == "roze-attempt" {
                 if let Some(value) = item.value {
                     if let Ok(raw) = std::str::from_utf8(value) {
@@ -545,10 +554,14 @@ fn parse_attempt(headers: Option<&Headers>) -> u32 {
 }
 
 #[cfg(feature = "rdkafka")]
-fn collect_headers(headers: Option<&Headers>) -> HashMap<String, String> {
+fn collect_headers<H>(headers: Option<&H>) -> HashMap<String, String>
+where
+    H: Headers,
+{
     let mut output = HashMap::new();
     if let Some(headers) = headers {
-        for item in headers.iter() {
+        for index in 0..headers.count() {
+            let item = headers.get(index);
             output.insert(
                 item.key.to_string(),
                 String::from_utf8_lossy(item.value.unwrap_or(&[])).into_owned(),
@@ -564,11 +577,13 @@ async fn publish_recover(cfg: KafkaConfig, mut message: KafkaRecord) -> anyhow::
         if let Some(topic) = cfg.dead_letter_topic.clone() {
             message.topic = cfg.topic_name(topic);
             message.attempt = 0;
+            let log_topic = message.topic.clone();
+            let log_attempt = message.attempt;
             RdkafkaProducer::new(cfg)?.publish(message).await?;
             tracing::warn!(
                 event = "kafka.message.dead_lettered",
-                topic = %message.topic,
-                attempt = %message.attempt,
+                topic = %log_topic,
+                attempt = %log_attempt,
                 "kafka message dead letter handled (max_retries=0)"
             );
             return Ok(());
@@ -611,11 +626,13 @@ async fn publish_recover(cfg: KafkaConfig, mut message: KafkaRecord) -> anyhow::
     if let Some(topic) = cfg.dead_letter_topic.clone() {
         message.topic = cfg.topic_name(topic);
         message.attempt = 0;
+        let log_topic = message.topic.clone();
+        let log_attempt = message.attempt;
         RdkafkaProducer::new(cfg.clone())?.publish(message).await?;
         tracing::warn!(
             event = "kafka.message.dead_lettered",
-            topic = %message.topic,
-            attempt = %message.attempt,
+            topic = %log_topic,
+            attempt = %log_attempt,
             max_retries = cfg.max_retries,
             "kafka message moved to dead letter"
         );
@@ -656,7 +673,10 @@ impl RdkafkaSubscriber {
             .set("client.id", &self.config.client_id_or_default())
             .set("group.id", &self.config.group_id_or_default())
             .set("auto.offset.reset", &self.config.auto_offset_reset)
-            .set("session.timeout.ms", &self.config.session_timeout_ms.to_string())
+            .set(
+                "session.timeout.ms",
+                &self.config.session_timeout_ms.to_string(),
+            )
             .set(
                 "heartbeat.interval.ms",
                 &self.config.heartbeat_interval_ms.to_string(),
@@ -703,13 +723,16 @@ impl RdkafkaSubscriber {
         Ok(vec![requested_topic.to_string()])
     }
 
-    fn commit(
-        &self,
+    fn commit_with_consumer(
         consumer: &StreamConsumer,
         meta: &TopicOffsetMetadata,
     ) -> anyhow::Result<()> {
         let mut offsets = TopicPartitionList::new();
-        offsets.add_partition_offset(&meta.topic, meta.partition, Offset::Offset(meta.next_offset))?;
+        offsets.add_partition_offset(
+            &meta.topic,
+            meta.partition,
+            Offset::Offset(meta.next_offset),
+        )?;
         consumer.commit(&offsets, CommitMode::Async)?;
         Ok(())
     }
@@ -727,7 +750,6 @@ impl Subscriber for RdkafkaSubscriber {
         consumer.subscribe(&topic_refs)?;
 
         let (sender, _receiver) = broadcast::channel(256);
-        let mut consumer = consumer;
         let (ack_tx, mut ack_rx) = mpsc::unbounded_channel::<RdkafkaAckCmd>();
         let cfg = self.config.clone();
         let sender_for_task = sender.clone();
@@ -752,7 +774,7 @@ impl Subscriber for RdkafkaSubscriber {
                                 let commit_meta = TopicOffsetMetadata {
                                     topic: msg.topic().to_string(),
                                     partition: msg.partition(),
-                                    next_offset: msg.offset().to_raw() + 1,
+                                    next_offset: msg.offset() + 1,
                                 };
                                 let cfg_for_nack = cfg.clone();
                                 let message_for_nack = message.clone();
@@ -786,7 +808,7 @@ impl Subscriber for RdkafkaSubscriber {
                     }
                     maybe_ack = ack_rx.recv() => {
                         if let Some(RdkafkaAckCmd::Commit(meta)) = maybe_ack {
-                            if let Err(err) = cfg.commit(&consumer, &meta) {
+                            if let Err(err) = RdkafkaSubscriber::commit_with_consumer(&consumer, &meta) {
                                 tracing::warn!(topic=%meta.topic, error=%err, "kafka commit failed");
                             }
                         }
@@ -807,9 +829,7 @@ pub async fn publish_json<P>(
 where
     P: Publisher,
 {
-    publisher
-        .publish(KafkaRecord::new(topic, payload))
-        .await
+    publisher.publish(KafkaRecord::new(topic, payload)).await
 }
 
 pub async fn spawn_consumer<S, F, Fut>(
@@ -896,10 +916,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_kafka_round_trips() {
         let broker = InMemoryKafkaBroker::new();
-        let mut receiver = broker
-            .subscribe("orders")
-            .await
-            .expect("subscribe");
+        let mut receiver = broker.subscribe("orders").await.expect("subscribe");
 
         broker
             .publish(KafkaRecord::new("orders", serde_json::json!({"id": 1})))
@@ -919,7 +936,8 @@ mod tests {
 
         broker
             .publish(
-                KafkaRecord::new("orders", serde_json::json!({"id": 1})).with_dead_letter_topic("dead"),
+                KafkaRecord::new("orders", serde_json::json!({"id": 1}))
+                    .with_dead_letter_topic("dead"),
             )
             .await
             .expect("publish");
@@ -938,18 +956,14 @@ mod tests {
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_for_thread = seen.clone();
 
-        let handle = spawn_consumer(
-            &broker,
-            "tasks",
-            move |delivery| {
-                let seen_for_thread = seen_for_thread.clone();
-                async move {
-                    seen_for_thread.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(delivery.message().topic, "tasks");
-                    Ok(())
-                }
-            },
-        )
+        let handle = spawn_consumer(&broker, "tasks", move |delivery| {
+            let seen_for_thread = seen_for_thread.clone();
+            async move {
+                seen_for_thread.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(delivery.message().topic, "tasks");
+                Ok(())
+            }
+        })
         .await
         .expect("spawn");
 

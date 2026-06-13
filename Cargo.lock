@@ -2100,6 +2100,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_enum"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
+dependencies = [
+ "num_enum_derive",
+ "rustversion",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2757,6 +2779,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
+name = "rdkafka"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1beea247b9a7600a81d4cc33f659ce1a77e1988323d7d2809c7ed1c21f4c316d"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "log",
+ "rdkafka-sys",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slab",
+ "tokio",
+]
+
+[[package]]
+name = "rdkafka-sys"
+version = "4.10.0+2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77"
+dependencies = [
+ "libc",
+ "num_enum",
+ "pkg-config",
+]
+
+[[package]]
 name = "redis"
 version = "0.27.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2942,8 +2993,14 @@ dependencies = [
 name = "roze-config"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
  "config",
+ "reqwest",
  "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2972,6 +3029,7 @@ dependencies = [
  "anyhow",
  "roze-config",
  "sea-orm",
+ "tokio",
 ]
 
 [[package]]
@@ -3028,6 +3086,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "poem",
+ "reqwest",
+ "roze-config",
+ "roze-jwt",
+ "roze-trace",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "roze-gateway-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "poem",
+ "roze-config",
+ "roze-gateway",
+ "roze-http",
+ "roze-jwt",
+ "roze-log",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "roze-grpc"
 version = "0.1.0"
 dependencies = [
@@ -3077,9 +3168,14 @@ name = "roze-kafka"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "rdkafka",
+ "regex",
  "roze-eventbus",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4780,6 +4876,7 @@ dependencies = [
  "roze-error",
  "roze-http",
  "roze-jwt",
+ "roze-kafka",
  "roze-log",
  "roze-metrics",
  "roze-middleware",

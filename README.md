@@ -28,6 +28,11 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.
 
+## Usage Documentation
+
+- [Usage documentation](docs/usage/README.md)
+- [rozectl API generator guide](docs/usage/rozectl-api.md)
+
 ## Quick Start
 
 ```bash
@@ -58,6 +63,20 @@ Use `--force` only for a full rebuild. New projects use
 directory by default. Use `--out services/user` to choose another location.
 Projects created outside a Cargo workspace receive a standalone manifest with
 explicit package metadata and dependency versions.
+
+`rozectl api client ts example/user.api --out sdk/user.ts` generates a typed
+TypeScript `fetch` client from REST routes and request/response types. The
+generated SDK supports `baseUrl`, per-call headers, injected `fetch`, path
+parameters, query parameters, headers, and JSON bodies.
+Use `rozectl api client js example/user.api --out sdk/user.js` for a plain ESM
+JavaScript client with JSDoc typedefs and the same request-building behavior.
+Use `rozectl api client dart example/user.api --out sdk/user.dart` for a Dart
+client that uses `package:http`, typed models, JSON serialization, route path
+parameters, query parameters, headers, and JSON bodies.
+
+`rozectl openapi generate example/user.api --out openapi.json` writes an
+OpenAPI 3 document with component schemas, route parameters, JSON/form request
+bodies, response schemas, tags, and bearer security when JWT is declared.
 
 `rozectl model generate example/user.model --out apps/roze-example` writes a
 SeaORM-style model scaffold into an existing service. The model generator
