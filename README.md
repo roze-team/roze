@@ -53,6 +53,7 @@ and permission checks.
 
 ## Usage Documentation
 
+- [Project standards](docs/project-standards.md)
 - [Usage documentation](docs/usage/README.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
 - [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)
