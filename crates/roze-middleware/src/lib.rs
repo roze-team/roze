@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Request as AxumRequest, State},
+    http::{HeaderMap, HeaderName, HeaderValue},
     middleware::Next,
     response::Response as AxumResponse,
     Router,
@@ -43,6 +44,23 @@ where
     router.layer(axum::middleware::from_fn_with_state(config, axum_auth))
 }
 
+pub fn apply_auth_policy<S>(router: Router<S>, config: AuthPolicyConfig) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn_with_state(
+        config,
+        axum_auth_policy,
+    ))
+}
+
+pub fn apply_idempotency_key<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn(axum_idempotency_key))
+}
+
 #[deprecated(note = "use apply_common; the middleware crate is Axum-only")]
 pub fn apply_common_axum<S>(router: Router<S>) -> Router<S>
 where
@@ -52,21 +70,30 @@ where
 }
 
 pub async fn axum_request_context(mut req: AxumRequest, next: Next) -> AxumResponse {
-    let request_id = ensure_axum_header(&mut req, roze_context::REQUEST_ID_HEADER);
-    let trace_id = ensure_axum_header(&mut req, roze_context::TRACE_ID_HEADER);
-    let context = incoming_axum_timeout(&req)
-        .map(|timeout| {
-            Context::background_with_request_id_and_trace_id(request_id.clone(), trace_id.clone())
-                .with_timeout(timeout)
-        })
-        .unwrap_or_else(|| {
-            Context::background_with_request_id_and_trace_id(request_id.clone(), trace_id.clone())
-        })
-        .with_metadata_map(incoming_axum_metadata(&req));
+    let header_map = incoming_axum_headers(&req);
+    let mut context = Context::from_propagation_headers(&header_map);
+    if let Some(locale) = incoming_axum_locale(&req) {
+        context = context.with_locale(locale);
+    }
+    if let Some(key) = idempotency_key_from_request(&req) {
+        context = context.with_metadata(roze_context::IDEMPOTENCY_KEY_METADATA_KEY, key);
+    }
+    insert_axum_request_header(
+        &mut req,
+        roze_context::REQUEST_ID_HEADER,
+        &context.request_id(),
+    );
+    insert_axum_request_header(&mut req, roze_context::TRACE_ID_HEADER, &context.trace_id());
     req.extensions_mut().insert(context.clone());
 
     let locale = context.locale();
-    let mut response = roze_error::scope_locale(locale, next.run(req)).await;
+    let mut response = roze_error::scope_error_context(
+        locale,
+        Some(context.request_id()),
+        Some(context.trace_id()),
+        next.run(req),
+    )
+    .await;
     insert_axum_response_header(
         response.headers_mut(),
         roze_context::REQUEST_ID_HEADER,
@@ -83,7 +110,11 @@ pub async fn axum_request_context(mut req: AxumRequest, next: Next) -> AxumRespo
 pub async fn axum_trace(mut req: AxumRequest, next: Next) -> AxumResponse {
     let method = req.method().clone();
     let uri = req.uri().clone();
-    let trace_id = ensure_axum_header(&mut req, roze_context::TRACE_ID_HEADER);
+    let trace_id = ensure_axum_header_with_aliases(
+        &mut req,
+        roze_context::TRACE_ID_HEADER,
+        roze_context::HULA_HEADER_ALIASES.trace_id,
+    );
     let span = request_span(method.as_str(), uri.path(), &trace_id);
 
     async move {
@@ -129,6 +160,32 @@ pub async fn axum_auth(
     Ok(next.run(req).await)
 }
 
+pub async fn axum_auth_policy(
+    State(config): State<AuthPolicyConfig>,
+    req: AxumRequest,
+    next: Next,
+) -> std::result::Result<AxumResponse, RozeError> {
+    let decision = config.decision_for_path(req.uri().path());
+    if decision == AuthDecision::Public {
+        return Ok(next.run(req).await);
+    }
+    let Some(context) = req.extensions().get::<Context>() else {
+        return Err(RozeError::Unauthorized);
+    };
+    enforce_auth_decision(context, &decision)?;
+    Ok(next.run(req).await)
+}
+
+pub async fn axum_idempotency_key(mut req: AxumRequest, next: Next) -> AxumResponse {
+    if let Some(key) = idempotency_key_from_request(&req) {
+        if let Some(context) = req.extensions().get::<Context>().cloned() {
+            req.extensions_mut()
+                .insert(context.with_metadata(roze_context::IDEMPOTENCY_KEY_METADATA_KEY, key));
+        }
+    }
+    next.run(req).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInMiddleware {
     Auth,
@@ -166,6 +223,127 @@ pub fn resolve_middleware_plan(names: &[String]) -> MiddlewarePlan {
         }
     }
     plan
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthDecision {
+    Public,
+    User,
+    Role(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthPolicyConfig {
+    pub public_paths: Vec<String>,
+    pub user_paths: Vec<String>,
+    pub role_paths: Vec<RolePathPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolePathPolicy {
+    pub path: String,
+    pub role: String,
+}
+
+impl AuthPolicyConfig {
+    pub fn decision_for_path(&self, path: &str) -> AuthDecision {
+        if self
+            .public_paths
+            .iter()
+            .any(|pattern| path_matches(pattern, path))
+        {
+            return AuthDecision::Public;
+        }
+        if let Some(policy) = self
+            .role_paths
+            .iter()
+            .find(|policy| path_matches(&policy.path, path))
+        {
+            return AuthDecision::Role(policy.role.clone());
+        }
+        if self
+            .user_paths
+            .iter()
+            .any(|pattern| path_matches(pattern, path))
+        {
+            return AuthDecision::User;
+        }
+        AuthDecision::Public
+    }
+}
+
+pub fn default_hula_auth_policy() -> AuthPolicyConfig {
+    AuthPolicyConfig {
+        public_paths: vec![
+            "/register".to_string(),
+            "/login".to_string(),
+            "/captcha".to_string(),
+            "/healthz".to_string(),
+        ],
+        user_paths: vec![
+            "/message/*".to_string(),
+            "/conversation/*".to_string(),
+            "/friend/*".to_string(),
+            "/group/*".to_string(),
+        ],
+        role_paths: vec![RolePathPolicy {
+            path: "/admin/*".to_string(),
+            role: "admin".to_string(),
+        }],
+    }
+}
+
+pub fn enforce_auth_decision(context: &Context, decision: &AuthDecision) -> Result<(), RozeError> {
+    match decision {
+        AuthDecision::Public => Ok(()),
+        AuthDecision::User => context
+            .subject()
+            .filter(|subject| !subject.is_empty())
+            .map(|_| ())
+            .ok_or(RozeError::Unauthorized),
+        AuthDecision::Role(required) => {
+            if context
+                .subject()
+                .filter(|subject| !subject.is_empty())
+                .is_none()
+            {
+                return Err(RozeError::Unauthorized);
+            }
+            if context.roles().iter().any(|role| role == required) {
+                Ok(())
+            } else {
+                Err(RozeError::Forbidden)
+            }
+        }
+    }
+}
+
+pub fn idempotency_key_from_headers(headers: &HeaderMap) -> Option<String> {
+    ["x-idempotency-key", "idempotency-key"]
+        .iter()
+        .find_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+pub fn idempotency_key_from_query(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        matches!(key, "client_msg_id" | "idempotency_key")
+            .then(|| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+pub fn idempotency_key_from_request(req: &AxumRequest) -> Option<String> {
+    idempotency_key_from_headers(req.headers())
+        .or_else(|| idempotency_key_from_query(req.uri().query()))
 }
 
 #[derive(Debug, Clone)]
@@ -295,34 +473,19 @@ fn incoming_axum_header(req: &AxumRequest, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn incoming_axum_timeout(req: &AxumRequest) -> Option<Duration> {
-    let raw = req
-        .headers()
-        .get(roze_context::TIMEOUT_HEADER)
-        .and_then(|value| value.to_str().ok())?;
-    let millis = raw.parse::<u64>().ok()?;
-    Some(Duration::from_millis(millis))
-}
-
-fn incoming_axum_metadata(req: &AxumRequest) -> BTreeMap<String, String> {
-    let mut metadata = req
-        .headers()
+fn incoming_axum_headers(req: &AxumRequest) -> BTreeMap<String, String> {
+    req.headers()
         .iter()
         .filter_map(|(name, value)| {
-            let key = name
-                .as_str()
-                .strip_prefix(roze_context::METADATA_HEADER_PREFIX)?;
-            let value = value.to_str().ok()?;
-            Some((key.to_string(), value.to_string()))
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
         })
-        .collect::<BTreeMap<_, _>>();
-    if let Some(locale) = incoming_axum_header(req, roze_context::LOCALE_HEADER)
+        .collect()
+}
+
+fn incoming_axum_locale(req: &AxumRequest) -> Option<String> {
+    incoming_axum_header(req, roze_context::LOCALE_HEADER)
         .or_else(|| incoming_axum_header(req, roze_context::ACCEPT_LANGUAGE_HEADER))
         .and_then(|value| roze_error::locale_from_accept_language(&value))
-    {
-        metadata.insert(roze_context::LOCALE_METADATA_KEY.to_string(), locale);
-    }
-    metadata
 }
 
 fn ensure_axum_header(req: &mut AxumRequest, key: &'static str) -> String {
@@ -338,6 +501,22 @@ fn ensure_axum_header(req: &mut AxumRequest, key: &'static str) -> String {
     generated
 }
 
+fn ensure_axum_header_with_aliases(
+    req: &mut AxumRequest,
+    key: &'static str,
+    aliases: &[&str],
+) -> String {
+    if let Some(value) = incoming_axum_header(req, key).or_else(|| {
+        aliases
+            .iter()
+            .find_map(|alias| incoming_axum_header(req, alias))
+    }) {
+        insert_axum_request_header(req, key, &value);
+        return value;
+    }
+    ensure_axum_header(req, key)
+}
+
 fn insert_axum_response_header(
     headers: &mut axum::http::HeaderMap,
     key: &'static str,
@@ -345,6 +524,22 @@ fn insert_axum_response_header(
 ) {
     if let Ok(value) = axum::http::HeaderValue::from_str(value) {
         headers.insert(axum::http::HeaderName::from_static(key), value);
+    }
+}
+
+fn insert_axum_request_header(req: &mut AxumRequest, key: &'static str, value: &str) {
+    let Ok(value) = HeaderValue::from_str(value) else {
+        return;
+    };
+    req.headers_mut()
+        .insert(HeaderName::from_static(key), value);
+}
+
+fn path_matches(pattern: &str, path: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        path == prefix || path.starts_with(&format!("{prefix}/"))
+    } else {
+        path == pattern || path.ends_with(pattern)
     }
 }
 
@@ -479,7 +674,7 @@ fn route_breaker_record(key: &str, success: bool, config: &BreakerConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request, routing::get};
+    use axum::{body::Body, http::Request, routing::get, Extension, Json};
     use tower::ServiceExt;
 
     #[test]
@@ -564,6 +759,61 @@ mod tests {
         assert_eq!(policy.rate_limit.expect("rate limit").burst, 2);
     }
 
+    #[test]
+    fn hula_auth_policy_maps_paths_to_requirements() {
+        let policy = default_hula_auth_policy();
+
+        assert_eq!(policy.decision_for_path("/login"), AuthDecision::Public);
+        assert_eq!(
+            policy.decision_for_path("/message/send"),
+            AuthDecision::User
+        );
+        assert_eq!(
+            policy.decision_for_path("/admin/users/ban"),
+            AuthDecision::Role("admin".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_decision_enforces_subject_and_role() {
+        let user = Context::background_with_request_id_and_trace_id("request-1", "trace-1")
+            .with_auth(AuthContext {
+                subject: "user-1".to_string(),
+                roles: vec!["user".to_string()],
+                tenant: None,
+            });
+        let admin = user.with_auth(AuthContext {
+            subject: "admin-1".to_string(),
+            roles: vec!["admin".to_string()],
+            tenant: None,
+        });
+
+        assert!(enforce_auth_decision(&user, &AuthDecision::User).is_ok());
+        assert_eq!(
+            enforce_auth_decision(&user, &AuthDecision::Role("admin".to_string())),
+            Err(RozeError::Forbidden)
+        );
+        assert!(enforce_auth_decision(&admin, &AuthDecision::Role("admin".to_string())).is_ok());
+    }
+
+    #[test]
+    fn idempotency_key_reads_headers_and_query() {
+        let request = Request::builder()
+            .uri("/message/send?client_msg_id=msg-1")
+            .header("x-idempotency-key", "idem-1")
+            .body(Body::empty())
+            .expect("request");
+
+        assert_eq!(
+            idempotency_key_from_headers(request.headers()).as_deref(),
+            Some("idem-1")
+        );
+        assert_eq!(
+            idempotency_key_from_query(request.uri().query()).as_deref(),
+            Some("msg-1")
+        );
+    }
+
     #[tokio::test]
     async fn request_context_localizes_error_response_from_accept_language() {
         let app = apply_common(axum::Router::new().route(
@@ -587,5 +837,78 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
 
         assert_eq!(value["msg"], "未认证或登录已失效");
+        assert!(value["request_id"].as_str().is_some());
+        assert!(value["trace_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn request_context_restores_hula_alias_headers() {
+        let app = apply_common(axum::Router::new().route(
+            "/message/send",
+            get(|Extension(ctx): Extension<Context>| async move {
+                Json(serde_json::json!({
+                    "request_id": ctx.request_id(),
+                    "trace_id": ctx.trace_id(),
+                    "subject": ctx.subject(),
+                    "tenant": ctx.tenant(),
+                    "device_id": ctx.metadata_value(roze_context::DEVICE_ID_METADATA_KEY),
+                    "scope": ctx.metadata_value(roze_context::SCOPE_METADATA_KEY),
+                }))
+            }),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/message/send")
+                    .header(roze_context::HULA_REQUEST_ID_HEADER, "request-hula")
+                    .header(roze_context::HULA_TRACE_ID_HEADER, "trace-hula")
+                    .header(roze_context::HULA_UID_HEADER, "user-hula")
+                    .header(roze_context::HULA_TENANT_ID_HEADER, "tenant-hula")
+                    .header(roze_context::HULA_DEVICE_ID_HEADER, "device-hula")
+                    .header(roze_context::HULA_SCOPE_HEADER, "message:write")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+        assert_eq!(value["request_id"], "request-hula");
+        assert_eq!(value["trace_id"], "trace-hula");
+        assert_eq!(value["subject"], "user-hula");
+        assert_eq!(value["tenant"], "tenant-hula");
+        assert_eq!(value["device_id"], "device-hula");
+        assert_eq!(value["scope"], "message:write");
+    }
+
+    #[tokio::test]
+    async fn request_context_stores_idempotency_key() {
+        let app = apply_common(axum::Router::new().route(
+            "/message/send",
+            get(|Extension(ctx): Extension<Context>| async move {
+                ctx.metadata_value(roze_context::IDEMPOTENCY_KEY_METADATA_KEY)
+                    .unwrap_or_default()
+            }),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/message/send")
+                    .header("x-idempotency-key", "idem-1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body");
+
+        assert_eq!(body.as_ref(), b"idem-1");
     }
 }

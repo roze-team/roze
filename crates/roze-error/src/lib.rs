@@ -7,6 +7,24 @@ use thiserror::Error;
 
 tokio::task_local! {
     static REQUEST_LOCALE: String;
+    static REQUEST_IDS: RequestIds;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestIds {
+    pub request_id: String,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub code: i32,
+    pub msg: String,
+    pub data: Option<()>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -15,6 +33,8 @@ pub enum RozeError {
     BadRequest(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
     #[error("not found: {0}")]
     NotFound(String),
     #[error("internal error: {0}")]
@@ -26,6 +46,7 @@ impl RozeError {
         match self {
             RozeError::BadRequest(_) => "bad_request",
             RozeError::Unauthorized => "unauthorized",
+            RozeError::Forbidden => "forbidden",
             RozeError::NotFound(_) => "not_found",
             RozeError::Internal(_) => "internal",
         }
@@ -35,6 +56,7 @@ impl RozeError {
         match self {
             RozeError::BadRequest(_) => 400,
             RozeError::Unauthorized => 401,
+            RozeError::Forbidden => 403,
             RozeError::NotFound(_) => 404,
             RozeError::Internal(_) => 500,
         }
@@ -44,6 +66,7 @@ impl RozeError {
         match self {
             RozeError::BadRequest(msg) => msg.clone(),
             RozeError::Unauthorized => "unauthorized".to_string(),
+            RozeError::Forbidden => "forbidden".to_string(),
             RozeError::NotFound(msg) => msg.clone(),
             RozeError::Internal(msg) => msg.clone(),
         }
@@ -61,7 +84,10 @@ impl RozeError {
     pub fn is_client_error(&self) -> bool {
         matches!(
             self,
-            RozeError::BadRequest(_) | RozeError::Unauthorized | RozeError::NotFound(_)
+            RozeError::BadRequest(_)
+                | RozeError::Unauthorized
+                | RozeError::Forbidden
+                | RozeError::NotFound(_)
         )
     }
 
@@ -69,6 +95,7 @@ impl RozeError {
         match self {
             RozeError::BadRequest(_) => StatusCode::BAD_REQUEST,
             RozeError::Unauthorized => StatusCode::UNAUTHORIZED,
+            RozeError::Forbidden => StatusCode::FORBIDDEN,
             RozeError::NotFound(_) => StatusCode::NOT_FOUND,
             RozeError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -80,6 +107,7 @@ pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
         Some("zh-CN") => match kind {
             "bad_request" => "请求参数错误",
             "unauthorized" => "未认证或登录已失效",
+            "forbidden" => "无权限访问",
             "not_found" => "资源不存在",
             "internal" => "服务器内部错误",
             _ => "服务器内部错误",
@@ -87,6 +115,7 @@ pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
         _ => match kind {
             "bad_request" => "bad request",
             "unauthorized" => "unauthorized",
+            "forbidden" => "forbidden",
             "not_found" => "not found",
             "internal" => "internal server error",
             _ => "internal server error",
@@ -121,7 +150,14 @@ impl IntoResponse for RozeError {
         let message = current_locale()
             .map(|locale| self.message_i18n(locale))
             .unwrap_or_else(|| self.message());
-        let body = roze_result::ApiResponse::<()>::error(self.code(), message);
+        let ids = current_request_ids();
+        let body = ErrorResponse {
+            code: self.code(),
+            msg: message,
+            data: None,
+            request_id: ids.as_ref().map(|ids| ids.request_id.clone()),
+            trace_id: ids.as_ref().map(|ids| ids.trace_id.clone()),
+        };
         (status, axum::Json(body)).into_response()
     }
 }
@@ -136,8 +172,52 @@ where
     }
 }
 
+pub async fn scope_error_context<F>(
+    locale: Option<String>,
+    request_id: Option<String>,
+    trace_id: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    match (locale, request_id, trace_id) {
+        (Some(locale), Some(request_id), Some(trace_id)) => {
+            REQUEST_LOCALE
+                .scope(
+                    locale,
+                    REQUEST_IDS.scope(
+                        RequestIds {
+                            request_id,
+                            trace_id,
+                        },
+                        future,
+                    ),
+                )
+                .await
+        }
+        (Some(locale), _, _) => REQUEST_LOCALE.scope(locale, future).await,
+        (None, Some(request_id), Some(trace_id)) => {
+            REQUEST_IDS
+                .scope(
+                    RequestIds {
+                        request_id,
+                        trace_id,
+                    },
+                    future,
+                )
+                .await
+        }
+        (None, _, _) => future.await,
+    }
+}
+
 pub fn current_locale() -> Option<String> {
     REQUEST_LOCALE.try_with(Clone::clone).ok()
+}
+
+pub fn current_request_ids() -> Option<RequestIds> {
+    REQUEST_IDS.try_with(Clone::clone).ok()
 }
 
 impl From<roze_grpc::transport::Status> for RozeError {
@@ -154,6 +234,7 @@ mod tests {
     fn derives_status_codes() {
         assert_eq!(RozeError::BadRequest("x".into()).code(), 400);
         assert_eq!(RozeError::Unauthorized.code(), 401);
+        assert_eq!(RozeError::Forbidden.code(), 403);
         assert_eq!(RozeError::NotFound("x".into()).code(), 404);
         assert_eq!(RozeError::Internal("x".into()).code(), 500);
     }

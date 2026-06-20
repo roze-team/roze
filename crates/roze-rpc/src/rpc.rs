@@ -445,6 +445,7 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
     let code = match error {
         RozeError::BadRequest(_) => Code::InvalidArgument,
         RozeError::Unauthorized => Code::Unauthenticated,
+        RozeError::Forbidden => Code::PermissionDenied,
         RozeError::NotFound(_) => Code::NotFound,
         RozeError::Internal(_) => Code::Internal,
     };
@@ -485,6 +486,7 @@ pub fn error_from_status(status: &Status) -> RozeError {
     match status.code() {
         Code::InvalidArgument => RozeError::BadRequest(status.message().to_string()),
         Code::Unauthenticated => RozeError::Unauthorized,
+        Code::PermissionDenied => RozeError::Forbidden,
         Code::NotFound => RozeError::NotFound(status.message().to_string()),
         _ => RozeError::Internal(status.message().to_string()),
     }

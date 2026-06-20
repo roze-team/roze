@@ -20,6 +20,50 @@ pub const TENANT_HEADER: &str = "x-roze-tenant";
 pub const ROLES_HEADER: &str = "x-roze-roles";
 pub const METADATA_HEADER_PREFIX: &str = "x-roze-meta-";
 pub const LOCALE_METADATA_KEY: &str = "locale";
+pub const USER_ID_METADATA_KEY: &str = "uid";
+pub const DEVICE_ID_METADATA_KEY: &str = "device_id";
+pub const SCOPE_METADATA_KEY: &str = "scope";
+pub const IDEMPOTENCY_KEY_METADATA_KEY: &str = "idempotency_key";
+
+pub const HULA_TENANT_ID_HEADER: &str = "x-hula-tenant-id";
+pub const HULA_UID_HEADER: &str = "x-hula-uid";
+pub const HULA_DEVICE_ID_HEADER: &str = "x-hula-device-id";
+pub const HULA_TRACE_ID_HEADER: &str = "x-hula-trace-id";
+pub const HULA_REQUEST_ID_HEADER: &str = "x-hula-request-id";
+pub const HULA_ROLE_HEADER: &str = "x-hula-role";
+pub const HULA_SCOPE_HEADER: &str = "x-hula-scope";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderAliases {
+    pub request_id: &'static [&'static str],
+    pub trace_id: &'static [&'static str],
+    pub subject: &'static [&'static str],
+    pub tenant: &'static [&'static str],
+    pub roles: &'static [&'static str],
+    pub metadata: &'static [(&'static str, &'static str)],
+}
+
+pub const EMPTY_HEADER_ALIASES: HeaderAliases = HeaderAliases {
+    request_id: &[],
+    trace_id: &[],
+    subject: &[],
+    tenant: &[],
+    roles: &[],
+    metadata: &[],
+};
+
+pub const HULA_HEADER_ALIASES: HeaderAliases = HeaderAliases {
+    request_id: &[HULA_REQUEST_ID_HEADER],
+    trace_id: &[HULA_TRACE_ID_HEADER],
+    subject: &[HULA_UID_HEADER],
+    tenant: &[HULA_TENANT_ID_HEADER],
+    roles: &[HULA_ROLE_HEADER],
+    metadata: &[
+        (USER_ID_METADATA_KEY, HULA_UID_HEADER),
+        (DEVICE_ID_METADATA_KEY, HULA_DEVICE_ID_HEADER),
+        (SCOPE_METADATA_KEY, HULA_SCOPE_HEADER),
+    ],
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
@@ -315,17 +359,24 @@ impl Context {
     }
 
     pub fn from_propagation_headers(headers: &BTreeMap<String, String>) -> Self {
-        let request_id = header_value(headers, REQUEST_ID_HEADER)
+        Self::from_propagation_headers_with_aliases(headers, HULA_HEADER_ALIASES)
+    }
+
+    pub fn from_propagation_headers_with_aliases(
+        headers: &BTreeMap<String, String>,
+        aliases: HeaderAliases,
+    ) -> Self {
+        let request_id = header_value_with_aliases(headers, REQUEST_ID_HEADER, aliases.request_id)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(trace_generate_trace_id);
-        let trace_id = header_value(headers, TRACE_ID_HEADER)
+        let trace_id = header_value_with_aliases(headers, TRACE_ID_HEADER, aliases.trace_id)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| request_id.clone());
         let mut ctx = Self::background_with_request_id_and_trace_id(request_id, trace_id)
-            .with_metadata_map(metadata_from_headers(headers));
-        if let Some(auth) = auth_from_headers(headers) {
+            .with_metadata_map(metadata_from_headers_with_aliases(headers, aliases));
+        if let Some(auth) = auth_from_headers_with_aliases(headers, aliases) {
             ctx = ctx.with_auth(auth);
         }
         if let Some(timeout) = header_value(headers, TIMEOUT_HEADER)
@@ -338,17 +389,29 @@ impl Context {
     }
 
     pub fn with_propagation_headers(&self, headers: &BTreeMap<String, String>) -> Self {
+        self.with_propagation_headers_and_aliases(headers, HULA_HEADER_ALIASES)
+    }
+
+    pub fn with_propagation_headers_and_aliases(
+        &self,
+        headers: &BTreeMap<String, String>,
+        aliases: HeaderAliases,
+    ) -> Self {
         let mut ctx = self.clone();
-        if let Some(request_id) = header_value(headers, REQUEST_ID_HEADER) {
+        if let Some(request_id) =
+            header_value_with_aliases(headers, REQUEST_ID_HEADER, aliases.request_id)
+        {
             ctx = ctx.with_request_id(request_id);
         }
-        if let Some(trace_id) = header_value(headers, TRACE_ID_HEADER) {
+        if let Some(trace_id) =
+            header_value_with_aliases(headers, TRACE_ID_HEADER, aliases.trace_id)
+        {
             ctx = ctx.with_trace_id(trace_id);
         }
-        if let Some(auth) = auth_from_headers(headers) {
+        if let Some(auth) = auth_from_headers_with_aliases(headers, aliases) {
             ctx = ctx.with_auth(auth);
         }
-        let metadata = metadata_from_headers(headers);
+        let metadata = metadata_from_headers_with_aliases(headers, aliases);
         if !metadata.is_empty() {
             ctx = ctx.with_metadata_map(metadata);
         }
@@ -533,24 +596,54 @@ fn header_value<'a>(headers: &'a BTreeMap<String, String>, key: &str) -> Option<
         .map(|(_, value)| value.as_str())
 }
 
-fn metadata_from_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    headers
-        .iter()
-        .filter_map(|(key, value)| {
-            key.strip_prefix(METADATA_HEADER_PREFIX)
-                .map(|key| (key.to_string(), value.clone()))
-        })
-        .collect()
+fn header_value_with_aliases<'a>(
+    headers: &'a BTreeMap<String, String>,
+    key: &str,
+    aliases: &[&str],
+) -> Option<&'a str> {
+    header_value(headers, key).or_else(|| {
+        aliases
+            .iter()
+            .find_map(|alias| header_value(headers, alias))
+    })
 }
 
-fn auth_from_headers(headers: &BTreeMap<String, String>) -> Option<AuthContext> {
-    let subject = header_value(headers, SUBJECT_HEADER)
+fn metadata_from_headers_with_aliases(
+    headers: &BTreeMap<String, String>,
+    aliases: HeaderAliases,
+) -> BTreeMap<String, String> {
+    let prefix = METADATA_HEADER_PREFIX.to_ascii_lowercase();
+    let mut metadata = headers
+        .iter()
+        .filter_map(|(key, value)| {
+            let lower = key.to_ascii_lowercase();
+            lower
+                .strip_prefix(&prefix)
+                .map(|key| (key.to_string(), value.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (metadata_key, header) in aliases.metadata {
+        if metadata.contains_key(*metadata_key) {
+            continue;
+        }
+        if let Some(value) = header_value(headers, header).filter(|value| !value.is_empty()) {
+            metadata.insert((*metadata_key).to_string(), value.to_string());
+        }
+    }
+    metadata
+}
+
+fn auth_from_headers_with_aliases(
+    headers: &BTreeMap<String, String>,
+    aliases: HeaderAliases,
+) -> Option<AuthContext> {
+    let subject = header_value_with_aliases(headers, SUBJECT_HEADER, aliases.subject)
         .filter(|value| !value.is_empty())?
         .to_string();
-    let tenant = header_value(headers, TENANT_HEADER)
+    let tenant = header_value_with_aliases(headers, TENANT_HEADER, aliases.tenant)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let roles = header_value(headers, ROLES_HEADER)
+    let roles = header_value_with_aliases(headers, ROLES_HEADER, aliases.roles)
         .map(|value| {
             value
                 .split(',')
@@ -630,5 +723,62 @@ mod tests {
         assert_eq!(restored.tenant().as_deref(), Some("tenant-1"));
         assert_eq!(restored.roles(), vec!["admin", "ops"]);
         assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
+    }
+
+    #[test]
+    fn context_restores_hula_header_aliases() {
+        let headers = BTreeMap::from([
+            (
+                HULA_REQUEST_ID_HEADER.to_string(),
+                "request-hula".to_string(),
+            ),
+            (HULA_TRACE_ID_HEADER.to_string(), "trace-hula".to_string()),
+            (HULA_TENANT_ID_HEADER.to_string(), "tenant-hula".to_string()),
+            (HULA_UID_HEADER.to_string(), "user-hula".to_string()),
+            (HULA_DEVICE_ID_HEADER.to_string(), "device-hula".to_string()),
+            (HULA_ROLE_HEADER.to_string(), "admin,ops".to_string()),
+            (HULA_SCOPE_HEADER.to_string(), "message:write".to_string()),
+        ]);
+
+        let restored = Context::from_propagation_headers(&headers);
+
+        assert_eq!(restored.request_id(), "request-hula");
+        assert_eq!(restored.trace_id(), "trace-hula");
+        assert_eq!(restored.subject().as_deref(), Some("user-hula"));
+        assert_eq!(restored.tenant().as_deref(), Some("tenant-hula"));
+        assert_eq!(restored.roles(), vec!["admin", "ops"]);
+        assert_eq!(
+            restored.metadata_value(USER_ID_METADATA_KEY).as_deref(),
+            Some("user-hula")
+        );
+        assert_eq!(
+            restored.metadata_value(DEVICE_ID_METADATA_KEY).as_deref(),
+            Some("device-hula")
+        );
+        assert_eq!(
+            restored.metadata_value(SCOPE_METADATA_KEY).as_deref(),
+            Some("message:write")
+        );
+    }
+
+    #[test]
+    fn standard_headers_take_precedence_over_hula_aliases() {
+        let headers = BTreeMap::from([
+            (REQUEST_ID_HEADER.to_string(), "request-roze".to_string()),
+            (TRACE_ID_HEADER.to_string(), "trace-roze".to_string()),
+            (SUBJECT_HEADER.to_string(), "user-roze".to_string()),
+            (
+                HULA_REQUEST_ID_HEADER.to_string(),
+                "request-hula".to_string(),
+            ),
+            (HULA_TRACE_ID_HEADER.to_string(), "trace-hula".to_string()),
+            (HULA_UID_HEADER.to_string(), "user-hula".to_string()),
+        ]);
+
+        let restored = Context::from_propagation_headers(&headers);
+
+        assert_eq!(restored.request_id(), "request-roze");
+        assert_eq!(restored.trace_id(), "trace-roze");
+        assert_eq!(restored.subject().as_deref(), Some("user-roze"));
     }
 }
