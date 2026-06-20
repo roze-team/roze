@@ -12,4 +12,5 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+roze-context = { path = "../roze-context" }
 roze-trace = { path = "../roze-trace" }

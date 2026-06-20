@@ -117,7 +117,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     ));
     out.push_str("use roze_rpc::balance::Balancer;\n");
     out.push_str("use roze_rpc::registry::{CachedRegistryResolver, Registry};\n");
-    out.push_str("use roze_grpc::transport::{Channel, Endpoint, Request, Status};\n\n");
+    out.push_str("use roze_grpc::transport::{Channel, Endpoint, Status};\n\n");
 
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("pub struct RpcClient {\n");
@@ -200,7 +200,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     for route in &spec.rest_routes {
         let handler = resolved_handler_name(route);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    roze_rpc::rpc::apply_client_auth(&mut request, &options, client_config.as_ref());\n                    inner.{handler}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request(request_template.clone(), &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
             request = route.request,
             response = route.response
@@ -210,7 +210,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     for method in &spec.rpc_methods {
         let method_name = to_snake_case(&method.name);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let mut request = Request::new(request_template.clone());\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                async move {{\n                    if let Some(timeout) = context.remaining_timeout() {{\n                        request.set_timeout(timeout);\n                    }} else {{\n                        request.set_timeout(options.request_timeout);\n                    }}\n                    roze_rpc::rpc::apply_request_context(&mut request, &context);\n                    roze_rpc::rpc::apply_client_auth(&mut request, &options, client_config.as_ref());\n                    inner.{method_name}(request).await\n                }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request(request_template.clone(), &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
             request = method.request,
             response = method.response
@@ -450,6 +450,16 @@ fn custom_validation_checks(field: &Field, fields: &[Field], expr: &str) -> Stri
             "        if {expr}.parse::<f64>().is_err() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be numeric\", &request_ctx));\n        }}\n"
         ));
     }
+    if has_rule(rules, "lowercase") {
+        out.push_str(&format!(
+            "        if {expr}.chars().any(|ch| ch.is_uppercase()) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be lowercase\", &request_ctx));\n        }}\n"
+        ));
+    }
+    if has_rule(rules, "uppercase") {
+        out.push_str(&format!(
+            "        if {expr}.chars().any(|ch| ch.is_lowercase()) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be uppercase\", &request_ctx));\n        }}\n"
+        ));
+    }
 
     out
 }
@@ -573,6 +583,16 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
             if has_rule(rules, "numeric") {
                 body.push_str(&format!(
                     "{indent}if {var}.parse::<f64>().is_err() {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be numeric\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "lowercase") {
+                body.push_str(&format!(
+                    "{indent}if {var}.chars().any(|ch| ch.is_uppercase()) {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be lowercase\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "uppercase") {
+                body.push_str(&format!(
+                    "{indent}if {var}.chars().any(|ch| ch.is_lowercase()) {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be uppercase\", &request_ctx));\n{indent}}}\n"
                 ));
             }
         }
@@ -975,9 +995,7 @@ mod tests {
         assert!(client.contains("client_config: Option<roze_config::RpcClientConfig>"));
         assert!(client.contains("pub async fn connect_from_config"));
         assert!(client.contains("RpcClientOptions::from_config(&config)"));
-        assert!(
-            client.contains("apply_client_auth(&mut request, &options, client_config.as_ref())")
-        );
+        assert!(client.contains("roze_rpc::rpc::client_request("));
     }
 
     #[test]
@@ -993,6 +1011,8 @@ mod tests {
                 status: string `validate:"oneof=active disabled"`
                 account: string
                 backup: string `validate:"required_with=account"`
+                lower_code: string `validate:"lowercase"`
+                upper_code: string `validate:"uppercase"`
                 tags: []string `validate:"min=1,dive,required,min=2,alphanum"`
             }
 
@@ -1012,6 +1032,8 @@ mod tests {
         assert!(
             rendered.contains("if (!req.account.to_string().is_empty()) && req.backup.is_empty()")
         );
+        assert!(rendered.contains("if req.lower_code.chars().any(|ch| ch.is_uppercase())"));
+        assert!(rendered.contains("if req.upper_code.chars().any(|ch| ch.is_lowercase())"));
         assert!(rendered.contains("for item in &req.tags"));
         assert!(rendered.contains("if item.chars().count() < 2"));
         assert!(rendered.contains("if !item.chars().all(|ch| ch.is_alphanumeric())"));

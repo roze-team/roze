@@ -135,25 +135,111 @@ pub fn validation_message_i18n(code: &str, locale: Option<&str>) -> &'static str
             "required" => "不能为空",
             "length" => "长度不合法",
             "range" => "数值范围不合法",
+            "oneof" => "必须是允许的取值",
             "email" => "邮箱格式不合法",
             "url" => "URL 格式不合法",
+            "uri" => "URI 格式不合法",
             "ip" => "IP 地址格式不合法",
+            "ipv4" => "IPv4 地址格式不合法",
+            "ipv6" => "IPv6 地址格式不合法",
             "contains" => "缺少必需内容",
             "does_not_contain" => "包含禁止内容",
+            "startswith" => "前缀不合法",
+            "endswith" => "后缀不合法",
+            "alpha" => "只能包含字母",
+            "alphanum" => "只能包含字母和数字",
+            "ascii" => "只能包含 ASCII 字符",
+            "numeric" => "必须是数字",
+            "lowercase" => "必须是小写",
+            "uppercase" => "必须是大写",
+            "eqfield" => "必须与指定字段相等",
+            "nefield" => "不能与指定字段相等",
+            "gtfield" => "必须大于指定字段",
+            "gtefield" => "必须大于或等于指定字段",
+            "ltfield" => "必须小于指定字段",
+            "ltefield" => "必须小于或等于指定字段",
+            "required_if" => "条件满足时不能为空",
+            "required_unless" => "条件不满足时不能为空",
+            "required_with" => "关联字段存在时不能为空",
+            "required_without" => "关联字段不存在时不能为空",
+            "dive" => "集合元素不合法",
+            "keys" => "集合键不合法",
+            "endkeys" => "集合值不合法",
             _ => "参数不合法",
         },
         _ => match code {
             "required" => "required",
             "length" => "invalid length",
             "range" => "out of range",
+            "oneof" => "not an allowed value",
             "email" => "invalid email",
             "url" => "invalid url",
+            "uri" => "invalid uri",
             "ip" => "invalid ip address",
+            "ipv4" => "invalid ipv4 address",
+            "ipv6" => "invalid ipv6 address",
             "contains" => "missing required content",
             "does_not_contain" => "contains forbidden content",
+            "startswith" => "invalid prefix",
+            "endswith" => "invalid suffix",
+            "alpha" => "letters only",
+            "alphanum" => "letters and numbers only",
+            "ascii" => "ascii only",
+            "numeric" => "numeric value required",
+            "lowercase" => "lowercase required",
+            "uppercase" => "uppercase required",
+            "eqfield" => "must equal another field",
+            "nefield" => "must not equal another field",
+            "gtfield" => "must be greater than another field",
+            "gtefield" => "must be greater than or equal to another field",
+            "ltfield" => "must be less than another field",
+            "ltefield" => "must be less than or equal to another field",
+            "required_if" => "required by condition",
+            "required_unless" => "required unless condition matches",
+            "required_with" => "required with another field",
+            "required_without" => "required without another field",
+            "dive" => "invalid collection element",
+            "keys" => "invalid collection key",
+            "endkeys" => "invalid collection value",
             _ => "invalid value",
         },
     }
+}
+
+pub fn is_alpha(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(char::is_alphabetic)
+}
+
+pub fn is_alphanum(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(char::is_alphanumeric)
+}
+
+pub fn is_ascii(value: &str) -> bool {
+    value.is_ascii()
+}
+
+pub fn is_numeric(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+pub fn is_lowercase(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(char::is_uppercase)
+}
+
+pub fn is_uppercase(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(char::is_lowercase)
+}
+
+pub fn one_of(value: &str, allowed: &[&str]) -> bool {
+    allowed.iter().any(|item| *item == value)
+}
+
+pub fn starts_with(value: &str, prefix: &str) -> bool {
+    value.starts_with(prefix)
+}
+
+pub fn ends_with(value: &str, suffix: &str) -> bool {
+    value.ends_with(suffix)
 }
 
 fn normalize_locale(locale: Option<&str>) -> Option<String> {
@@ -284,5 +370,44 @@ mod tests {
         let err =
             validate_or_message_i18n(&input, Some("zh-CN")).expect_err("validation should fail");
         assert_eq!(err, "name: 长度不合法");
+    }
+
+    #[test]
+    fn validation_message_i18n_covers_generated_validator_codes() {
+        assert_eq!(
+            validation_message_i18n("required_with", Some("zh-CN")),
+            "关联字段存在时不能为空"
+        );
+        assert_eq!(
+            validation_message_i18n("lowercase", Some("zh-CN")),
+            "必须是小写"
+        );
+        assert_eq!(
+            validation_message_i18n("uppercase", Some("en-US")),
+            "uppercase required"
+        );
+        assert_eq!(
+            validation_message_i18n("oneof", None),
+            "not an allowed value"
+        );
+    }
+
+    #[test]
+    fn helper_validators_cover_common_string_rules() {
+        assert!(is_alpha("用户"));
+        assert!(is_alphanum("user123"));
+        assert!(is_ascii("trace-123"));
+        assert!(is_numeric("123456"));
+        assert!(is_lowercase("user_123"));
+        assert!(is_uppercase("USER_123"));
+        assert!(one_of("active", &["active", "disabled"]));
+        assert!(starts_with("user_123", "user_"));
+        assert!(ends_with("order_id", "_id"));
+
+        assert!(!is_alpha("user123"));
+        assert!(!is_alphanum("user-123"));
+        assert!(!is_numeric("12.3"));
+        assert!(!is_lowercase("User"));
+        assert!(!is_uppercase("User"));
     }
 }

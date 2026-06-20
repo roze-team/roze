@@ -27,6 +27,12 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub kafka: Option<KafkaConfig>,
     #[serde(default)]
+    pub nats: Option<roze_nats::NatsConfig>,
+    #[serde(default)]
+    pub outbox: Option<OutboxConfig>,
+    #[serde(default)]
+    pub storage: Option<roze_storage::StorageConfig>,
+    #[serde(default)]
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub telemetry: Option<TelemetryConfig>,
@@ -184,6 +190,16 @@ pub struct RestConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcConfig {
     pub addr: SocketAddr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_outbox_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_outbox_interval_ms")]
+    pub interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -521,6 +537,14 @@ fn default_rpc_client_keepalive_time_secs() -> u64 {
     20
 }
 
+fn default_outbox_batch_size() -> usize {
+    100
+}
+
+fn default_outbox_interval_ms() -> u64 {
+    1_000
+}
+
 fn default_true() -> bool {
     true
 }
@@ -765,6 +789,79 @@ endpoint = "http://127.0.0.1:4317"
         assert_eq!(telemetry.sampler, default_telemetry_sampler());
         assert_eq!(telemetry.batcher, TelemetryBatcher::OtlpGrpc);
         assert_eq!(telemetry.propagator, TelemetryPropagator::TraceContext);
+    }
+
+    #[test]
+    fn loads_storage_config() {
+        let source = r#"
+name = "demo"
+
+[storage]
+provider = "aliyun_oss"
+bucket = "images"
+endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+region = "cn-hangzhou"
+public_base_url = "https://cdn.example.com"
+
+[storage.validation]
+max_size_bytes = 1024
+allowed_mime_types = ["image/png"]
+allowed_extensions = ["png"]
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let storage = config.storage.expect("storage");
+        assert_eq!(storage.bucket, "images");
+        assert_eq!(storage.provider, roze_storage::StorageProvider::AliyunOss);
+        assert_eq!(storage.validation.max_size_bytes, 1024);
+    }
+
+    #[test]
+    fn loads_nats_and_outbox_config() {
+        let source = r#"
+name = "demo"
+
+[nats]
+servers = ["127.0.0.1:4222"]
+client_name = "demo-api"
+subject_prefix = "demo"
+
+[nats.jetstream]
+stream = "DEMO"
+subjects = ["demo.*"]
+durable = "demo-workers"
+
+[outbox]
+enabled = true
+batch_size = 50
+interval_ms = 500
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let nats = config.nats.expect("nats");
+        assert_eq!(nats.servers, vec!["127.0.0.1:4222"]);
+        assert_eq!(nats.subject_name("orders"), "demo.orders");
+        assert_eq!(nats.jetstream.stream, "DEMO");
+        assert_eq!(nats.jetstream.durable, "demo-workers");
+
+        let outbox = config.outbox.expect("outbox");
+        assert!(outbox.enabled);
+        assert_eq!(outbox.batch_size, 50);
+        assert_eq!(outbox.interval_ms, 500);
     }
 
     #[test]

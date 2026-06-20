@@ -15,6 +15,7 @@ Roze is a small Rust service framework scaffold with:
 - `crates/roze-rpc`: tonic gRPC helpers.
 - `crates/roze-job`: scheduled job scaffolding.
 - `crates/roze-mq`: messaging scaffolding.
+- `crates/roze-storage`: object storage contracts for local/S3-compatible/Qiniu/Alibaba/Tencent providers.
 - `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
 - `apps/rozectl`: code generation for `.api` service definitions.
 - `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.
@@ -28,9 +29,21 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
 - ORM: `Toasty` is the default generated model layer; shared ORM request contracts live in `roze-orm`.
 - DTM: built-in distributed transaction manager defaults to TCC and keeps Saga as an optional workflow.
-- Governance: registry, balancing, middleware, config center, tracing, and error handling live across the `roze-*` crates.
+- Governance: registry, balancing, middleware, config center, tracing, NATS JetStream, outbox relay, and error handling live across the `roze-*` crates.
 
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.
+
+Generated REST services always expose the same Rust project shape:
+`src/main.rs`, `src/config.rs`, `src/context.rs`, `src/middleware.rs`,
+`src/openapi.rs`, `src/routes.rs`, `src/svc.rs`, `src/types.rs`,
+`src/handler/`, and `src/logic/`. Generated RPC services use
+`build.rs`, `proto/service.proto`, `proto/source.proto`, `src/client.rs`,
+`src/pb.rs`, `src/rpc.rs`, `src/svc.rs`, `src/types.rs`, and `src/logic/`.
+This keeps handler boundaries, context, validation, errors, tracing, and
+response contracts uniform across teams.
+Generated services also include optional NATS/outbox slots in `ServiceContext`,
+so reliable event publishing follows the same convention in API and RPC
+projects.
 
 `rozectl` generates the scaffold and glue code: API projects, RPC projects,
 model modules, documentation, client SDKs, Dockerfiles, and Kubernetes

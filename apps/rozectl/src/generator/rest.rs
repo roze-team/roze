@@ -655,6 +655,16 @@ fn custom_validation_checks(field: &Field, fields: &[Field], expr: &str) -> Stri
             "    if {expr}.parse::<f64>().is_err() {{\n        let err = RozeError::BadRequest(\"{field_label} must be numeric\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
         ));
     }
+    if has_rule(rules, "lowercase") {
+        out.push_str(&format!(
+            "    if {expr}.chars().any(|ch| ch.is_uppercase()) {{\n        let err = RozeError::BadRequest(\"{field_label} must be lowercase\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if has_rule(rules, "uppercase") {
+        out.push_str(&format!(
+            "    if {expr}.chars().any(|ch| ch.is_lowercase()) {{\n        let err = RozeError::BadRequest(\"{field_label} must be uppercase\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
 
     out
 }
@@ -773,6 +783,16 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
             if has_rule(rules, "numeric") {
                 body.push_str(&format!(
                     "{indent}if {var}.parse::<f64>().is_err() {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be numeric\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "lowercase") {
+                body.push_str(&format!(
+                    "{indent}if {var}.chars().any(|ch| ch.is_uppercase()) {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be lowercase\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "uppercase") {
+                body.push_str(&format!(
+                    "{indent}if {var}.chars().any(|ch| ch.is_lowercase()) {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be uppercase\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
                 ));
             }
         }
@@ -1593,6 +1613,8 @@ mod tests {
                 code_name string `query:"codeName" validate:"alphanum"`
                 trace string `query:"trace" validate:"ascii"`
                 amount string `query:"amount" validate:"numeric"`
+                lower_code string `query:"lowerCode" validate:"lowercase"`
+                upper_code string `query:"upperCode" validate:"uppercase"`
                 note String `query:"note" validate:"optional"`
             }
 
@@ -1662,6 +1684,8 @@ mod tests {
         assert!(handlers.contains("if !req.code_name.chars().all(|ch| ch.is_alphanumeric())"));
         assert!(handlers.contains("if !req.trace.is_ascii()"));
         assert!(handlers.contains("if req.amount.parse::<f64>().is_err()"));
+        assert!(handlers.contains("if req.lower_code.chars().any(|ch| ch.is_uppercase())"));
+        assert!(handlers.contains("if req.upper_code.chars().any(|ch| ch.is_lowercase())"));
         assert!(!handlers.contains("note:\n    #[validate"));
     }
 

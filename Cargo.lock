@@ -3028,6 +3028,8 @@ dependencies = [
  "config",
  "futures-util",
  "reqwest",
+ "roze-nats",
+ "roze-storage",
  "serde",
  "serde_json",
  "tokio",
@@ -3324,6 +3326,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "roze-context",
  "roze-trace",
  "serde",
  "serde_json",
@@ -3340,6 +3343,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "futures-util",
+ "roze-context",
  "roze-eventbus",
  "roze-mq",
  "roze-trace",
@@ -3529,6 +3533,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "roze-swagger"
 version = "0.1.0"
 
@@ -3545,6 +3561,8 @@ name = "roze-transaction"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "roze-context",
+ "roze-mq",
  "serde",
  "serde_json",
  "tokio",

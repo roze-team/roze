@@ -289,6 +289,78 @@ impl Context {
         next
     }
 
+    pub fn propagation_headers(&self) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::new();
+        headers.insert(REQUEST_ID_HEADER.to_string(), self.request_id());
+        headers.insert(TRACE_ID_HEADER.to_string(), self.trace_id());
+        if let Some(timeout) = self.remaining_timeout() {
+            headers.insert(
+                TIMEOUT_HEADER.to_string(),
+                timeout.as_millis().max(1).to_string(),
+            );
+        }
+        if let Some(auth) = self.auth() {
+            headers.insert(SUBJECT_HEADER.to_string(), auth.subject);
+            if let Some(tenant) = auth.tenant {
+                headers.insert(TENANT_HEADER.to_string(), tenant);
+            }
+            if !auth.roles.is_empty() {
+                headers.insert(ROLES_HEADER.to_string(), auth.roles.join(","));
+            }
+        }
+        for (key, value) in self.metadata() {
+            headers.insert(format!("{METADATA_HEADER_PREFIX}{key}"), value);
+        }
+        headers
+    }
+
+    pub fn from_propagation_headers(headers: &BTreeMap<String, String>) -> Self {
+        let request_id = header_value(headers, REQUEST_ID_HEADER)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(trace_generate_trace_id);
+        let trace_id = header_value(headers, TRACE_ID_HEADER)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| request_id.clone());
+        let mut ctx = Self::background_with_request_id_and_trace_id(request_id, trace_id)
+            .with_metadata_map(metadata_from_headers(headers));
+        if let Some(auth) = auth_from_headers(headers) {
+            ctx = ctx.with_auth(auth);
+        }
+        if let Some(timeout) = header_value(headers, TIMEOUT_HEADER)
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+        {
+            ctx = ctx.with_timeout(timeout);
+        }
+        ctx
+    }
+
+    pub fn with_propagation_headers(&self, headers: &BTreeMap<String, String>) -> Self {
+        let mut ctx = self.clone();
+        if let Some(request_id) = header_value(headers, REQUEST_ID_HEADER) {
+            ctx = ctx.with_request_id(request_id);
+        }
+        if let Some(trace_id) = header_value(headers, TRACE_ID_HEADER) {
+            ctx = ctx.with_trace_id(trace_id);
+        }
+        if let Some(auth) = auth_from_headers(headers) {
+            ctx = ctx.with_auth(auth);
+        }
+        let metadata = metadata_from_headers(headers);
+        if !metadata.is_empty() {
+            ctx = ctx.with_metadata_map(metadata);
+        }
+        if let Some(timeout) = header_value(headers, TIMEOUT_HEADER)
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+        {
+            ctx = ctx.with_timeout(timeout);
+        }
+        ctx
+    }
+
     pub fn with_timeout(&self, timeout: Duration) -> Self {
         self.with_deadline(Instant::now() + timeout)
     }
@@ -454,6 +526,47 @@ impl Context {
     }
 }
 
+fn header_value<'a>(headers: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.as_str())
+}
+
+fn metadata_from_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix(METADATA_HEADER_PREFIX)
+                .map(|key| (key.to_string(), value.clone()))
+        })
+        .collect()
+}
+
+fn auth_from_headers(headers: &BTreeMap<String, String>) -> Option<AuthContext> {
+    let subject = header_value(headers, SUBJECT_HEADER)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let tenant = header_value(headers, TENANT_HEADER)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let roles = header_value(headers, ROLES_HEADER)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(AuthContext {
+        subject,
+        roles,
+        tenant,
+    })
+}
+
 impl Default for Context {
     fn default() -> Self {
         Self::background()
@@ -497,5 +610,25 @@ mod tests {
         ctx.cancel();
         assert!(ctx.cancelled());
         assert_eq!(ctx.cancel_reason(), Some(CancelReason::Canceled));
+    }
+
+    #[test]
+    fn context_round_trips_propagation_headers() {
+        let ctx = Context::background_with_request_id_and_trace_id("request-1", "trace-1")
+            .with_auth(AuthContext {
+                subject: "user-1".to_string(),
+                roles: vec!["admin".to_string(), "ops".to_string()],
+                tenant: Some("tenant-1".to_string()),
+            })
+            .with_locale("zh-CN");
+
+        let restored = Context::from_propagation_headers(&ctx.propagation_headers());
+
+        assert_eq!(restored.request_id(), "request-1");
+        assert_eq!(restored.trace_id(), "trace-1");
+        assert_eq!(restored.subject().as_deref(), Some("user-1"));
+        assert_eq!(restored.tenant().as_deref(), Some("tenant-1"));
+        assert_eq!(restored.roles(), vec!["admin", "ops"]);
+        assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
     }
 }

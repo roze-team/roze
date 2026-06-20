@@ -9,14 +9,15 @@
 | HTTP 统一边界 | 已完成 | `roze-http`, `roze-middleware`, `roze-result`, `roze-error` |
 | RPC 统一边界 | 已完成 | `roze-rpc`, `roze-grpc`, `roze-context` |
 | 统一错误 | 已完成 | HTTP `RozeError`，RPC `status_from_error` metadata |
-| Context 传递 | 已完成 | request id, trace id, auth, tenant, locale, timeout, metadata |
-| 参数校验 | 已完成 | REST/RPC 生成入口均执行 `roze-validation` |
+| Context 传递 | 已完成 | request id, trace id, auth, tenant, locale, timeout, metadata，统一 propagation headers，可跨 HTTP/RPC/MQ |
+| 参数校验 | 已完成 | REST/RPC 生成入口均执行 `roze-validation`，支持 go-playground 风格标签、跨字段、条件必填、集合 `dive`、map key/value 校验 |
 | 错误 i18n | 已完成基础版 | `x-roze-locale`, `Accept-Language`, validator code i18n |
 | 服务注册发现 | 已完成代码层 | memory, dns, etcd lease 注册/续约, consul TTL, etcd watch, cached resolver |
 | 配置中心 | 已完成代码层 | Etcd v3 原生 `/v3/watch`，断线按 revision 恢复 |
 | Gateway | 已完成代码层 | axum/tower/tower-http, registry upstream, retry, health, outlier |
-| MQ 抽象 | 已完成治理基础版 | publish/subscribe, retry, dead letter, idempotency, delay, stats, DLQ list/replay/purge, NATS JetStream |
-| 一致性工具 | 已完成基础版 | saga, outbox, inbox dedupe |
+| MQ 抽象 | 已完成治理版 | publish/subscribe, retry, dead letter, idempotency, delay, stats, DLQ list/replay/purge, NATS JetStream, Context carrier |
+| 对象存储 | 已完成基础契约 | local, s3-compatible, qiniu kodo, aliyun oss, tencent cos config, validation, presign boundary |
+| 一致性工具 | 已完成基础版 | saga, in-memory outbox relay, inbox dedupe，outbox 可发布到任意 `roze_mq::Publisher` |
 | DTM 基础服务 | 已完成基础版 | 默认 TCC，Saga 可选，HTTP 分支调用，分支屏障 |
 | 认证授权 | 已完成基础版 | JWT, RBAC, tenant, ABAC attribute rule |
 | ORM 默认契约 | 已完成基础版 | Toasty 默认生成，通用 page/sort/filter/tenant/audit/soft-delete |

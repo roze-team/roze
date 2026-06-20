@@ -16,7 +16,7 @@ use anyhow::{bail, Context};
 use crate::parser::ApiSpec;
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 15] = [
+const REST_ROZE_CRATES: [&str; 18] = [
     "roze-config",
     "roze-error",
     "roze-http",
@@ -28,13 +28,16 @@ const REST_ROZE_CRATES: [&str; 15] = [
     "roze-context",
     "roze-db",
     "roze-mongo",
+    "roze-mq",
+    "roze-nats",
     "roze-openapi",
     "roze-result",
+    "roze-transaction",
     "roze-validation",
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 13] = [
+const RPC_ROZE_CRATES: [&str; 16] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -44,9 +47,12 @@ const RPC_ROZE_CRATES: [&str; 13] = [
     "roze-jwt",
     "roze-log",
     "roze-cache",
+    "roze-mq",
+    "roze-nats",
     "roze-result",
     "roze-rpc",
     "roze-trace",
+    "roze-transaction",
     "roze-validation",
 ];
 
@@ -1418,6 +1424,18 @@ governance:
 # cache:
 #   url: redis://127.0.0.1/
 #   namespace: {}
+# nats:
+#   servers: ["127.0.0.1:4222"]
+#   client_name: {}
+#   subject_prefix: {}
+#   jetstream:
+#     stream: ROZE
+#     subjects: ["{}.*"]
+#     durable: {}
+# outbox:
+#   enabled: true
+#   batch_size: 100
+#   interval_ms: 1000
 # auth:
 #   jwt_secret: change-me
 #   jwt_issuer: {}
@@ -1428,6 +1446,10 @@ governance:
 #   sampler: 1.0
 #   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
             spec.service,
             spec.service,
             spec.service,
@@ -1479,6 +1501,18 @@ governance:
 # cache:
 #   url: redis://127.0.0.1/
 #   namespace: {}
+# nats:
+#   servers: ["127.0.0.1:4222"]
+#   client_name: {}
+#   subject_prefix: {}
+#   jetstream:
+#     stream: ROZE
+#     subjects: ["{}.*"]
+#     durable: {}
+# outbox:
+#   enabled: true
+#   batch_size: 100
+#   interval_ms: 1000
 # auth:
 #   jwt_secret: change-me
 #   jwt_issuer: {}
@@ -1489,6 +1523,10 @@ governance:
 #   sampler: 1.0
 #   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
+            spec.service,
+            spec.service,
+            spec.service,
+            spec.service,
             spec.service,
             spec.service,
             spec.service,
@@ -1635,6 +1673,8 @@ pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigE
 fn service_context_rs() -> String {
     r#"#![allow(dead_code)]
 
+use std::sync::Arc;
+
 use crate::config::Config;
 
 #[derive(Clone, Debug)]
@@ -1643,6 +1683,8 @@ pub struct ServiceContext {
     pub db_connections: Option<roze_db::DatabaseConnections>,
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
+    pub mq: Option<Arc<roze_nats::NatsJetStream>>,
+    pub outbox: roze_transaction::InMemoryOutbox,
 }
 
 impl ServiceContext {
@@ -1660,11 +1702,17 @@ impl ServiceContext {
             ),
             None => None,
         };
+        let mq = match config.nats.as_ref() {
+            Some(nats) => Some(Arc::new(roze_nats::NatsJetStream::connect(nats.clone()).await?)),
+            None => None,
+        };
         Ok(Self {
             config,
             db_connections,
             mongo,
             cache,
+            mq,
+            outbox: roze_transaction::InMemoryOutbox::new(),
         })
     }
 
@@ -1684,6 +1732,12 @@ impl ServiceContext {
 
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
         self.config.auth.as_ref().map(Into::into)
+    }
+
+    pub fn mq(&self) -> anyhow::Result<Arc<roze_nats::NatsJetStream>> {
+        self.mq
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("nats jetstream is not configured"))
     }
 }
 "#

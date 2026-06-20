@@ -63,6 +63,7 @@
 
 - `roze-mq::InMemoryBroker` 已实现 `MqAdmin`。
 - `roze-kafka::InMemoryKafkaBroker` 已实现 `roze_mq::MqAdmin`，便于本地测试和控制面复用。
+- `roze_mq::Message::with_context` 和 `roze_nats::NatsMessage::with_context` 使用统一 Context carrier，携带 request id、trace id、auth、tenant、locale、timeout 和 metadata。
 - `roze-nats::NatsMessage` 默认带 `x-trace-id`，与 HTTP/RPC/Kafka/MQ 链路一致。
 
 ## NATS JetStream
@@ -98,6 +99,18 @@ nats:
 - durable consumer：通过 `jetstream.durable` 配置。
 - 治理：实现 `roze_mq::MqAdmin`，支持 stats、DLQ list/replay/purge/clear。
 - trace：所有 `NatsMessage` 默认携带 UUIDv7 `x-trace-id`。
+
+## Outbox Relay
+
+`roze-transaction` 提供基础 outbox relay：
+
+- `OutboxMessage::with_context`：入 outbox 时固化当前 Context propagation headers。
+- `InMemoryOutbox`：框架内置内存 outbox，适合本地开发、测试和上层持久化实现的契约参考。
+- `relay_outbox_batch`：读取 pending/failed 消息并发布到任意 `roze_mq::Publisher`，包括 `NatsJetStream`。
+- 发布成功：标记 `Published`。
+- 发布失败：标记 `Failed`，并按指数退避写入 `next_attempt_millis`。
+
+生产持久化层可按同一 `OutboxMessage` 结构落库，relay 侧保持 `roze_mq::Publisher` 抽象，不绑定具体 MQ。
 
 ## 手工提交验证（应用层）
 - 成功路径

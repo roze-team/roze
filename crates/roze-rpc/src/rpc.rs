@@ -573,6 +573,23 @@ pub fn apply_client_auth<T>(
     }
 }
 
+pub fn client_request<T>(
+    payload: T,
+    context: &Context,
+    options: RpcClientOptions,
+    config: Option<&roze_config::RpcClientConfig>,
+) -> Request<T> {
+    let mut request = Request::new(payload);
+    if let Some(timeout) = context.remaining_timeout() {
+        request.set_timeout(timeout);
+    } else {
+        request.set_timeout(options.request_timeout);
+    }
+    apply_request_context(&mut request, context);
+    apply_client_auth(&mut request, &options, config);
+    request
+}
+
 #[derive(Debug, Clone)]
 pub struct MethodPolicy {
     pub timeout: Option<Duration>,

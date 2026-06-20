@@ -80,6 +80,33 @@ impl Message {
         }
     }
 
+    pub fn with_context(
+        context: &roze_context::Context,
+        topic: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            topic: topic.into(),
+            key: None,
+            headers: context.propagation_headers().into_iter().collect(),
+            attempt: 0,
+            dead_letter_topic: None,
+            idempotency_key: None,
+            available_at_millis: None,
+            payload,
+        }
+    }
+
+    pub fn context(&self) -> roze_context::Context {
+        roze_context::Context::from_propagation_headers(
+            &self
+                .headers
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    }
+
     pub fn ensure_trace_id(&mut self) -> String {
         if let Some((_, value)) = self.headers.iter().find(|(key, value)| {
             key.eq_ignore_ascii_case(roze_trace::TRACE_ID_HEADER) && !value.trim().is_empty()
@@ -574,6 +601,19 @@ mod tests {
             uuid::Uuid::parse_str(trace_id).unwrap().get_version_num(),
             7
         );
+    }
+
+    #[test]
+    fn message_round_trips_context_headers() {
+        let ctx =
+            roze_context::Context::background_with_request_id_and_trace_id("request-1", "trace-1")
+                .with_locale("zh-CN");
+        let message = Message::with_context(&ctx, "events", serde_json::json!({"ok": true}));
+        let restored = message.context();
+
+        assert_eq!(restored.request_id(), "request-1");
+        assert_eq!(restored.trace_id(), "trace-1");
+        assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
     }
 
     #[tokio::test]

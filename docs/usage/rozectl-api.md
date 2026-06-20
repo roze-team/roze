@@ -282,6 +282,8 @@ Validation has two layers:
 | `alphanum` | string must contain alphabetic or numeric characters only |
 | `ascii` | string must be ASCII |
 | `numeric` | string must parse as `f64` |
+| `lowercase` | string must not contain uppercase characters |
+| `uppercase` | string must not contain lowercase characters |
 | `eqfield=Other` | field must equal another field of the same generated Rust type |
 | `nefield=Other` | field must not equal another field of the same generated Rust type |
 | `gtfield=Other` | field must be greater than another field of the same generated Rust type |
@@ -319,7 +321,57 @@ type LabelsReq {
 
 Supported item/key/value rules are the same basic string and numeric rules used
 for scalar request-level checks: `required`, `min`, `max`, `len`, `oneof`,
-`alpha`, `alphanum`, `ascii`, `numeric`, `gte`, `lte`, `gt`, and `lt`.
+`alpha`, `alphanum`, `ascii`, `numeric`, `lowercase`, `uppercase`, `gte`,
+`lte`, `gt`, and `lt`.
+
+## Convention-first project layout
+
+`rozectl` generated projects intentionally use one stable layout so every Rust
+service has the same entry points and ownership boundaries.
+
+REST services:
+
+```text
+config.yaml
+Cargo.toml
+src/
+  main.rs
+  config.rs
+  context.rs
+  middleware.rs
+  openapi.rs
+  routes.rs
+  svc.rs
+  types.rs
+  handler/
+  logic/
+```
+
+RPC services:
+
+```text
+config.yaml
+Cargo.toml
+build.rs
+proto/
+  service.proto
+  source.proto
+src/
+  main.rs
+  client.rs
+  config.rs
+  context.rs
+  pb.rs
+  rpc.rs
+  svc.rs
+  types.rs
+  logic/
+```
+
+Framework-owned files can be regenerated with `--update`. Business code should
+live in `src/logic`, while generated boundary files keep HTTP/RPC parsing,
+validation, context extraction, errors, tracing, and response contracts
+consistent across services.
 
 ## OpenAPI output
 

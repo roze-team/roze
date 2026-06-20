@@ -1,4 +1,9 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -87,6 +92,8 @@ pub struct OutboxMessage {
     pub id: String,
     pub topic: String,
     pub key: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     pub idempotency_key: String,
     pub payload: serde_json::Value,
     pub status: OutboxStatus,
@@ -105,12 +112,40 @@ impl OutboxMessage {
             id: id.into(),
             topic: topic.into(),
             key: None,
+            headers: BTreeMap::new(),
             idempotency_key: idempotency_key.into(),
             payload,
             status: OutboxStatus::Pending,
             attempts: 0,
             next_attempt_millis: None,
         }
+    }
+
+    pub fn with_context(
+        context: &roze_context::Context,
+        id: impl Into<String>,
+        topic: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        let mut message = Self::new(id, topic, idempotency_key, payload);
+        message.headers = context.propagation_headers();
+        message
+    }
+
+    pub fn to_mq_message(&self) -> roze_mq::Message {
+        let mut message = roze_mq::Message {
+            topic: self.topic.clone(),
+            key: self.key.clone(),
+            headers: self.headers.clone().into_iter().collect(),
+            attempt: self.attempts,
+            dead_letter_topic: None,
+            idempotency_key: Some(self.idempotency_key.clone()),
+            available_at_millis: self.next_attempt_millis,
+            payload: self.payload.clone(),
+        };
+        message.ensure_trace_id();
+        message
     }
 
     pub fn mark_published(&mut self) {
@@ -122,6 +157,111 @@ impl OutboxMessage {
         self.attempts = self.attempts.saturating_add(1);
         self.next_attempt_millis = next_attempt_millis;
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryOutbox {
+    messages: Arc<Mutex<BTreeMap<String, OutboxMessage>>>,
+}
+
+impl InMemoryOutbox {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue(&self, message: OutboxMessage) -> bool {
+        self.messages
+            .lock()
+            .expect("outbox lock poisoned")
+            .insert(message.id.clone(), message)
+            .is_none()
+    }
+
+    pub fn get(&self, id: &str) -> Option<OutboxMessage> {
+        self.messages
+            .lock()
+            .expect("outbox lock poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    pub fn pending(&self, now_millis: u64, limit: usize) -> Vec<OutboxMessage> {
+        self.messages
+            .lock()
+            .expect("outbox lock poisoned")
+            .values()
+            .filter(|message| {
+                matches!(message.status, OutboxStatus::Pending | OutboxStatus::Failed)
+                    && message
+                        .next_attempt_millis
+                        .map(|next| next <= now_millis)
+                        .unwrap_or(true)
+            })
+            .take(limit.max(1))
+            .cloned()
+            .collect()
+    }
+
+    pub fn mark_published(&self, id: &str) {
+        if let Some(message) = self
+            .messages
+            .lock()
+            .expect("outbox lock poisoned")
+            .get_mut(id)
+        {
+            message.mark_published();
+        }
+    }
+
+    pub fn mark_failed(&self, id: &str, next_attempt_millis: Option<u64>) {
+        if let Some(message) = self
+            .messages
+            .lock()
+            .expect("outbox lock poisoned")
+            .get_mut(id)
+        {
+            message.mark_failed(next_attempt_millis);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboxRelayReport {
+    pub published: usize,
+    pub failed: usize,
+}
+
+pub async fn relay_outbox_batch<P>(
+    outbox: &InMemoryOutbox,
+    publisher: &P,
+    now_millis: u64,
+    limit: usize,
+) -> OutboxRelayReport
+where
+    P: roze_mq::Publisher,
+{
+    let mut report = OutboxRelayReport::default();
+    for message in outbox.pending(now_millis, limit) {
+        match publisher.publish(message.to_mq_message()).await {
+            Ok(()) => {
+                outbox.mark_published(&message.id);
+                report.published += 1;
+            }
+            Err(_) => {
+                outbox.mark_failed(
+                    &message.id,
+                    Some(next_attempt_millis(now_millis, message.attempts)),
+                );
+                report.failed += 1;
+            }
+        }
+    }
+    report
+}
+
+fn next_attempt_millis(now_millis: u64, attempts: u32) -> u64 {
+    let delay = 1_000u64.saturating_mul(2u64.saturating_pow(attempts.min(6)));
+    now_millis.saturating_add(delay)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +282,7 @@ impl InboxDeduper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roze_mq::Subscriber;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -196,6 +337,42 @@ mod tests {
         assert_eq!(message.attempts, 1);
         message.mark_published();
         assert_eq!(message.status, OutboxStatus::Published);
+    }
+
+    #[tokio::test]
+    async fn outbox_relay_publishes_to_mq_with_context() {
+        let outbox = InMemoryOutbox::new();
+        let broker = roze_mq::InMemoryBroker::new();
+        let mut rx = broker.subscribe("orders").await.expect("subscribe");
+        let ctx =
+            roze_context::Context::background_with_request_id_and_trace_id("request-1", "trace-1")
+                .with_locale("zh-CN");
+
+        outbox.enqueue(OutboxMessage::with_context(
+            &ctx,
+            "msg-1",
+            "orders",
+            "order-1",
+            serde_json::json!({"id": 1}),
+        ));
+
+        let report = relay_outbox_batch(&outbox, &broker, 1, 10).await;
+        let delivered = rx.recv().await.expect("delivery");
+
+        assert_eq!(report.published, 1);
+        assert_eq!(
+            outbox.get("msg-1").expect("message").status,
+            OutboxStatus::Published
+        );
+        assert_eq!(
+            delivered.message().idempotency_key.as_deref(),
+            Some("order-1")
+        );
+        assert_eq!(delivered.message().context().trace_id(), "trace-1");
+        assert_eq!(
+            delivered.message().context().locale().as_deref(),
+            Some("zh-CN")
+        );
     }
 
     #[test]
