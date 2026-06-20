@@ -1,5 +1,5 @@
 use crate::{
-    generator::to_snake_case,
+    generator::{rust_identifier, to_snake_case},
     parser::{Field, FieldSource, TypeDef},
 };
 
@@ -89,7 +89,7 @@ fn collection_element_type(ty: &str) -> Option<String> {
 }
 
 fn rust_field_name(field: &Field) -> String {
-    to_snake_case(&field.name)
+    rust_identifier(&field.name)
 }
 
 fn serde_rename(field: &Field) -> Option<&str> {
@@ -98,7 +98,7 @@ fn serde_rename(field: &Field) -> Option<&str> {
     }
 
     let json_name = field.json_name.as_deref().or(field.wire_name.as_deref())?;
-    if json_name == rust_field_name(field) {
+    if json_name == to_snake_case(&field.name) {
         None
     } else {
         Some(json_name)
@@ -279,6 +279,7 @@ mod tests {
             type UserResp {
                 UserID u64 `json:"user-id"`
                 CreatedAt int `json:"created_at"`
+                type string `json:"type"`
                 Tags []string `json:"tags"`
                 Scores []int `json:"scores"`
                 Labels map[string]string `json:"labels"`
@@ -296,6 +297,7 @@ mod tests {
         assert!(rendered.contains("#[serde(rename = \"user-id\")]"));
         assert!(rendered.contains("pub user_i_d: u64,"));
         assert!(rendered.contains("pub created_at: i64,"));
+        assert!(rendered.contains("pub r#type: String,"));
         assert!(rendered.contains("pub tags: Vec<String>,"));
         assert!(rendered.contains("pub scores: Vec<i64>,"));
         assert!(rendered.contains("pub labels: std::collections::HashMap<String, String>,"));

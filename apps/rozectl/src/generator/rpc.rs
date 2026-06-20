@@ -1,10 +1,10 @@
 use crate::{
-    generator::{to_pascal_case, to_snake_case},
+    generator::{rust_identifier, to_pascal_case, to_snake_case},
     parser::{ApiSpec, Field, HttpMethod, RestRoute, RpcMethod, TypeDef},
 };
 
 pub fn render_main(spec: &ApiSpec) -> String {
-    let package = spec.service.replace('-', "_");
+    let package = to_snake_case(&spec.service);
     let service = to_pascal_case(&spec.service);
     let server_mod = format!("{}_server", to_snake_case(&service));
 
@@ -62,7 +62,7 @@ fn config_path() -> PathBuf {{
 }
 
 pub fn render_rpc(spec: &ApiSpec) -> String {
-    let package = spec.service.replace('-', "_");
+    let package = to_snake_case(&spec.service);
     let service = to_pascal_case(&spec.service);
     let server_mod = format!("{}_server", to_snake_case(&service));
 
@@ -104,7 +104,7 @@ pub fn render_rpc(spec: &ApiSpec) -> String {
 }
 
 pub fn render_client(spec: &ApiSpec) -> String {
-    let package = spec.service.replace('-', "_");
+    let package = to_snake_case(&spec.service);
     let service = to_pascal_case(&spec.service);
     let client_mod = format!("{}_client", to_snake_case(&service));
 
@@ -326,7 +326,10 @@ fn proto_to_app(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
         .iter()
         .map(|field| {
             let name = rust_field_name(field);
-            format!("{name}: {var}.{name}")
+            format!(
+                "{name}: {}",
+                proto_to_app_value(spec, &field.ty, &format!("{var}.{name}"))
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -344,7 +347,10 @@ fn app_to_proto(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
         .iter()
         .map(|field| {
             let name = rust_field_name(field);
-            format!("{name}: {var}.{name}")
+            format!(
+                "{name}: {}",
+                app_to_proto_value(spec, &field.ty, &format!("{var}.{name}"))
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -352,15 +358,70 @@ fn app_to_proto(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
     format!("proto::{ty_name} {{ {fields} }}")
 }
 
+fn proto_to_app_value(spec: &ApiSpec, ty: &str, expr: &str) -> String {
+    if let Some(inner) = collection_element_type(ty) {
+        if is_known_type(spec, &inner) {
+            return format!(
+                "{expr}.into_iter().map(|item| {}).collect()",
+                proto_to_app(spec, &inner, "item")
+            );
+        }
+        return expr.to_string();
+    }
+    if let Some((_key, value)) = map_key_value_types(ty) {
+        if is_known_type(spec, &value) {
+            return format!(
+                "{expr}.into_iter().map(|(key, value)| (key, {})).collect()",
+                proto_to_app(spec, &value, "value")
+            );
+        }
+        return expr.to_string();
+    }
+    if is_known_type(spec, ty) {
+        return proto_to_app(spec, ty, expr);
+    }
+    expr.to_string()
+}
+
+fn app_to_proto_value(spec: &ApiSpec, ty: &str, expr: &str) -> String {
+    if let Some(inner) = collection_element_type(ty) {
+        if is_known_type(spec, &inner) {
+            return format!(
+                "{expr}.into_iter().map(|item| {}).collect()",
+                app_to_proto(spec, &inner, "item")
+            );
+        }
+        return expr.to_string();
+    }
+    if let Some((_key, value)) = map_key_value_types(ty) {
+        if is_known_type(spec, &value) {
+            return format!(
+                "{expr}.into_iter().map(|(key, value)| (key, {})).collect()",
+                app_to_proto(spec, &value, "value")
+            );
+        }
+        return expr.to_string();
+    }
+    if is_known_type(spec, ty) {
+        return app_to_proto(spec, ty, expr);
+    }
+    expr.to_string()
+}
+
+fn is_known_type(spec: &ApiSpec, ty_name: &str) -> bool {
+    find_type(spec, ty_name).is_some()
+}
+
 fn find_type<'a>(spec: &'a ApiSpec, ty_name: &str) -> Option<&'a TypeDef> {
     spec.types.iter().find(|ty| ty.name == ty_name)
 }
 
 fn rust_field_name(field: &Field) -> String {
-    field
+    let name = field
         .json_name
         .clone()
-        .unwrap_or_else(|| to_snake_case(&field.name))
+        .unwrap_or_else(|| to_snake_case(&field.name));
+    rust_identifier(&name)
 }
 
 fn render_rpc_request_validation_checks(spec: &ApiSpec, ty_name: &str) -> String {
@@ -944,10 +1005,7 @@ fn default_fields(spec: &ApiSpec, name: &str) -> String {
             ty.fields
                 .iter()
                 .map(|field| {
-                    let name = field
-                        .json_name
-                        .clone()
-                        .unwrap_or_else(|| to_snake_case(&field.name));
+                    let name = rust_field_name(field);
                     format!("{}: {}", name, default_value(&field.ty))
                 })
                 .collect::<Vec<_>>()
@@ -1037,5 +1095,40 @@ mod tests {
         assert!(rendered.contains("for item in &req.tags"));
         assert!(rendered.contains("if item.chars().count() < 2"));
         assert!(rendered.contains("if !item.chars().all(|ch| ch.is_alphanumeric())"));
+    }
+
+    #[test]
+    fn rpc_converts_keyword_and_repeated_message_fields() {
+        let spec = parse_api(
+            r#"
+            service user {
+                rpc ListUsers (ListUsersReq) returns (ListUsersResp)
+            }
+
+            type UserItem {
+                id: u64
+                type: string
+            }
+
+            type ListUsersReq {
+                items: []UserItem
+            }
+
+            type ListUsersResp {
+                users: []UserItem
+            }
+            "#,
+        )
+        .expect("api");
+
+        let rendered = render_rpc(&spec);
+
+        assert!(rendered.contains("r#type: item.r#type"));
+        assert!(rendered.contains(
+            "items: req.items.into_iter().map(|item| UserItem { id: item.id, r#type: item.r#type }).collect()"
+        ));
+        assert!(rendered.contains(
+            "users: resp.users.into_iter().map(|item| proto::UserItem { id: item.id, r#type: item.r#type }).collect()"
+        ));
     }
 }

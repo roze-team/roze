@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    generator::to_snake_case,
+    generator::{rust_identifier, to_snake_case},
     parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute},
 };
 
@@ -1086,7 +1086,7 @@ fn field_wire_name(field: &Field) -> String {
 }
 
 fn rust_field_name(field: &Field) -> String {
-    to_snake_case(&field.name)
+    rust_identifier(&field.name)
 }
 
 fn partial_struct_name(name: &str, source: FieldSource) -> String {

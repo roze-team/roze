@@ -1745,7 +1745,7 @@ impl ServiceContext {
 }
 
 fn render_pb(spec: &ApiSpec) -> String {
-    let package = spec.service.replace('-', "_");
+    let package = to_snake_case(&spec.service);
     format!(
         r#"pub mod {package} {{
     roze_grpc::include_proto!("{package}");
@@ -1782,8 +1782,73 @@ pub fn to_snake_case(input: &str) -> String {
     out
 }
 
+pub fn rust_identifier(input: &str) -> String {
+    let ident = to_snake_case(input);
+    if is_rust_keyword(&ident) {
+        format!("r#{ident}")
+    } else {
+        ident
+    }
+}
+
+fn is_rust_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    )
+}
+
 fn render_proto(spec: &ApiSpec) -> anyhow::Result<String> {
-    let package = spec.service.replace('-', "_");
+    let package = to_snake_case(&spec.service);
     let known_types = spec
         .types
         .iter()

@@ -570,14 +570,16 @@ fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
 
 fn parse_proto_api_spec(source: &str) -> anyhow::Result<ApiSpec> {
     let source = strip_proto_comments(source);
-    let package = parse_proto_package(&source).unwrap_or_else(|| "service".to_string());
+    let service = parse_proto_service_name(&source)
+        .or_else(|| parse_proto_package(&source))
+        .unwrap_or_else(|| "service".to_string());
     let types = parse_proto_messages(&source)?;
     let rpc_methods = parse_proto_rpcs(&source)?;
     if rpc_methods.is_empty() {
         bail!("proto file must contain at least one rpc method");
     }
     Ok(ApiSpec {
-        service: package,
+        service,
         server: None,
         info: Vec::new(),
         types,
@@ -625,6 +627,16 @@ fn parse_proto_package(source: &str) -> Option<String> {
         line.strip_prefix("package ")
             .and_then(|rest| rest.trim_end_matches(';').split('.').next_back())
             .map(|name| name.trim().replace('-', "_"))
+    })
+}
+
+fn parse_proto_service_name(source: &str) -> Option<String> {
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("service ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(|name| name.trim_end_matches('{').to_string())
+            .filter(|name| !name.is_empty())
     })
 }
 
@@ -932,7 +944,7 @@ mod tests {
         )
         .expect("parse proto");
 
-        assert_eq!(spec.service, "user");
+        assert_eq!(spec.service, "User");
         assert_eq!(spec.rpc_methods[0].name, "GetUser");
         assert_eq!(spec.rpc_methods[0].request, "GetUserReq");
         assert_eq!(spec.rpc_methods[0].response, "UserResp");
@@ -940,6 +952,38 @@ mod tests {
         assert_eq!(spec.types[0].fields[1].ty, "[]string");
         assert_eq!(spec.types[0].fields[2].ty, "string");
         assert_eq!(spec.types[0].fields[3].ty, "map[string]i32");
+    }
+
+    #[test]
+    fn parses_proto_service_name_instead_of_package_tail() {
+        let spec = parse_proto_api_spec(
+            r#"
+            syntax = "proto3";
+            package hula.group;
+
+            service HulaGroup {
+              rpc ApplyGroup (ApplyGroupReq) returns (ApplyGroupResp);
+            }
+
+            message ApplyGroupReq {
+              int64 type = 3;
+            }
+
+            message ApplyGroupResp {
+              bool ok = 1;
+            }
+            "#,
+        )
+        .expect("parse proto");
+
+        assert_eq!(spec.service, "HulaGroup");
+        let proto = crate::generator::render_proto(&spec).expect("render proto");
+        assert!(proto.contains("package hula_group;"));
+        assert!(proto.contains("service HulaGroup {"));
+        let rpc = crate::generator::rpc::render_rpc(&spec);
+        assert!(rpc.contains("hula_group_server::HulaGroup"));
+        assert!(rpc.contains("impl HulaGroup for RpcService"));
+        assert!(rpc.contains("r#type: req.r#type"));
     }
 
     #[test]
