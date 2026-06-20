@@ -37,6 +37,12 @@ cd roze
 cargo install --path apps/rozectl
 ```
 
+Force reinstall from a local checkout:
+
+```bash
+cargo install --path apps/rozectl --force
+```
+
 During local framework development, you can run without installing:
 
 ```bash

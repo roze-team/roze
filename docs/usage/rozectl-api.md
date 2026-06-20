@@ -17,6 +17,12 @@ Install `rozectl` first if the binary is not available:
 cargo install --git https://github.com/roze-team/roze.git rozectl
 ```
 
+Force reinstall or upgrade an existing binary:
+
+```bash
+cargo install --git https://github.com/roze-team/roze.git rozectl --force
+```
+
 See [usage documentation](./README.md#install-rozectl) for local install,
 upgrade, and PATH troubleshooting.
 

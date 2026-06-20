@@ -66,10 +66,22 @@ Install from GitHub:
 cargo install --git https://github.com/roze-team/roze.git rozectl
 ```
 
+Force reinstall or upgrade an existing binary:
+
+```bash
+cargo install --git https://github.com/roze-team/roze.git rozectl --force
+```
+
 Install from a local checkout:
 
 ```bash
 cargo install --path apps/rozectl
+```
+
+Force reinstall from a local checkout:
+
+```bash
+cargo install --path apps/rozectl --force
 ```
 
 Verify the installation:
