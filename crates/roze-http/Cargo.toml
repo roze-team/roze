@@ -5,7 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-poem.workspace = true
+axum.workspace = true
 roze-error = { path = "../roze-error" }
 tokio.workspace = true
 tracing.workspace = true

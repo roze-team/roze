@@ -1,6 +1,6 @@
 # roze-gateway
 
-最小可用网关（Poem + Poem 转发）示例，覆盖：
+最小可用网关（Axum + Tower HTTP 转发）示例，覆盖：
 
 - 跨服务路由映射
 - 方法约束 / 前缀匹配
@@ -31,11 +31,29 @@ gateway:
   listen: "127.0.0.1:8081"
   middlewares:
     - trace
+  services:
+    - name: user
+      upstream: "http://127.0.0.1:3000"
+      outlier:
+        failure_threshold: 3
+        ejection_ms: 30000
+      health_check:
+        path: /healthz
+        interval_ms: 10000
+        timeout_ms: 1000
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+        expected_status: 200
+    # registry-only upstream:
+    # - name: order
+    #   registry_name: order-api
   routes:
     - path: /user
       service: user
       methods: [GET, POST]
       rewrite: /user
+      retries: 2
+      retry_backoff_ms: 100
       middlewares:
         - trace
         - rate

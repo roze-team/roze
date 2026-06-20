@@ -5,7 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-poem.workspace = true
+axum.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
@@ -14,4 +14,6 @@ roze-metrics = { path = "../roze-metrics" }
 roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
 tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
 tracing.workspace = true

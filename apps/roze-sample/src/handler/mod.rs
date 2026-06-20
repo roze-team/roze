@@ -1,10 +1,10 @@
 #![allow(unused_imports)]
 
-use poem::{
-    handler,
+use axum::{
+    extract::{Extension, Form, Path, Query, State},
     http::HeaderMap,
-    web::{Data, Form, Json, Path, Query},
-    Endpoint, EndpointExt, Route,
+    routing::{get, post},
+    Json, Router,
 };
 use roze_context::Context;
 use roze_error::RozeError;
@@ -16,26 +16,23 @@ use crate::openapi;
 use crate::svc::ServiceContext;
 use crate::types::*;
 
-pub fn router(ctx: ServiceContext) -> impl Endpoint {
-    Route::new()
-        .at("/api/healthz", poem::get(health))
-        .at("/api/metrics", poem::get(metrics))
-        .at("/api/openapi.json", poem::get(openapi_doc))
-        .at("/api/roze_sample/login", poem::post(post_roze_sample_login))
-        .data(ctx)
+pub fn router(ctx: ServiceContext) -> Router {
+    Router::new()
+        .route("/api/healthz", get(health))
+        .route("/api/metrics", get(metrics))
+        .route("/api/openapi.json", get(openapi_doc))
+        .route("/api/roze_sample/login", post(post_roze_sample_login))
+        .with_state(ctx)
 }
 
-#[handler]
-async fn health() -> Result<Json<ApiResponse<&'static str>>, RozeError> {
-    Ok(Json(ApiResponse::ok("ok")))
+async fn health() -> Result<ApiResponse<&'static str>, RozeError> {
+    Ok(ApiResponse::ok("ok"))
 }
 
-#[handler]
 async fn metrics() -> String {
     roze_metrics::http_metrics()
 }
 
-#[handler]
 async fn openapi_doc() -> Json<serde_json::Value> {
     Json(openapi::document())
 }
@@ -48,18 +45,16 @@ struct LoginReqJson {
     password: String,
 }
 
-#[handler]
 async fn post_roze_sample_login(
-    Data(ctx): Data<&ServiceContext>,
-    Data(request_ctx): Data<&Context>,
+    State(ctx): State<ServiceContext>,
+    Extension(request_ctx): Extension<Context>,
     Json(body): Json<LoginReqJson>,
-) -> Result<Json<ApiResponse<LoginResp>>, RozeError> {
+) -> Result<ApiResponse<LoginResp>, RozeError> {
     roze_validation::validate_or_message(&body).map_err(RozeError::BadRequest)?;
     let req = LoginReq {
         username: body.username,
         password: body.password,
     };
-    let resp =
-        crate::logic::post_roze_sample_login((*ctx).clone(), (*request_ctx).clone(), req).await?;
-    Ok(Json(ApiResponse::ok(resp)))
+    let resp = crate::logic::post_roze_sample_login(ctx, request_ctx, req).await?;
+    Ok(ApiResponse::ok(resp))
 }

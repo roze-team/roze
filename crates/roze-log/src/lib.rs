@@ -1,17 +1,12 @@
 use std::sync::OnceLock;
 
+use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{
-    propagation::TraceContextPropagator,
-    trace::{Sampler, TracerProvider},
-    Resource,
-};
-use roze_config::{ServiceConfig, TelemetryBatcher, TelemetryConfig};
+use roze_config::ServiceConfig;
+use roze_opentelemetry::SdkTracerProvider;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-static TRACER_PROVIDER: OnceLock<TracerProvider> = OnceLock::new();
+static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 pub fn init_tracing() {
     init_tracing_with_filter("info");
@@ -42,32 +37,16 @@ pub fn init_tracing_with_config_and_filter(
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer());
 
-    let Some(telemetry) = config.telemetry.as_ref() else {
+    let Some(provider) = roze_opentelemetry::build_tracer_provider(config)? else {
         let _ = subscriber.try_init();
         return Ok(());
     };
 
-    let Some(endpoint) = telemetry
-        .endpoint
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    else {
-        let _ = subscriber.try_init();
-        return Ok(());
-    };
-
-    global::set_text_map_propagator(TraceContextPropagator::new());
-
-    let service_name = telemetry.name.as_deref().unwrap_or(config.name.as_str());
-    let exporter = build_span_exporter(telemetry, endpoint)?;
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_resource(Resource::new(vec![KeyValue::new(
-            "service.name",
-            service_name.to_string(),
-        )]))
-        .with_sampler(Sampler::TraceIdRatioBased(clamp_sampler(telemetry.sampler)))
-        .build();
+    let telemetry = config
+        .telemetry
+        .as_ref()
+        .expect("provider requires telemetry config");
+    let service_name = roze_opentelemetry::service_name(config, telemetry);
     let tracer = provider.tracer(service_name.to_string());
 
     let _ = TRACER_PROVIDER.set(provider.clone());
@@ -78,24 +57,4 @@ pub fn init_tracing_with_config_and_filter(
         .try_init();
 
     Ok(())
-}
-
-fn build_span_exporter(
-    telemetry: &TelemetryConfig,
-    endpoint: &str,
-) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry::trace::TraceError> {
-    match telemetry.batcher {
-        TelemetryBatcher::OtlpGrpc => opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .build(),
-        TelemetryBatcher::OtlpHttp => opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(endpoint)
-            .build(),
-    }
-}
-
-fn clamp_sampler(sampler: f64) -> f64 {
-    sampler.clamp(0.0, 1.0)
 }

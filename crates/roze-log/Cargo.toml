@@ -6,10 +6,9 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-opentelemetry = "0.27"
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "http-proto", "reqwest-rustls"] }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry = "0.31"
 roze-config = { path = "../roze-config" }
+roze-opentelemetry = { path = "../roze-opentelemetry" }
 tracing.workspace = true
-tracing-opentelemetry = "0.28"
+tracing-opentelemetry = "0.32"
 tracing-subscriber.workspace = true

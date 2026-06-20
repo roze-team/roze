@@ -1,7 +1,7 @@
 # rozectl API generator
 
 `rozectl api generate` reads a go-zero/goctl-style `.api` file and generates a
-Poem-based REST service. The generated project keeps framework-owned files
+Rust-native Axum REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
 `src/logic/mod.rs` and `config.yaml` when `--update` is used.
 

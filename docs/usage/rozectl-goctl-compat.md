@@ -49,7 +49,7 @@ rozectl api client js example/user.api --out sdk/user.js
 `rozectl` accepts goctl command names for operator familiarity, but generated
 projects remain Rust-native:
 
-- REST services use Poem and Roze HTTP helpers.
+- REST services use Axum, Tower/Tower HTTP, and Roze HTTP helpers.
 - RPC services use tonic/prost and Roze RPC helpers.
 - SQL models use SeaORM-style Rust modules by default; `--orm toasty` generates Toasty model modules.
 - Mongo models generate Rust repository helpers.

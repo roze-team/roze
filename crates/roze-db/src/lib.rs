@@ -7,9 +7,8 @@ use std::{
 };
 
 pub use roze_config::{DatabaseConfig, DatabaseReadPolicy};
-use sea_orm::{
-    ConnectOptions, Database, DatabaseConnection, DbErr, TransactionError, TransactionTrait,
-};
+pub use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectOptions, Database, DbErr, TransactionError, TransactionTrait};
 
 pub async fn connect(config: &DatabaseConfig) -> Result<DatabaseConnection, DbErr> {
     connect_url(config, &config.url).await

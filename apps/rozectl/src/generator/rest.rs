@@ -62,53 +62,51 @@ fn config_path() -> std::path::PathBuf {
 pub fn render_handlers(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(unused_imports)]\n\n");
     out.push_str(
-        "use poem::{handler, http::HeaderMap, web::{Data, Form, Json, Path, Query}, Endpoint, EndpointExt, Route};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+        "use axum::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, routing::{delete, get, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
-    out.push_str("pub fn router(ctx: ServiceContext) -> impl Endpoint {\n");
-    out.push_str("    Route::new()\n");
+    out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
+    out.push_str("    Router::new()\n");
     out.push_str(&format!(
-        "        .at(\"{}\", poem::get(health))\n",
-        full_route_path(spec, "/healthz")
+        "        .route(\"{}\", get(health))\n",
+        axum_route_path(&full_route_path(spec, "/healthz"))
     ));
     out.push_str(&format!(
-        "        .at(\"{}\", poem::get(metrics))\n",
-        full_route_path(spec, "/metrics")
+        "        .route(\"{}\", get(metrics))\n",
+        axum_route_path(&full_route_path(spec, "/metrics"))
     ));
     out.push_str(&format!(
-        "        .at(\"{}\", poem::get(openapi_doc))\n",
-        full_route_path(spec, "/openapi.json")
+        "        .route(\"{}\", get(openapi_doc))\n",
+        axum_route_path(&full_route_path(spec, "/openapi.json"))
     ));
 
     for route in &spec.rest_routes {
         let handler = resolved_handler_name(route);
         let routing_fn = match route.method {
-            HttpMethod::Get => "poem::get",
-            HttpMethod::Post => "poem::post",
-            HttpMethod::Put => "poem::put",
-            HttpMethod::Patch => "poem::patch",
-            HttpMethod::Delete => "poem::delete",
+            HttpMethod::Get => "get",
+            HttpMethod::Post => "post",
+            HttpMethod::Put => "put",
+            HttpMethod::Patch => "patch",
+            HttpMethod::Delete => "delete",
         };
         out.push_str(&format!(
-            "        .at(\"{}\", {}({}))\n",
-            full_route_path_for_route(spec, route),
+            "        .route(\"{}\", {}({}))\n",
+            axum_route_path(&full_route_path_for_route(spec, route)),
             routing_fn,
             handler
         ));
     }
 
-    out.push_str("        .data(ctx)\n");
+    out.push_str("        .with_state(ctx)\n");
     out.push_str("}\n\n");
 
     out.push_str(
-        "#[handler]\nasync fn health() -> Result<Json<ApiResponse<&'static str>>, RozeError> {\n    Ok(Json(ApiResponse::ok(\"ok\")))\n}\n\n",
+        "async fn health() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ok\"))\n}\n\n",
     );
 
-    out.push_str(
-        "#[handler]\nasync fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n",
-    );
+    out.push_str("async fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n");
 
     out.push_str(
-        "#[handler]\nasync fn openapi_doc() -> Json<serde_json::Value> {\n    Json(openapi::document())\n}\n\n",
+        "async fn openapi_doc() -> Json<serde_json::Value> {\n    Json(openapi::document())\n}\n\n",
     );
 
     if spec.rest_routes.iter().any(|route| {
@@ -125,7 +123,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         .any(|route| route_uses_auth(spec, route))
     {
         out.push_str(
-            "fn authorize(headers: &HeaderMap, ctx: &ServiceContext) -> Result<(), RozeError> {\n    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;\n    let header_value = headers\n        .get(\"authorization\")\n        .and_then(|value| value.to_str().ok())\n        .ok_or(RozeError::Unauthorized)?;\n    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;\n    roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;\n    Ok(())\n}\n\n",
+            "fn authorize(headers: &HeaderMap, ctx: &ServiceContext) -> Result<roze_context::AuthContext, RozeError> {\n    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;\n    let header_value = headers\n        .get(\"authorization\")\n        .and_then(|value| value.to_str().ok())\n        .ok_or(RozeError::Unauthorized)?;\n    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;\n    let claims = roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;\n    Ok(roze_context::AuthContext {\n        subject: claims.sub,\n        roles: claims.roles,\n        tenant: claims.tenant,\n    })\n}\n\n",
         );
     }
 
@@ -385,8 +383,8 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
 
     let mut params = vec![
-        "Data(ctx): Data<&ServiceContext>".to_string(),
-        "Data(request_ctx): Data<&Context>".to_string(),
+        "State(ctx): State<ServiceContext>".to_string(),
+        "Extension(request_ctx): Extension<Context>".to_string(),
     ];
     if route_spec.groups.contains_key(&FieldSource::Path) {
         params.push(format!(
@@ -413,23 +411,22 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         ));
     }
     if route_spec.has_header || uses_auth {
-        params.push("headers: &HeaderMap".to_string());
+        params.push("headers: HeaderMap".to_string());
     }
 
-    out.push_str("#[handler]\n");
     out.push_str(&format!(
-        "async fn {handler}({params}) -> Result<Json<ApiResponse<{response}>>, RozeError> {{\n",
+        "async fn {handler}({params}) -> Result<ApiResponse<{response}>, RozeError> {{\n",
         handler = handler,
         params = params.join(", "),
         response = route.response
     ));
     out.push_str(&format!(
-        "    let (request_ctx, route_guard) = roze_middleware::begin_route(ctx.config.name.clone(), {:?}, {:?}, (*request_ctx).clone(), Some(&ctx.config.governance))?;\n",
+        "    let (request_ctx, route_guard) = roze_middleware::begin_route(ctx.config.name.clone(), {:?}, {:?}, request_ctx, Some(&ctx.config.governance))?;\n",
         handler,
         http_method_name(&route.method)
     ));
     if uses_auth {
-        out.push_str("    if let Err(err) = authorize(headers, ctx) {\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }\n");
+        out.push_str("    let request_ctx = match authorize(headers, ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
     }
     for name in custom {
         out.push_str(&format!(
@@ -471,10 +468,10 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
     out.push_str(&render_request_validation_checks(&request_ty.fields));
     out.push_str(&format!(
-        "    let result = crate::logic::{handler}((*ctx).clone(), request_ctx, req).await;\n",
+        "    let result = crate::logic::{handler}(ctx.clone(), request_ctx, req).await;\n",
         handler = handler
     ));
-    out.push_str("    match result {\n        Ok(resp) => {\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(Json(ApiResponse::ok(resp)))\n        }\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }\n    }\n");
+    out.push_str("    match result {\n        Ok(resp) => {\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }\n    }\n");
     out.push_str("}\n\n");
 
     out
@@ -1203,6 +1200,18 @@ pub fn full_route_path_for_openapi(spec: &ApiSpec, route: &RestRoute) -> String 
     full_route_path_for_route(spec, route)
 }
 
+fn axum_route_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            segment
+                .strip_prefix(':')
+                .map(|name| format!("{{{name}}}"))
+                .unwrap_or_else(|| segment.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn escape_doc(doc: &str) -> String {
     doc.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -1678,11 +1687,11 @@ mod tests {
         .expect("valid api");
 
         let handlers = render_handlers(&spec);
-        assert!(handlers.contains(".at(\"/health\", poem::get(health))"));
-        assert!(handlers.contains(".at(\"/ping\", poem::get(ping))"));
-        assert!(handlers.contains(".at(\"/logout\", poem::post(logout))"));
+        assert!(handlers.contains(".route(\"/health\", get(health))"));
+        assert!(handlers.contains(".route(\"/ping\", get(ping))"));
+        assert!(handlers.contains(".route(\"/logout\", post(logout))"));
         assert!(handlers.contains("let req = EmptyReq {};"));
-        assert!(handlers.contains("Result<Json<ApiResponse<EmptyResp>>, RozeError>"));
+        assert!(handlers.contains("Result<ApiResponse<EmptyResp>, RozeError>"));
 
         let logic = render_logic(&spec);
         assert!(logic.contains("Ok(EmptyResp::default_response())"));
@@ -1745,9 +1754,9 @@ mod tests {
         .expect("valid api");
 
         let handlers = render_handlers(&spec);
-        assert!(handlers.contains(".at(\"/api/v1/users/:id\", poem::get(get_user))"));
-        assert!(handlers.contains(".at(\"/internal/stats\", poem::get(get_stats))"));
-        assert!(handlers.contains(".at(\"/internal/users/:id\", poem::patch(update_user))"));
+        assert!(handlers.contains(".route(\"/api/v1/users/{id}\", get(get_user))"));
+        assert!(handlers.contains(".route(\"/internal/stats\", get(get_stats))"));
+        assert!(handlers.contains(".route(\"/internal/users/{id}\", patch(update_user))"));
         assert!(handlers.contains("authorize(headers, ctx)"));
         assert!(handlers.contains("crate::middleware::audit(ctx, &request_ctx).await"));
 

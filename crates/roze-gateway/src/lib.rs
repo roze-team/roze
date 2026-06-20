@@ -4,25 +4,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-use poem::{
-    endpoint,
-    http::{header, HeaderName, HeaderValue, Method, StatusCode},
-    middleware::Cors,
-    EndpointExt, Request, Response, Result, Route,
+use axum::{
+    body::{to_bytes, Body},
+    http::{header, HeaderName, HeaderValue, Method, Request, Response, StatusCode},
+    routing::any,
+    Router,
 };
 use reqwest::Response as ReqwestResponse;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 
 use roze_config::{
-    BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayRoute, GatewayService,
-    RateLimitConfig,
+    BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayHealthCheckConfig,
+    GatewayOutlierConfig, GatewayRoute, GatewayService, RateLimitConfig,
 };
-use roze_jwt::{verify_token, JwtConfig};
-use roze_trace::TRACE_ID_HEADER;
-
-pub const REQUEST_ID_HEADER: &str = "x-request-id";
+use roze_jwt::{verify_token, Claims, JwtConfig};
+use roze_rpc::registry::Registry;
 
 #[derive(Clone)]
 struct GatewayRuntime {
@@ -34,14 +33,29 @@ struct GatewayRuntime {
     global_middlewares: Vec<String>,
     client: reqwest::Client,
     jwt: Option<JwtConfig>,
+    registry: Option<Arc<dyn Registry>>,
+    registry_cursors: Arc<Mutex<HashMap<String, usize>>>,
+    outlier_states: Arc<Mutex<HashMap<String, OutlierState>>>,
+    health_states: Arc<Mutex<HashMap<String, HealthState>>>,
     rate_limit_states: Arc<Mutex<HashMap<String, TokenBucketState>>>,
     breaker_states: Arc<Mutex<HashMap<String, CircuitState>>>,
 }
 
 #[derive(Debug, Clone)]
 struct ServiceEndpoint {
+    name: String,
     upstream: String,
+    registry_name: Option<String>,
     timeout_ms: Option<u64>,
+    outlier: Option<GatewayOutlierConfig>,
+    health_check: Option<GatewayHealthCheckConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct UpstreamTarget {
+    base: String,
+    instance_key: String,
+    outlier: Option<GatewayOutlierConfig>,
 }
 
 #[derive(Clone)]
@@ -50,6 +64,8 @@ struct CompiledRoute {
     service: String,
     methods: Vec<Method>,
     timeout_ms: Option<u64>,
+    retries: u32,
+    retry_backoff_ms: u64,
     rewrite: Option<String>,
     fallback: Option<GatewayFallbackResponse>,
     rate_limit: Option<RateLimitConfig>,
@@ -69,6 +85,29 @@ struct CircuitState {
     open_until: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct OutlierState {
+    failures: u32,
+    ejected_until: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HealthState {
+    healthy: bool,
+    failures: u32,
+    successes: u32,
+}
+
+impl Default for HealthState {
+    fn default() -> Self {
+        Self {
+            healthy: true,
+            failures: 0,
+            successes: 0,
+        }
+    }
+}
+
 impl Default for GatewayRuntime {
     fn default() -> Self {
         Self {
@@ -80,22 +119,33 @@ impl Default for GatewayRuntime {
             global_middlewares: Vec::new(),
             client: reqwest::Client::new(),
             jwt: None,
+            registry: None,
+            registry_cursors: Arc::new(Mutex::new(HashMap::new())),
+            outlier_states: Arc::new(Mutex::new(HashMap::new())),
+            health_states: Arc::new(Mutex::new(HashMap::new())),
             rate_limit_states: Arc::new(Mutex::new(HashMap::new())),
             breaker_states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
-pub fn build_router(
+pub fn build_router(config: GatewayConfig, jwt: Option<JwtConfig>) -> Router {
+    build_router_with_registry(config, jwt, None)
+}
+
+pub fn build_router_with_registry(
     config: GatewayConfig,
     jwt: Option<JwtConfig>,
-) -> impl poem::Endpoint<Output = Response> {
+    registry: Option<Arc<dyn Registry>>,
+) -> Router {
+    let cors_config = config.cors;
     let mut runtime = GatewayRuntime {
         global_timeout_ms: config.timeout_ms,
         global_fallback: config.fallback,
         request_body_limit_bytes: config.request_body_limit_bytes,
         global_middlewares: normalize_middlewares(config.middlewares),
         jwt,
+        registry,
         ..Default::default()
     };
 
@@ -118,6 +168,8 @@ pub fn build_router(
                 service: service.to_string(),
                 methods: Vec::new(),
                 timeout_ms: runtime.global_timeout_ms,
+                retries: 0,
+                retry_backoff_ms: 0,
                 rewrite: None,
                 fallback: runtime.global_fallback.clone(),
                 rate_limit: None,
@@ -129,36 +181,33 @@ pub fn build_router(
     runtime.routes = routes;
 
     let runtime = Arc::new(runtime);
-    let handler = endpoint::make(move |req: Request| {
+    runtime.clone().spawn_health_checks();
+    let app = Router::new().fallback(any(move |req: Request<Body>| {
         let runtime = runtime.clone();
         async move { runtime.handle_request(req).await }
-    });
+    }));
 
-    let app = Route::new().at("/*path", handler);
-    let has_cors = config.cors.is_some();
-    let cors = config
-        .cors
-        .map(|cors| {
-            build_cors(
-                cors.allow_origins,
-                cors.allow_methods,
-                cors.allow_headers,
-                cors.max_age_seconds,
-            )
-        })
-        .unwrap_or_default();
-
-    app.with_if(has_cors, cors)
+    if let Some(cors) = cors_config {
+        let cors = build_cors(
+            cors.allow_origins,
+            cors.allow_methods,
+            cors.allow_headers,
+            cors.max_age_seconds,
+        );
+        app.layer(cors)
+    } else {
+        app
+    }
 }
 
 impl GatewayRuntime {
-    async fn handle_request(self: Arc<Self>, req: Request) -> Result<Response> {
+    async fn handle_request(self: Arc<Self>, req: Request<Body>) -> Response<Body> {
         let request_path = req.uri().path().to_string();
         let request_method = req.method().clone();
 
         let mut req = req;
-        let request_id = ensure_header(&mut req, REQUEST_ID_HEADER);
-        let trace_id = ensure_header(&mut req, TRACE_ID_HEADER);
+        let request_id = ensure_header(&mut req, roze_context::REQUEST_ID_HEADER);
+        let trace_id = ensure_header(&mut req, roze_context::TRACE_ID_HEADER);
 
         let span = tracing::info_span!(
             "gateway.request",
@@ -176,11 +225,11 @@ impl GatewayRuntime {
                 event = "gateway.no_route",
                 "no route matched"
             );
-            return Ok(build_fallback(
+            return build_fallback(
                 self.global_fallback.as_ref(),
                 StatusCode::NOT_FOUND,
                 "gateway route not found",
-            ));
+            );
         };
 
         self.inject_trace_headers(&mut req);
@@ -193,45 +242,48 @@ impl GatewayRuntime {
                 event = "gateway.method_not_allowed",
                 "method blocked by route config"
             );
-            return Ok(build_fallback(
+            return build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method not allowed",
-            ));
+            );
         }
 
         // fixed middleware order: trace -> auth -> rate -> breaker -> timeout -> upstream
         if self.requires_auth(&route) {
-            if let Err(err) = validate_request_auth(&req, self.jwt.as_ref()) {
-                warn!(
-                    error = %err,
-                    event = "gateway.auth_failed",
-                    "auth validation failed"
-                );
-                return Ok(build_fallback(
-                    route.fallback.as_ref().or(self.global_fallback.as_ref()),
-                    StatusCode::UNAUTHORIZED,
-                    "unauthorized",
-                ));
+            match validate_request_auth(&req, self.jwt.as_ref()) {
+                Ok(claims) => inject_auth_context_headers(&mut req, &claims),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        event = "gateway.auth_failed",
+                        "auth validation failed"
+                    );
+                    return build_fallback(
+                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                    );
+                }
             }
         }
 
         if !self.rate_allowed(&route).await {
             warn!(route = %route.path, event = "gateway.rate_limited", "route rate limited");
-            return Ok(build_fallback(
+            return build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::TOO_MANY_REQUESTS,
                 "too many requests",
-            ));
+            );
         }
 
         if self.is_breaker_open(&route).await {
             warn!(route = %route.path, event = "gateway.breaker_open", "breaker open");
-            return Ok(build_fallback(
+            return build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service temporarily unavailable",
-            ));
+            );
         }
 
         let upstream_method = request_method.clone();
@@ -243,14 +295,10 @@ impl GatewayRuntime {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect::<Vec<_>>();
 
-        let body = match req
-            .into_body()
-            .into_bytes_limit(
-                self.request_body_limit_bytes
-                    .unwrap_or(self.default_body_limit_bytes()),
-            )
-            .await
-        {
+        let body_limit = self
+            .request_body_limit_bytes
+            .unwrap_or(self.default_body_limit_bytes());
+        let body = match to_bytes(req.into_body(), body_limit).await {
             Ok(body) => body.to_vec(),
             Err(err) => {
                 warn!(
@@ -259,11 +307,11 @@ impl GatewayRuntime {
                     error = %err,
                     "read request body failed"
                 );
-                return Ok(build_fallback(
+                return build_fallback(
                     route.fallback.as_ref().or(self.global_fallback.as_ref()),
                     StatusCode::BAD_REQUEST,
                     &err.to_string(),
-                ));
+                );
             }
         };
 
@@ -273,52 +321,102 @@ impl GatewayRuntime {
             .or(self.global_timeout_ms)
             .unwrap_or(5_000);
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            self.proxy_to_upstream(
-                &route,
-                upstream_method,
-                upstream_path,
-                upstream_query,
-                upstream_headers,
-                body,
-            ),
-        )
-        .await;
+        let max_attempts = route.retries.saturating_add(1);
+        let mut attempt = 0;
+        let mut last_error: Option<anyhow::Error> = None;
+        let mut last_timeout = false;
 
-        match result {
-            Ok(Ok(response)) => {
-                self.record_breaker_success(&route).await;
-                Ok(response)
+        while attempt < max_attempts {
+            attempt += 1;
+            let result = tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                self.proxy_to_upstream(
+                    &route,
+                    upstream_method.clone(),
+                    upstream_path.clone(),
+                    upstream_query.clone(),
+                    upstream_headers.clone(),
+                    body.clone(),
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(response)) => {
+                    if response.status().is_server_error() && attempt < max_attempts {
+                        warn!(
+                            event = "gateway.upstream_status_retry",
+                            route = %route.path,
+                            attempt = attempt,
+                            max_attempts = max_attempts,
+                            status = response.status().as_u16(),
+                            "upstream returned retryable status"
+                        );
+                    } else {
+                        if response.status().is_server_error() {
+                            self.record_breaker_failure(&route).await;
+                        } else {
+                            self.record_breaker_success(&route).await;
+                        }
+                        if attempt > 1 {
+                            tracing::info!(
+                                event = "gateway.upstream_retry_succeeded",
+                                route = %route.path,
+                                attempt = attempt,
+                                max_attempts = max_attempts,
+                                "proxy retry completed"
+                            );
+                        }
+                        return response;
+                    }
+                }
+                Ok(Err(err)) => {
+                    last_timeout = false;
+                    warn!(
+                        event = "gateway.upstream_failed",
+                        route = %route.path,
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        error = %err,
+                        "proxy to upstream failed"
+                    );
+                    last_error = Some(err);
+                }
+                Err(_) => {
+                    last_timeout = true;
+                    warn!(
+                        event = "gateway.upstream_timeout",
+                        route = %route.path,
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        timeout_ms = timeout_ms,
+                        "upstream request timeout"
+                    );
+                }
             }
-            Ok(Err(err)) => {
-                self.record_breaker_failure(&route).await;
-                warn!(
-                    event = "gateway.upstream_failed",
-                    route = %route.path,
-                    error = %err,
-                    "proxy to upstream failed"
-                );
-                Ok(build_fallback(
-                    route.fallback.as_ref().or(self.global_fallback.as_ref()),
-                    StatusCode::BAD_GATEWAY,
-                    &err.to_string(),
-                ))
+
+            if attempt < max_attempts && route.retry_backoff_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(route.retry_backoff_ms)).await;
             }
-            Err(_) => {
-                self.record_breaker_failure(&route).await;
-                warn!(
-                    event = "gateway.upstream_timeout",
-                    route = %route.path,
-                    timeout_ms = timeout_ms,
-                    "upstream request timeout"
-                );
-                Ok(build_fallback(
-                    route.fallback.as_ref().or(self.global_fallback.as_ref()),
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "upstream timeout",
-                ))
-            }
+        }
+
+        self.record_breaker_failure(&route).await;
+        if last_timeout {
+            build_fallback(
+                route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream timeout",
+            )
+        } else {
+            let message = last_error
+                .as_ref()
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "upstream failed".to_string());
+            build_fallback(
+                route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                StatusCode::BAD_GATEWAY,
+                &message,
+            )
         }
     }
 
@@ -333,9 +431,9 @@ impl GatewayRuntime {
             || has_middleware(&self.global_middlewares, "jwt")
     }
 
-    fn inject_trace_headers(&self, req: &mut Request) {
-        let trace_id = ensure_header(req, TRACE_ID_HEADER);
-        let request_id = ensure_header(req, REQUEST_ID_HEADER);
+    fn inject_trace_headers(&self, req: &mut Request<Body>) {
+        let trace_id = ensure_header(req, roze_context::TRACE_ID_HEADER);
+        let request_id = ensure_header(req, roze_context::REQUEST_ID_HEADER);
         tracing::debug!(event = "gateway.trace_headers", trace_id = %trace_id, request_id = %request_id);
         let _ = req;
     }
@@ -348,16 +446,17 @@ impl GatewayRuntime {
         incoming_query: Option<String>,
         headers: Vec<(HeaderName, HeaderValue)>,
         body: Vec<u8>,
-    ) -> anyhow::Result<Response> {
+    ) -> anyhow::Result<Response<Body>> {
         let service = self
             .services
             .get(&route.service)
             .ok_or_else(|| anyhow::anyhow!("service '{}' is not registered", route.service))?;
+        let target = self.resolve_upstream(service).await?;
 
         let method = parse_reqwest_method(&method)?;
         let rewritten_path = rewrite_path(&route.path, route.rewrite.as_deref(), &incoming_path);
         let upstream_url = build_upstream_url(
-            &service.upstream,
+            &target.base,
             &rewritten_path,
             incoming_query.as_deref().filter(|query| !query.is_empty()),
         );
@@ -372,8 +471,238 @@ impl GatewayRuntime {
         if !body.is_empty() {
             upstream_req = upstream_req.body(body);
         }
-        let upstream_response = upstream_req.send().await?;
-        build_upstream_response(upstream_response).await
+        let upstream_response = match upstream_req.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                self.record_outlier_failure(&target).await;
+                return Err(err.into());
+            }
+        };
+        let response = build_upstream_response(upstream_response).await?;
+        if response.status().is_server_error() {
+            self.record_outlier_failure(&target).await;
+        } else {
+            self.record_outlier_success(&target).await;
+        }
+        Ok(response)
+    }
+
+    async fn resolve_upstream(&self, service: &ServiceEndpoint) -> anyhow::Result<UpstreamTarget> {
+        let registry_name = service
+            .registry_name
+            .as_deref()
+            .filter(|name| !name.is_empty());
+        let should_discover = registry_name.is_some() || service.upstream.is_empty();
+
+        if should_discover {
+            let registry = self
+                .registry
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("registry is not configured"))?;
+            let name = registry_name.unwrap_or(&service.name);
+            let instances = registry.discover(name).await?;
+            let available = self
+                .available_instances(
+                    name,
+                    instances,
+                    service.outlier,
+                    service.health_check.as_ref(),
+                )
+                .await;
+            if !available.is_empty() {
+                let idx = {
+                    let mut cursors = self.registry_cursors.lock().await;
+                    let cursor = cursors.entry(name.to_string()).or_default();
+                    let idx = *cursor % available.len();
+                    *cursor = cursor.wrapping_add(1);
+                    idx
+                };
+                let instance = &available[idx];
+                return Ok(UpstreamTarget {
+                    base: normalize_upstream_base(&instance.addr),
+                    instance_key: upstream_instance_key(name, &instance.addr),
+                    outlier: service.outlier,
+                });
+            }
+        }
+
+        if service.upstream.is_empty() {
+            anyhow::bail!("service upstream is empty")
+        }
+
+        Ok(UpstreamTarget {
+            base: normalize_upstream_base(&service.upstream),
+            instance_key: upstream_instance_key(&service.name, &service.upstream),
+            outlier: service.outlier,
+        })
+    }
+
+    async fn available_instances(
+        &self,
+        service_name: &str,
+        instances: Vec<roze_rpc::registry::ServiceInstance>,
+        outlier: Option<GatewayOutlierConfig>,
+        health_check: Option<&GatewayHealthCheckConfig>,
+    ) -> Vec<roze_rpc::registry::ServiceInstance> {
+        if outlier.is_none() && health_check.is_none() {
+            return instances;
+        }
+        let now = Instant::now();
+        let outlier_states = self.outlier_states.lock().await;
+        let health_states = self.health_states.lock().await;
+        let mut available = instances
+            .iter()
+            .filter(|instance| {
+                let key = upstream_instance_key(service_name, &instance.addr);
+                let ejected = outlier_states
+                    .get(&key)
+                    .and_then(|state| state.ejected_until)
+                    .is_some_and(|until| until > now);
+                let unhealthy = health_check.is_some()
+                    && health_states.get(&key).is_some_and(|state| !state.healthy);
+                !ejected && !unhealthy
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if available.is_empty() {
+            available = instances;
+        }
+        available
+    }
+
+    fn spawn_health_checks(self: Arc<Self>) {
+        for service in self.services.values().cloned() {
+            let Some(health_check) = service.health_check.clone() else {
+                continue;
+            };
+            let runtime = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    runtime.check_service_health(&service, &health_check).await;
+                    tokio::time::sleep(Duration::from_millis(health_check.interval_ms.max(1)))
+                        .await;
+                }
+            });
+        }
+    }
+
+    async fn check_service_health(
+        &self,
+        service: &ServiceEndpoint,
+        health_check: &GatewayHealthCheckConfig,
+    ) {
+        let registry_name = service
+            .registry_name
+            .as_deref()
+            .filter(|name| !name.is_empty());
+        let mut targets = Vec::new();
+
+        if let Some(name) = registry_name {
+            if let Some(registry) = self.registry.as_ref() {
+                match registry.discover(name).await {
+                    Ok(instances) => {
+                        targets.extend(instances.into_iter().map(|instance| {
+                            (
+                                upstream_instance_key(name, &instance.addr),
+                                normalize_upstream_base(&instance.addr),
+                            )
+                        }));
+                    }
+                    Err(err) => {
+                        warn!(
+                            event = "gateway.health_check_discover_failed",
+                            service = %service.name,
+                            registry_name = %name,
+                            error = %err,
+                            "discover service instances for health check failed"
+                        );
+                    }
+                }
+            }
+        } else if !service.upstream.is_empty() {
+            targets.push((
+                upstream_instance_key(&service.name, &service.upstream),
+                normalize_upstream_base(&service.upstream),
+            ));
+        }
+
+        for (key, base) in targets {
+            let healthy = self.health_probe(&base, health_check).await;
+            self.record_health_result(&key, health_check, healthy).await;
+        }
+    }
+
+    async fn health_probe(&self, base: &str, health_check: &GatewayHealthCheckConfig) -> bool {
+        let url = build_upstream_url(base, &health_check.path, None);
+        let timeout = Duration::from_millis(health_check.timeout_ms.max(1));
+        let result = tokio::time::timeout(timeout, self.client.get(url).send()).await;
+        let Ok(Ok(response)) = result else {
+            return false;
+        };
+        response.status().as_u16() == health_check.expected_status
+    }
+
+    async fn record_health_result(
+        &self,
+        instance_key: &str,
+        health_check: &GatewayHealthCheckConfig,
+        healthy: bool,
+    ) {
+        let mut states = self.health_states.lock().await;
+        let state = states.entry(instance_key.to_string()).or_default();
+        if healthy {
+            state.failures = 0;
+            state.successes = state.successes.saturating_add(1);
+            if !state.healthy && state.successes >= health_check.healthy_threshold.max(1) {
+                state.healthy = true;
+                warn!(
+                    event = "gateway.upstream_recovered",
+                    upstream = %instance_key,
+                    "upstream instance recovered"
+                );
+            }
+        } else {
+            state.successes = 0;
+            state.failures = state.failures.saturating_add(1);
+            if state.healthy && state.failures >= health_check.unhealthy_threshold.max(1) {
+                state.healthy = false;
+                warn!(
+                    event = "gateway.upstream_unhealthy",
+                    upstream = %instance_key,
+                    "upstream instance marked unhealthy"
+                );
+            }
+        }
+    }
+
+    async fn record_outlier_success(&self, target: &UpstreamTarget) {
+        if target.outlier.is_none() {
+            return;
+        }
+        let mut states = self.outlier_states.lock().await;
+        if let Some(state) = states.get_mut(&target.instance_key) {
+            state.failures = 0;
+            state.ejected_until = None;
+        }
+    }
+
+    async fn record_outlier_failure(&self, target: &UpstreamTarget) {
+        let Some(config) = target.outlier else {
+            return;
+        };
+        let mut states = self.outlier_states.lock().await;
+        let state = states.entry(target.instance_key.clone()).or_default();
+        state.failures = state.failures.saturating_add(1);
+        if state.failures >= config.failure_threshold.max(1) {
+            state.failures = 0;
+            state.ejected_until = Some(Instant::now() + Duration::from_millis(config.ejection_ms));
+            warn!(
+                event = "gateway.upstream_ejected",
+                upstream = %target.instance_key,
+                ejection_ms = config.ejection_ms,
+                "upstream instance ejected"
+            );
+        }
     }
 
     fn select_route(&self, path: &str, method: &Method) -> Option<CompiledRoute> {
@@ -486,6 +815,8 @@ fn compile_routes(routes: Vec<GatewayRoute>) -> Vec<CompiledRoute> {
             service: route.service,
             methods: parse_methods(&route.methods),
             timeout_ms: route.timeout_ms,
+            retries: route.retries.unwrap_or_default(),
+            retry_backoff_ms: route.retry_backoff_ms.unwrap_or_default(),
             rewrite: route.rewrite,
             fallback: route.fallback,
             rate_limit: route.rate_limit,
@@ -572,7 +903,7 @@ fn has_middleware(items: &[String], name: &str) -> bool {
     })
 }
 
-fn validate_request_auth(req: &Request, jwt: Option<&JwtConfig>) -> anyhow::Result<()> {
+fn validate_request_auth(req: &Request<Body>, jwt: Option<&JwtConfig>) -> anyhow::Result<Claims> {
     let jwt = jwt.ok_or_else(|| anyhow::anyhow!("jwt config missing"))?;
 
     let auth_header = req
@@ -582,11 +913,10 @@ fn validate_request_auth(req: &Request, jwt: Option<&JwtConfig>) -> anyhow::Resu
         .and_then(roze_jwt::extract_bearer_token)
         .ok_or_else(|| anyhow::anyhow!("missing bearer token"))?;
 
-    verify_token(auth_header, jwt).map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    Ok(())
+    verify_token(auth_header, jwt).map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
-fn ensure_header(req: &mut Request, key: &str) -> String {
+fn ensure_header(req: &mut Request<Body>, key: &str) -> String {
     if let Some(value) = req.headers().get(key).and_then(|value| value.to_str().ok()) {
         return value.to_string();
     }
@@ -598,6 +928,26 @@ fn ensure_header(req: &mut Request, key: &str) -> String {
         }
     }
     generated
+}
+
+fn inject_auth_context_headers(req: &mut Request<Body>, claims: &Claims) {
+    insert_header(req, roze_context::SUBJECT_HEADER, &claims.sub);
+    if let Some(tenant) = claims.tenant.as_deref().filter(|tenant| !tenant.is_empty()) {
+        insert_header(req, roze_context::TENANT_HEADER, tenant);
+    }
+    if !claims.roles.is_empty() {
+        insert_header(req, roze_context::ROLES_HEADER, &claims.roles.join(","));
+    }
+}
+
+fn insert_header(req: &mut Request<Body>, key: &'static str, value: &str) {
+    let Ok(value) = HeaderValue::from_str(value) else {
+        return;
+    };
+    let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
+        return;
+    };
+    req.headers_mut().insert(name, value);
 }
 
 fn rewrite_path(route_path: &str, rewrite: Option<&str>, request_path: &str) -> String {
@@ -654,6 +1004,19 @@ fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
     url
 }
 
+fn normalize_upstream_base(base: &str) -> String {
+    let base = base.trim();
+    if base.starts_with("http://") || base.starts_with("https://") {
+        base.to_string()
+    } else {
+        format!("http://{base}")
+    }
+}
+
+fn upstream_instance_key(service: &str, upstream: &str) -> String {
+    format!("{service}:{}", normalize_upstream_base(upstream))
+}
+
 fn is_hop_by_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -668,21 +1031,21 @@ fn is_hop_by_hop_header(name: &str) -> bool {
     )
 }
 
-async fn build_upstream_response(upstream_response: ReqwestResponse) -> anyhow::Result<Response> {
+async fn build_upstream_response(
+    upstream_response: ReqwestResponse,
+) -> anyhow::Result<Response<Body>> {
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
     let body = upstream_response.bytes().await?;
-    let mut poem_response = Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .body(body.to_vec());
+        .body(Body::from(body))?;
 
     for (name, value) in &headers {
-        poem_response
-            .headers_mut()
-            .insert(name.clone(), value.clone());
+        response.headers_mut().insert(name.clone(), value.clone());
     }
 
-    Ok(poem_response)
+    Ok(response)
 }
 
 fn build_cors(
@@ -690,13 +1053,19 @@ fn build_cors(
     allow_methods: Vec<String>,
     allow_headers: Vec<String>,
     max_age_seconds: Option<u64>,
-) -> Cors {
-    let mut cors = Cors::new();
+) -> CorsLayer {
+    let mut cors = CorsLayer::new();
     if !allow_origins.is_empty() {
-        if allow_origins.len() == 1 {
-            cors = cors.allow_origin(&allow_origins[0]);
+        if allow_origins.iter().any(|origin| origin == "*") {
+            cors = cors.allow_origin(Any);
         } else {
-            cors = cors.allow_origin_regex(allow_origins.join("|"));
+            let origins = allow_origins
+                .into_iter()
+                .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+                .collect::<Vec<_>>();
+            if !origins.is_empty() {
+                cors = cors.allow_origin(origins);
+            }
         }
     }
     if !allow_methods.is_empty() {
@@ -709,10 +1078,16 @@ fn build_cors(
         }
     }
     if !allow_headers.is_empty() {
-        cors = cors.allow_headers(allow_headers);
+        let headers = allow_headers
+            .into_iter()
+            .filter_map(|header| header.parse::<HeaderName>().ok())
+            .collect::<Vec<_>>();
+        if !headers.is_empty() {
+            cors = cors.allow_headers(headers);
+        }
     }
     if let Some(max_age) = max_age_seconds {
-        cors = cors.max_age(max_age.min(i32::MAX as u64) as i32);
+        cors = cors.max_age(Duration::from_secs(max_age));
     }
     cors
 }
@@ -721,7 +1096,7 @@ fn build_fallback(
     config: Option<&GatewayFallbackResponse>,
     status: StatusCode,
     message: &str,
-) -> Response {
+) -> Response<Body> {
     let status = config
         .and_then(|cfg| StatusCode::from_u16(cfg.status).ok())
         .unwrap_or(status);
@@ -731,8 +1106,11 @@ fn build_fallback(
 
     let mut response = Response::builder()
         .status(status)
-        .body(serde_json::to_vec(&body).unwrap_or_else(|_| message.as_bytes().to_vec()));
-    response = response.set_content_type("application/json");
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&body).unwrap_or_else(|_| message.as_bytes().to_vec()),
+        ))
+        .expect("fallback response");
 
     if let Some(cfg) = config {
         for (name, value) in &cfg.headers {
@@ -754,8 +1132,387 @@ fn build_fallback(
 impl From<GatewayService> for ServiceEndpoint {
     fn from(value: GatewayService) -> Self {
         Self {
+            name: value.name,
             upstream: value.upstream,
+            registry_name: value.registry_name,
             timeout_ms: value.timeout_ms,
+            outlier: value.outlier,
+            health_check: value.health_check,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{extract::State, response::IntoResponse, routing::get, Router};
+    use roze_rpc::registry::{MemoryRegistry, Registry, ServiceInstance};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn retries_retryable_upstream_status() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new()
+            .route(
+                "/user",
+                get(|State(attempts): State<Arc<AtomicUsize>>| async move {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    } else {
+                        "ok".into_response()
+                    }
+                }),
+            )
+            .with_state(attempts.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, upstream).await;
+        });
+
+        let gateway = build_router(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    retries: Some(2),
+                    retry_backoff_ms: Some(1),
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+        );
+
+        let response = gateway
+            .oneshot(
+                Request::builder()
+                    .uri("/user")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("gateway response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn discovers_registry_upstreams_round_robin() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let first_addr = spawn_text_upstream("first", first_hits.clone()).await;
+        let second_addr = spawn_text_upstream("second", second_hits.clone()).await;
+
+        let registry = Arc::new(MemoryRegistry::default());
+        registry
+            .register(ServiceInstance::new("user", first_addr.to_string()))
+            .await
+            .expect("register first");
+        registry
+            .register(ServiceInstance::new("user", second_addr.to_string()))
+            .await
+            .expect("register second");
+
+        let gateway = build_router_with_registry(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    registry_name: Some("user".to_string()),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(registry as Arc<dyn Registry>),
+        );
+
+        for _ in 0..2 {
+            let response = gateway
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/user")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("gateway response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ejects_registry_instance_after_retryable_status() {
+        let bad_hits = Arc::new(AtomicUsize::new(0));
+        let good_hits = Arc::new(AtomicUsize::new(0));
+        let bad_addr =
+            spawn_status_upstream(StatusCode::SERVICE_UNAVAILABLE, bad_hits.clone()).await;
+        let good_addr = spawn_text_upstream("ok", good_hits.clone()).await;
+
+        let registry = Arc::new(MemoryRegistry::default());
+        registry
+            .register(ServiceInstance::new("user", bad_addr.to_string()))
+            .await
+            .expect("register bad");
+        registry
+            .register(ServiceInstance::new("user", good_addr.to_string()))
+            .await
+            .expect("register good");
+
+        let gateway = build_router_with_registry(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    registry_name: Some("user".to_string()),
+                    outlier: Some(GatewayOutlierConfig {
+                        failure_threshold: 1,
+                        ejection_ms: 60_000,
+                    }),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(registry as Arc<dyn Registry>),
+        );
+
+        let first = gateway
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/user")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("first gateway response");
+        assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        for _ in 0..3 {
+            let response = gateway
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/user")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("gateway response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(bad_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(good_hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn active_health_check_skips_unhealthy_registry_instance() {
+        let bad_hits = Arc::new(AtomicUsize::new(0));
+        let good_hits = Arc::new(AtomicUsize::new(0));
+        let bad_addr =
+            spawn_health_upstream("bad", StatusCode::SERVICE_UNAVAILABLE, bad_hits.clone()).await;
+        let good_addr = spawn_health_upstream("good", StatusCode::OK, good_hits.clone()).await;
+
+        let registry = Arc::new(MemoryRegistry::default());
+        registry
+            .register(ServiceInstance::new("user", bad_addr.to_string()))
+            .await
+            .expect("register bad");
+        registry
+            .register(ServiceInstance::new("user", good_addr.to_string()))
+            .await
+            .expect("register good");
+
+        let gateway = build_router_with_registry(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    registry_name: Some("user".to_string()),
+                    health_check: Some(GatewayHealthCheckConfig {
+                        path: "/healthz".to_string(),
+                        interval_ms: 10,
+                        timeout_ms: 100,
+                        unhealthy_threshold: 1,
+                        healthy_threshold: 1,
+                        expected_status: 200,
+                    }),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(registry as Arc<dyn Registry>),
+        );
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        for _ in 0..3 {
+            let response = gateway
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/user")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("gateway response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(bad_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(good_hits.load(Ordering::SeqCst), 3);
+    }
+
+    async fn spawn_text_upstream(
+        text: &'static str,
+        hits: Arc<AtomicUsize>,
+    ) -> std::net::SocketAddr {
+        let upstream = Router::new().route(
+            "/user",
+            get(move || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    text
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, upstream).await;
+        });
+        upstream_addr
+    }
+
+    async fn spawn_status_upstream(
+        status: StatusCode,
+        hits: Arc<AtomicUsize>,
+    ) -> std::net::SocketAddr {
+        let upstream = Router::new().route(
+            "/user",
+            get(move || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    status
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, upstream).await;
+        });
+        upstream_addr
+    }
+
+    async fn spawn_health_upstream(
+        text: &'static str,
+        health_status: StatusCode,
+        hits: Arc<AtomicUsize>,
+    ) -> std::net::SocketAddr {
+        let upstream = Router::new()
+            .route(
+                "/user",
+                get(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        text
+                    }
+                }),
+            )
+            .route("/healthz", get(move || async move { health_status }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, upstream).await;
+        });
+        upstream_addr
+    }
+
+    fn empty_gateway_config() -> GatewayConfig {
+        GatewayConfig {
+            listen: None,
+            services: Vec::new(),
+            routes: Vec::new(),
+            middlewares: Vec::new(),
+            timeout_ms: None,
+            request_body_limit_bytes: None,
+            fallback: None,
+            cors: None,
+        }
+    }
+
+    fn empty_gateway_route() -> GatewayRoute {
+        GatewayRoute {
+            path: String::new(),
+            service: String::new(),
+            methods: Vec::new(),
+            middlewares: Vec::new(),
+            timeout_ms: None,
+            retries: None,
+            retry_backoff_ms: None,
+            rewrite: None,
+            fallback: None,
+            rate_limit: None,
+            breaker: None,
+        }
+    }
+
+    fn empty_gateway_service() -> GatewayService {
+        GatewayService {
+            name: String::new(),
+            upstream: String::new(),
+            registry_name: None,
+            timeout_ms: None,
+            outlier: None,
+            health_check: None,
         }
     }
 }

@@ -1,223 +1,131 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::{
-    future::Future,
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use poem::{
-    http::{
-        header::{HeaderName, HeaderValue},
-        Method,
-    },
-    middleware::{CatchPanic, Cors},
-    Endpoint, EndpointExt, Middleware, Request, Result,
+use axum::{
+    extract::{Request as AxumRequest, State},
+    middleware::Next,
+    response::Response as AxumResponse,
+    Router,
 };
+use tower::ServiceBuilder;
+use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
 use tracing::Instrument;
 
-use roze_auth::principal_from_claims;
+use roze_auth::{principal_from_claims, AuthPrincipal};
 use roze_config::{GovernanceConfig, RouteGovernanceConfig};
-use roze_context::Context;
+use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_metrics::{record_http_request, record_http_route};
-use roze_trace::{generate_trace_id, request_span, TRACE_ID_HEADER};
+use roze_trace::{generate_trace_id, request_span};
 
 static ROUTE_RATE_LIMITS: OnceLock<Mutex<HashMap<String, RateLimitState>>> = OnceLock::new();
 static ROUTE_BREAKERS: OnceLock<Mutex<HashMap<String, BreakerState>>> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TraceMiddleware;
-
-impl<E> Middleware<E> for TraceMiddleware
+pub fn apply_common<S>(router: Router<S>) -> Router<S>
 where
-    E: Endpoint,
+    S: Clone + Send + Sync + 'static,
 {
-    type Output = TraceEndpoint<E>;
-
-    fn transform(&self, ep: E) -> Self::Output {
-        TraceEndpoint { ep }
-    }
+    router.layer(
+        ServiceBuilder::new()
+            .layer(CatchPanicLayer::new())
+            .layer(CorsLayer::permissive())
+            .layer(axum::middleware::from_fn(axum_trace))
+            .layer(axum::middleware::from_fn(axum_request_context)),
+    )
 }
 
-pub struct TraceEndpoint<E> {
-    ep: E,
+pub fn apply_auth<S>(router: Router<S>, config: JwtConfig) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn_with_state(config, axum_auth))
 }
 
-impl<E> Endpoint for TraceEndpoint<E>
+#[deprecated(note = "use apply_common; the middleware crate is Axum-only")]
+pub fn apply_common_axum<S>(router: Router<S>) -> Router<S>
 where
-    E: Endpoint,
+    S: Clone + Send + Sync + 'static,
 {
-    type Output = E::Output;
+    apply_common(router)
+}
 
-    fn call(&self, req: Request) -> impl Future<Output = Result<Self::Output>> + Send {
-        let mut req = req;
-        let method = req.method().clone();
-        let uri = req.uri().clone();
-        let trace_id = ensure_trace_id_header(&mut req);
-        let span = request_span(method.as_str(), uri.path(), &trace_id);
+pub async fn axum_request_context(mut req: AxumRequest, next: Next) -> AxumResponse {
+    let request_id = ensure_axum_header(&mut req, roze_context::REQUEST_ID_HEADER);
+    let trace_id = ensure_axum_header(&mut req, roze_context::TRACE_ID_HEADER);
+    let context = incoming_axum_timeout(&req)
+        .map(|timeout| {
+            Context::background_with_request_id_and_trace_id(request_id.clone(), trace_id.clone())
+                .with_timeout(timeout)
+        })
+        .unwrap_or_else(|| {
+            Context::background_with_request_id_and_trace_id(request_id.clone(), trace_id.clone())
+        })
+        .with_metadata_map(incoming_axum_metadata(&req));
+    req.extensions_mut().insert(context.clone());
 
-        async move {
-            let start = std::time::Instant::now();
-            let response = self.ep.call(req).await;
-            record_http_request(response.is_ok(), start.elapsed());
-            match &response {
-                Ok(_) => {
-                    tracing::info!(
-                        elapsed_ms = start.elapsed().as_millis(),
-                        "request completed"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        elapsed_ms = start.elapsed().as_millis(),
-                        "request failed"
-                    );
-                }
-            }
-            response
+    let mut response = next.run(req).await;
+    insert_axum_response_header(
+        response.headers_mut(),
+        roze_context::REQUEST_ID_HEADER,
+        &context.request_id(),
+    );
+    insert_axum_response_header(
+        response.headers_mut(),
+        roze_context::TRACE_ID_HEADER,
+        &context.trace_id(),
+    );
+    response
+}
+
+pub async fn axum_trace(mut req: AxumRequest, next: Next) -> AxumResponse {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let trace_id = ensure_axum_header(&mut req, roze_context::TRACE_ID_HEADER);
+    let span = request_span(method.as_str(), uri.path(), &trace_id);
+
+    async move {
+        let start = Instant::now();
+        let response = next.run(req).await;
+        let elapsed = start.elapsed();
+        let success = response.status().is_success();
+        record_http_request(success, elapsed);
+        if success {
+            tracing::info!(elapsed_ms = elapsed.as_millis(), "request completed");
+        } else {
+            tracing::warn!(
+                status = response.status().as_u16(),
+                elapsed_ms = elapsed.as_millis(),
+                "request failed"
+            );
         }
-        .instrument(span)
+        response
     }
+    .instrument(span)
+    .await
 }
 
-#[derive(Debug, Clone)]
-pub struct AuthMiddleware {
-    config: JwtConfig,
-}
-
-impl AuthMiddleware {
-    pub fn new(config: JwtConfig) -> Self {
-        Self { config }
+pub async fn axum_auth(
+    State(config): State<JwtConfig>,
+    mut req: AxumRequest,
+    next: Next,
+) -> std::result::Result<AxumResponse, RozeError> {
+    let header_value = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(RozeError::Unauthorized)?;
+    let token = extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;
+    let claims =
+        verify_token(token, &config).map_err(|err| RozeError::Internal(err.to_string()))?;
+    let principal = principal_from_claims(&claims);
+    if let Some(context) = req.extensions().get::<Context>().cloned() {
+        req.extensions_mut()
+            .insert(context.with_auth(auth_context_from_principal(&principal)));
     }
-}
-
-impl<E> Middleware<E> for AuthMiddleware
-where
-    E: Endpoint,
-{
-    type Output = AuthEndpoint<E>;
-
-    fn transform(&self, ep: E) -> Self::Output {
-        AuthEndpoint {
-            ep,
-            config: self.config.clone(),
-        }
-    }
-}
-
-pub struct AuthEndpoint<E> {
-    ep: E,
-    config: JwtConfig,
-}
-
-impl<E> Endpoint for AuthEndpoint<E>
-where
-    E: Endpoint,
-{
-    type Output = E::Output;
-
-    fn call(&self, mut req: Request) -> impl Future<Output = Result<Self::Output>> + Send {
-        let config = self.config.clone();
-        let ep = &self.ep;
-
-        async move {
-            let header_value = req
-                .headers()
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .ok_or(RozeError::Unauthorized)?;
-            let token = extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;
-            let claims =
-                verify_token(token, &config).map_err(|err| RozeError::Internal(err.to_string()))?;
-            req.extensions_mut().insert(principal_from_claims(&claims));
-            ep.call(req).await
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RequestIdMiddleware;
-
-impl<E> Middleware<E> for RequestIdMiddleware
-where
-    E: Endpoint,
-{
-    type Output = RequestIdEndpoint<E>;
-
-    fn transform(&self, ep: E) -> Self::Output {
-        RequestIdEndpoint { ep }
-    }
-}
-
-pub struct RequestIdEndpoint<E> {
-    ep: E,
-}
-
-impl<E> Endpoint for RequestIdEndpoint<E>
-where
-    E: Endpoint,
-{
-    type Output = E::Output;
-
-    fn call(&self, mut req: Request) -> impl Future<Output = Result<Self::Output>> + Send {
-        let request_id = next_request_id();
-        let trace_id = incoming_trace_id(&req).unwrap_or_else(|| request_id.clone());
-        let context = incoming_timeout(&req)
-            .map(|timeout| {
-                Context::background_with_trace_id(trace_id.clone()).with_timeout(timeout)
-            })
-            .unwrap_or_else(|| Context::background_with_trace_id(trace_id.clone()));
-        req.extensions_mut().insert(context);
-        req.extensions_mut().insert(RequestContext {
-            request_id: request_id.clone(),
-            trace_id,
-        });
-        let ep = &self.ep;
-
-        async move { ep.call(req).await }
-    }
-}
-
-pub fn trace() -> TraceMiddleware {
-    TraceMiddleware
-}
-
-pub fn auth(config: JwtConfig) -> AuthMiddleware {
-    AuthMiddleware::new(config)
-}
-
-pub fn rate_limit(config: RateLimitConfig) -> RateLimitMiddleware {
-    RateLimitMiddleware::new(config)
-}
-
-pub fn breaker(config: BreakerConfig) -> BreakerMiddleware {
-    BreakerMiddleware::new(config)
-}
-
-pub fn apply_common<E>(endpoint: E) -> impl Endpoint
-where
-    E: Endpoint,
-{
-    endpoint
-        .with(RequestIdMiddleware)
-        .with(CatchPanic::new())
-        .with(Cors::new().allow_origin_regex(".*").allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ]))
-        .with(TraceMiddleware)
-}
-
-pub fn apply_auth<E>(endpoint: E, config: JwtConfig) -> impl Endpoint
-where
-    E: Endpoint,
-{
-    endpoint.with(AuthMiddleware::new(config))
+    req.extensions_mut().insert(principal);
+    Ok(next.run(req).await)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,7 +209,7 @@ pub fn begin_route(
     method: impl Into<String>,
     request_ctx: Context,
     governance: Option<&GovernanceConfig>,
-) -> Result<(Context, RouteGuard), RozeError> {
+) -> std::result::Result<(Context, RouteGuard), RozeError> {
     let service = service.into();
     let route = route.into();
     let method = method.into();
@@ -362,35 +270,10 @@ pub struct BreakerConfig {
     pub reset_timeout: Duration,
 }
 
-#[derive(Debug, Clone)]
-pub struct RequestContext {
-    pub request_id: String,
-    pub trace_id: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct RateLimitMiddleware {
-    config: RateLimitConfig,
-    state: Arc<Mutex<RateLimitState>>,
-}
-
 #[derive(Debug)]
 struct RateLimitState {
     tokens: f64,
     last_refill: Instant,
-}
-
-#[derive(Debug, Clone)]
-pub struct RateLimitEndpoint<E> {
-    ep: E,
-    config: RateLimitConfig,
-    state: Arc<Mutex<RateLimitState>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BreakerMiddleware {
-    config: BreakerConfig,
-    state: Arc<Mutex<BreakerState>>,
 }
 
 #[derive(Debug)]
@@ -399,135 +282,19 @@ struct BreakerState {
     open_until: Option<Instant>,
 }
 
-#[derive(Debug, Clone)]
-pub struct BreakerEndpoint<E> {
-    ep: E,
-    config: BreakerConfig,
-    state: Arc<Mutex<BreakerState>>,
-}
-
-impl RateLimitMiddleware {
-    pub fn new(config: RateLimitConfig) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(RateLimitState {
-                tokens: config.burst as f64,
-                last_refill: Instant::now(),
-            })),
-            config,
-        }
-    }
-}
-
-impl<E> Middleware<E> for RateLimitMiddleware
-where
-    E: Endpoint,
-{
-    type Output = RateLimitEndpoint<E>;
-
-    fn transform(&self, ep: E) -> Self::Output {
-        RateLimitEndpoint {
-            ep,
-            config: self.config.clone(),
-            state: Arc::clone(&self.state),
-        }
-    }
-}
-
-impl<E> Endpoint for RateLimitEndpoint<E>
-where
-    E: Endpoint,
-{
-    type Output = E::Output;
-
-    fn call(&self, req: Request) -> impl Future<Output = Result<Self::Output>> + Send {
-        let allowed = {
-            let mut state = self.state.lock().expect("rate limit lock poisoned");
-            refill_tokens(&mut state, &self.config);
-            if state.tokens >= 1.0 {
-                state.tokens -= 1.0;
-                true
-            } else {
-                false
-            }
-        };
-
-        async move {
-            if !allowed {
-                return Err(RozeError::Internal("rate limited".to_string()).into());
-            }
-            self.ep.call(req).await
-        }
-    }
-}
-
-impl BreakerMiddleware {
-    pub fn new(config: BreakerConfig) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(BreakerState {
-                failures: 0,
-                open_until: None,
-            })),
-            config,
-        }
-    }
-}
-
-impl<E> Middleware<E> for BreakerMiddleware
-where
-    E: Endpoint,
-{
-    type Output = BreakerEndpoint<E>;
-
-    fn transform(&self, ep: E) -> Self::Output {
-        BreakerEndpoint {
-            ep,
-            config: self.config.clone(),
-            state: Arc::clone(&self.state),
-        }
-    }
-}
-
-impl<E> Endpoint for BreakerEndpoint<E>
-where
-    E: Endpoint,
-{
-    type Output = E::Output;
-
-    fn call(&self, req: Request) -> impl Future<Output = Result<Self::Output>> + Send {
-        let open = {
-            let mut state = self.state.lock().expect("breaker lock poisoned");
-            breaker_is_open(&mut state)
-        };
-
-        async move {
-            if open {
-                return Err(RozeError::Internal("circuit open".to_string()).into());
-            }
-
-            let response = self.ep.call(req).await;
-            let mut state = self.state.lock().expect("breaker lock poisoned");
-            match &response {
-                Ok(_) => breaker_record_success(&mut state),
-                Err(_) => breaker_record_failure(&mut state, &self.config),
-            }
-            response
-        }
-    }
-}
-
 fn next_request_id() -> String {
     generate_trace_id()
 }
 
-fn incoming_trace_id(req: &Request) -> Option<String> {
+fn incoming_axum_header(req: &AxumRequest, key: &str) -> Option<String> {
     req.headers()
-        .get(TRACE_ID_HEADER)
+        .get(key)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
 
-fn incoming_timeout(req: &Request) -> Option<Duration> {
+fn incoming_axum_timeout(req: &AxumRequest) -> Option<Duration> {
     let raw = req
         .headers()
         .get(roze_context::TIMEOUT_HEADER)
@@ -536,17 +303,48 @@ fn incoming_timeout(req: &Request) -> Option<Duration> {
     Some(Duration::from_millis(millis))
 }
 
-fn ensure_trace_id_header(req: &mut Request) -> String {
-    if let Some(trace_id) = incoming_trace_id(req) {
-        return trace_id;
+fn incoming_axum_metadata(req: &AxumRequest) -> BTreeMap<String, String> {
+    req.headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            let key = name
+                .as_str()
+                .strip_prefix(roze_context::METADATA_HEADER_PREFIX)?;
+            let value = value.to_str().ok()?;
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn ensure_axum_header(req: &mut AxumRequest, key: &'static str) -> String {
+    if let Some(value) = incoming_axum_header(req, key) {
+        return value;
     }
 
-    let trace_id = generate_trace_id();
-    let value = HeaderValue::from_str(&trace_id)
-        .unwrap_or_else(|_| HeaderValue::from_static("trace-invalid"));
-    req.headers_mut()
-        .insert(HeaderName::from_static(TRACE_ID_HEADER), value);
-    trace_id
+    let generated = next_request_id();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&generated) {
+        req.headers_mut()
+            .insert(axum::http::HeaderName::from_static(key), value);
+    }
+    generated
+}
+
+fn insert_axum_response_header(
+    headers: &mut axum::http::HeaderMap,
+    key: &'static str,
+    value: &str,
+) {
+    if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+        headers.insert(axum::http::HeaderName::from_static(key), value);
+    }
+}
+
+fn auth_context_from_principal(principal: &AuthPrincipal) -> AuthContext {
+    AuthContext {
+        subject: principal.subject.clone(),
+        roles: principal.roles.clone(),
+        tenant: principal.tenant.clone(),
+    }
 }
 
 fn refill_tokens(state: &mut RateLimitState, config: &RateLimitConfig) {
@@ -617,7 +415,7 @@ fn effective_breaker(
         })
 }
 
-fn enforce_rate_limit(key: &str, config: &RateLimitConfig) -> Result<(), RozeError> {
+fn enforce_rate_limit(key: &str, config: &RateLimitConfig) -> std::result::Result<(), RozeError> {
     let mut states = ROUTE_RATE_LIMITS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()

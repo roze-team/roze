@@ -1,5 +1,7 @@
-use poem::web::Json;
-use poem::{error::ResponseError, http::StatusCode, IntoResponse, Response};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -40,10 +42,8 @@ impl RozeError {
             RozeError::BadRequest(_) | RozeError::Unauthorized | RozeError::NotFound(_)
         )
     }
-}
 
-impl ResponseError for RozeError {
-    fn status(&self) -> StatusCode {
+    pub fn status_code(&self) -> StatusCode {
         match self {
             RozeError::BadRequest(_) => StatusCode::BAD_REQUEST,
             RozeError::Unauthorized => StatusCode::UNAUTHORIZED,
@@ -51,11 +51,13 @@ impl ResponseError for RozeError {
             RozeError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+}
 
-    fn as_response(&self) -> Response {
-        let code = self.code();
-        let msg = self.message();
-        Json(roze_result::ApiResponse::<()>::error(code, msg)).into_response()
+impl IntoResponse for RozeError {
+    fn into_response(self) -> Response {
+        let status = self.status_code();
+        let body = roze_result::ApiResponse::<()>::error(self.code(), self.message());
+        (status, axum::Json(body)).into_response()
     }
 }
 
@@ -75,5 +77,11 @@ mod tests {
         assert_eq!(RozeError::Unauthorized.code(), 401);
         assert_eq!(RozeError::NotFound("x".into()).code(), 404);
         assert_eq!(RozeError::Internal("x".into()).code(), 500);
+    }
+
+    #[test]
+    fn converts_to_axum_error_response() {
+        let resp = axum::response::IntoResponse::into_response(RozeError::Unauthorized);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

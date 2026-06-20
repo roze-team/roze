@@ -4,13 +4,13 @@
 //! workspace depends on `roze_grpc::transport` instead of importing `tonic`
 //! directly. That keeps the transport boundary easy to swap in the future.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
-use roze_context::Context;
-use roze_trace::{generate_trace_id, TRACE_ID_HEADER};
+use roze_context::{AuthContext, Context};
+use roze_trace::generate_trace_id;
 
 pub mod transport {
-    pub use tonic::metadata::MetadataValue;
+    pub use tonic::metadata::{Ascii, KeyAndValueRef, MetadataKey, MetadataMap, MetadataValue};
     pub use tonic::transport::{Channel, Endpoint, Server};
     pub use tonic::{Code, Request, Response, Status};
 }
@@ -119,8 +119,14 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
         .get::<Context>()
         .cloned()
         .unwrap_or_else(|| {
+            let request_id = metadata_value(request, roze_context::REQUEST_ID_HEADER)
+                .unwrap_or_else(generate_trace_id);
             let trace_id = metadata_trace_id(request).unwrap_or_else(generate_trace_id);
-            let ctx = Context::background_with_trace_id(trace_id);
+            let mut ctx = Context::background_with_request_id_and_trace_id(request_id, trace_id)
+                .with_metadata_map(metadata_context_values(request.metadata()));
+            if let Some(auth) = metadata_auth(request.metadata()) {
+                ctx = ctx.with_auth(auth);
+            }
             match metadata_timeout(request) {
                 Some(timeout) => ctx.with_timeout(timeout),
                 None => ctx,
@@ -129,17 +135,44 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
 }
 
 pub fn apply_context<T>(request: &mut Request<T>, context: &Context) {
-    let trace_id = context.trace_id();
-    if let Ok(value) = MetadataValue::try_from(trace_id.as_str()) {
-        request.metadata_mut().insert(TRACE_ID_HEADER, value);
-    }
+    insert_metadata(
+        request.metadata_mut(),
+        roze_context::REQUEST_ID_HEADER,
+        &context.request_id(),
+    );
+    insert_metadata(
+        request.metadata_mut(),
+        roze_context::TRACE_ID_HEADER,
+        &context.trace_id(),
+    );
     if let Some(timeout) = context.remaining_timeout() {
         let timeout_ms = timeout.as_millis().to_string();
-        if let Ok(value) = MetadataValue::try_from(timeout_ms.as_str()) {
-            request
-                .metadata_mut()
-                .insert(roze_context::TIMEOUT_HEADER, value);
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::TIMEOUT_HEADER,
+            &timeout_ms,
+        );
+    }
+    if let Some(auth) = context.auth() {
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::SUBJECT_HEADER,
+            &auth.subject,
+        );
+        if let Some(tenant) = auth.tenant {
+            insert_metadata(request.metadata_mut(), roze_context::TENANT_HEADER, &tenant);
         }
+        if !auth.roles.is_empty() {
+            insert_metadata(
+                request.metadata_mut(),
+                roze_context::ROLES_HEADER,
+                &auth.roles.join(","),
+            );
+        }
+    }
+    for (key, value) in context.metadata() {
+        let header = format!("{}{}", roze_context::METADATA_HEADER_PREFIX, key);
+        insert_metadata(request.metadata_mut(), &header, &value);
     }
     request.extensions_mut().insert(context.clone());
 }
@@ -147,7 +180,7 @@ pub fn apply_context<T>(request: &mut Request<T>, context: &Context) {
 pub fn metadata_trace_id<T>(request: &Request<T>) -> Option<String> {
     request
         .metadata()
-        .get(TRACE_ID_HEADER)
+        .get(roze_context::TRACE_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
@@ -162,8 +195,73 @@ pub fn metadata_timeout<T>(request: &Request<T>) -> Option<Duration> {
     Some(Duration::from_millis(millis))
 }
 
+fn metadata_value<T>(request: &Request<T>, key: &str) -> Option<String> {
+    request
+        .metadata()
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn insert_metadata(metadata: &mut transport::MetadataMap, key: &str, value: &str) {
+    let Ok(key) = key.parse::<transport::MetadataKey<transport::Ascii>>() else {
+        return;
+    };
+    let Ok(value) = MetadataValue::try_from(value) else {
+        return;
+    };
+    metadata.insert(key, value);
+}
+
+fn metadata_auth(metadata: &transport::MetadataMap) -> Option<AuthContext> {
+    let subject = metadata
+        .get(roze_context::SUBJECT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let tenant = metadata
+        .get(roze_context::TENANT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let roles = metadata
+        .get(roze_context::ROLES_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(parse_roles)
+        .unwrap_or_default();
+    Some(AuthContext {
+        subject,
+        roles,
+        tenant,
+    })
+}
+
+fn metadata_context_values(metadata: &transport::MetadataMap) -> BTreeMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|entry| {
+            let transport::KeyAndValueRef::Ascii(key, value) = entry else {
+                return None;
+            };
+            let key = key
+                .as_str()
+                .strip_prefix(roze_context::METADATA_HEADER_PREFIX)?;
+            Some((key.to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect()
+}
+
+fn parse_roles(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 #[allow(clippy::result_large_err)]
-pub fn with_trace_interceptor(
+pub fn with_context_interceptor(
     context: Context,
 ) -> impl FnMut(Request<()>) -> Result<Request<()>, transport::Status> + Clone {
     move |mut request: Request<()>| {
@@ -190,11 +288,22 @@ mod tests {
 
     #[test]
     fn context_round_trips_through_request() {
-        let context = Context::background_with_trace_id("trace-1");
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1")
+            .with_auth(AuthContext {
+                subject: "user-1".to_string(),
+                roles: vec!["admin".to_string(), "ops".to_string()],
+                tenant: Some("tenant-1".to_string()),
+            })
+            .with_metadata("locale", "zh-CN");
         let mut request = Request::new(());
         apply_context(&mut request, &context);
         assert_eq!(metadata_trace_id(&request).as_deref(), Some("trace-1"));
         let restored = request_context(&request);
+        assert_eq!(restored.request_id(), "request-1");
         assert_eq!(restored.trace_id(), "trace-1");
+        assert_eq!(restored.subject().as_deref(), Some("user-1"));
+        assert_eq!(restored.tenant().as_deref(), Some("tenant-1"));
+        assert_eq!(restored.roles(), vec!["admin", "ops"]);
+        assert_eq!(restored.metadata_value("locale").as_deref(), Some("zh-CN"));
     }
 }

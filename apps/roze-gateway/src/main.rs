@@ -2,15 +2,22 @@ mod config;
 
 use std::sync::Arc;
 
-use poem::{Request, Response, Result};
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, Response, StatusCode},
+    routing::any,
+    Router,
+};
 use tokio::sync::{mpsc, RwLock};
+use tower::ServiceExt;
 use tracing::{info, warn};
 
-struct DynamicGatewayEndpoint<E> {
-    current: Arc<RwLock<RouteEntry<E>>>,
+struct DynamicGatewayRouter {
+    current: Arc<RwLock<Router>>,
 }
 
-impl<E> Clone for DynamicGatewayEndpoint<E> {
+impl Clone for DynamicGatewayRouter {
     fn clone(&self) -> Self {
         Self {
             current: self.current.clone(),
@@ -18,36 +25,30 @@ impl<E> Clone for DynamicGatewayEndpoint<E> {
     }
 }
 
-struct RouteEntry<E> {
-    route: E,
-}
-
-impl<E> DynamicGatewayEndpoint<E> {
-    fn new(initial: E) -> Self {
+impl DynamicGatewayRouter {
+    fn new(initial: Router) -> Self {
         Self {
-            current: Arc::new(RwLock::new(RouteEntry { route: initial })),
+            current: Arc::new(RwLock::new(initial)),
         }
     }
 
-    async fn set_route(&self, route: E) {
+    async fn set_route(&self, route: Router) {
         let mut guard = self.current.write().await;
-        *guard = RouteEntry { route };
+        *guard = route;
     }
 }
 
-impl<E> poem::Endpoint for DynamicGatewayEndpoint<E>
-where
-    E: poem::Endpoint<Output = Response> + Send + Sync + 'static,
-{
-    type Output = Response;
-
-    fn call(&self, req: Request) -> impl std::future::Future<Output = Result<Self::Output>> + Send {
-        let this = self.current.clone();
-        async move {
-            let guard = this.read().await;
-            guard.route.call(req).await
-        }
-    }
+async fn dynamic_gateway_handler(
+    State(dynamic): State<DynamicGatewayRouter>,
+    req: Request<Body>,
+) -> Response<Body> {
+    let router = dynamic.current.read().await.clone();
+    router.oneshot(req).await.unwrap_or_else(|err| {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(err.to_string()))
+            .expect("gateway dispatch error response")
+    })
 }
 
 #[tokio::main]
@@ -65,15 +66,21 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .unwrap_or_else(|| "127.0.0.1:8081".parse().expect("default addr"));
     let initial_gateway_signature = route_signature(&gateway);
+    let registry = roze_rpc::registry::build_service_registry(&config)?;
 
-    let initial_router = roze_gateway::build_router(gateway.clone(), jwt.clone());
-    let dynamic_router = DynamicGatewayEndpoint::new(initial_router);
+    let initial_router =
+        roze_gateway::build_router_with_registry(gateway.clone(), jwt.clone(), registry.clone());
+    let dynamic_gateway = DynamicGatewayRouter::new(initial_router);
+    let dynamic_router = Router::new()
+        .fallback(any(dynamic_gateway_handler))
+        .with_state(dynamic_gateway.clone());
     let signature_guard = Arc::new(RwLock::new(initial_gateway_signature));
 
     if let Some(center) = center.clone() {
         let (config_tx, mut config_rx) = mpsc::unbounded_channel::<config::Config>();
-        let center_router = dynamic_router.clone();
+        let center_router = dynamic_gateway.clone();
         let center_jwt = jwt.clone();
+        let center_registry = registry.clone();
         let center_signature = signature_guard.clone();
         let center_listen = listen;
 
@@ -106,7 +113,11 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                let next = roze_gateway::build_router(updated_gateway, center_jwt.clone());
+                let next = roze_gateway::build_router_with_registry(
+                    updated_gateway,
+                    center_jwt.clone(),
+                    center_registry.clone(),
+                );
                 center_router.set_route(next).await;
                 *current_signature = next_signature.clone();
 

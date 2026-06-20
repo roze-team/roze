@@ -8,16 +8,14 @@
 ## 模块状态与细化任务
 
 ### 1) HTTP 网关（高优先级）
-- 当前状态：未落地（目前为服务内 REST，非独立网关）
-- 目标状态：支持上游代理、路由映射、路径重写、超时、重试、限流/熔断。
+- 当前状态：v1 已落地。`apps/roze-gateway` 基于 Axum/Tower HTTP 提供独立网关，已支持静态上游、路由映射、路径重写、超时、限流/熔断、鉴权、CORS、fallback 和配置中心热更新。
+- 目标状态：补齐 registry 动态上游、重试、指标和更完整的治理联动。
 - 主要任务：
-  1. 新增应用 `apps/roze-gateway`，复用 `poem` 作为 HTTP 接入。
-  2. 在 `apps/roze-gateway` 配置 `upstreams`、`routes`、`mapping`。
-  3. 每条路由支持：`method/path` 映射、`prefix`、`rewrite`、`timeout_ms`、`retries`。
-  4. 支持从 `registry` 动态发现上游目标服务。
-  5. 接入 `roze-middleware` 的 rate limit 与 breaker。
-  6. 统一响应结构与错误码映射。
-  7. 增加最小治理度量（网关请求计数、成功率、延迟、重试次数）。
+  1. 支持从 `registry` 动态发现上游目标服务。
+  2. 每条路由支持 `retries`、退避策略和重试指标。
+  3. 统一响应结构与错误码映射，明确代理透传响应与网关 fallback 响应边界。
+  4. 增加最小治理度量（网关请求计数、成功率、延迟、重试次数）。
+  5. 增加 smoke test，覆盖 rewrite、timeout、auth、rate limit、breaker 和热更新。
 - 验收：
   1. 可配置路由到上游，并返回上游 JSON 原样。
   2. 路由映射变更可无重启更新（热读配置）。
@@ -130,12 +128,13 @@
   3. 增加故障场景 fallback。
 
 ## 第一期实施范围（仅建议可开工）
-- 任务A：网关 v1（目标文件）
-  1. [ ] [apps/roze-gateway] 新建服务框架
-  2. [ ] 路由配置模型与配置加载
-  3. [ ] 代理转发 + registry 发现
-  4. [ ] 重写、超时、重试、错误码
-  5. [ ] 简单示例与 smoke test
+- 任务A：网关 v2（目标文件）
+  1. [x] [apps/roze-gateway] 新建服务框架
+  2. [x] 路由配置模型与配置加载
+  3. [x] 代理转发、重写、超时、鉴权、限流、熔断、fallback
+  4. [ ] registry 动态上游发现
+  5. [ ] 重试、错误码统一和治理指标
+  6. [ ] 简单示例与 smoke test
 - 任务B：配置中心变更事件完善
   1. [ ] 变更事件结构和日志
   2. [ ] 变更失败回退

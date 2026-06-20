@@ -55,10 +55,42 @@ pub struct GatewayConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayService {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub upstream: String,
     #[serde(default)]
+    pub registry_name: Option<String>,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub outlier: Option<GatewayOutlierConfig>,
+    #[serde(default)]
+    pub health_check: Option<GatewayHealthCheckConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GatewayOutlierConfig {
+    #[serde(default = "default_gateway_outlier_failure_threshold")]
+    pub failure_threshold: u32,
+    #[serde(default = "default_gateway_outlier_ejection_ms")]
+    pub ejection_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayHealthCheckConfig {
+    #[serde(default = "default_gateway_health_check_path")]
+    pub path: String,
+    #[serde(default = "default_gateway_health_check_interval_ms")]
+    pub interval_ms: u64,
+    #[serde(default = "default_gateway_health_check_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_gateway_health_check_unhealthy_threshold")]
+    pub unhealthy_threshold: u32,
+    #[serde(default = "default_gateway_health_check_healthy_threshold")]
+    pub healthy_threshold: u32,
+    #[serde(default = "default_gateway_health_check_expected_status")]
+    pub expected_status: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +103,10 @@ pub struct GatewayRoute {
     pub middlewares: Vec<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub retries: Option<u32>,
+    #[serde(default)]
+    pub retry_backoff_ms: Option<u64>,
     #[serde(default)]
     pub rewrite: Option<String>,
     #[serde(default)]
@@ -105,6 +141,38 @@ pub struct GatewayCorsConfig {
 
 fn default_gateway_fallback_status() -> u16 {
     503
+}
+
+fn default_gateway_outlier_failure_threshold() -> u32 {
+    3
+}
+
+fn default_gateway_outlier_ejection_ms() -> u64 {
+    30_000
+}
+
+fn default_gateway_health_check_path() -> String {
+    "/healthz".to_string()
+}
+
+fn default_gateway_health_check_interval_ms() -> u64 {
+    10_000
+}
+
+fn default_gateway_health_check_timeout_ms() -> u64 {
+    1_000
+}
+
+fn default_gateway_health_check_unhealthy_threshold() -> u32 {
+    3
+}
+
+fn default_gateway_health_check_healthy_threshold() -> u32 {
+    1
+}
+
+fn default_gateway_health_check_expected_status() -> u16 {
+    200
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +333,8 @@ pub struct TelemetryConfig {
     pub sampler: f64,
     #[serde(default)]
     pub batcher: TelemetryBatcher,
+    #[serde(default)]
+    pub propagator: TelemetryPropagator,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,6 +345,15 @@ pub enum TelemetryBatcher {
     OtlpGrpc,
     #[serde(alias = "otlphttp")]
     OtlpHttp,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TelemetryPropagator {
+    #[default]
+    #[serde(alias = "tracecontext", alias = "w3c")]
+    TraceContext,
+    Jaeger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,6 +764,7 @@ endpoint = "http://127.0.0.1:4317"
         assert_eq!(telemetry.endpoint.as_deref(), Some("http://127.0.0.1:4317"));
         assert_eq!(telemetry.sampler, default_telemetry_sampler());
         assert_eq!(telemetry.batcher, TelemetryBatcher::OtlpGrpc);
+        assert_eq!(telemetry.propagator, TelemetryPropagator::TraceContext);
     }
 
     #[test]
@@ -697,6 +777,7 @@ name = "demo-api"
 endpoint = "http://127.0.0.1:4318"
 sampler = 0.25
 batcher = "otlphttp"
+propagator = "jaeger"
 
 [governance]
 "#;
@@ -711,6 +792,7 @@ batcher = "otlphttp"
         assert_eq!(telemetry.name.as_deref(), Some("demo-api"));
         assert_eq!(telemetry.sampler, 0.25);
         assert_eq!(telemetry.batcher, TelemetryBatcher::OtlpHttp);
+        assert_eq!(telemetry.propagator, TelemetryPropagator::Jaeger);
     }
 
     #[test]

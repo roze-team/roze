@@ -1145,23 +1145,23 @@ version = "0.1.0""#
             if in_workspace {
                 r#"anyhow.workspace = true
 config.workspace = true
-poem.workspace = true"#
+axum.workspace = true"#
             } else {
                 r#"anyhow = "1"
 config = { version = "0.14", default-features = false, features = ["json", "yaml", "toml"] }
-poem = "3""#
+axum = { version = "0.8", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }"#
             },
             if in_workspace {
                 r#"serde.workspace = true
 serde_json.workspace = true
-sea-orm.workspace = true
+toasty.workspace = true
 validator.workspace = true
 tokio.workspace = true
 tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }
+toasty = { version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }
 validator = { version = "0.20", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1""#
@@ -1181,7 +1181,7 @@ prost = "0.12""#
             if in_workspace {
                 r#"serde.workspace = true
 serde_json.workspace = true
-sea-orm.workspace = true
+toasty.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tonic.workspace = true
@@ -1189,7 +1189,7 @@ tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }
+toasty = { version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.11"
@@ -1633,12 +1633,10 @@ fn service_context_rs() -> String {
     r#"#![allow(dead_code)]
 
 use crate::config::Config;
-use sea_orm::DatabaseConnection;
 
 #[derive(Clone, Debug)]
 pub struct ServiceContext {
     pub config: Config,
-    pub db: Option<DatabaseConnection>,
     pub db_connections: Option<roze_db::DatabaseConnections>,
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
@@ -1647,7 +1645,6 @@ pub struct ServiceContext {
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
-        let db = db_connections.as_ref().map(|connections| connections.primary().clone());
         let mongo = roze_mongo::connect_optional(config.mongo.as_ref()).await?;
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
@@ -1662,26 +1659,23 @@ impl ServiceContext {
         };
         Ok(Self {
             config,
-            db,
             db_connections,
             mongo,
             cache,
         })
     }
 
-    pub fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {
+    pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
         self.db_connections
             .as_ref()
             .map(|connections| connections.read())
-            .or(self.db.as_ref())
             .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
     }
 
-    pub fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {
+    pub fn write_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
         self.db_connections
             .as_ref()
             .map(|connections| connections.write())
-            .or(self.db.as_ref())
             .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
     }
 

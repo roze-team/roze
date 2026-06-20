@@ -1,5 +1,4 @@
-use poem::web::Json;
-use poem::{IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,7 +33,7 @@ where
     T: Serialize + Send,
 {
     fn into_response(self) -> Response {
-        Json(self).into_response()
+        axum::Json(self).into_response()
     }
 }
 
@@ -48,5 +47,11 @@ mod tests {
         assert_eq!(resp.code, 0);
         assert_eq!(resp.msg, "OK");
         assert_eq!(resp.data, Some(123));
+    }
+
+    #[test]
+    fn converts_to_axum_response() {
+        let resp = axum::response::IntoResponse::into_response(ApiResponse::ok(123));
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }
 }

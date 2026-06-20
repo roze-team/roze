@@ -36,9 +36,9 @@ enum ModelFormat {
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum ModelOrm {
-    #[default]
     #[value(name = "sea-orm")]
     SeaOrm,
+    #[default]
     Toasty,
 }
 
@@ -1017,6 +1017,18 @@ mod tests {
             Commands::Model {
                 command: ModelCommands::Generate {
                     format: ModelFormat::Sql,
+                    orm: ModelOrm::Toasty,
+                    ..
+                }
+            }
+        ));
+
+        let default_orm = Cli::try_parse_from(["rozectl", "model", "generate", "user.sql"])
+            .expect("parse default model orm");
+        assert!(matches!(
+            default_orm.command,
+            Commands::Model {
+                command: ModelCommands::Generate {
                     orm: ModelOrm::Toasty,
                     ..
                 }

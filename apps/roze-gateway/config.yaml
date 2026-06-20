@@ -13,6 +13,16 @@ gateway:
   services:
     - name: user
       upstream: "http://127.0.0.1:3000"
+      outlier:
+        failure_threshold: 3
+        ejection_ms: 30000
+      health_check:
+        path: /healthz
+        interval_ms: 10000
+        timeout_ms: 1000
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+        expected_status: 200
   routes:
     - path: /healthz
       service: user
@@ -29,6 +39,8 @@ gateway:
         - PUT
         - DELETE
       rewrite: /user
+      retries: 2
+      retry_backoff_ms: 100
       middlewares:
         - trace
         - rate
@@ -66,4 +78,3 @@ gateway:
       - content-type
       - x-request-id
       - x-trace-id
-

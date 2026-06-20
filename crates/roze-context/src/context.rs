@@ -1,7 +1,7 @@
 use roze_trace::generate_trace_id as trace_generate_trace_id;
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -10,7 +10,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+pub const TRACE_ID_HEADER: &str = roze_trace::TRACE_ID_HEADER;
 pub const TIMEOUT_HEADER: &str = "x-roze-timeout-ms";
+pub const SUBJECT_HEADER: &str = "x-roze-subject";
+pub const TENANT_HEADER: &str = "x-roze-tenant";
+pub const ROLES_HEADER: &str = "x-roze-roles";
+pub const METADATA_HEADER_PREFIX: &str = "x-roze-meta-";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContext {
+    pub subject: String,
+    pub roles: Vec<String>,
+    pub tenant: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
@@ -47,7 +60,10 @@ pub struct Context {
 }
 
 struct ContextInner {
+    request_id: Mutex<String>,
     trace_id: Mutex<String>,
+    auth: Mutex<Option<AuthContext>>,
+    metadata: Mutex<BTreeMap<String, String>>,
     deadline: Mutex<Option<Instant>>,
     cancelled: AtomicBool,
     cancel_reason: Mutex<Option<CancelReason>>,
@@ -56,9 +72,12 @@ struct ContextInner {
 }
 
 impl ContextInner {
-    fn new(trace_id: String) -> Self {
+    fn new(request_id: String, trace_id: String) -> Self {
         Self {
+            request_id: Mutex::new(request_id),
             trace_id: Mutex::new(trace_id),
+            auth: Mutex::new(None),
+            metadata: Mutex::new(BTreeMap::new()),
             deadline: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             cancel_reason: Mutex::new(None),
@@ -72,11 +91,35 @@ impl std::fmt::Debug for ContextInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContextInner")
             .field(
+                "request_id",
+                &self
+                    .request_id
+                    .lock()
+                    .expect("context request_id mutex poisoned")
+                    .clone(),
+            )
+            .field(
                 "trace_id",
                 &self
                     .trace_id
                     .lock()
                     .expect("context trace_id mutex poisoned")
+                    .clone(),
+            )
+            .field(
+                "auth",
+                &self
+                    .auth
+                    .lock()
+                    .expect("context auth mutex poisoned")
+                    .clone(),
+            )
+            .field(
+                "metadata",
+                &self
+                    .metadata
+                    .lock()
+                    .expect("context metadata mutex poisoned")
                     .clone(),
             )
             .field(
@@ -118,13 +161,40 @@ impl std::fmt::Debug for ContextInner {
 
 impl Context {
     pub fn background() -> Self {
-        Self::background_with_trace_id(trace_generate_trace_id())
+        let request_id = trace_generate_trace_id();
+        Self::background_with_request_id_and_trace_id(request_id.clone(), request_id)
     }
 
     pub fn background_with_trace_id(trace_id: impl Into<String>) -> Self {
+        let trace_id = trace_id.into();
+        Self::background_with_request_id_and_trace_id(trace_id.clone(), trace_id)
+    }
+
+    pub fn background_with_request_id_and_trace_id(
+        request_id: impl Into<String>,
+        trace_id: impl Into<String>,
+    ) -> Self {
         Self {
-            inner: Arc::new(ContextInner::new(trace_id.into())),
+            inner: Arc::new(ContextInner::new(request_id.into(), trace_id.into())),
         }
+    }
+
+    pub fn request_id(&self) -> String {
+        self.inner
+            .request_id
+            .lock()
+            .expect("context request_id mutex poisoned")
+            .clone()
+    }
+
+    pub fn with_request_id(&self, request_id: impl Into<String>) -> Self {
+        let next = self.fork();
+        *next
+            .inner
+            .request_id
+            .lock()
+            .expect("context request_id mutex poisoned") = request_id.into();
+        next
     }
 
     pub fn trace_id(&self) -> String {
@@ -142,6 +212,69 @@ impl Context {
             .trace_id
             .lock()
             .expect("context trace_id mutex poisoned") = trace_id.into();
+        next
+    }
+
+    pub fn auth(&self) -> Option<AuthContext> {
+        self.inner
+            .auth
+            .lock()
+            .expect("context auth mutex poisoned")
+            .clone()
+    }
+
+    pub fn with_auth(&self, auth: AuthContext) -> Self {
+        let next = self.fork();
+        *next.inner.auth.lock().expect("context auth mutex poisoned") = Some(auth);
+        next
+    }
+
+    pub fn subject(&self) -> Option<String> {
+        self.auth().map(|auth| auth.subject)
+    }
+
+    pub fn tenant(&self) -> Option<String> {
+        self.auth().and_then(|auth| auth.tenant)
+    }
+
+    pub fn roles(&self) -> Vec<String> {
+        self.auth().map(|auth| auth.roles).unwrap_or_default()
+    }
+
+    pub fn metadata(&self) -> BTreeMap<String, String> {
+        self.inner
+            .metadata
+            .lock()
+            .expect("context metadata mutex poisoned")
+            .clone()
+    }
+
+    pub fn metadata_value(&self, key: impl AsRef<str>) -> Option<String> {
+        self.inner
+            .metadata
+            .lock()
+            .expect("context metadata mutex poisoned")
+            .get(key.as_ref())
+            .cloned()
+    }
+
+    pub fn with_metadata(&self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let next = self.fork();
+        next.inner
+            .metadata
+            .lock()
+            .expect("context metadata mutex poisoned")
+            .insert(key.into(), value.into());
+        next
+    }
+
+    pub fn with_metadata_map(&self, metadata: BTreeMap<String, String>) -> Self {
+        let next = self.fork();
+        *next
+            .inner
+            .metadata
+            .lock()
+            .expect("context metadata mutex poisoned") = metadata;
         next
     }
 
@@ -273,7 +406,10 @@ impl Context {
     }
 
     fn fork(&self) -> Self {
+        let request_id = self.request_id();
         let trace_id = self.trace_id();
+        let auth = self.auth();
+        let metadata = self.metadata();
         let deadline = *self
             .inner
             .deadline
@@ -293,7 +429,10 @@ impl Context {
 
         Self {
             inner: Arc::new(ContextInner {
+                request_id: Mutex::new(request_id),
                 trace_id: Mutex::new(trace_id),
+                auth: Mutex::new(auth),
+                metadata: Mutex::new(metadata),
                 deadline: Mutex::new(deadline),
                 cancelled: AtomicBool::new(cancelled),
                 cancel_reason: Mutex::new(cancel_reason),
@@ -320,11 +459,22 @@ mod tests {
     #[test]
     fn context_carries_trace_id_and_values() {
         let key = ContextKey::<TestValue>::new("test-value");
-        let ctx = Context::background_with_trace_id("trace-123")
+        let ctx = Context::background_with_request_id_and_trace_id("request-123", "trace-123")
             .with_timeout(Duration::from_millis(20))
+            .with_auth(AuthContext {
+                subject: "user-1".to_string(),
+                roles: vec!["admin".to_string()],
+                tenant: Some("tenant-1".to_string()),
+            })
+            .with_metadata("locale", "zh-CN")
             .with_value(key, TestValue(42));
 
+        assert_eq!(ctx.request_id(), "request-123");
         assert_eq!(ctx.trace_id(), "trace-123");
+        assert_eq!(ctx.subject().as_deref(), Some("user-1"));
+        assert_eq!(ctx.tenant().as_deref(), Some("tenant-1"));
+        assert_eq!(ctx.roles(), vec!["admin"]);
+        assert_eq!(ctx.metadata_value("locale").as_deref(), Some("zh-CN"));
         assert!(ctx.remaining_timeout().is_some());
         assert_eq!(ctx.value(key), Some(TestValue(42)));
     }

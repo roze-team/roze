@@ -23,6 +23,17 @@ gateway:
     - name: user
       upstream: http://127.0.0.1:3000
       timeout_ms: 3000
+      outlier: { failure_threshold: 3, ejection_ms: 30000 }
+      health_check:
+        path: /healthz
+        interval_ms: 10000
+        timeout_ms: 1000
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+        expected_status: 200
+    - name: order
+      registry_name: order-api
+      timeout_ms: 3000
   routes:
     - path: /user
       service: user
@@ -59,6 +70,23 @@ gateway:
 - 默认转发 preserve path，支持 `rewrite`：
   - `route.rewrite` 若存在则用重写后的前缀替换匹配前缀；
   - 无 `rewrite` 则保留原始请求路径。
+- 上游可配置静态 `service.upstream`，也可配置 `service.registry_name` 从注册中心动态发现实例；两者同时存在时，`registry_name` 优先，静态 upstream 作为未启用动态发现时的默认路径。
+- `service.outlier` 开启实例级被动摘除：
+  - `failure_threshold`：同一实例连续失败阈值，默认 3；
+  - `ejection_ms`：摘除时长，默认 30000；
+  - 当前失败信号包含上游连接错误和 5xx 响应；若全部实例都处于摘除窗口，会临时允许全集合参与选择，避免服务完全不可达。
+- `service.health_check` 开启实例级主动健康检查：
+  - `path`：探测路径，默认 `/healthz`；
+  - `interval_ms`：探测周期，默认 10000；
+  - `timeout_ms`：单次探测超时，默认 1000；
+  - `unhealthy_threshold`：连续失败多少次后标记不健康，默认 3；
+  - `healthy_threshold`：连续成功多少次后恢复健康，默认 1；
+  - `expected_status`：期望 HTTP 状态码，默认 200；
+  - registry 服务会周期性发现当前实例并探测，路由选择会跳过不健康实例；若全部实例都不健康，会临时允许全集合参与选择，避免探测误判导致整体不可达。
+- 支持路由级重试：
+  - `retries`：失败后的额外重试次数，默认 0；
+  - `retry_backoff_ms`：每次重试前的等待时间，默认 0；
+  - 每次尝试独立应用 `timeout_ms`，全部尝试失败后才触发 breaker failure 记录。
 - 自动透传请求头、body 与 query-string，保留 `x-request-id`、`x-trace-id`（若未提供则自动补齐）。
 - 默认请求体上限：2MB（可配置 `request_body_limit_bytes`）。
 
@@ -79,6 +107,11 @@ gateway:
 - `gateway.request_body_invalid`
 - `gateway.upstream_failed`
 - `gateway.upstream_timeout`
+- `gateway.upstream_retry_succeeded`
+- `gateway.upstream_ejected`
+- `gateway.upstream_unhealthy`
+- `gateway.upstream_recovered`
+- `gateway.health_check_discover_failed`
 
 网关配置热更新相关事件：
 

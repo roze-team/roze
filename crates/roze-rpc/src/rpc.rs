@@ -16,11 +16,13 @@ use crate::{
     },
 };
 use roze_auth::principal_from_claims;
-use roze_context::Context;
-use roze_grpc::transport::{Channel, Code, Endpoint, MetadataValue, Request, Server, Status};
+use roze_context::{AuthContext, Context};
+use roze_grpc::transport::{
+    Channel, Code, Endpoint, MetadataMap, MetadataValue, Request, Server, Status,
+};
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_metrics::record_rpc_method;
-use roze_trace::{generate_trace_id, TRACE_ID_HEADER};
+use roze_trace::generate_trace_id;
 use tokio::time::sleep;
 use tracing::info;
 
@@ -155,7 +157,6 @@ pub fn auth_interceptor(
     config: JwtConfig,
 ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
     move |mut req: Request<()>| {
-        let trace_id = trace_id_from_metadata(&req).unwrap_or_else(generate_trace_id);
         let header_value = req
             .metadata()
             .get("authorization")
@@ -165,17 +166,28 @@ pub fn auth_interceptor(
             .ok_or_else(|| Status::unauthenticated("missing bearer token"))?;
         let claims =
             verify_token(token, &config).map_err(|err| Status::unauthenticated(err.to_string()))?;
-        let subject = MetadataValue::try_from(claims.sub.as_str())
-            .map_err(|_| Status::unauthenticated("invalid subject"))?;
-        req.metadata_mut().insert("x-subject", subject);
-        req.extensions_mut().insert(principal_from_claims(&claims));
-        req.metadata_mut().insert(
-            TRACE_ID_HEADER,
-            MetadataValue::try_from(trace_id.as_str())
-                .map_err(|_| Status::unauthenticated("invalid trace id"))?,
+        insert_metadata(
+            req.metadata_mut(),
+            roze_context::SUBJECT_HEADER,
+            &claims.sub,
         );
-        req.extensions_mut()
-            .insert(Context::background_with_trace_id(trace_id));
+        if let Some(tenant) = claims.tenant.as_deref() {
+            insert_metadata(req.metadata_mut(), roze_context::TENANT_HEADER, tenant);
+        }
+        if !claims.roles.is_empty() {
+            insert_metadata(
+                req.metadata_mut(),
+                roze_context::ROLES_HEADER,
+                &claims.roles.join(","),
+            );
+        }
+        let context = request_context(&req).with_auth(AuthContext {
+            subject: claims.sub.clone(),
+            roles: claims.roles.clone(),
+            tenant: claims.tenant.clone(),
+        });
+        req.extensions_mut().insert(principal_from_claims(&claims));
+        apply_request_context(&mut req, &context);
         Ok(req)
     }
 }
@@ -339,7 +351,7 @@ pub fn should_retry_status(status: &Status) -> bool {
 pub fn trace_id_from_metadata(request: &Request<()>) -> Option<String> {
     request
         .metadata()
-        .get(TRACE_ID_HEADER)
+        .get(roze_context::TRACE_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
@@ -351,14 +363,25 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
         .get::<Context>()
         .cloned()
         .unwrap_or_else(|| {
-            let trace_id = request
+            let request_id = request
                 .metadata()
-                .get(TRACE_ID_HEADER)
+                .get(roze_context::REQUEST_ID_HEADER)
                 .and_then(|value| value.to_str().ok())
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(generate_trace_id);
-            let ctx = Context::background_with_trace_id(trace_id);
+            let trace_id = request
+                .metadata()
+                .get(roze_context::TRACE_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(generate_trace_id);
+            let mut ctx = Context::background_with_request_id_and_trace_id(request_id, trace_id)
+                .with_metadata_map(context_metadata_from_tonic(request.metadata()));
+            if let Some(auth) = context_auth_from_tonic(request.metadata()) {
+                ctx = ctx.with_auth(auth);
+            }
             match request
                 .metadata()
                 .get(roze_context::TIMEOUT_HEADER)
@@ -373,18 +396,104 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
 }
 
 pub fn apply_request_context<T>(request: &mut Request<T>, context: &Context) {
-    let trace_id = context.trace_id();
-    if let Ok(value) = MetadataValue::try_from(trace_id.as_str()) {
-        request.metadata_mut().insert(TRACE_ID_HEADER, value);
-    }
+    insert_metadata(
+        request.metadata_mut(),
+        roze_context::REQUEST_ID_HEADER,
+        &context.request_id(),
+    );
+    insert_metadata(
+        request.metadata_mut(),
+        roze_context::TRACE_ID_HEADER,
+        &context.trace_id(),
+    );
     if let Some(timeout) = context.remaining_timeout() {
         let timeout_ms = timeout.as_millis().to_string();
-        if let Ok(value) = MetadataValue::try_from(timeout_ms.as_str()) {
-            request
-                .metadata_mut()
-                .insert(roze_context::TIMEOUT_HEADER, value);
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::TIMEOUT_HEADER,
+            &timeout_ms,
+        );
+    }
+    if let Some(auth) = context.auth() {
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::SUBJECT_HEADER,
+            &auth.subject,
+        );
+        if let Some(tenant) = auth.tenant {
+            insert_metadata(request.metadata_mut(), roze_context::TENANT_HEADER, &tenant);
+        }
+        if !auth.roles.is_empty() {
+            insert_metadata(
+                request.metadata_mut(),
+                roze_context::ROLES_HEADER,
+                &auth.roles.join(","),
+            );
         }
     }
+    for (key, value) in context.metadata() {
+        let header = format!("{}{}", roze_context::METADATA_HEADER_PREFIX, key);
+        insert_metadata(request.metadata_mut(), &header, &value);
+    }
+}
+
+fn insert_metadata(metadata: &mut MetadataMap, key: &str, value: &str) {
+    let Ok(key) = key.parse::<roze_grpc::transport::MetadataKey<roze_grpc::transport::Ascii>>()
+    else {
+        return;
+    };
+    let Ok(value) = MetadataValue::try_from(value) else {
+        return;
+    };
+    metadata.insert(key, value);
+}
+
+fn context_auth_from_tonic(metadata: &MetadataMap) -> Option<AuthContext> {
+    let subject = metadata
+        .get(roze_context::SUBJECT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let tenant = metadata
+        .get(roze_context::TENANT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let roles = metadata
+        .get(roze_context::ROLES_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(parse_roles)
+        .unwrap_or_default();
+    Some(AuthContext {
+        subject,
+        roles,
+        tenant,
+    })
+}
+
+fn context_metadata_from_tonic(
+    metadata: &MetadataMap,
+) -> std::collections::BTreeMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|entry| {
+            let roze_grpc::transport::KeyAndValueRef::Ascii(key, value) = entry else {
+                return None;
+            };
+            let key = key
+                .as_str()
+                .strip_prefix(roze_context::METADATA_HEADER_PREFIX)?;
+            Some((key.to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect()
+}
+
+fn parse_roles(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub fn apply_client_auth<T>(
@@ -393,7 +502,7 @@ pub fn apply_client_auth<T>(
     config: Option<&roze_config::RpcClientConfig>,
 ) {
     if !options.trace {
-        request.metadata_mut().remove(TRACE_ID_HEADER);
+        request.metadata_mut().remove(roze_context::TRACE_ID_HEADER);
     }
     let Some(config) = config else {
         return;
@@ -692,30 +801,83 @@ mod tests {
     }
 
     #[test]
-    fn request_context_prefers_metadata_trace_id() {
+    fn request_context_restores_standard_metadata() {
         let mut request = Request::new(());
-        request.metadata_mut().insert(
-            TRACE_ID_HEADER,
-            MetadataValue::try_from("trace-abc").unwrap(),
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::REQUEST_ID_HEADER,
+            "request-abc",
         );
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::TRACE_ID_HEADER,
+            "trace-abc",
+        );
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::SUBJECT_HEADER,
+            "user-1",
+        );
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::TENANT_HEADER,
+            "tenant-1",
+        );
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::ROLES_HEADER,
+            "admin,ops",
+        );
+        insert_metadata(request.metadata_mut(), "x-roze-meta-locale", "zh-CN");
 
         let context = request_context(&request);
+        assert_eq!(context.request_id(), "request-abc");
         assert_eq!(context.trace_id(), "trace-abc");
+        assert_eq!(context.subject().as_deref(), Some("user-1"));
+        assert_eq!(context.tenant().as_deref(), Some("tenant-1"));
+        assert_eq!(context.roles(), vec!["admin", "ops"]);
+        assert_eq!(context.metadata_value("locale").as_deref(), Some("zh-CN"));
     }
 
     #[test]
-    fn apply_request_context_sets_trace_id_metadata() {
+    fn apply_request_context_sets_standard_metadata() {
         let mut request = Request::new(());
-        let context = Context::background_with_trace_id("trace-xyz");
+        let context = Context::background_with_request_id_and_trace_id("request-xyz", "trace-xyz")
+            .with_auth(AuthContext {
+                subject: "user-1".to_string(),
+                roles: vec!["admin".to_string()],
+                tenant: Some("tenant-1".to_string()),
+            })
+            .with_metadata("locale", "zh-CN");
 
         apply_request_context(&mut request, &context);
 
+        let request_id = request
+            .metadata()
+            .get(roze_context::REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("request id metadata");
         let trace_id = request
             .metadata()
-            .get(TRACE_ID_HEADER)
+            .get(roze_context::TRACE_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .expect("trace id metadata");
+        assert_eq!(request_id, "request-xyz");
         assert_eq!(trace_id, "trace-xyz");
+        assert_eq!(
+            request
+                .metadata()
+                .get(roze_context::SUBJECT_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("user-1")
+        );
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-roze-meta-locale")
+                .and_then(|value| value.to_str().ok()),
+            Some("zh-CN")
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-poem.workspace = true
+axum.workspace = true
 serde.workspace = true
 roze-result = { path = "../roze-result" }
 roze-grpc = { path = "../roze-grpc" }

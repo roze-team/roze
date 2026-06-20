@@ -160,10 +160,6 @@ fn update_main_rs(out: &Path) -> anyhow::Result<()> {
 }
 
 fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
-    if orm != ModelOrm::Toasty {
-        return Ok(());
-    }
-
     let manifest_path = out.join("Cargo.toml");
     if !manifest_path.is_file() {
         return Ok(());
@@ -181,11 +177,16 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
             anyhow::anyhow!("{} has no [dependencies] table", manifest_path.display())
         })?;
 
-    if dependencies.contains_key("toasty") {
+    let dependency_name = match orm {
+        ModelOrm::SeaOrm => "sea-orm",
+        ModelOrm::Toasty => "toasty",
+    };
+    if dependencies.contains_key(dependency_name) {
         return Ok(());
     }
 
     let uses_workspace = content.contains("edition.workspace = true")
+        || content.contains("toasty.workspace = true")
         || content.contains("sea-orm.workspace = true");
 
     let item = if uses_workspace {
@@ -193,11 +194,20 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
         table.insert("workspace", true.into());
         toml_edit::Item::Value(toml_edit::Value::InlineTable(table))
     } else {
-        r#"{ version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }"#
-            .parse::<toml_edit::Item>()
-            .expect("valid toml dependency value")
+        match orm {
+            ModelOrm::SeaOrm => {
+                r#"{ version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }"#
+                    .parse::<toml_edit::Item>()
+                    .expect("valid toml dependency value")
+            }
+            ModelOrm::Toasty => {
+                r#"{ version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }"#
+                    .parse::<toml_edit::Item>()
+                    .expect("valid toml dependency value")
+            }
+        }
     };
-    dependencies.insert("toasty", item);
+    dependencies.insert(dependency_name, item);
     fs::write(&manifest_path, document.to_string())
         .with_context(|| format!("failed to write {}", manifest_path.display()))
 }
@@ -2970,7 +2980,6 @@ version.workspace = true
 
 [dependencies]
 serde.workspace = true
-sea-orm.workspace = true
 "#,
         )
         .expect("manifest");
@@ -2991,10 +3000,54 @@ sea-orm.workspace = true
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains("toasty = { workspace = true }"));
+        assert!(!manifest.contains("sea-orm.workspace = true"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("toasty::Model"));
         let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
         assert!(mod_rs.contains("pub use user::{User, UserRepository};"));
+    }
+
+    #[test]
+    fn sea_orm_generation_updates_manifest_dependency_when_selected() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-sea-orm-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "user-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+toasty.workspace = true
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            CREATE TABLE users (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Sql,
+            ModelOrm::SeaOrm,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains("sea-orm = { workspace = true }"));
+        let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
+        assert!(module.contains("sea_orm::"));
     }
 
     #[test]

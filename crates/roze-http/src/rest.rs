@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
-use poem::{listener::TcpListener, Endpoint, Server};
+use axum::Router;
+use tokio::net::TcpListener;
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -9,16 +10,13 @@ pub struct RestConfig {
     pub graceful_shutdown_timeout: Duration,
 }
 
-pub struct RestServer<E> {
+pub struct RestServer {
     config: RestConfig,
-    endpoint: E,
+    endpoint: Router,
 }
 
-impl<E> RestServer<E>
-where
-    E: Endpoint + 'static,
-{
-    pub fn new(addr: SocketAddr, endpoint: E) -> Self {
+impl RestServer {
+    pub fn new(addr: SocketAddr, endpoint: Router) -> Self {
         Self {
             config: RestConfig {
                 addr,
@@ -28,19 +26,17 @@ where
         }
     }
 
-    pub fn with_config(config: RestConfig, endpoint: E) -> Self {
+    pub fn with_config(config: RestConfig, endpoint: Router) -> Self {
         Self { config, endpoint }
     }
 
     pub async fn serve(self) -> std::io::Result<()> {
         info!(addr = %self.config.addr, "REST server listening");
 
-        Server::new(TcpListener::bind(self.config.addr))
-            .run_with_graceful_shutdown(
-                self.endpoint,
-                shutdown_signal(),
-                Some(self.config.graceful_shutdown_timeout),
-            )
+        let listener = TcpListener::bind(self.config.addr).await?;
+        let service = self.endpoint.into_make_service();
+        axum::serve(listener, service)
+            .with_graceful_shutdown(shutdown_signal())
             .await
     }
 }
@@ -53,7 +49,7 @@ async fn shutdown_signal() {
 macro_rules! parse_json_request {
     ($result:expr) => {
         match $result {
-            Ok(poem::web::Json(payload)) => payload,
+            Ok(axum::Json(payload)) => payload,
             Err(err) => {
                 return Err(roze_error::RozeError::BadRequest(err.to_string()));
             }

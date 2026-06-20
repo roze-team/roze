@@ -7,7 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 config.workspace = true
-poem.workspace = true
+axum.workspace = true
 roze-config = { path = "../../crates/roze-config" }
 roze-error = { path = "../../crates/roze-error" }
 roze-http = { path = "../../crates/roze-http" }
