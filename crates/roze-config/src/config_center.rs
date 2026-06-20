@@ -7,7 +7,7 @@ use std::{
     string::ToString,
     sync::Arc as StdArc,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -15,10 +15,11 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::StreamExt;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::json;
 use tokio::{
-    sync::RwLock,
+    sync::{mpsc, RwLock},
     time::{self, Instant},
 };
 use tracing::warn;
@@ -155,6 +156,16 @@ impl Default for ConfigCenterConfig {
 
 pub trait Subscriber: Send + Sync {
     fn value(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+
+    fn supports_watch(&self) -> bool {
+        false
+    }
+
+    fn watch(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<mpsc::UnboundedReceiver<String>>> + Send + '_>> {
+        Box::pin(async { Err(anyhow!("subscriber does not support watch")) })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +246,55 @@ impl Subscriber for EtcdSubscriber {
                 .unwrap_or_else(|| anyhow!("no configured etcd endpoint could return config")))
         })
     }
+
+    fn supports_watch(&self) -> bool {
+        true
+    }
+
+    fn watch(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<mpsc::UnboundedReceiver<String>>> + Send + '_>> {
+        let endpoints = self.endpoints.clone();
+        let key = self.key.clone();
+        Box::pin(async move {
+            let (tx, rx) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let last_revision = Arc::new(AtomicI64::new(0));
+                loop {
+                    let client = reqwest::Client::new();
+                    let mut connected = false;
+                    for endpoint in config_center_endpoints(&endpoints, "http://127.0.0.1:2379") {
+                        match stream_etcd_watch(
+                            &client,
+                            &endpoint,
+                            &key,
+                            tx.clone(),
+                            last_revision.clone(),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                connected = true;
+                                break;
+                            }
+                            Err(err) => {
+                                warn!(
+                                    %err,
+                                    endpoint = %endpoint,
+                                    key = %key,
+                                    "etcd native watch stream failed"
+                                );
+                            }
+                        }
+                    }
+                    if !connected {
+                        time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            });
+            Ok(rx)
+        })
+    }
 }
 
 #[derive(Default)]
@@ -270,6 +330,24 @@ impl Subscriber for CascadingSubscriber {
             }
 
             Err(last_error.unwrap_or_else(|| anyhow!("no config source available")))
+        })
+    }
+
+    fn supports_watch(&self) -> bool {
+        self.sources.iter().any(|source| source.supports_watch())
+    }
+
+    fn watch(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<mpsc::UnboundedReceiver<String>>> + Send + '_>> {
+        let sources = self.sources.clone();
+        Box::pin(async move {
+            for source in sources {
+                if source.supports_watch() {
+                    return source.watch().await;
+                }
+            }
+            Err(anyhow!("no config source supports watch"))
         })
     }
 }
@@ -353,15 +431,39 @@ async fn watch_loop<T>(
         .unwrap_or_else(|| "config-center".to_string());
     let mut last_hash = snapshot_hash(&last_snapshot);
     let mut pending: Option<(String, Instant)> = None;
+    let mut watch_rx = if subscriber.supports_watch() {
+        match subscriber.watch().await {
+            Ok(rx) => {
+                tracing::info!(source = %source, "config center using native watch");
+                Some(rx)
+            }
+            Err(err) => {
+                warn!(%err, source = %source, "config center native watch unavailable, fallback to polling");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     loop {
-        time::sleep(options.poll_interval).await;
-
-        let snapshot = match subscriber.value().await {
-            Ok(raw) => raw,
-            Err(err) => {
-                warn!(%err, source = %source, "read config center value failed");
-                continue;
+        let snapshot = if let Some(rx) = &mut watch_rx {
+            match rx.recv().await {
+                Some(raw) => raw,
+                None => {
+                    warn!(source = %source, "config center native watch channel closed, fallback to polling");
+                    watch_rx = None;
+                    continue;
+                }
+            }
+        } else {
+            time::sleep(options.poll_interval).await;
+            match subscriber.value().await {
+                Ok(raw) => raw,
+                Err(err) => {
+                    warn!(%err, source = %source, "read config center value failed");
+                    continue;
+                }
             }
         };
 
@@ -524,12 +626,135 @@ async fn fetch_etcd_key(client: &reqwest::Client, endpoint: &str, key: &str) -> 
     String::from_utf8(decoded).map_err(|err| anyhow!("config value is not utf-8: {err}"))
 }
 
+async fn stream_etcd_watch(
+    client: &reqwest::Client,
+    endpoint: &str,
+    key: &str,
+    tx: mpsc::UnboundedSender<String>,
+    last_revision: Arc<AtomicI64>,
+) -> Result<()> {
+    let mut create_request = serde_json::Map::new();
+    create_request.insert("key".to_string(), json!(STANDARD.encode(key)));
+    let revision = last_revision.load(Ordering::SeqCst);
+    if revision > 0 {
+        create_request.insert("start_revision".to_string(), json!(revision + 1));
+    }
+    let body = json!({
+        "create_request": create_request,
+    });
+    let response = client
+        .post(format!("{}/v3/watch", normalize_endpoint(endpoint)))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buffer.push_str(std::str::from_utf8(&chunk)?);
+
+        while let Some(idx) = buffer.find('\n') {
+            let line = buffer[..idx].trim().to_string();
+            buffer = buffer[idx + 1..].to_string();
+            if line.is_empty() {
+                continue;
+            }
+            for update in etcd_watch_updates(&line)? {
+                if let Some(revision) = update.revision {
+                    last_revision.fetch_max(revision, Ordering::SeqCst);
+                }
+                if let Some(value) = update.value {
+                    let _ = tx.send(value);
+                }
+            }
+        }
+
+        if let Ok(updates) = etcd_watch_updates(&buffer) {
+            buffer.clear();
+            for update in updates {
+                if let Some(revision) = update.revision {
+                    last_revision.fetch_max(revision, Ordering::SeqCst);
+                }
+                if let Some(value) = update.value {
+                    let _ = tx.send(value);
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("etcd watch stream ended"))
+}
+
+#[cfg(test)]
+fn etcd_watch_values(raw: &str) -> Result<Vec<String>> {
+    Ok(etcd_watch_updates(raw)?
+        .into_iter()
+        .filter_map(|update| update.value)
+        .collect())
+}
+
+fn etcd_watch_updates(raw: &str) -> Result<Vec<EtcdWatchUpdate>> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let response: EtcdWatchResponse = serde_json::from_str(raw)?;
+    let mut updates = Vec::new();
+    let Some(result) = response.result else {
+        return Ok(updates);
+    };
+    let header_revision = result
+        .header
+        .as_ref()
+        .and_then(|header| header.revision.as_deref())
+        .and_then(|revision| revision.parse::<i64>().ok());
+    for event in result.events {
+        if let Some(kv) = event.kv {
+            let revision = kv
+                .mod_revision
+                .as_deref()
+                .and_then(|revision| revision.parse::<i64>().ok())
+                .or(header_revision);
+            let value = if kv.value.is_empty() {
+                None
+            } else {
+                let decoded = STANDARD
+                    .decode(kv.value)
+                    .map_err(|err| anyhow!("decode etcd watch value failed: {err}"))?;
+                Some(
+                    String::from_utf8(decoded)
+                        .map_err(|err| anyhow!("config watch value is not utf-8: {err}"))?,
+                )
+            };
+            updates.push(EtcdWatchUpdate { value, revision });
+        } else if let Some(revision) = header_revision {
+            updates.push(EtcdWatchUpdate {
+                value: None,
+                revision: Some(revision),
+            });
+        }
+    }
+    Ok(updates)
+}
+
 fn normalize_endpoint(endpoint: &str) -> String {
     let endpoint = endpoint.trim().trim_end_matches('/');
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
         format!("http://{endpoint}")
+    }
+}
+
+fn config_center_endpoints(configured: &[String], default: &str) -> Vec<String> {
+    if configured.is_empty() {
+        vec![default.to_string()]
+    } else {
+        configured
+            .iter()
+            .map(|endpoint| normalize_endpoint(endpoint))
+            .collect()
     }
 }
 
@@ -541,5 +766,75 @@ struct EtcdRangeResponse {
 
 #[derive(Debug, Deserialize)]
 struct EtcdKv {
+    #[serde(default)]
     value: String,
+    #[serde(default)]
+    mod_revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EtcdWatchResponse {
+    #[serde(default)]
+    result: Option<EtcdWatchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EtcdWatchResult {
+    #[serde(default)]
+    header: Option<EtcdWatchHeader>,
+    #[serde(default)]
+    events: Vec<EtcdWatchEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EtcdWatchHeader {
+    #[serde(default)]
+    revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EtcdWatchEvent {
+    #[serde(default)]
+    kv: Option<EtcdKv>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EtcdWatchUpdate {
+    value: Option<String>,
+    revision: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_etcd_watch_values() {
+        let value = STANDARD.encode("name: demo\n");
+        let raw = serde_json::json!({
+            "result": {
+                "events": [
+                    {
+                        "type": "PUT",
+                        "kv": {
+                            "key": STANDARD.encode("roze/demo/config"),
+                            "value": value,
+                        }
+                    }
+                ]
+            }
+        });
+
+        let values = etcd_watch_values(&raw.to_string()).expect("watch values");
+
+        assert_eq!(values, vec!["name: demo\n"]);
+    }
+
+    #[test]
+    fn normalizes_config_center_endpoints() {
+        assert_eq!(
+            config_center_endpoints(&["127.0.0.1:2379".to_string()], "http://default"),
+            vec!["http://127.0.0.1:2379"]
+        );
+    }
 }

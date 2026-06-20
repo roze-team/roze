@@ -71,6 +71,7 @@ gateway:
   - `route.rewrite` 若存在则用重写后的前缀替换匹配前缀；
   - 无 `rewrite` 则保留原始请求路径。
 - 上游可配置静态 `service.upstream`，也可配置 `service.registry_name` 从注册中心动态发现实例；两者同时存在时，`registry_name` 优先，静态 upstream 作为未启用动态发现时的默认路径。
+- 注册中心发现由 `CachedRegistryResolver` 维护本地实例快照；etcd registry 支持原生 `/v3/watch`，实例变更会即时刷新缓存，周期 refresh 作为 watch 断线兜底。
 - `service.outlier` 开启实例级被动摘除：
   - `failure_threshold`：同一实例连续失败阈值，默认 3；
   - `ejection_ms`：摘除时长，默认 30000；

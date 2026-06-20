@@ -2,6 +2,7 @@
 
 ## 目标
 - 支持 `Etcd -> Env -> File` 的配置优先级。
+- Etcd 使用 v3 原生 `/v3/watch` 流式监听。
 - 配置变更触发热更新并记录可观测事件。
 - 解析失败不替换内存中的旧配置。
 
@@ -14,6 +15,11 @@
   - `ROZE_CONFIG_CENTER_NAMESPACE` + `ROZE_CONFIG_CENTER_APP`: 生成默认 key（可选）
 - 优先级
   - 当存在 `ROZE_CONFIG_CENTER_ETCD_ENDPOINTS` 时，优先使用 Etcd（第一位）
+- 监听方式
+  - 启动时通过 `/v3/kv/range` 读取初始值。
+  - 运行期通过 `/v3/watch` 监听同一个 key 的 PUT 事件。
+  - watch 记录 `mod_revision` 或 header `revision`；断线重连时使用 `start_revision = last_revision + 1` 恢复。
+  - watch 流断开后自动重连；无法建立 watch 时回退到 `ROZE_CONFIG_CENTER_POLL_SECS` 间隔读取。
 
 ### 环境变量
 - 关键环境变量
@@ -45,7 +51,7 @@
 
 ## 触发约束
 - debounce 默认 400ms（可通过 `ROZE_CONFIG_CENTER_DEBOUNCE_MS` 覆盖）
-- 轮询默认 5s（可通过 `ROZE_CONFIG_CENTER_POLL_SECS` 覆盖）
+- Etcd 默认使用原生 watch；轮询默认 5s 仅用于 Env/File 或 Etcd watch 失败兜底（可通过 `ROZE_CONFIG_CENTER_POLL_SECS` 覆盖）
 - 失败时不更新内存配置；仅记录失败事件
 - 默认配置格式为 `yaml`，可用 `ROZE_CONFIG_CENTER_FORMAT` 覆盖
 
@@ -53,7 +59,7 @@
 - `add_reload_listener` 日志：
   - 成功：`event=config.reload.applied`
   - 失败：`event=config.reload.failed`
-- `watch` 通道下发新配置后触发 Kafka pipeline 重建：
+- Etcd 原生 watch 或 fallback poll 下发新配置后触发 Kafka pipeline 重建：
   - 条件：`kafka` 配置签名变更
 
 ## 快速示例

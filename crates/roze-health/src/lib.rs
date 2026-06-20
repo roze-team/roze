@@ -1,6 +1,8 @@
 use std::fmt::{self, Display};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthStatus {
     Healthy,
     Degraded,
@@ -27,7 +29,7 @@ impl Display for HealthStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthCheck {
     pub name: String,
     pub status: HealthStatus,
@@ -60,7 +62,7 @@ impl HealthCheck {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthReport {
     pub checks: Vec<HealthCheck>,
 }
@@ -107,6 +109,32 @@ impl HealthReport {
         }
         out
     }
+
+    pub fn probe(&self, probe: ProbeKind) -> ProbeReport {
+        ProbeReport {
+            probe,
+            status: self.overall_status(),
+            ready: self.is_ready(),
+            alive: self.is_alive(),
+            checks: self.checks.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProbeKind {
+    Liveness,
+    Readiness,
+    Startup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeReport {
+    pub probe: ProbeKind,
+    pub status: HealthStatus,
+    pub ready: bool,
+    pub alive: bool,
+    pub checks: Vec<HealthCheck>,
 }
 
 #[cfg(test)]
@@ -124,5 +152,8 @@ mod tests {
         assert!(report.is_alive());
         assert!(!report.is_ready());
         assert!(report.render_text().contains("cache=degraded"));
+        let probe = report.probe(ProbeKind::Readiness);
+        assert_eq!(probe.probe, ProbeKind::Readiness);
+        assert!(!probe.ready);
     }
 }

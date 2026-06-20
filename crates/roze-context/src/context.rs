@@ -13,10 +13,13 @@ use std::{
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const TRACE_ID_HEADER: &str = roze_trace::TRACE_ID_HEADER;
 pub const TIMEOUT_HEADER: &str = "x-roze-timeout-ms";
+pub const LOCALE_HEADER: &str = "x-roze-locale";
+pub const ACCEPT_LANGUAGE_HEADER: &str = "accept-language";
 pub const SUBJECT_HEADER: &str = "x-roze-subject";
 pub const TENANT_HEADER: &str = "x-roze-tenant";
 pub const ROLES_HEADER: &str = "x-roze-roles";
 pub const METADATA_HEADER_PREFIX: &str = "x-roze-meta-";
+pub const LOCALE_METADATA_KEY: &str = "locale";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
@@ -256,6 +259,14 @@ impl Context {
             .expect("context metadata mutex poisoned")
             .get(key.as_ref())
             .cloned()
+    }
+
+    pub fn locale(&self) -> Option<String> {
+        self.metadata_value(LOCALE_METADATA_KEY)
+    }
+
+    pub fn with_locale(&self, locale: impl Into<String>) -> Self {
+        self.with_metadata(LOCALE_METADATA_KEY, locale)
     }
 
     pub fn with_metadata(&self, key: impl Into<String>, value: impl Into<String>) -> Self {

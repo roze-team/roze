@@ -8,13 +8,16 @@ Roze is a small Rust service framework scaffold with:
 - `crates/roze-config`: YAML/TOML/env configuration loading.
 - `crates/roze-log`: tracing and `trace_id` plumbing.
 - `crates/roze-auth`: JWT and auth helpers.
-- `crates/roze-db`: SeaORM and database helpers.
+- `crates/roze-db`: database connection helpers.
+- `crates/roze-orm`: common ORM contracts for pagination, filters, tenant scope, audit fields, and soft delete.
 - `crates/roze-cache`: Redis helpers.
 - `crates/roze-openapi`: Swagger/OpenAPI support.
 - `crates/roze-rpc`: tonic gRPC helpers.
 - `crates/roze-job`: scheduled job scaffolding.
 - `crates/roze-mq`: messaging scaffolding.
+- `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
 - `apps/rozectl`: code generation for `.api` service definitions.
+- `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.
 - `apps/roze-example`: a generated example service from `example/user.api`.
 
 The direction is go-zero style microservice ergonomics with Rust-native building blocks:
@@ -23,8 +26,9 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
 - REST: `axum`, `tower`, and `tower-http` with `roze-result::ApiResponse`, `roze-error::RozeError`, and Roze middleware boundaries.
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
-- ORM: `SeaORM` is the default database layer; generated services get an optional `database.url` config and `ServiceContext::db`.
-- Governance: registry, balancing, middleware, config, tracing, and error handling live in `roze-core`.
+- ORM: `Toasty` is the default generated model layer; shared ORM request contracts live in `roze-orm`.
+- DTM: built-in distributed transaction manager defaults to TCC and keeps Saga as an optional workflow.
+- Governance: registry, balancing, middleware, config center, tracing, and error handling live across the `roze-*` crates.
 
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.
 

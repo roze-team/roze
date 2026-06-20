@@ -34,7 +34,7 @@ const REST_ROZE_CRATES: [&str; 15] = [
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 12] = [
+const RPC_ROZE_CRATES: [&str; 13] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -47,6 +47,7 @@ const RPC_ROZE_CRATES: [&str; 12] = [
     "roze-result",
     "roze-rpc",
     "roze-trace",
+    "roze-validation",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1185,6 +1186,7 @@ toasty.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+validator.workspace = true
 tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
@@ -1193,6 +1195,7 @@ toasty = { version = "0.7", default-features = false, features = ["sqlite", "pos
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.11"
+validator = { version = "0.20", features = ["derive"] }
 tracing = "0.1""#
             },
             if in_workspace {

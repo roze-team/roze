@@ -18,6 +18,8 @@ Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共�
 - `x-request-id`：对应 `Context::request_id()`。
 - `x-trace-id`：对应 `Context::trace_id()`。
 - `x-roze-timeout-ms`：剩余 timeout 毫秒数。
+- `x-roze-locale`：请求语言，例如 `zh-CN`、`en-US`。
+- `Accept-Language`：未提供 `x-roze-locale` 时作为语言来源。
 - `x-roze-subject`：认证主体。
 - `x-roze-tenant`：租户。
 - `x-roze-roles`：逗号分隔角色列表。
@@ -27,6 +29,7 @@ Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共�
 
 - `roze-middleware::axum_request_context` 从 HTTP header 构造 `Context` 并写入 Axum request extensions。
 - 未传入 `x-request-id` 或 `x-trace-id` 时，入口中间件生成新值并回写响应 header。
+- `x-roze-locale` 或 `Accept-Language` 会进入 `Context::locale()`。
 - `roze-middleware::axum_auth` 验证 JWT 后把 `subject/roles/tenant` 写入同一个 `Context`。
 
 ## RPC/gRPC 边界
@@ -34,6 +37,12 @@ Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共�
 - `roze_rpc::rpc::apply_request_context` 和 `roze_grpc::apply_context` 将 Context 写入 tonic metadata。
 - `roze_rpc::rpc::request_context` 和 `roze_grpc::request_context` 从 tonic metadata 恢复完整 Context。
 - 生成的 RPC client 应继续以 `&roze_context::Context` 作为第一个业务上下文参数。
+- RPC 错误统一由 `roze_rpc::rpc::status_from_error` 生成，metadata 包含：
+  - `x-roze-error-code`
+  - `x-roze-error-kind`
+  - `x-request-id`
+  - `x-trace-id`
+  - `x-roze-locale`
 
 ## Gateway 边界
 
@@ -43,4 +52,3 @@ Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共�
   - `x-roze-tenant`
   - `x-roze-roles`
 - Gateway 保留并透传 `x-request-id`、`x-trace-id` 和其它非 hop-by-hop header。
-

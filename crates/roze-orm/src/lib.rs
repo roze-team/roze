@@ -17,6 +17,75 @@ impl Default for PageRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sort {
+    pub field: String,
+    pub order: SortOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Like,
+    In,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Filter {
+    pub field: String,
+    pub op: FilterOp,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueryRequest {
+    pub page: PageRequest,
+    pub sorts: Vec<Sort>,
+    pub filters: Vec<Filter>,
+    pub tenant: Option<TenantScope>,
+    pub include_deleted: bool,
+}
+
+impl QueryRequest {
+    pub fn new(page: PageRequest) -> Self {
+        Self {
+            page,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantScope {
+    pub tenant_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditFields {
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub created_at_millis: Option<u64>,
+    pub updated_at_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftDeleteFields {
+    pub deleted: bool,
+    pub deleted_at_millis: Option<u64>,
+    pub deleted_by: Option<String>,
+}
+
 impl PageRequest {
     pub fn new(page: u64, page_size: u64) -> Self {
         Self {
@@ -114,5 +183,28 @@ mod tests {
         let page = Page::new(vec![1, 2, 3], 3, PageRequest::default());
         let mapped = page.map(|value| value.to_string());
         assert_eq!(mapped.items, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn query_request_carries_common_scopes() {
+        let request = QueryRequest {
+            page: PageRequest::new(2, 50),
+            sorts: vec![Sort {
+                field: "created_at".into(),
+                order: SortOrder::Desc,
+            }],
+            filters: vec![Filter {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: serde_json::json!("active"),
+            }],
+            tenant: Some(TenantScope {
+                tenant_id: "tenant-1".into(),
+            }),
+            include_deleted: false,
+        };
+
+        assert_eq!(request.page.offset(), 50);
+        assert_eq!(request.tenant.unwrap().tenant_id, "tenant-1");
     }
 }

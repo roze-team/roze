@@ -1,18 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use tracing::Span;
 
 pub const TRACE_ID_HEADER: &str = "x-trace-id";
 
 pub fn generate_trace_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{nanos:x}-{seq:x}")
+    uuid::Uuid::now_v7().to_string()
 }
 
 pub fn service_span(service: impl AsRef<str>) -> Span {
@@ -44,6 +35,10 @@ mod tests {
     fn builds_trace_helpers() {
         let trace_id = generate_trace_id();
         assert!(!trace_id.is_empty());
+        assert_eq!(
+            uuid::Uuid::parse_str(&trace_id).unwrap().get_version_num(),
+            7
+        );
 
         let span = service_span("roze");
         record_trace_id(&span, "trace-123");

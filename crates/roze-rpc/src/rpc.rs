@@ -17,6 +17,7 @@ use crate::{
 };
 use roze_auth::principal_from_claims;
 use roze_context::{AuthContext, Context};
+use roze_error::RozeError;
 use roze_grpc::transport::{
     Channel, Code, Endpoint, MetadataMap, MetadataValue, Request, Server, Status,
 };
@@ -29,6 +30,9 @@ use tracing::info;
 static METHOD_RATE_LIMITS: OnceLock<Mutex<HashMap<String, MethodRateLimitState>>> = OnceLock::new();
 static METHOD_BREAKERS: OnceLock<Mutex<HashMap<String, MethodBreakerState>>> = OnceLock::new();
 static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
+
+pub const ERROR_CODE_METADATA: &str = "x-roze-error-code";
+pub const ERROR_KIND_METADATA: &str = "x-roze-error-kind";
 
 #[derive(Debug, Clone)]
 pub struct RpcConfig {
@@ -434,6 +438,55 @@ pub fn apply_request_context<T>(request: &mut Request<T>, context: &Context) {
     for (key, value) in context.metadata() {
         let header = format!("{}{}", roze_context::METADATA_HEADER_PREFIX, key);
         insert_metadata(request.metadata_mut(), &header, &value);
+    }
+}
+
+pub fn status_from_error(error: RozeError, context: &Context) -> Status {
+    let code = match error {
+        RozeError::BadRequest(_) => Code::InvalidArgument,
+        RozeError::Unauthorized => Code::Unauthenticated,
+        RozeError::NotFound(_) => Code::NotFound,
+        RozeError::Internal(_) => Code::Internal,
+    };
+    let locale = context.locale();
+    let mut metadata = MetadataMap::new();
+    insert_metadata(
+        &mut metadata,
+        ERROR_CODE_METADATA,
+        &error.code().to_string(),
+    );
+    insert_metadata(&mut metadata, ERROR_KIND_METADATA, error.kind());
+    insert_metadata(
+        &mut metadata,
+        roze_context::REQUEST_ID_HEADER,
+        &context.request_id(),
+    );
+    insert_metadata(
+        &mut metadata,
+        roze_context::TRACE_ID_HEADER,
+        &context.trace_id(),
+    );
+    if let Some(locale) = locale.as_deref() {
+        insert_metadata(&mut metadata, roze_context::LOCALE_HEADER, locale);
+    }
+    Status::with_metadata(
+        code,
+        error.message_i18n(locale.as_deref().unwrap_or("en-US")),
+        metadata,
+    )
+}
+
+pub fn invalid_argument_status(message: impl Into<String>, context: &Context) -> Status {
+    let error = RozeError::BadRequest(message.into());
+    status_from_error(error, context)
+}
+
+pub fn error_from_status(status: &Status) -> RozeError {
+    match status.code() {
+        Code::InvalidArgument => RozeError::BadRequest(status.message().to_string()),
+        Code::Unauthenticated => RozeError::Unauthorized,
+        Code::NotFound => RozeError::NotFound(status.message().to_string()),
+        _ => RozeError::Internal(status.message().to_string()),
     }
 }
 

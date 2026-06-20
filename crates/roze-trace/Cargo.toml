@@ -6,3 +6,4 @@ version.workspace = true
 
 [dependencies]
 tracing.workspace = true
+uuid.workspace = true

@@ -1,18 +1,19 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "rdkafka")]
+use std::time::Duration;
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    sync::{broadcast, mpsc},
-    task::JoinHandle,
-};
+#[cfg(feature = "rdkafka")]
+use tokio::sync::mpsc;
+use tokio::{sync::broadcast, task::JoinHandle};
 
 #[cfg(feature = "rdkafka")]
 use rdkafka::{
@@ -204,14 +205,36 @@ pub struct KafkaRecord {
 
 impl KafkaRecord {
     pub fn new(topic: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self::with_trace_id(topic, payload, roze_trace::generate_trace_id())
+    }
+
+    pub fn with_trace_id(
+        topic: impl Into<String>,
+        payload: serde_json::Value,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        let mut headers = HashMap::new();
+        headers.insert(roze_trace::TRACE_ID_HEADER.to_string(), trace_id.into());
         Self {
             topic: topic.into(),
             key: None,
-            headers: HashMap::new(),
+            headers,
             payload,
             attempt: 0,
             dead_letter_topic: None,
         }
+    }
+
+    pub fn ensure_trace_id(&mut self) -> String {
+        if let Some((_, value)) = self.headers.iter().find(|(key, value)| {
+            key.eq_ignore_ascii_case(roze_trace::TRACE_ID_HEADER) && !value.trim().is_empty()
+        }) {
+            return value.clone();
+        }
+        let trace_id = roze_trace::generate_trace_id();
+        self.headers
+            .insert(roze_trace::TRACE_ID_HEADER.to_string(), trace_id.clone());
+        trace_id
     }
 
     pub fn with_dead_letter_topic(mut self, topic: impl Into<String>) -> Self {
@@ -235,6 +258,30 @@ impl KafkaRecord {
             payload: event.payload,
             attempt: event.attempt,
             dead_letter_topic: None,
+        }
+    }
+
+    pub fn to_mq_message(&self) -> roze_mq::Message {
+        roze_mq::Message {
+            topic: self.topic.clone(),
+            key: self.key.clone(),
+            headers: self.headers.clone(),
+            attempt: self.attempt,
+            dead_letter_topic: self.dead_letter_topic.clone(),
+            idempotency_key: None,
+            available_at_millis: None,
+            payload: self.payload.clone(),
+        }
+    }
+
+    pub fn from_mq_message(message: roze_mq::Message) -> Self {
+        Self {
+            topic: message.topic,
+            key: message.key,
+            headers: message.headers,
+            payload: message.payload,
+            attempt: message.attempt,
+            dead_letter_topic: message.dead_letter_topic,
         }
     }
 }
@@ -312,9 +359,16 @@ pub trait Subscriber: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct InMemoryKafkaBroker {
     topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>>,
-    dead_letters: Arc<Mutex<VecDeque<KafkaRecord>>>,
+    dead_letters: Arc<Mutex<VecDeque<roze_mq::DeadLetterRecord>>>,
     dead_letter_topic: Option<String>,
     max_attempts: u32,
+    next_dead_letter_id: Arc<AtomicU64>,
+    published: Arc<AtomicU64>,
+    delivered: Arc<AtomicU64>,
+    acked: Arc<AtomicU64>,
+    nacked: Arc<AtomicU64>,
+    dead_lettered: Arc<AtomicU64>,
+    replayed: Arc<AtomicU64>,
 }
 
 impl InMemoryKafkaBroker {
@@ -324,6 +378,13 @@ impl InMemoryKafkaBroker {
             dead_letters: Arc::new(Mutex::new(VecDeque::new())),
             dead_letter_topic: None,
             max_attempts: 3,
+            next_dead_letter_id: Arc::new(AtomicU64::new(1)),
+            published: Arc::new(AtomicU64::new(0)),
+            delivered: Arc::new(AtomicU64::new(0)),
+            acked: Arc::new(AtomicU64::new(0)),
+            nacked: Arc::new(AtomicU64::new(0)),
+            dead_lettered: Arc::new(AtomicU64::new(0)),
+            replayed: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -336,6 +397,15 @@ impl InMemoryKafkaBroker {
     }
 
     pub fn dead_letters(&self) -> Vec<KafkaRecord> {
+        self.dead_letters
+            .lock()
+            .expect("broker lock poisoned")
+            .iter()
+            .map(|record| KafkaRecord::from_mq_message(record.message.clone()))
+            .collect()
+    }
+
+    pub fn dead_letter_records(&self) -> Vec<roze_mq::DeadLetterRecord> {
         self.dead_letters
             .lock()
             .expect("broker lock poisoned")
@@ -355,22 +425,39 @@ impl InMemoryKafkaBroker {
             .clone()
     }
 
-    fn push_dead_letter(&self, message: KafkaRecord) {
+    fn push_dead_letter(&self, message: KafkaRecord, reason: impl Into<String>) {
+        let record = roze_mq::DeadLetterRecord {
+            id: self.next_dead_letter_id.fetch_add(1, Ordering::SeqCst),
+            original_topic: message.topic.clone(),
+            reason: reason.into(),
+            failed_at_millis: current_millis(),
+            replay_count: 0,
+            message: message.to_mq_message(),
+        };
         self.dead_letters
             .lock()
             .expect("broker lock poisoned")
-            .push_back(message);
+            .push_back(record);
+        self.dead_lettered.fetch_add(1, Ordering::SeqCst);
     }
 
     fn make_delivery(&self, message: KafkaRecord) -> Delivery {
         let broker = self.clone();
         let message_for_nack = message.clone();
 
-        let ack_fn: DeliveryAction = Arc::new(|| Box::pin(async { Ok(()) }));
+        let ack_broker = self.clone();
+        let ack_fn: DeliveryAction = Arc::new(move || {
+            let broker = ack_broker.clone();
+            Box::pin(async move {
+                broker.acked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
         let nack_fn: DeliveryAction = Arc::new(move || {
             let broker = broker.clone();
             let message = message_for_nack.clone();
             Box::pin(async move {
+                broker.nacked.fetch_add(1, Ordering::SeqCst);
                 broker.requeue_or_dead_letter(message).await;
                 Ok(())
             })
@@ -382,7 +469,7 @@ impl InMemoryKafkaBroker {
     fn route_or_dead_letter(&self, mut message: KafkaRecord) {
         message.attempt = message.attempt.saturating_add(1);
         if message.attempt > self.max_attempts {
-            self.push_dead_letter(message.clone());
+            self.push_dead_letter(message.clone(), "max_attempts_exceeded");
             if let Some(dead_letter_topic) = message
                 .dead_letter_topic
                 .clone()
@@ -399,6 +486,7 @@ impl InMemoryKafkaBroker {
         let _ = self
             .sender_for(&message.topic)
             .send(self.make_delivery(message));
+        self.delivered.fetch_add(1, Ordering::SeqCst);
     }
 
     async fn route(&self, message: KafkaRecord) {
@@ -418,7 +506,9 @@ impl Default for InMemoryKafkaBroker {
 
 #[async_trait::async_trait]
 impl Publisher for InMemoryKafkaBroker {
-    async fn publish(&self, message: KafkaRecord) -> anyhow::Result<()> {
+    async fn publish(&self, mut message: KafkaRecord) -> anyhow::Result<()> {
+        message.ensure_trace_id();
+        self.published.fetch_add(1, Ordering::SeqCst);
         self.route(message).await;
         Ok(())
     }
@@ -428,6 +518,81 @@ impl Publisher for InMemoryKafkaBroker {
 impl Subscriber for InMemoryKafkaBroker {
     async fn subscribe(&self, topic: &str) -> anyhow::Result<broadcast::Receiver<Delivery>> {
         Ok(self.sender_for(topic).subscribe())
+    }
+}
+
+#[async_trait::async_trait]
+impl roze_mq::MqAdmin for InMemoryKafkaBroker {
+    async fn stats(&self) -> anyhow::Result<roze_mq::MqStats> {
+        Ok(roze_mq::MqStats {
+            published: self.published.load(Ordering::SeqCst),
+            delivered: self.delivered.load(Ordering::SeqCst),
+            acked: self.acked.load(Ordering::SeqCst),
+            nacked: self.nacked.load(Ordering::SeqCst),
+            duplicated: 0,
+            dead_lettered: self.dead_lettered.load(Ordering::SeqCst),
+            replayed: self.replayed.load(Ordering::SeqCst),
+            dead_letter_pending: self
+                .dead_letters
+                .lock()
+                .expect("broker lock poisoned")
+                .len() as u64,
+        })
+    }
+
+    async fn dead_letters(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<roze_mq::DeadLetterRecord>> {
+        let limit = limit.clamp(1, 500);
+        Ok(self
+            .dead_letters
+            .lock()
+            .expect("broker lock poisoned")
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn replay_dead_letter(&self, id: u64) -> anyhow::Result<Option<roze_mq::Message>> {
+        let mut message = {
+            let mut dead_letters = self.dead_letters.lock().expect("broker lock poisoned");
+            let Some(record) = dead_letters.iter_mut().find(|record| record.id == id) else {
+                return Ok(None);
+            };
+            record.replay_count = record.replay_count.saturating_add(1);
+            let mut message = record.message.clone();
+            message.topic = record.original_topic.clone();
+            message.attempt = 0;
+            message.available_at_millis = None;
+            message
+        };
+        message.ensure_trace_id();
+        self.replayed.fetch_add(1, Ordering::SeqCst);
+        self.route(KafkaRecord::from_mq_message(message.clone()))
+            .await;
+        Ok(Some(message))
+    }
+
+    async fn purge_dead_letter(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<Option<roze_mq::DeadLetterRecord>> {
+        let mut dead_letters = self.dead_letters.lock().expect("broker lock poisoned");
+        let Some(index) = dead_letters.iter().position(|record| record.id == id) else {
+            return Ok(None);
+        };
+        Ok(dead_letters.remove(index))
+    }
+
+    async fn clear_dead_letters(&self) -> anyhow::Result<usize> {
+        let mut dead_letters = self.dead_letters.lock().expect("broker lock poisoned");
+        let len = dead_letters.len();
+        dead_letters.clear();
+        Ok(len)
     }
 }
 
@@ -479,7 +644,8 @@ impl RdkafkaProducer {
 #[cfg(feature = "rdkafka")]
 #[async_trait::async_trait]
 impl Publisher for RdkafkaProducer {
-    async fn publish(&self, message: KafkaRecord) -> anyhow::Result<()> {
+    async fn publish(&self, mut message: KafkaRecord) -> anyhow::Result<()> {
+        message.ensure_trace_id();
         let topic = self.config.topic_name(message.topic);
         let payload = serde_json::to_vec(&message.payload)?;
         let mut headers = OwnedHeaders::new();
@@ -829,6 +995,13 @@ where
     publisher.publish(KafkaRecord::new(topic, payload)).await
 }
 
+fn current_millis() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_millis() as u64,
+        Err(_) => 0,
+    }
+}
+
 pub async fn spawn_consumer<S, F, Fut>(
     subscriber: &S,
     topic: impl Into<String>,
@@ -887,6 +1060,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roze_mq::MqAdmin;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -923,6 +1097,15 @@ mod tests {
         let delivery = receiver.recv().await.expect("delivery");
         assert_eq!(delivery.message().topic, "orders");
         assert_eq!(delivery.message().payload["id"], 1);
+        let trace_id = delivery
+            .message()
+            .headers
+            .get(roze_trace::TRACE_ID_HEADER)
+            .expect("trace header");
+        assert_eq!(
+            uuid::Uuid::parse_str(trace_id).unwrap().get_version_num(),
+            7
+        );
     }
 
     #[tokio::test]
@@ -945,6 +1128,40 @@ mod tests {
         let dead_delivery = dead.recv().await.expect("dead");
         assert_eq!(dead_delivery.message().topic, "dead");
         assert_eq!(dead_delivery.message().payload["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn admin_replays_kafka_dead_letters() {
+        let broker = InMemoryKafkaBroker::with_dead_letter("dead", 1);
+        let mut orders = broker.subscribe("orders").await.expect("subscribe orders");
+        let mut replay = broker.subscribe("orders").await.expect("subscribe replay");
+
+        broker
+            .publish(KafkaRecord::new("orders", serde_json::json!({"id": 9})))
+            .await
+            .expect("publish");
+        let first = orders.recv().await.expect("delivery");
+        first.nack().await.expect("nack");
+
+        let records = MqAdmin::dead_letters(&broker, 0, 10)
+            .await
+            .expect("dead letters");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].original_topic, "orders");
+
+        let replayed = broker
+            .replay_dead_letter(records[0].id)
+            .await
+            .expect("replay")
+            .expect("message");
+        assert_eq!(replayed.topic, "orders");
+        let delivery = replay.recv().await.expect("replayed");
+        assert_eq!(delivery.message().payload["id"], 9);
+
+        let stats = broker.stats().await.expect("stats");
+        assert_eq!(stats.dead_lettered, 1);
+        assert_eq!(stats.replayed, 1);
+        assert_eq!(broker.clear_dead_letters().await.expect("clear"), 1);
     }
 
     #[tokio::test]

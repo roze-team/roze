@@ -65,7 +65,8 @@ pub async fn axum_request_context(mut req: AxumRequest, next: Next) -> AxumRespo
         .with_metadata_map(incoming_axum_metadata(&req));
     req.extensions_mut().insert(context.clone());
 
-    let mut response = next.run(req).await;
+    let locale = context.locale();
+    let mut response = roze_error::scope_locale(locale, next.run(req)).await;
     insert_axum_response_header(
         response.headers_mut(),
         roze_context::REQUEST_ID_HEADER,
@@ -304,7 +305,8 @@ fn incoming_axum_timeout(req: &AxumRequest) -> Option<Duration> {
 }
 
 fn incoming_axum_metadata(req: &AxumRequest) -> BTreeMap<String, String> {
-    req.headers()
+    let mut metadata = req
+        .headers()
         .iter()
         .filter_map(|(name, value)| {
             let key = name
@@ -313,7 +315,14 @@ fn incoming_axum_metadata(req: &AxumRequest) -> BTreeMap<String, String> {
             let value = value.to_str().ok()?;
             Some((key.to_string(), value.to_string()))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    if let Some(locale) = incoming_axum_header(req, roze_context::LOCALE_HEADER)
+        .or_else(|| incoming_axum_header(req, roze_context::ACCEPT_LANGUAGE_HEADER))
+        .and_then(|value| roze_error::locale_from_accept_language(&value))
+    {
+        metadata.insert(roze_context::LOCALE_METADATA_KEY.to_string(), locale);
+    }
+    metadata
 }
 
 fn ensure_axum_header(req: &mut AxumRequest, key: &'static str) -> String {
@@ -470,6 +479,8 @@ fn route_breaker_record(key: &str, success: bool, config: &BreakerConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request, routing::get};
+    use tower::ServiceExt;
 
     #[test]
     fn rate_limit_refills_burst_capacity() {
@@ -551,5 +562,30 @@ mod tests {
 
         assert_eq!(policy.timeout, Some(Duration::from_millis(50)));
         assert_eq!(policy.rate_limit.expect("rate limit").burst, 2);
+    }
+
+    #[tokio::test]
+    async fn request_context_localizes_error_response_from_accept_language() {
+        let app = apply_common(axum::Router::new().route(
+            "/private",
+            get(|| async { Err::<&'static str, RozeError>(RozeError::Unauthorized) }),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/private")
+                    .header(roze_context::ACCEPT_LANGUAGE_HEADER, "zh-CN,zh;q=0.9")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+        assert_eq!(value["msg"], "未认证或登录已失效");
     }
 }

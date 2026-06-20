@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 
@@ -40,6 +41,8 @@ pub struct TransactionPlan {
     steps: Vec<TransactionAction>,
 }
 
+pub type Saga = TransactionPlan;
+
 impl TransactionPlan {
     pub fn new() -> Self {
         Self { steps: Vec::new() }
@@ -69,6 +72,70 @@ impl TransactionPlan {
             applied.push(action);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutboxStatus {
+    Pending,
+    Published,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboxMessage {
+    pub id: String,
+    pub topic: String,
+    pub key: Option<String>,
+    pub idempotency_key: String,
+    pub payload: serde_json::Value,
+    pub status: OutboxStatus,
+    pub attempts: u32,
+    pub next_attempt_millis: Option<u64>,
+}
+
+impl OutboxMessage {
+    pub fn new(
+        id: impl Into<String>,
+        topic: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            topic: topic.into(),
+            key: None,
+            idempotency_key: idempotency_key.into(),
+            payload,
+            status: OutboxStatus::Pending,
+            attempts: 0,
+            next_attempt_millis: None,
+        }
+    }
+
+    pub fn mark_published(&mut self) {
+        self.status = OutboxStatus::Published;
+    }
+
+    pub fn mark_failed(&mut self, next_attempt_millis: Option<u64>) {
+        self.status = OutboxStatus::Failed;
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_attempt_millis = next_attempt_millis;
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxDeduper {
+    processed: std::collections::BTreeSet<String>,
+}
+
+impl InboxDeduper {
+    pub fn has_processed(&self, idempotency_key: impl AsRef<str>) -> bool {
+        self.processed.contains(idempotency_key.as_ref())
+    }
+
+    pub fn mark_processed(&mut self, idempotency_key: impl Into<String>) -> bool {
+        self.processed.insert(idempotency_key.into())
     }
 }
 
@@ -114,5 +181,28 @@ mod tests {
         assert!(plan.execute().await.is_err());
         assert_eq!(applied.load(Ordering::SeqCst), 3);
         assert_eq!(rolled_back.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn outbox_tracks_status_and_attempts() {
+        let mut message = OutboxMessage::new(
+            "1",
+            "orders",
+            "order-created-1",
+            serde_json::json!({"id": 1}),
+        );
+        message.mark_failed(Some(42));
+        assert_eq!(message.status, OutboxStatus::Failed);
+        assert_eq!(message.attempts, 1);
+        message.mark_published();
+        assert_eq!(message.status, OutboxStatus::Published);
+    }
+
+    #[test]
+    fn inbox_deduper_marks_once() {
+        let mut deduper = InboxDeduper::default();
+        assert!(deduper.mark_processed("k1"));
+        assert!(!deduper.mark_processed("k1"));
+        assert!(deduper.has_processed("k1"));
     }
 }

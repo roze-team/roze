@@ -40,6 +40,65 @@
   - `kafka.message.recover_dropped`
   - `kafka.message.requeue_retry`
 
+## MQ 治理接口
+
+`roze-mq` 提供统一治理 trait：`MqAdmin`。
+
+- `stats()`：返回发布、投递、ack、nack、重复、死信、重放、待处理死信数量。
+- `dead_letters(offset, limit)`：分页查询死信记录。
+- `replay_dead_letter(id)`：按死信 id 重放到原 topic，重置 attempt 并保留 trace header。
+- `purge_dead_letter(id)`：按死信 id 删除记录。
+- `clear_dead_letters()`：清空当前死信记录。
+
+死信记录统一结构：
+
+- `id`：治理侧唯一 id。
+- `original_topic`：原始 topic。
+- `reason`：进入死信原因，例如 `nack_max_attempts_exceeded`。
+- `failed_at_millis`：进入死信时间。
+- `replay_count`：人工重放次数。
+- `message`：原始消息快照。
+
+当前实现：
+
+- `roze-mq::InMemoryBroker` 已实现 `MqAdmin`。
+- `roze-kafka::InMemoryKafkaBroker` 已实现 `roze_mq::MqAdmin`，便于本地测试和控制面复用。
+- `roze-nats::NatsMessage` 默认带 `x-trace-id`，与 HTTP/RPC/Kafka/MQ 链路一致。
+
+## NATS JetStream
+
+`roze-nats` 提供真实 JetStream adapter：`NatsJetStream`。
+
+配置结构：
+
+```yaml
+nats:
+  servers: ["127.0.0.1:4222"]
+  client_name: user-service
+  subject_prefix: app
+  jetstream:
+    stream: ROZE
+    subjects: ["orders", "orders.retry", "orders.dlq"]
+    durable: user-orders
+    max_messages: 10000
+    max_retries: 3
+    retry_subject: orders.retry
+    dead_letter_subject: orders.dlq
+    consumer_buffer: 256
+```
+
+能力：
+
+- 真实 NATS client 连接：`async_nats::connect`。
+- JetStream stream 初始化：`get_or_create_stream`。
+- 发布：实现 `roze_mq::Publisher`，消息序列化为 JSON 并写入 JetStream。
+- 订阅：实现 `roze_mq::Subscriber`，使用 pull durable consumer。
+- ack：业务成功时调用 JetStream `ack()`。
+- nack：业务失败时发送 `Nak`，并按 `max_retries` 进入 retry subject 或 dead-letter subject。
+- durable consumer：通过 `jetstream.durable` 配置。
+- 治理：实现 `roze_mq::MqAdmin`，支持 stats、DLQ list/replay/purge/clear。
+- trace：所有 `NatsMessage` 默认携带 UUIDv7 `x-trace-id`。
+
 ## 手工提交验证（应用层）
 - 成功路径
   - 消费消息 -> 业务成功 -> `ack`

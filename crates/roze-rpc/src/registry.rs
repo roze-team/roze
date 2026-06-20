@@ -1,14 +1,16 @@
 use std::{
     collections::HashMap,
     net::ToSocketAddrs,
+    pin::Pin,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::time::interval;
+use tokio::{sync::mpsc, time::interval};
 
 use crate::balance::{self, Balancer};
 use roze_config::{RegistryConfig, RegistryKind, RpcClientEtcdConfig, ServiceConfig};
@@ -37,6 +39,24 @@ pub trait Registry: Send + Sync + 'static {
     async fn register(&self, instance: ServiceInstance) -> anyhow::Result<()>;
     async fn deregister(&self, name: &str, addr: &str) -> anyhow::Result<()>;
     async fn discover(&self, name: &str) -> anyhow::Result<Vec<ServiceInstance>>;
+
+    fn supports_watch(&self) -> bool {
+        false
+    }
+
+    fn watch(
+        &self,
+        _name: &str,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { anyhow::bail!("registry does not support watch") })
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -293,6 +313,60 @@ impl Registry for EtcdRegistry {
 
         Ok(Vec::new())
     }
+
+    fn supports_watch(&self) -> bool {
+        true
+    }
+
+    fn watch(
+        &self,
+        name: &str,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let registry = self.clone();
+        let name = name.to_string();
+        Box::pin(async move {
+            let (tx, rx) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                if let Ok(instances) = registry.discover(&name).await {
+                    let _ = tx.send(instances);
+                }
+                loop {
+                    let mut connected = false;
+                    for endpoint in
+                        registry_endpoints(registry.endpoints(), "http://127.0.0.1:2379")
+                    {
+                        match stream_etcd_registry_watch(&registry, &endpoint, &name, tx.clone())
+                            .await
+                        {
+                            Ok(()) => {
+                                connected = true;
+                                break;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    service = %name,
+                                    endpoint = %endpoint,
+                                    error = %err,
+                                    "etcd registry watch failed"
+                                );
+                            }
+                        }
+                    }
+                    if !connected {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            });
+            Ok(rx)
+        })
+    }
 }
 
 #[async_trait]
@@ -471,6 +545,54 @@ fn etcd_prefix_end(prefix: &[u8]) -> Vec<u8> {
     Vec::new()
 }
 
+async fn stream_etcd_registry_watch(
+    registry: &EtcdRegistry,
+    endpoint: &str,
+    name: &str,
+    tx: mpsc::UnboundedSender<Vec<ServiceInstance>>,
+) -> anyhow::Result<()> {
+    let key_prefix = etcd_service_prefix(name);
+    let range_end = etcd_prefix_end(key_prefix.as_bytes());
+    let body = serde_json::json!({
+        "create_request": {
+            "key": STANDARD.encode(key_prefix.as_bytes()),
+            "range_end": STANDARD.encode(range_end),
+        }
+    });
+    let response = registry
+        .client
+        .post(format!("{}/v3/watch", endpoint))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buffer.push_str(std::str::from_utf8(&chunk)?);
+        if !etcd_registry_watch_has_event(&buffer) {
+            continue;
+        }
+
+        let instances = registry.discover(name).await?;
+        let _ = tx.send(instances);
+        buffer.clear();
+    }
+
+    anyhow::bail!("etcd registry watch stream ended")
+}
+
+fn etcd_registry_watch_has_event(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("result").cloned())
+        .and_then(|result| result.get("events").cloned())
+        .and_then(|events| events.as_array().cloned())
+        .is_some_and(|events| !events.is_empty())
+}
+
 fn consul_instance_id(name: &str, addr: &str) -> String {
     format!("{}-{}", name, addr.replace(':', "-"))
 }
@@ -580,6 +702,7 @@ pub struct CachedRegistryResolver<R, B> {
     refresh_interval: Duration,
     cache: Arc<Mutex<HashMap<String, CachedEntry>>>,
     refresh_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    watch_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -608,6 +731,7 @@ where
             refresh_interval,
             cache: Arc::new(Mutex::new(HashMap::new())),
             refresh_tasks: Arc::new(Mutex::new(HashMap::new())),
+            watch_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -618,12 +742,14 @@ where
 
     pub async fn discover(&self, name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
         if let Some(instances) = self.cached_instances(name) {
+            self.ensure_watch_task(name.to_string());
             self.ensure_refresh_task(name.to_string());
             return Ok(instances);
         }
 
         let instances = self.registry.discover(name).await?;
         self.store(name, instances.clone());
+        self.ensure_watch_task(name.to_string());
         self.ensure_refresh_task(name.to_string());
         Ok(instances)
     }
@@ -642,6 +768,14 @@ where
             .refresh_tasks
             .lock()
             .expect("registry refresh lock poisoned")
+            .remove(name)
+        {
+            handle.abort();
+        }
+        if let Some(handle) = self
+            .watch_tasks
+            .lock()
+            .expect("registry watch lock poisoned")
             .remove(name)
         {
             handle.abort();
@@ -707,6 +841,47 @@ where
         });
 
         refresh_tasks.insert(name, handle);
+    }
+
+    fn ensure_watch_task(&self, name: String) {
+        if !self.registry.supports_watch() {
+            return;
+        }
+        let mut watch_tasks = self
+            .watch_tasks
+            .lock()
+            .expect("registry watch lock poisoned");
+        if watch_tasks.contains_key(&name) {
+            return;
+        }
+
+        let registry = Arc::clone(&self.registry);
+        let cache = Arc::clone(&self.cache);
+        let name_for_task = name.clone();
+        let handle = tokio::spawn(async move {
+            match registry.watch(&name_for_task).await {
+                Ok(mut rx) => {
+                    while let Some(instances) = rx.recv().await {
+                        cache.lock().expect("registry cache lock poisoned").insert(
+                            name_for_task.clone(),
+                            CachedEntry {
+                                discovered_at: Instant::now(),
+                                instances,
+                            },
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        service = %name_for_task,
+                        error = %err,
+                        "registry watch unavailable"
+                    );
+                }
+            }
+        });
+
+        watch_tasks.insert(name, handle);
     }
 }
 
@@ -944,6 +1119,96 @@ mod tests {
             "expected background refresh to run, got {discoveries}"
         );
 
+        resolver.invalidate("user");
+    }
+
+    #[tokio::test]
+    async fn cached_resolver_updates_from_registry_watch() {
+        #[derive(Debug, Clone)]
+        struct WatchRegistry {
+            current: Arc<RwLock<Vec<ServiceInstance>>>,
+            tx: mpsc::UnboundedSender<Vec<ServiceInstance>>,
+            rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>>>,
+        }
+
+        impl WatchRegistry {
+            fn new(initial: Vec<ServiceInstance>) -> Self {
+                let (tx, rx) = mpsc::unbounded_channel();
+                Self {
+                    current: Arc::new(RwLock::new(initial)),
+                    tx,
+                    rx: Arc::new(Mutex::new(Some(rx))),
+                }
+            }
+
+            fn send_snapshot(&self, snapshot: Vec<ServiceInstance>) {
+                *self.current.write().expect("registry lock poisoned") = snapshot.clone();
+                self.tx.send(snapshot).expect("send snapshot");
+            }
+        }
+
+        #[async_trait]
+        impl Registry for WatchRegistry {
+            async fn register(&self, instance: ServiceInstance) -> anyhow::Result<()> {
+                self.current
+                    .write()
+                    .expect("registry lock poisoned")
+                    .push(instance);
+                Ok(())
+            }
+
+            async fn deregister(&self, _name: &str, addr: &str) -> anyhow::Result<()> {
+                self.current
+                    .write()
+                    .expect("registry lock poisoned")
+                    .retain(|instance| instance.addr != addr);
+                Ok(())
+            }
+
+            async fn discover(&self, _name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
+                Ok(self.current.read().expect("registry lock poisoned").clone())
+            }
+
+            fn supports_watch(&self) -> bool {
+                true
+            }
+
+            fn watch(
+                &self,
+                _name: &str,
+            ) -> Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    self.rx
+                        .lock()
+                        .expect("registry lock poisoned")
+                        .take()
+                        .ok_or_else(|| anyhow::anyhow!("watch already taken"))
+                })
+            }
+        }
+
+        let registry = WatchRegistry::new(vec![ServiceInstance::new("user", "127.0.0.1:8080")]);
+        let resolver = CachedRegistryResolver::new(
+            registry.clone(),
+            crate::balance::FirstAvailableBalancer,
+            Duration::from_secs(60),
+        );
+
+        let initial = resolver.discover("user").await.expect("discover");
+        assert_eq!(initial[0].addr, "127.0.0.1:8080");
+
+        registry.send_snapshot(vec![ServiceInstance::new("user", "127.0.0.1:8081")]);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let watched = resolver.discover("user").await.expect("discover");
+        assert_eq!(watched[0].addr, "127.0.0.1:8081");
         resolver.invalidate("user");
     }
 }

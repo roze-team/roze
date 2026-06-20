@@ -1,0 +1,20 @@
+[package]
+name = "roze-dtm-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+config.workspace = true
+roze-dtm = { path = "../../crates/roze-dtm" }
+roze-config = { path = "../../crates/roze-config" }
+roze-health = { path = "../../crates/roze-health" }
+roze-http = { path = "../../crates/roze-http" }
+roze-log = { path = "../../crates/roze-log" }
+roze-result = { path = "../../crates/roze-result" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

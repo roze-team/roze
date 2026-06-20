@@ -286,6 +286,9 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         if route_has_jwt(spec, route) {
             out.push_str(".require_security(\"bearerAuth\")");
         }
+        out.push_str(
+            ".parameter(\"x-roze-locale\", roze_openapi::ParameterLocation::Header, \"String\", false)",
+        );
 
         for source in [
             FieldSource::Path,
@@ -448,7 +451,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
                 FieldSource::Header | FieldSource::Auto => unreachable!(),
             };
             out.push_str(&format!(
-                    "    if let Err(message) = roze_validation::validate_or_message(&{var}) {{\n        let err = RozeError::BadRequest(message);\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+                    "    if let Err(message) = roze_validation::validate_or_message_i18n(&{var}, roze_error::current_locale().as_deref()) {{\n        let err = RozeError::BadRequest(message);\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
                 var = var
             ));
         }

@@ -27,6 +27,7 @@ members = [
     "crates/roze-orm",
     "crates/roze-sqlx",
     "crates/roze-transaction",
+    "crates/roze-dtm",
     "crates/roze-migration",
     "crates/roze-cache",
     "crates/roze-redis",
@@ -54,6 +55,7 @@ members = [
     "apps/roze-sample",
     "apps/user",
     "apps/roze-gateway",
+    "apps/roze-dtm",
 ]
 resolver = "2"
 
@@ -82,7 +84,7 @@ base64 = "0.22"
 jsonwebtoken = "9"
 mongodb = "3.7.0"
 redis = { version = "0.27", features = ["aio", "tokio-comp"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.11"
 tonic-build = "0.11"
@@ -91,3 +93,5 @@ tower-http = { version = "0.7.0", features = ["catch-panic", "cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml_edit = "0.22"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v7"] }

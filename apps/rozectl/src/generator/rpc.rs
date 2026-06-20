@@ -242,6 +242,13 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         "        let req = {};\n",
         proto_to_app(spec, req_ty, "req")
     ));
+    out.push_str("        if let Err(message) = roze_validation::validate_or_message_i18n(&req, request_ctx.locale().as_deref()) {\n");
+    out.push_str("            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n");
+    out.push_str(
+        "            return Err(roze_rpc::rpc::invalid_argument_status(message, &request_ctx));\n",
+    );
+    out.push_str("        }\n");
+    out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
     out.push_str(&format!(
         "        let result = crate::logic::{handler}({args}).await;\n",
         handler = handler,
@@ -252,7 +259,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
         app_to_proto(spec, resp_ty, "resp")
     ));
-    out.push_str("            Err(err) => {\n                roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                Err(Status::internal(err.to_string()))\n            }\n        }\n");
+    out.push_str("            Err(err) => {\n                roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }\n        }\n");
     out.push_str("    }\n");
     out
 }
@@ -271,7 +278,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
     out.push_str(&format!(
-        "        let (_request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
+        "        let (request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
         method.name
     ));
     out.push_str("        let req = request.into_inner();\n");
@@ -279,6 +286,13 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         "        let req = {};\n",
         proto_to_app(spec, req_ty, "req")
     ));
+    out.push_str("        if let Err(message) = roze_validation::validate_or_message_i18n(&req, request_ctx.locale().as_deref()) {\n");
+    out.push_str("            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n");
+    out.push_str(
+        "            return Err(roze_rpc::rpc::invalid_argument_status(message, &request_ctx));\n",
+    );
+    out.push_str("        }\n");
+    out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
     out.push_str("        let _ = req;\n");
     out.push_str(&format!(
         "        let resp = {} {{ {} }};\n",
@@ -349,6 +363,542 @@ fn rust_field_name(field: &Field) -> String {
         .unwrap_or_else(|| to_snake_case(&field.name))
 }
 
+fn render_rpc_request_validation_checks(spec: &ApiSpec, ty_name: &str) -> String {
+    let Some(ty) = find_type(spec, ty_name) else {
+        return String::new();
+    };
+
+    let mut out = String::new();
+    for field in &ty.fields {
+        out.push_str(&custom_validation_checks(
+            field,
+            &ty.fields,
+            &format!("req.{}", rust_field_name(field)),
+        ));
+    }
+    out
+}
+
+fn custom_validation_checks(field: &Field, fields: &[Field], expr: &str) -> String {
+    let Some(rules) = field.validate.as_deref() else {
+        return String::new();
+    };
+    if has_rule(rules, "optional") || has_rule(rules, "omitempty") {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let field_name = field_wire_name(field);
+    let field_label = format!("field `{field_name}`");
+    out.push_str(&cross_field_validation_checks(field, fields, rules, expr));
+    if let Some(values) = oneof_values(rules) {
+        let allowed = values
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let allowed_message = values.join(", ");
+        out.push_str(&format!(
+            "        {{\n            let value = {expr}.to_string();\n            if ![{allowed}].contains(&value.as_str()) {{\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::invalid_argument_status(format!(\"{field_label} must be one of: {{}}\", {allowed_message:?}), &request_ctx));\n            }}\n        }}\n"
+        ));
+    }
+
+    if let Some((key_ty, value_ty)) = map_key_value_types(&field.ty) {
+        out.push_str(&map_dive_validation_checks(
+            field, rules, expr, &key_ty, &value_ty,
+        ));
+        return out;
+    }
+
+    if let Some(element_ty) = collection_element_type(&field.ty) {
+        out.push_str(&dive_validation_checks(field, rules, expr, &element_ty));
+        return out;
+    }
+
+    if map_type(&field.ty) != "String" {
+        return out;
+    }
+    out.push_str(&conditional_required_checks(field, fields, rules, expr));
+
+    if let Some(prefix) = rule_value(rules, "startswith") {
+        out.push_str(&format!(
+            "        if !{expr}.starts_with({prefix:?}) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(format!(\"{field_label} must start with {{}}\", {prefix:?}), &request_ctx));\n        }}\n"
+        ));
+    }
+    if let Some(suffix) = rule_value(rules, "endswith") {
+        out.push_str(&format!(
+            "        if !{expr}.ends_with({suffix:?}) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(format!(\"{field_label} must end with {{}}\", {suffix:?}), &request_ctx));\n        }}\n"
+        ));
+    }
+    if has_rule(rules, "alpha") {
+        out.push_str(&format!(
+            "        if !{expr}.chars().all(|ch| ch.is_alphabetic()) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain letters only\", &request_ctx));\n        }}\n"
+        ));
+    }
+    if has_rule(rules, "alphanum") {
+        out.push_str(&format!(
+            "        if !{expr}.chars().all(|ch| ch.is_alphanumeric()) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain letters and numbers only\", &request_ctx));\n        }}\n"
+        ));
+    }
+    if has_rule(rules, "ascii") {
+        out.push_str(&format!(
+            "        if !{expr}.is_ascii() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain ASCII characters only\", &request_ctx));\n        }}\n"
+        ));
+    }
+    if has_rule(rules, "numeric") {
+        out.push_str(&format!(
+            "        if {expr}.parse::<f64>().is_err() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be numeric\", &request_ctx));\n        }}\n"
+        ));
+    }
+
+    out
+}
+
+fn dive_validation_checks(field: &Field, rules: &str, expr: &str, element_ty: &str) -> String {
+    let Some(element_rules) = rules_after_dive(rules) else {
+        return String::new();
+    };
+    if element_rules.is_empty() {
+        return String::new();
+    }
+
+    let field_name = field_wire_name(field);
+    let body = dive_element_body(
+        element_rules,
+        "item",
+        element_ty,
+        &format!("field `{field_name}` item"),
+        "            ",
+    );
+
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("        for item in &{expr} {{\n{body}        }}\n")
+    }
+}
+
+fn map_dive_validation_checks(
+    field: &Field,
+    rules: &str,
+    expr: &str,
+    key_ty: &str,
+    value_ty: &str,
+) -> String {
+    let Some(element_rules) = rules_after_dive(rules) else {
+        return String::new();
+    };
+    let (key_rules, value_rules) = split_map_dive_rules(element_rules);
+    let field_name = field_wire_name(field);
+    let mut body = String::new();
+    if let Some(key_rules) = key_rules {
+        body.push_str(&dive_element_body(
+            &key_rules,
+            "key",
+            key_ty,
+            &format!("field `{field_name}` key"),
+            "            ",
+        ));
+    }
+    if let Some(value_rules) = value_rules {
+        body.push_str(&dive_element_body(
+            &value_rules,
+            "value",
+            value_ty,
+            &format!("field `{field_name}` value"),
+            "            ",
+        ));
+    }
+
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("        for (key, value) in &{expr} {{\n{body}        }}\n")
+    }
+}
+
+fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent: &str) -> String {
+    let mut body = String::new();
+
+    if let Some(values) = oneof_values(rules) {
+        let allowed = values
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let allowed_message = values.join(", ");
+        body.push_str(&format!(
+            "{indent}{{\n{indent}    let value = {var}.to_string();\n{indent}    if ![{allowed}].contains(&value.as_str()) {{\n{indent}        roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}        return Err(roze_rpc::rpc::invalid_argument_status(format!(\"{field_label} must be one of: {{}}\", {allowed_message:?}), &request_ctx));\n{indent}    }}\n{indent}}}\n"
+        ));
+    }
+
+    match map_type(ty).as_str() {
+        "String" => {
+            let (mut min, max) = min_max_rules(rules);
+            let equal = rule_value(rules, "len").and_then(parse_usize);
+            if has_rule(rules, "required") {
+                min.get_or_insert(1usize);
+            }
+            if let Some(equal) = equal {
+                body.push_str(&format!(
+                    "{indent}if {var}.chars().count() != {equal} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} length is invalid\", &request_ctx));\n{indent}}}\n"
+                ));
+            } else {
+                if let Some(min) = min {
+                    body.push_str(&format!(
+                        "{indent}if {var}.chars().count() < {min} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} is too short\", &request_ctx));\n{indent}}}\n"
+                    ));
+                }
+                if let Some(max) = max {
+                    body.push_str(&format!(
+                        "{indent}if {var}.chars().count() > {max} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} is too long\", &request_ctx));\n{indent}}}\n"
+                    ));
+                }
+            }
+            if has_rule(rules, "alpha") {
+                body.push_str(&format!(
+                    "{indent}if !{var}.chars().all(|ch| ch.is_alphabetic()) {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain letters only\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "alphanum") {
+                body.push_str(&format!(
+                    "{indent}if !{var}.chars().all(|ch| ch.is_alphanumeric()) {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain letters and numbers only\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "ascii") {
+                body.push_str(&format!(
+                    "{indent}if !{var}.is_ascii() {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain ASCII characters only\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "numeric") {
+                body.push_str(&format!(
+                    "{indent}if {var}.parse::<f64>().is_err() {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be numeric\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+        }
+        "i64" | "u64" | "i32" | "u32" => {
+            body.push_str(&numeric_range_checks(rules, var, field_label, indent));
+        }
+        _ => {}
+    }
+
+    body
+}
+
+fn numeric_range_checks(rules: &str, expr: &str, field_label: &str, indent: &str) -> String {
+    let mut out = String::new();
+    if let Some(min) = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .filter(|value| is_number_literal(value))
+    {
+        out.push_str(&format!(
+            "{indent}if {expr} < &{min} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} is too small\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
+    if let Some(max) = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .filter(|value| is_number_literal(value))
+    {
+        out.push_str(&format!(
+            "{indent}if {expr} > &{max} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} is too large\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
+    if let Some(min) = rule_value(rules, "gt").filter(|value| is_number_literal(value)) {
+        out.push_str(&format!(
+            "{indent}if {expr} <= &{min} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} is too small\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
+    if let Some(max) = rule_value(rules, "lt").filter(|value| is_number_literal(value)) {
+        out.push_str(&format!(
+            "{indent}if {expr} >= &{max} {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} is too large\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
+    out
+}
+
+fn cross_field_validation_checks(
+    field: &Field,
+    fields: &[Field],
+    rules: &str,
+    expr: &str,
+) -> String {
+    let mut out = String::new();
+    let field_name = field_wire_name(field);
+    for (tag, op, message) in [
+        ("eqfield", "==", "must equal"),
+        ("nefield", "!=", "must not equal"),
+        ("gtfield", ">", "must be greater than"),
+        ("gtefield", ">=", "must be greater than or equal to"),
+        ("ltfield", "<", "must be less than"),
+        ("ltefield", "<=", "must be less than or equal to"),
+    ] {
+        let Some(other_name) = rule_value(rules, tag) else {
+            continue;
+        };
+        let Some(other) = comparable_field_ref_expr(fields, other_name, &field.ty) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "        if !({expr} {op} {other}) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"field `{field_name}` {message} field `{other_name}`\", &request_ctx));\n        }}\n"
+        ));
+    }
+    out
+}
+
+fn conditional_required_checks(field: &Field, fields: &[Field], rules: &str, expr: &str) -> String {
+    let mut out = String::new();
+    let field_name = field_wire_name(field);
+
+    if let Some(condition) = rule_value(rules, "required_if") {
+        let conditions = condition_pairs(condition)
+            .into_iter()
+            .filter_map(|(other_name, expected)| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("{other}.to_string() == {expected:?}"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "        if ({}) && {expr}.is_empty() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"field `{field_name}` is required\", &request_ctx));\n        }}\n",
+                conditions.join(" && ")
+            ));
+        }
+    }
+
+    if let Some(condition) = rule_value(rules, "required_unless") {
+        let conditions = condition_pairs(condition)
+            .into_iter()
+            .filter_map(|(other_name, expected)| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("{other}.to_string() == {expected:?}"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "        if !({}) && {expr}.is_empty() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"field `{field_name}` is required\", &request_ctx));\n        }}\n",
+                conditions.join(" || ")
+            ));
+        }
+    }
+
+    if let Some(names) = rule_value(rules, "required_with") {
+        let conditions = condition_names(names)
+            .into_iter()
+            .filter_map(|other_name| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("!{other}.to_string().is_empty()"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "        if ({}) && {expr}.is_empty() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"field `{field_name}` is required\", &request_ctx));\n        }}\n",
+                conditions.join(" || ")
+            ));
+        }
+    }
+
+    if let Some(names) = rule_value(rules, "required_without") {
+        let conditions = condition_names(names)
+            .into_iter()
+            .filter_map(|other_name| {
+                let other = field_ref_expr(fields, other_name)?;
+                Some(format!("{other}.to_string().is_empty()"))
+            })
+            .collect::<Vec<_>>();
+        if !conditions.is_empty() {
+            out.push_str(&format!(
+                "        if ({}) && {expr}.is_empty() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"field `{field_name}` is required\", &request_ctx));\n        }}\n",
+                conditions.join(" || ")
+            ));
+        }
+    }
+
+    out
+}
+
+fn field_ref_expr(fields: &[Field], name: &str) -> Option<String> {
+    field_by_name(fields, name).map(|field| format!("req.{}", rust_field_name(field)))
+}
+
+fn comparable_field_ref_expr(fields: &[Field], name: &str, ty: &str) -> Option<String> {
+    field_by_name(fields, name)
+        .filter(|field| map_type(&field.ty) == map_type(ty))
+        .map(|field| format!("req.{}", rust_field_name(field)))
+}
+
+fn field_by_name<'a>(fields: &'a [Field], name: &str) -> Option<&'a Field> {
+    fields.iter().find(|field| {
+        field.name == name
+            || rust_field_name(field) == name
+            || field.wire_name.as_deref() == Some(name)
+            || field.json_name.as_deref() == Some(name)
+    })
+}
+
+fn field_wire_name(field: &Field) -> String {
+    field
+        .wire_name
+        .as_deref()
+        .or(field.json_name.as_deref())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| rust_field_name(field))
+}
+
+fn map_type(ty: &str) -> String {
+    let ty = ty.trim();
+    if let Some((key, value)) = map_key_value_types(ty) {
+        return format!(
+            "std::collections::HashMap<{}, {}>",
+            map_type(&key),
+            map_type(&value)
+        );
+    }
+    if let Some(inner) = collection_element_type(ty) {
+        return format!("Vec<{}>", map_type(&inner));
+    }
+
+    match ty {
+        "string" => "String".to_string(),
+        "int" => "i64".to_string(),
+        "uint" => "u64".to_string(),
+        "bool" => "bool".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn map_key_value_types(ty: &str) -> Option<(String, String)> {
+    let ty = ty.trim();
+    if let Some(rest) = ty.strip_prefix("map[") {
+        let (key, value) = rest.split_once(']')?;
+        return Some((
+            key.trim_start_matches('*').trim().to_string(),
+            value.trim_start_matches('*').trim().to_string(),
+        ));
+    }
+    if let Some(inner) = ty
+        .strip_prefix("HashMap<")
+        .and_then(|raw| raw.strip_suffix('>'))
+    {
+        let (key, value) = inner.split_once(',')?;
+        return Some((
+            key.trim_start_matches('*').trim().to_string(),
+            value.trim_start_matches('*').trim().to_string(),
+        ));
+    }
+    None
+}
+
+fn collection_element_type(ty: &str) -> Option<String> {
+    let ty = ty.trim();
+    if let Some(inner) = ty.strip_prefix("[]") {
+        return Some(inner.trim_start_matches('*').trim().to_string());
+    }
+    if let Some(inner) = ty
+        .strip_prefix("Vec<")
+        .and_then(|raw| raw.strip_suffix('>'))
+    {
+        return Some(inner.trim_start_matches('*').trim().to_string());
+    }
+    None
+}
+
+fn oneof_values(rules: &str) -> Option<Vec<&str>> {
+    let values = rule_value(rules, "oneof")?
+        .split_whitespace()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
+fn condition_pairs(value: &str) -> Vec<(&str, &str)> {
+    let parts = condition_names(value);
+    parts
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>()
+}
+
+fn condition_names(value: &str) -> Vec<&str> {
+    value
+        .split_whitespace()
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn rule_value<'a>(rules: &'a str, name: &str) -> Option<&'a str> {
+    for rule in rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
+        if let Some((key, value)) = rule.split_once('=') {
+            if key.trim() == name {
+                return Some(value.trim());
+            }
+        }
+    }
+    None
+}
+
+fn rules_after_dive(rules: &str) -> Option<&str> {
+    rules
+        .split_once("dive,")
+        .map(|(_, after)| after.trim())
+        .filter(|after| !after.is_empty())
+}
+
+fn split_map_dive_rules(rules: &str) -> (Option<String>, Option<String>) {
+    let parts = rules
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.first() != Some(&"keys") {
+        return (None, Some(rules.trim().to_string()));
+    }
+
+    let Some(end_idx) = parts.iter().position(|part| *part == "endkeys") else {
+        return (None, Some(rules.trim().to_string()));
+    };
+    let key_rules = parts[1..end_idx].join(",");
+    let value_rules = parts[end_idx + 1..].join(",");
+    (
+        (!key_rules.is_empty()).then_some(key_rules),
+        (!value_rules.is_empty()).then_some(value_rules),
+    )
+}
+
+fn min_max_rules(rules: &str) -> (Option<usize>, Option<usize>) {
+    let min = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .and_then(parse_usize);
+    let max = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .and_then(parse_usize);
+    (min, max)
+}
+
+fn has_rule(rules: &str, name: &str) -> bool {
+    rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+        .any(|rule| rule == name)
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok()
+}
+
+fn is_number_literal(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| ch.is_ascii_digit() || ch == '.' || (idx == 0 && ch == '-'))
+}
+
 fn handler_name(method: &HttpMethod, path: &str) -> String {
     let method = match method {
         HttpMethod::Get => "get",
@@ -404,6 +954,9 @@ mod tests {
         let spec = parse_api(
             r#"
             service user {
+                @handler getUserRoute
+                get /users/:id (GetUserReq) returns (GetUserResp)
+
                 rpc GetUser (GetUserReq) returns (GetUserResp)
             }
 
@@ -425,5 +978,42 @@ mod tests {
         assert!(
             client.contains("apply_client_auth(&mut request, &options, client_config.as_ref())")
         );
+    }
+
+    #[test]
+    fn rpc_server_validates_request_before_logic() {
+        let spec = parse_api(
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (GetUserResp)
+            }
+
+            type GetUserReq {
+                id: u64 `validate:"gte=1"`
+                status: string `validate:"oneof=active disabled"`
+                account: string
+                backup: string `validate:"required_with=account"`
+                tags: []string `validate:"min=1,dive,required,min=2,alphanum"`
+            }
+
+            type GetUserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("api");
+
+        let rendered = render_rpc(&spec);
+
+        assert!(rendered.contains("roze_validation::validate_or_message_i18n(&req"));
+        assert!(rendered.contains("roze_rpc::rpc::invalid_argument_status(message, &request_ctx)"));
+        assert!(rendered.contains("finish_method(method_guard, \"invalid_argument\")"));
+        assert!(rendered.contains("if ![\"active\", \"disabled\"].contains(&value.as_str())"));
+        assert!(
+            rendered.contains("if (!req.account.to_string().is_empty()) && req.backup.is_empty()")
+        );
+        assert!(rendered.contains("for item in &req.tags"));
+        assert!(rendered.contains("if item.chars().count() < 2"));
+        assert!(rendered.contains("if !item.chars().all(|ch| ch.is_alphanumeric())"));
     }
 }

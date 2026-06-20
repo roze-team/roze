@@ -4,14 +4,19 @@ use crate::{
 };
 
 pub fn render_types(types: &[TypeDef]) -> String {
-    let mut out = String::from("#![allow(dead_code)]\n\nuse serde::{Deserialize, Serialize};\n\n");
+    let mut out = String::from(
+        "#![allow(dead_code)]\n\nuse roze_validation::Validate;\nuse serde::{Deserialize, Serialize};\n\n",
+    );
 
     for ty in types {
-        out.push_str("#[derive(Debug, Clone, Default, Serialize, Deserialize)]\n");
+        out.push_str("#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]\n");
         out.push_str(&format!("pub struct {} {{\n", ty.name));
         for field in &ty.fields {
             if let Some(rename) = serde_rename(field) {
                 out.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
+            }
+            if let Some(validate) = validation_attr(field) {
+                out.push_str(&format!("    #[validate({validate})]\n"));
             }
             out.push_str(&format!(
                 "    pub {}: {},\n",
@@ -100,6 +105,165 @@ fn serde_rename(field: &Field) -> Option<&str> {
     }
 }
 
+fn validation_attr(field: &Field) -> Option<String> {
+    let rules = field.validate.as_deref()?;
+    if has_rule(rules, "optional") || has_rule(rules, "omitempty") {
+        return None;
+    }
+
+    if map_key_value_types(&field.ty).is_some() || collection_element_type(&field.ty).is_some() {
+        return collection_validation_attr(rules_before_dive(rules));
+    }
+
+    match map_type(&field.ty).as_str() {
+        "String" => string_validation_attr(rules),
+        "i64" | "u64" | "i32" | "u32" => number_validation_attr(rules),
+        _ => None,
+    }
+}
+
+fn string_validation_attr(rules: &str) -> Option<String> {
+    let mut attrs = Vec::new();
+    if has_rule(rules, "email") {
+        attrs.push("email".to_string());
+    }
+    if has_rule(rules, "url") || has_rule(rules, "uri") {
+        attrs.push("url".to_string());
+    }
+    if has_rule(rules, "ip") {
+        attrs.push("ip".to_string());
+    } else if has_rule(rules, "ipv4") {
+        attrs.push("ip(v4 = true)".to_string());
+    } else if has_rule(rules, "ipv6") {
+        attrs.push("ip(v6 = true)".to_string());
+    }
+    if let Some(pattern) = rule_value(rules, "contains") {
+        attrs.push(format!("contains = {pattern:?}"));
+    }
+    if let Some(pattern) = rule_value(rules, "excludes") {
+        attrs.push(format!("does_not_contain = {pattern:?}"));
+    }
+
+    let (mut min, max) = min_max_rules(rules);
+    let equal = rule_value(rules, "len").and_then(parse_usize);
+    if has_rule(rules, "required") {
+        min.get_or_insert(1usize);
+    }
+
+    if let Some(equal) = equal {
+        attrs.push(format!("length(equal = {equal})"));
+    } else {
+        match (min, max) {
+            (Some(min), Some(max)) => attrs.push(format!("length(min = {min}, max = {max})")),
+            (Some(min), None) => attrs.push(format!("length(min = {min})")),
+            (None, Some(max)) => attrs.push(format!("length(max = {max})")),
+            (None, None) => {}
+        }
+    }
+
+    (!attrs.is_empty()).then(|| attrs.join(", "))
+}
+
+fn number_validation_attr(rules: &str) -> Option<String> {
+    let min = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .filter(|value| is_number_literal(value));
+    let max = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .filter(|value| is_number_literal(value));
+    let exclusive_min = rule_value(rules, "gt").filter(|value| is_number_literal(value));
+    let exclusive_max = rule_value(rules, "lt").filter(|value| is_number_literal(value));
+
+    let mut parts = Vec::new();
+    if let Some(min) = min {
+        parts.push(format!("min = {min}"));
+    }
+    if let Some(max) = max {
+        parts.push(format!("max = {max}"));
+    }
+    if let Some(exclusive_min) = exclusive_min {
+        parts.push(format!("exclusive_min = {exclusive_min}"));
+    }
+    if let Some(exclusive_max) = exclusive_max {
+        parts.push(format!("exclusive_max = {exclusive_max}"));
+    }
+
+    (!parts.is_empty()).then(|| format!("range({})", parts.join(", ")))
+}
+
+fn collection_validation_attr(rules: &str) -> Option<String> {
+    let (mut min, max) = min_max_rules(rules);
+    let equal = rule_value(rules, "len").and_then(parse_usize);
+    if has_rule(rules, "required") {
+        min.get_or_insert(1usize);
+    }
+
+    if let Some(equal) = equal {
+        Some(format!("length(equal = {equal})"))
+    } else {
+        match (min, max) {
+            (Some(min), Some(max)) => Some(format!("length(min = {min}, max = {max})")),
+            (Some(min), None) => Some(format!("length(min = {min})")),
+            (None, Some(max)) => Some(format!("length(max = {max})")),
+            (None, None) => None,
+        }
+    }
+}
+
+fn min_max_rules(rules: &str) -> (Option<usize>, Option<usize>) {
+    let min = rule_value(rules, "min")
+        .or_else(|| rule_value(rules, "gte"))
+        .and_then(parse_usize);
+    let max = rule_value(rules, "max")
+        .or_else(|| rule_value(rules, "lte"))
+        .and_then(parse_usize);
+    (min, max)
+}
+
+fn has_rule(rules: &str, name: &str) -> bool {
+    rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+        .any(|rule| rule == name)
+}
+
+fn rules_before_dive(rules: &str) -> &str {
+    rules
+        .split_once(",dive")
+        .map(|(before, _)| before)
+        .unwrap_or(rules)
+        .trim()
+}
+
+fn rule_value<'a>(rules: &'a str, name: &str) -> Option<&'a str> {
+    for rule in rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
+        if let Some((key, value)) = rule.split_once('=') {
+            if key.trim() == name {
+                return Some(value.trim());
+            }
+        }
+    }
+    None
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok()
+}
+
+fn is_number_literal(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| ch.is_ascii_digit() || ch == '.' || (idx == 0 && ch == '-'))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::parser::parse_api;
@@ -126,7 +290,9 @@ mod tests {
 
         let rendered = render_types(&spec.types);
 
-        assert!(rendered.contains("#[derive(Debug, Clone, Default, Serialize, Deserialize)]"));
+        assert!(
+            rendered.contains("#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]")
+        );
         assert!(rendered.contains("#[serde(rename = \"user-id\")]"));
         assert!(rendered.contains("pub user_i_d: u64,"));
         assert!(rendered.contains("pub created_at: i64,"));
@@ -135,5 +301,28 @@ mod tests {
         assert!(rendered.contains("pub labels: std::collections::HashMap<String, String>,"));
         assert!(rendered.contains("pub weights: std::collections::HashMap<String, i64>,"));
         assert!(!rendered.contains("pub user-id"));
+    }
+
+    #[test]
+    fn renders_validation_attributes() {
+        let spec = parse_api(
+            r#"
+            service user-api
+
+            type CreateUserReq {
+                nickname String `json:"nickname" validate:"required,min=2,max=16"`
+                age int `json:"age" validate:"gte=1,lte=120"`
+                tags []string `json:"tags" validate:"min=1,dive,required"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let rendered = render_types(&spec.types);
+
+        assert!(rendered.contains("use roze_validation::Validate;"));
+        assert!(rendered.contains("#[validate(length(min = 2, max = 16))]"));
+        assert!(rendered.contains("#[validate(range(min = 1, max = 120))]"));
+        assert!(rendered.contains("#[validate(length(min = 1))]"));
     }
 }

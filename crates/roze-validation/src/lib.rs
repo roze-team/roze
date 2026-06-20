@@ -56,6 +56,24 @@ impl ValidationReport {
             })
             .collect()
     }
+
+    pub fn messages_i18n(&self, locale: Option<&str>) -> Vec<String> {
+        self.issues
+            .iter()
+            .map(|issue| match &issue.message {
+                Some(message) => format!("{}: {}", issue.field, message),
+                None => format!(
+                    "{}: {}",
+                    issue.field,
+                    validation_message_i18n(&issue.code, locale)
+                ),
+            })
+            .collect()
+    }
+
+    pub fn to_string_i18n(&self, locale: Option<&str>) -> String {
+        self.messages_i18n(locale).join("; ")
+    }
 }
 
 impl Display for ValidationReport {
@@ -100,6 +118,57 @@ pub fn validate_or_message<T: Validate>(value: &T) -> Result<(), String> {
     value
         .validate()
         .map_err(|errors| ValidationReport::from_errors(&errors).to_string())
+}
+
+pub fn validate_or_message_i18n<T: Validate>(
+    value: &T,
+    locale: Option<&str>,
+) -> Result<(), String> {
+    value
+        .validate()
+        .map_err(|errors| ValidationReport::from_errors(&errors).to_string_i18n(locale))
+}
+
+pub fn validation_message_i18n(code: &str, locale: Option<&str>) -> &'static str {
+    match normalize_locale(locale).as_deref() {
+        Some("zh-CN") => match code {
+            "required" => "不能为空",
+            "length" => "长度不合法",
+            "range" => "数值范围不合法",
+            "email" => "邮箱格式不合法",
+            "url" => "URL 格式不合法",
+            "ip" => "IP 地址格式不合法",
+            "contains" => "缺少必需内容",
+            "does_not_contain" => "包含禁止内容",
+            _ => "参数不合法",
+        },
+        _ => match code {
+            "required" => "required",
+            "length" => "invalid length",
+            "range" => "out of range",
+            "email" => "invalid email",
+            "url" => "invalid url",
+            "ip" => "invalid ip address",
+            "contains" => "missing required content",
+            "does_not_contain" => "contains forbidden content",
+            _ => "invalid value",
+        },
+    }
+}
+
+fn normalize_locale(locale: Option<&str>) -> Option<String> {
+    let normalized = locale?.trim().replace('_', "-");
+    if normalized.is_empty() || normalized == "*" {
+        return None;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if lower == "zh" || lower.starts_with("zh-cn") || lower.starts_with("zh-hans") {
+        return Some("zh-CN".to_string());
+    }
+    if lower == "en" || lower.starts_with("en-us") || lower.starts_with("en-") {
+        return Some("en-US".to_string());
+    }
+    None
 }
 
 fn flatten_errors(prefix: &str, errors: &ValidationErrors, out: &mut Vec<ValidationIssue>) {
@@ -198,5 +267,22 @@ mod tests {
 
         let err = validate_or_message(&input).expect_err("validation should fail");
         assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn validate_or_message_i18n_returns_localized_text() {
+        #[derive(Debug, Validate)]
+        struct Input {
+            #[validate(length(min = 3))]
+            name: String,
+        }
+
+        let input = Input {
+            name: String::new(),
+        };
+
+        let err =
+            validate_or_message_i18n(&input, Some("zh-CN")).expect_err("validation should fail");
+        assert_eq!(err, "name: 长度不合法");
     }
 }
