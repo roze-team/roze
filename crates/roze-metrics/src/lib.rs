@@ -12,6 +12,7 @@ static REQUEST_FAILED: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
 static ROUTE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RPC_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static GATEWAY_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetricLabels(BTreeMap<String, String>);
@@ -150,6 +151,53 @@ pub fn record_rpc_method(
     );
 }
 
+pub fn record_gateway_route(
+    service: impl Into<String>,
+    route: impl Into<String>,
+    method: impl Into<String>,
+    status: impl Into<String>,
+    outcome: impl Into<String>,
+    elapsed: Duration,
+) {
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("route", route.into())
+        .insert("method", method.into())
+        .insert("status", status.into())
+        .insert("outcome", outcome.into());
+    let registry = gateway_metrics_registry();
+    registry.inc_counter("roze_gateway_route_requests_total", labels.clone(), 1);
+    registry.inc_counter(
+        "roze_gateway_route_request_duration_ms_total",
+        labels,
+        elapsed.as_millis() as u64,
+    );
+}
+
+pub fn record_gateway_retry(
+    service: impl Into<String>,
+    route: impl Into<String>,
+    reason: impl Into<String>,
+) {
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("route", route.into())
+        .insert("reason", reason.into());
+    gateway_metrics_registry().inc_counter("roze_gateway_route_retries_total", labels, 1);
+}
+
+pub fn record_gateway_upstream(
+    service: impl Into<String>,
+    upstream: impl Into<String>,
+    outcome: impl Into<String>,
+) {
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("upstream", upstream.into())
+        .insert("outcome", outcome.into());
+    gateway_metrics_registry().inc_counter("roze_gateway_upstream_events_total", labels, 1);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -175,6 +223,7 @@ pub fn http_metrics() -> String {
     );
     out.push_str(&route_metrics_registry().render());
     out.push_str(&rpc_metrics_registry().render());
+    out.push_str(&gateway_metrics_registry().render());
     out
 }
 
@@ -188,6 +237,10 @@ pub fn route_metrics_registry() -> &'static MetricRegistry {
 
 pub fn rpc_metrics_registry() -> &'static MetricRegistry {
     RPC_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn gateway_metrics_registry() -> &'static MetricRegistry {
+    GATEWAY_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -248,5 +301,25 @@ mod tests {
         assert!(metrics.contains(r#"route="/users/:id""#));
         assert!(metrics.contains("roze_rpc_method_requests_total"));
         assert!(metrics.contains(r#"method="GetUser""#));
+    }
+
+    #[test]
+    fn renders_gateway_metrics_with_labels() {
+        record_gateway_route(
+            "gateway",
+            "/api",
+            "GET",
+            "200",
+            "ok",
+            Duration::from_millis(9),
+        );
+        record_gateway_retry("gateway", "/api", "status_503");
+        record_gateway_upstream("gateway", "http://127.0.0.1:8080", "ejected");
+
+        let metrics = http_metrics();
+        assert!(metrics.contains("roze_gateway_route_requests_total"));
+        assert!(metrics.contains("roze_gateway_route_retries_total"));
+        assert!(metrics.contains("roze_gateway_upstream_events_total"));
+        assert!(metrics.contains(r#"outcome="ok""#));
     }
 }

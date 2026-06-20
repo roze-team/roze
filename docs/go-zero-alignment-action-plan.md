@@ -132,9 +132,9 @@
   1. [x] [apps/roze-gateway] 新建服务框架
   2. [x] 路由配置模型与配置加载
   3. [x] 代理转发、重写、超时、鉴权、限流、熔断、fallback
-  4. [ ] registry 动态上游发现
-  5. [ ] 重试、错误码统一和治理指标
-  6. [ ] 简单示例与 smoke test
+  4. [x] registry 动态上游发现
+  5. [x] 重试、错误码统一和治理指标
+  6. [ ] app 级示例脚本；crate 级 smoke test 已覆盖 registry、retry、health/outlier
 - 任务B：配置中心变更事件完善
   1. [ ] 变更事件结构和日志
   2. [ ] 变更失败回退

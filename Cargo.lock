@@ -3162,6 +3162,7 @@ dependencies = [
  "roze-config",
  "roze-context",
  "roze-jwt",
+ "roze-metrics",
  "roze-rpc",
  "roze-trace",
  "serde",

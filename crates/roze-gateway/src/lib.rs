@@ -202,6 +202,7 @@ pub fn build_router_with_registry(
 
 impl GatewayRuntime {
     async fn handle_request(self: Arc<Self>, req: Request<Body>) -> Response<Body> {
+        let started = Instant::now();
         let request_path = req.uri().path().to_string();
         let request_method = req.method().clone();
 
@@ -225,6 +226,13 @@ impl GatewayRuntime {
                 event = "gateway.no_route",
                 "no route matched"
             );
+            self.record_gateway_response(
+                None,
+                &request_method,
+                StatusCode::NOT_FOUND,
+                "no_route",
+                started,
+            );
             return build_fallback(
                 self.global_fallback.as_ref(),
                 StatusCode::NOT_FOUND,
@@ -241,6 +249,13 @@ impl GatewayRuntime {
                 route = %route.path,
                 event = "gateway.method_not_allowed",
                 "method blocked by route config"
+            );
+            self.record_gateway_response(
+                Some(&route),
+                &request_method,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                started,
             );
             return build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
@@ -259,6 +274,13 @@ impl GatewayRuntime {
                         event = "gateway.auth_failed",
                         "auth validation failed"
                     );
+                    self.record_gateway_response(
+                        Some(&route),
+                        &request_method,
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                        started,
+                    );
                     return build_fallback(
                         route.fallback.as_ref().or(self.global_fallback.as_ref()),
                         StatusCode::UNAUTHORIZED,
@@ -270,6 +292,13 @@ impl GatewayRuntime {
 
         if !self.rate_allowed(&route).await {
             warn!(route = %route.path, event = "gateway.rate_limited", "route rate limited");
+            self.record_gateway_response(
+                Some(&route),
+                &request_method,
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                started,
+            );
             return build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -279,6 +308,13 @@ impl GatewayRuntime {
 
         if self.is_breaker_open(&route).await {
             warn!(route = %route.path, event = "gateway.breaker_open", "breaker open");
+            self.record_gateway_response(
+                Some(&route),
+                &request_method,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "breaker_open",
+                started,
+            );
             return build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -306,6 +342,13 @@ impl GatewayRuntime {
                     path = %request_path,
                     error = %err,
                     "read request body failed"
+                );
+                self.record_gateway_response(
+                    Some(&route),
+                    &request_method,
+                    StatusCode::BAD_REQUEST,
+                    "bad_request_body",
+                    started,
                 );
                 return build_fallback(
                     route.fallback.as_ref().or(self.global_fallback.as_ref()),
@@ -352,6 +395,11 @@ impl GatewayRuntime {
                             status = response.status().as_u16(),
                             "upstream returned retryable status"
                         );
+                        roze_metrics::record_gateway_retry(
+                            route.service.clone(),
+                            route.path.clone(),
+                            format!("status_{}", response.status().as_u16()),
+                        );
                     } else {
                         if response.status().is_server_error() {
                             self.record_breaker_failure(&route).await;
@@ -367,6 +415,13 @@ impl GatewayRuntime {
                                 "proxy retry completed"
                             );
                         }
+                        self.record_gateway_response(
+                            Some(&route),
+                            &request_method,
+                            response.status(),
+                            response_outcome(response.status()),
+                            started,
+                        );
                         return response;
                     }
                 }
@@ -380,6 +435,13 @@ impl GatewayRuntime {
                         error = %err,
                         "proxy to upstream failed"
                     );
+                    if attempt < max_attempts {
+                        roze_metrics::record_gateway_retry(
+                            route.service.clone(),
+                            route.path.clone(),
+                            "upstream_error",
+                        );
+                    }
                     last_error = Some(err);
                 }
                 Err(_) => {
@@ -392,6 +454,13 @@ impl GatewayRuntime {
                         timeout_ms = timeout_ms,
                         "upstream request timeout"
                     );
+                    if attempt < max_attempts {
+                        roze_metrics::record_gateway_retry(
+                            route.service.clone(),
+                            route.path.clone(),
+                            "timeout",
+                        );
+                    }
                 }
             }
 
@@ -402,6 +471,13 @@ impl GatewayRuntime {
 
         self.record_breaker_failure(&route).await;
         if last_timeout {
+            self.record_gateway_response(
+                Some(&route),
+                &request_method,
+                StatusCode::GATEWAY_TIMEOUT,
+                "timeout",
+                started,
+            );
             build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::GATEWAY_TIMEOUT,
@@ -412,6 +488,13 @@ impl GatewayRuntime {
                 .as_ref()
                 .map(|err| err.to_string())
                 .unwrap_or_else(|| "upstream failed".to_string());
+            self.record_gateway_response(
+                Some(&route),
+                &request_method,
+                StatusCode::BAD_GATEWAY,
+                "upstream_failed",
+                started,
+            );
             build_fallback(
                 route.fallback.as_ref().or(self.global_fallback.as_ref()),
                 StatusCode::BAD_GATEWAY,
@@ -422,6 +505,27 @@ impl GatewayRuntime {
 
     fn default_body_limit_bytes(&self) -> usize {
         2 * 1024 * 1024
+    }
+
+    fn record_gateway_response(
+        &self,
+        route: Option<&CompiledRoute>,
+        method: &Method,
+        status: StatusCode,
+        outcome: &str,
+        started: Instant,
+    ) {
+        let (service, route_path) = route
+            .map(|route| (route.service.clone(), route.path.clone()))
+            .unwrap_or_else(|| (String::new(), String::new()));
+        roze_metrics::record_gateway_route(
+            service,
+            route_path,
+            method.as_str().to_string(),
+            status.as_u16().to_string(),
+            outcome.to_string(),
+            started.elapsed(),
+        );
     }
 
     fn requires_auth(&self, route: &CompiledRoute) -> bool {
@@ -475,14 +579,29 @@ impl GatewayRuntime {
             Ok(response) => response,
             Err(err) => {
                 self.record_outlier_failure(&target).await;
+                roze_metrics::record_gateway_upstream(
+                    route.service.clone(),
+                    target.instance_key.clone(),
+                    "request_error",
+                );
                 return Err(err.into());
             }
         };
         let response = build_upstream_response(upstream_response).await?;
         if response.status().is_server_error() {
             self.record_outlier_failure(&target).await;
+            roze_metrics::record_gateway_upstream(
+                route.service.clone(),
+                target.instance_key.clone(),
+                format!("status_{}", response.status().as_u16()),
+            );
         } else {
             self.record_outlier_success(&target).await;
+            roze_metrics::record_gateway_upstream(
+                route.service.clone(),
+                target.instance_key.clone(),
+                "ok",
+            );
         }
         Ok(response)
     }
@@ -1004,6 +1123,18 @@ fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
     url
 }
 
+fn response_outcome(status: StatusCode) -> &'static str {
+    if status.is_success() {
+        "ok"
+    } else if status.is_client_error() {
+        "client_error"
+    } else if status.is_server_error() {
+        "server_error"
+    } else {
+        "other"
+    }
+}
+
 fn normalize_upstream_base(base: &str) -> String {
     let base = base.trim();
     if base.starts_with("http://") || base.starts_with("https://") {
@@ -1209,6 +1340,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        let metrics = roze_metrics::http_metrics();
+        assert!(metrics.contains("roze_gateway_route_requests_total"));
+        assert!(metrics.contains("roze_gateway_route_retries_total"));
+        assert!(metrics.contains(r#"service="user""#));
+        assert!(metrics.contains(r#"route="/user""#));
+        assert!(metrics.contains(r#"reason="status_503""#));
     }
 
     #[tokio::test]

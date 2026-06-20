@@ -17,6 +17,7 @@ tracing.workspace = true
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
 roze-jwt = { path = "../roze-jwt" }
+roze-metrics = { path = "../roze-metrics" }
 roze-rpc = { path = "../roze-rpc" }
 roze-trace = { path = "../roze-trace" }
 
