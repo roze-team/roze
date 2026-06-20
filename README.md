@@ -58,6 +58,36 @@ and permission checks.
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
 - [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)
 
+## Install rozectl
+
+Install from GitHub:
+
+```bash
+cargo install --git https://github.com/roze-team/roze.git rozectl
+```
+
+Install from a local checkout:
+
+```bash
+cargo install --path apps/rozectl
+```
+
+Verify the installation:
+
+```bash
+rozectl --help
+```
+
+Generated REST/RPC services pin their package edition to Rust 2021, including
+when they are created inside a workspace. This keeps generated `build.rs`
+compatible with current Roze templates even if the parent workspace moves to
+Rust 2024.
+
+Roze keeps SeaORM/sqlx sqlite support in the framework, but generated Toasty
+dependencies default to MySQL/PostgreSQL only. This avoids duplicate
+`libsqlite3-sys` `links = "sqlite3"` conflicts when generated services also use
+`roze-db`.
+
 ## Quick Start
 
 ```bash

@@ -201,7 +201,7 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
                     .expect("valid toml dependency value")
             }
             ModelOrm::Toasty => {
-                r#"{ version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }"#
+                r#"{ version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }"#
                     .parse::<toml_edit::Item>()
                     .expect("valid toml dependency value")
             }

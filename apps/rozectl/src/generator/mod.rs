@@ -1139,7 +1139,7 @@ fn cargo_toml(
         project_roze_crates(kind),
     );
     let package = if in_workspace {
-        r#"edition.workspace = true
+        r#"edition = "2021"
 license.workspace = true
 version.workspace = true"#
     } else {
@@ -1168,7 +1168,7 @@ tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toasty = { version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }
+toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }
 validator = { version = "0.20", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1""#
@@ -1197,7 +1197,7 @@ tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toasty = { version = "0.7", default-features = false, features = ["sqlite", "postgresql", "mysql", "serde"] }
+toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.11"
@@ -2440,6 +2440,12 @@ mod tests {
         assert!(fs::read_to_string(out.join("proto/service.proto"))
             .expect("read proto")
             .contains("rpc GetUser (GetUserReq) returns (GetUserResp);"));
+        assert!(fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read project manifest")
+            .contains(r#"edition = "2021""#));
+        assert!(!fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read project manifest")
+            .contains("edition.workspace = true"));
         assert!(fs::read_to_string(out.join("Cargo.toml"))
             .expect("read project manifest")
             .contains(ROZE_GIT_URL));

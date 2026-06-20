@@ -11,6 +11,20 @@ code, and deployment files. Business logic is still written by developers:
 handler-driven logic, complex SQL, domain checks, transactions, authorization,
 permissions, and other product-specific behavior live in the application.
 
+Install `rozectl` first if the binary is not available:
+
+```bash
+cargo install --git https://github.com/roze-team/roze.git rozectl
+```
+
+See [usage documentation](./README.md#install-rozectl) for local install,
+upgrade, and PATH troubleshooting.
+
+Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
+instead of inheriting `edition.workspace`. Toasty model generation also defaults
+to MySQL/PostgreSQL features only; sqlite support remains available through the
+Roze SeaORM/sqlx stack.
+
 ## Commands
 
 Generate a REST service:
