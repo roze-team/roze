@@ -8,6 +8,8 @@ services.
 - [Project standards](../project-standards.md): repository layout, API/RPC
   project boundaries, generated file ownership, runtime contracts, metrics, and
   verification rules.
+- [Roze vs go-zero comparison](../go-zero-comparison.md): current parity
+  matrix, intentional differences, and remaining gaps.
 - [Middleware contract](../contracts/middleware.md): REST middleware config,
   go-zero-compatible built-in names, adaptive shedding, and generated file
   ownership.

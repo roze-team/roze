@@ -92,7 +92,7 @@ tonic-build = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = "0.14.6"
 tower = { version = "0.5.3", features = ["limit", "timeout", "util"] }
-tower-http = { version = "0.7.0", features = ["catch-panic", "cors", "decompression-gzip", "limit", "trace"] }
+tower-http = { version = "0.7.0", features = ["catch-panic", "cors", "decompression-gzip", "limit", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml_edit = "0.25.12"

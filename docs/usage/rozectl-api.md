@@ -245,6 +245,13 @@ rest:
     stat: true
     prometheus: true
     cors: true
+    # cors_config:
+    #   allow_origins: ["*"]
+    #   allow_methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    #   allow_headers: ["authorization", "content-type", "x-request-id", "x-trace-id"]
+    #   expose_headers: ["x-request-id", "x-trace-id"]
+    #   allow_credentials: false
+    #   max_age_seconds: 3600
     timeout: true
     # max_conns: 1000
     # shedding:
@@ -271,6 +278,24 @@ Unknown middleware names are application-owned hooks. For example,
 
 See [Middleware Contract](../contracts/middleware.md) for the complete alias
 table and adaptive shedding behavior.
+
+`timeout: true` makes generated route glue apply the service-wide
+`governance.timeout_ms` through Roze middleware. Generated handler adapters also
+enforce route-specific timeout overrides from `governance.routes`. Set
+`timeout: false` when you only want timeout metadata propagated through
+`roze_context::Context` and do not want generated HTTP adapters to cancel
+long-running logic.
+
+Business logic should not pass or construct `trace_id` values. Use
+`tracing::info!`, `tracing::warn!`, and `tracing::error!` directly in
+`src/logic/**`; the request Span created by Roze middleware carries the
+`trace_id`. Use `ServiceContext` for global resources and Axum `Extension<T>`
+for per-request user/session objects injected by custom middleware.
+
+`cors: true` enables CORS. Without `cors_config`, generated services keep the
+compatibility default of permissive CORS. Add `cors_config` to restrict browser
+origins, methods, request headers, exposed response headers, credentials, and
+preflight max age.
 
 ## Empty request and response
 

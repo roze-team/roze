@@ -55,6 +55,7 @@ and permission checks.
 
 - [Project standards](docs/project-standards.md)
 - [Usage documentation](docs/usage/README.md)
+- [Roze vs go-zero comparison](docs/go-zero-comparison.md)
 - [Middleware contract](docs/contracts/middleware.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
 - [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)

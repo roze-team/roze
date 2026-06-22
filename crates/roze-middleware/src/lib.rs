@@ -4,15 +4,18 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Request as AxumRequest, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response as AxumResponse},
     Router,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::{
-    catch_panic::CatchPanicLayer, cors::CorsLayer, decompression::RequestDecompressionLayer,
+    catch_panic::CatchPanicLayer,
+    cors::{Any, CorsLayer},
+    decompression::RequestDecompressionLayer,
     limit::RequestBodyLimitLayer,
+    timeout::TimeoutLayer,
 };
 use tracing::Instrument;
 
@@ -54,12 +57,22 @@ where
         router = router.layer(RequestDecompressionLayer::new().gzip(true));
     }
     if config.cors {
-        router = router.layer(CorsLayer::permissive());
+        router = router.layer(build_cors_layer(config.cors_config.as_ref()));
     }
     if config.recover {
         router = router.layer(CatchPanicLayer::new());
     }
     router
+}
+
+pub fn apply_timeout<S>(router: Router<S>, timeout: Duration) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        timeout,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +82,8 @@ pub struct CommonMiddlewareConfig {
     pub stat: bool,
     pub prometheus: bool,
     pub cors: bool,
+    pub cors_config: Option<CorsConfig>,
+    pub timeout: bool,
     pub max_conns: Option<usize>,
     pub shedding: Option<SheddingConfig>,
     pub gunzip: bool,
@@ -83,6 +98,8 @@ impl Default for CommonMiddlewareConfig {
             stat: true,
             prometheus: true,
             cors: true,
+            cors_config: None,
+            timeout: true,
             max_conns: None,
             shedding: None,
             gunzip: false,
@@ -99,6 +116,8 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
             stat: config.stat,
             prometheus: config.prometheus,
             cors: config.cors,
+            cors_config: config.cors_config.as_ref().map(CorsConfig::from),
+            timeout: config.timeout,
             max_conns: config.max_conns,
             shedding: config.shedding.map(|shedding| SheddingConfig {
                 concurrency: shedding.concurrency,
@@ -110,6 +129,29 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
             }),
             gunzip: config.gunzip,
             request_body_limit_bytes: config.request_body_limit_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorsConfig {
+    pub allow_origins: Vec<String>,
+    pub allow_methods: Vec<String>,
+    pub allow_headers: Vec<String>,
+    pub expose_headers: Vec<String>,
+    pub allow_credentials: bool,
+    pub max_age: Option<Duration>,
+}
+
+impl From<&roze_config::HttpCorsConfig> for CorsConfig {
+    fn from(config: &roze_config::HttpCorsConfig) -> Self {
+        Self {
+            allow_origins: config.allow_origins.clone(),
+            allow_methods: config.allow_methods.clone(),
+            allow_headers: config.allow_headers.clone(),
+            expose_headers: config.expose_headers.clone(),
+            allow_credentials: config.allow_credentials,
+            max_age: config.max_age_seconds.map(Duration::from_secs),
         }
     }
 }
@@ -530,6 +572,69 @@ fn failure_ratio_per_mille(state: &AdaptiveSheddingState) -> u32 {
     } else {
         ((state.failures.saturating_mul(1000)) / state.requests) as u32
     }
+}
+
+fn build_cors_layer(config: Option<&CorsConfig>) -> CorsLayer {
+    let Some(config) = config else {
+        return CorsLayer::permissive();
+    };
+
+    let mut cors = CorsLayer::new();
+    if config.allow_origins.is_empty() || config.allow_origins.iter().any(|origin| origin == "*") {
+        cors = cors.allow_origin(Any);
+    } else {
+        let origins = config
+            .allow_origins
+            .iter()
+            .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+            .collect::<Vec<_>>();
+        if !origins.is_empty() {
+            cors = cors.allow_origin(origins);
+        }
+    }
+
+    if config.allow_methods.is_empty() || config.allow_methods.iter().any(|method| method == "*") {
+        cors = cors.allow_methods(Any);
+    } else {
+        let methods = config
+            .allow_methods
+            .iter()
+            .filter_map(|method| method.parse::<Method>().ok())
+            .collect::<Vec<_>>();
+        if !methods.is_empty() {
+            cors = cors.allow_methods(methods);
+        }
+    }
+
+    if config.allow_headers.is_empty() || config.allow_headers.iter().any(|header| header == "*") {
+        cors = cors.allow_headers(Any);
+    } else {
+        let headers = config
+            .allow_headers
+            .iter()
+            .filter_map(|header| header.parse::<HeaderName>().ok())
+            .collect::<Vec<_>>();
+        if !headers.is_empty() {
+            cors = cors.allow_headers(headers);
+        }
+    }
+
+    let expose_headers = config
+        .expose_headers
+        .iter()
+        .filter_map(|header| header.parse::<HeaderName>().ok())
+        .collect::<Vec<_>>();
+    if !expose_headers.is_empty() {
+        cors = cors.expose_headers(expose_headers);
+    }
+
+    if config.allow_credentials {
+        cors = cors.allow_credentials(true);
+    }
+    if let Some(max_age) = config.max_age {
+        cors = cors.max_age(max_age);
+    }
+    cors
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1041,6 +1146,32 @@ mod tests {
         assert_eq!(state.failures, 0);
     }
 
+    #[tokio::test]
+    async fn timeout_layer_rejects_slow_requests() {
+        let app = apply_timeout(
+            axum::Router::new().route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    "ok"
+                }),
+            ),
+            Duration::from_millis(1),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
     #[test]
     fn adaptive_shedding_rejects_after_unhealthy_window() {
         let runtime = Arc::new(AdaptiveShedding::new(SheddingConfig {
@@ -1268,6 +1399,68 @@ mod tests {
             .expect("body");
 
         assert_eq!(body.as_ref(), b"idem-1");
+    }
+
+    #[tokio::test]
+    async fn cors_config_limits_allowed_origins() {
+        let app = apply_common_with_config(
+            axum::Router::new().route("/ping", get(|| async { "pong" })),
+            CommonMiddlewareConfig {
+                trace: false,
+                stat: false,
+                prometheus: false,
+                cors_config: Some(CorsConfig {
+                    allow_origins: vec!["https://example.com".to_string()],
+                    allow_methods: vec!["GET".to_string()],
+                    allow_headers: vec!["authorization".to_string()],
+                    expose_headers: vec!["x-request-id".to_string()],
+                    allow_credentials: true,
+                    max_age: Some(Duration::from_secs(60)),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("origin", "https://example.com")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            allowed
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            allowed
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ping")
+                    .header("origin", "https://other.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(denied
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
     }
 
     #[tokio::test]

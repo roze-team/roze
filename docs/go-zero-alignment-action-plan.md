@@ -65,7 +65,7 @@
 - 主要任务：
   1. [x] 统一 REST 服务级 middleware 配置：`rest.middlewares`。
   2. [x] 统一 `.api` 内建 middleware 名称解析，避免把 go-zero 常见 middleware 误生成成自定义 stub。
-  3. [x] HTTP timeout 从 Context metadata 升级为生成 handler 中真实 `tokio::time::timeout` 执行。
+  3. [x] HTTP timeout 从 Context metadata 升级为框架层执行：服务级 timeout 走 Tower middleware，route 覆盖由生成 handler adapter 兜底。
   4. [x] Adaptive shedding 支持并发上限、窗口样本数、平均延迟阈值、失败率阈值和冷却时间。
   5. [ ] `breaker`/`ratelimit` 状态持久化可选。
   6. [ ] 与 `roze-event`、`roze-http`、`roze-rpc` 指标口径进一步统一。

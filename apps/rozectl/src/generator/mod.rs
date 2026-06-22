@@ -1518,6 +1518,13 @@ rest:
     stat: true
     prometheus: true
     cors: true
+    # cors_config:
+    #   allow_origins: ["*"]
+    #   allow_methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    #   allow_headers: ["authorization", "content-type", "x-request-id", "x-trace-id"]
+    #   expose_headers: ["x-request-id", "x-trace-id"]
+    #   allow_credentials: false
+    #   max_age_seconds: 3600
     timeout: true
     # max_conns: 1000
     # shedding:

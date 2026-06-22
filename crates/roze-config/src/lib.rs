@@ -202,6 +202,8 @@ pub struct HttpMiddlewaresConfig {
     #[serde(default = "default_true")]
     pub cors: bool,
     #[serde(default)]
+    pub cors_config: Option<HttpCorsConfig>,
+    #[serde(default)]
     pub timeout: bool,
     #[serde(default)]
     pub max_conns: Option<usize>,
@@ -221,6 +223,7 @@ impl Default for HttpMiddlewaresConfig {
             stat: true,
             prometheus: true,
             cors: true,
+            cors_config: None,
             timeout: true,
             max_conns: None,
             shedding: None,
@@ -228,6 +231,22 @@ impl Default for HttpMiddlewaresConfig {
             request_body_limit_bytes: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpCorsConfig {
+    #[serde(default)]
+    pub allow_origins: Vec<String>,
+    #[serde(default)]
+    pub allow_methods: Vec<String>,
+    #[serde(default)]
+    pub allow_headers: Vec<String>,
+    #[serde(default)]
+    pub expose_headers: Vec<String>,
+    #[serde(default)]
+    pub allow_credentials: bool,
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

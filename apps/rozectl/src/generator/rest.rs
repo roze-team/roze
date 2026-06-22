@@ -178,10 +178,10 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use axum::{routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+        "use std::time::Duration;\n\nuse axum::{routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
-    out.push_str("    Router::new()\n");
+    out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and_then(|_| ctx.config.governance.timeout_ms)\n        .map(Duration::from_millis);\n    let router = Router::new()\n");
     out.push_str(&format!(
         "        .route(\"{}\", get(health))\n",
         axum_route_path(&full_route_path(spec, "/healthz"))
@@ -202,7 +202,8 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         ));
     }
 
-    out.push_str("        .with_state(ctx)\n");
+    out.push_str(";\n");
+    out.push_str("    let router = match timeout {\n        Some(timeout) => roze_middleware::apply_timeout(router, timeout),\n        None => router,\n    };\n    router.with_state(ctx)\n");
     out.push_str("}\n\n");
 
     out.push_str(
@@ -705,7 +706,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
     out.push_str(&render_request_validation_checks(&request_ty.fields));
     out.push_str(&format!(
-        "    let timeout = request_ctx.remaining_timeout();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n",
+        "    let timeout_enabled = ctx.config.rest.as_ref().map_or(true, |rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n",
         handler = handler
     ));
     out.push_str("    match result {\n        Ok(resp) => {\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }\n    }\n");
@@ -2040,7 +2041,13 @@ mod tests {
         assert!(handlers.contains(".route(\"/internal/stats\", get(get_stats))"));
         assert!(handlers.contains(".route(\"/internal/users/{id}\", patch(update_user))"));
         assert!(handlers.contains("authorize(headers, &ctx)"));
+        assert!(handlers
+            .contains("ctx.config.rest.as_ref().map_or(true, |rest| rest.middlewares.timeout)"));
         assert!(handlers.contains("crate::middleware::audit(&ctx, &request_ctx).await"));
+
+        let routes = render_route_mod(&spec);
+        assert!(routes.contains("roze_middleware::apply_timeout(router, timeout)"));
+        assert!(routes.contains(".and_then(|_| ctx.config.governance.timeout_ms)"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains("builder.security_scheme(\"bearerAuth\""));

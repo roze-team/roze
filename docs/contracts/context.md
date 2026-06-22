@@ -1,6 +1,18 @@
 # Roze Context 契约（v1）
 
-Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共享的请求上下文模型。新代码应以 `roze_context::Context` 作为唯一请求上下文入口。
+Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共享的请求元数据模型。它不是全局资源容器，也不是业务用户对象容器。
+
+新代码按职责选择上下文载体：
+
+| 数据类型 | 实现方式 | 作用域 |
+| --- | --- | --- |
+| 全局资源，例如 DB、Redis、配置、RPC client | `ServiceContext` | 应用全局，通过 Axum `State` 共享 |
+| 请求元数据，例如 request_id、trace_id、deadline、认证主体、透传 metadata | `roze_context::Context` | 单次请求，框架中间件写入 Axum `Extension<Context>`，跨 REST/RPC/Gateway 传播 |
+| 业务用户对象，例如登录用户详情、权限快照 | Axum `Extension<T>` | 单次 HTTP 请求，由认证/会话中间件注入，handler 提取后显式传给 logic |
+| 链路追踪和日志上下文 | `tracing::Span` | 当前异步任务隐式传播，业务代码直接使用 `tracing` 宏 |
+| 超时、限流、熔断、降载等横切逻辑 | middleware / route governance | 框架层处理，logic 不应自己实现通用治理 |
+
+业务 logic 中需要日志时直接使用 `tracing::info!`、`tracing::warn!`、`tracing::error!` 等宏。只要请求入口已经经过 Roze tracing middleware，日志会自动关联当前请求 Span 和 `trace_id`，不要为了打日志在业务函数签名里手动传递 `trace_id`。
 
 ## 标准字段
 
@@ -31,6 +43,10 @@ Roze Context 是 REST、RPC、Gateway、日志、链路追踪和治理规则共�
 - 未传入 `x-request-id` 或 `x-trace-id` 时，入口中间件生成新值并回写响应 header。
 - `x-roze-locale` 或 `Accept-Language` 会进入 `Context::locale()`。
 - `roze-middleware::axum_auth` 验证 JWT 后把 `subject/roles/tenant` 写入同一个 `Context`。
+- `roze-middleware::axum_trace` 为每个请求创建根 tracing Span，Span 字段包含 `trace_id`。
+- 需要完整业务用户对象时，自定义认证/会话中间件应把对象写入 Axum `Extension<User>`，handler 通过 `Extension(user): Extension<User>` 提取，再把需要的字段显式传给 logic。
+
+`Context` 保留 `trace_id` 是为了跨协议传播、错误响应和 RPC metadata，不代表业务代码需要手动传递它来记录日志。
 
 ## RPC/gRPC 边界
 
