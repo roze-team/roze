@@ -77,6 +77,12 @@ upgradeable, and recoverable.
 
 - More goctl parser edge fixtures: comments, imports, nested types, duplicate
   names, reserved words, mixed annotations, and compact syntax.
+
+## P1: Admin API
+
+- Control-plane models and adapters live in `roze-admin` for registry service
+  instances, config reload history, and MQ DLQ snapshots/replay/purge.
+- HTTP routes, OpenAPI, auth policy, and UI are still integration work.
 - Golden tests for repeated generation and ownership preservation.
 - Generated project compile tests for REST/RPC/model/client/docs.
 - OpenAPI projection for validator constraints including `min`, `max`, `len`,

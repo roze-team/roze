@@ -3184,10 +3184,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "roze-config",
+ "roze-mq",
+ "roze-rpc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "roze-auth"
 version = "0.1.0"
 dependencies = [
- "roze-jwt",
  "serde",
 ]
 
@@ -3233,6 +3248,7 @@ dependencies = [
  "config",
  "futures-util",
  "reqwest 0.13.4",
+ "roze-auth",
  "roze-nats",
  "roze-storage",
  "serde",
@@ -3363,6 +3379,7 @@ dependencies = [
  "anyhow",
  "axum",
  "reqwest 0.13.4",
+ "roze-auth",
  "roze-config",
  "roze-context",
  "roze-jwt",
@@ -3384,6 +3401,7 @@ dependencies = [
  "anyhow",
  "axum",
  "config",
+ "roze-admin",
  "roze-config",
  "roze-gateway",
  "roze-http",
@@ -5456,6 +5474,7 @@ dependencies = [
  "anyhow",
  "axum",
  "config",
+ "roze-admin",
  "roze-cache",
  "roze-config",
  "roze-context",

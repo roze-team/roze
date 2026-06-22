@@ -62,28 +62,33 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing gateway config"))?;
 
     let jwt = config.auth.as_ref().map(roze_jwt::JwtConfig::from);
+    let api_keys = config.auth.as_ref().and_then(|auth| auth.api_keys.clone());
     let listen = gateway
         .listen
         .unwrap_or_else(|| "127.0.0.1:8081".parse().expect("default addr"));
     let initial_gateway_signature = route_signature(&gateway, &config.governance);
     let registry = roze_rpc::registry::build_service_registry(&config)?;
+    let config_history = roze_admin::ConfigReloadHistory::new(128);
 
-    let initial_router = roze_gateway::build_router_with_registry_and_governance(
+    let initial_router = roze_gateway::build_router_with_registry_governance_and_auth(
         gateway.clone(),
         jwt.clone(),
+        api_keys.clone(),
         registry.clone(),
         Some(config.governance.clone()),
     );
     let dynamic_gateway = DynamicGatewayRouter::new(initial_router);
-    let dynamic_router = Router::new()
-        .fallback(any(dynamic_gateway_handler))
-        .with_state(dynamic_gateway.clone());
+    let admin_router = build_admin_router(registry.clone(), config_history.clone());
+    let dynamic_router = admin_router.merge(
+        Router::new()
+            .fallback(any(dynamic_gateway_handler))
+            .with_state(dynamic_gateway.clone()),
+    );
     let signature_guard = Arc::new(RwLock::new(initial_gateway_signature));
 
     if let Some(center) = center.clone() {
         let (config_tx, mut config_rx) = mpsc::unbounded_channel::<config::Config>();
         let center_router = dynamic_gateway.clone();
-        let center_jwt = jwt.clone();
         let center_registry = registry.clone();
         let center_signature = signature_guard.clone();
         let center_listen = listen;
@@ -117,9 +122,15 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                let next = roze_gateway::build_router_with_registry_and_governance(
+                let next_api_keys = updated_config
+                    .auth
+                    .as_ref()
+                    .and_then(|auth| auth.api_keys.clone());
+                let next_jwt = updated_config.auth.as_ref().map(roze_jwt::JwtConfig::from);
+                let next = roze_gateway::build_router_with_registry_governance_and_auth(
                     updated_gateway,
-                    center_jwt.clone(),
+                    next_jwt,
+                    next_api_keys,
                     center_registry.clone(),
                     Some(updated_config.governance),
                 );
@@ -137,8 +148,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(center) = center {
+        let reload_history = config_history.clone();
         center
-            .add_reload_listener(|result| {
+            .add_reload_listener(move |result| {
+                reload_history.record(result);
                 let diff_paths = result
                     .diff
                     .iter()
@@ -182,6 +195,20 @@ async fn main() -> anyhow::Result<()> {
         .serve()
         .await?;
     Ok(())
+}
+
+fn build_admin_router(
+    registry: Option<Arc<dyn roze_rpc::registry::Registry>>,
+    history: roze_admin::ConfigReloadHistory,
+) -> Router {
+    let mut state = roze_admin::AdminState::new().with_config_history(history);
+    if let Some(registry) = registry {
+        state = state.with_registry(roze_admin::RegistryAdmin::new(registry));
+    }
+    if let Some(auth) = roze_admin::AdminAuthConfig::from_env() {
+        state = state.with_auth(auth);
+    }
+    roze_admin::admin_router(state)
 }
 
 fn route_signature(

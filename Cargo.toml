@@ -15,6 +15,7 @@ members = [
     "crates/roze-bootstrap",
     "crates/roze-shutdown",
     "crates/roze-health",
+    "crates/roze-admin",
     "crates/roze-validation",
     "crates/roze-config",
     "crates/roze-log",

@@ -15,6 +15,21 @@ cargo run
 - REST: `GET /openapi.json`
 - `POST` `/user/login`
 
+## Admin API
+
+`user-service` 挂载 `roze-admin` 控制面路由：
+
+- `GET /admin/registry/{service}`：查询 registry 服务实例（仅配置 registry 时可用）。
+- `GET /admin/config/reloads?offset=0&limit=100`：查询配置中心 reload 审计历史。
+
+MQ DLQ 管理端点已由 `roze-admin` 提供，但当前 `user-service` Kafka 运行时使用真实 rdkafka pipeline，尚未注入可管理的 `MqAdmin` state。
+
+可通过环境变量启用 Admin 鉴权：
+
+- `ROZE_ADMIN_TOKEN`：要求 `Authorization: Bearer <token>`
+- `ROZE_ADMIN_API_KEY`：要求 API key header
+- `ROZE_ADMIN_API_KEY_HEADER`：API key header 名称，默认 `x-api-key`
+
 ## Config
 
 `config.yaml` is loaded from the crate directory first, then falls back to the current working directory.

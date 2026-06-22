@@ -126,6 +126,23 @@ nats:
 
 生产持久化层可按同一 `OutboxMessage` 结构落库，relay 侧保持 `roze_mq::Publisher` 抽象，不绑定具体 MQ。
 
+## Inbox Pattern
+
+`roze-transaction` 提供基础 inbox 状态模型：
+
+- `InboxMessage`：按 `idempotency_key` 记录消费状态、topic、group、attempts、时间戳和失败原因。
+- `InboxStatus`：`Processing`、`Processed`、`Failed`。
+- `InMemoryInbox::begin`：
+  - 首次消费返回 `Started`；
+  - 已成功处理返回 `DuplicateProcessed`，调用方应直接 ack；
+  - 正在处理或未到重试时间返回 `AlreadyProcessing`，调用方不应重复执行业务；
+  - 失败且到达 `next_attempt_millis` 返回 `RetryStarted`。
+- `mark_processed`：业务成功后标记完成。
+- `mark_failed`：业务失败后记录错误和下一次可重试时间。
+- `pending_retry`：查询已到期的失败消息，便于控制面或 worker 重试。
+
+生产持久化层可按同一 `InboxMessage` 结构落库，保证 at-least-once 投递下业务消费幂等。
+
 ## 手工提交验证（应用层）
 - 成功路径
   - 消费消息 -> 业务成功 -> `ack`

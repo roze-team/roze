@@ -390,6 +390,8 @@ pub struct AuthConfig {
     pub jwt_issuer: String,
     #[serde(default = "default_jwt_expiration_secs")]
     pub jwt_expiration_secs: u64,
+    #[serde(default)]
+    pub api_keys: Option<roze_auth::ApiKeyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -925,6 +927,42 @@ backoff_ms = 5
                 .backoff_ms,
             5
         );
+    }
+
+    #[test]
+    fn loads_auth_api_key_config() {
+        let source = r#"
+name = "demo"
+
+[auth]
+jwt_secret = "secret"
+jwt_issuer = "issuer"
+
+[auth.api_keys]
+header = "x-service-key"
+
+[[auth.api_keys.keys]]
+key = "secret-key"
+subject = "internal-worker"
+roles = ["worker", "admin"]
+tenant = "acme"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let api_keys = config.auth.expect("auth").api_keys.expect("api keys");
+        assert_eq!(api_keys.header, "x-service-key");
+        let credential = api_keys.keys.first().expect("credential");
+        assert_eq!(credential.key, "secret-key");
+        assert_eq!(credential.subject, "internal-worker");
+        assert_eq!(credential.roles, vec!["worker", "admin"]);
+        assert_eq!(credential.tenant.as_deref(), Some("acme"));
     }
 
     #[test]

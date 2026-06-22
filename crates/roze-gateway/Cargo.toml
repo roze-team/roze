@@ -15,6 +15,7 @@ tower-http.workspace = true
 tracing.workspace = true
 
 roze-config = { path = "../roze-config" }
+roze-auth = { path = "../roze-auth" }
 roze-context = { path = "../roze-context" }
 roze-jwt = { path = "../roze-jwt" }
 roze-metrics = { path = "../roze-metrics" }

@@ -19,7 +19,7 @@ use tower_http::{
 };
 use tracing::Instrument;
 
-use roze_auth::{principal_from_claims, AuthPrincipal};
+use roze_auth::AuthPrincipal;
 use roze_config::{GovernanceConfig, RouteGovernanceConfig};
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
@@ -422,7 +422,11 @@ pub async fn axum_auth(
     let token = extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;
     let claims =
         verify_token(token, &config).map_err(|err| RozeError::Internal(err.to_string()))?;
-    let principal = principal_from_claims(&claims);
+    let principal = roze_auth::principal(
+        claims.sub.clone(),
+        claims.roles.clone(),
+        claims.tenant.clone(),
+    );
     if let Some(context) = req.extensions().get::<Context>().cloned() {
         req.extensions_mut()
             .insert(context.with_auth(auth_context_from_principal(&principal)));

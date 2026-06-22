@@ -14,5 +14,6 @@ serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+roze-auth = { path = "../roze-auth" }
 roze-nats = { path = "../roze-nats" }
 roze-storage = { path = "../roze-storage" }

@@ -6,4 +6,3 @@ version.workspace = true
 
 [dependencies]
 serde.workspace = true
-roze-jwt = { path = "../roze-jwt" }

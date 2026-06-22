@@ -22,7 +22,7 @@ use roze_config::{
     GatewayOutlierConfig, GatewayRoute, GatewayService, GovernanceConfig, RateLimitConfig,
     RouteGovernanceConfig,
 };
-use roze_jwt::{verify_token, Claims, JwtConfig};
+use roze_jwt::{verify_token, JwtConfig};
 use roze_rpc::registry::Registry;
 
 #[derive(Clone)]
@@ -35,6 +35,7 @@ struct GatewayRuntime {
     global_middlewares: Vec<String>,
     client: reqwest::Client,
     jwt: Option<JwtConfig>,
+    api_keys: Option<roze_auth::ApiKeyConfig>,
     registry: Option<Arc<dyn Registry>>,
     registry_cursors: Arc<Mutex<HashMap<String, usize>>>,
     outlier_states: Arc<Mutex<HashMap<String, OutlierState>>>,
@@ -103,6 +104,13 @@ struct HealthState {
     successes: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AuthPolicy {
+    Jwt,
+    ApiKey,
+    Any,
+}
+
 impl Default for HealthState {
     fn default() -> Self {
         Self {
@@ -124,6 +132,7 @@ impl Default for GatewayRuntime {
             global_middlewares: Vec::new(),
             client: reqwest::Client::new(),
             jwt: None,
+            api_keys: None,
             registry: None,
             registry_cursors: Arc::new(Mutex::new(HashMap::new())),
             outlier_states: Arc::new(Mutex::new(HashMap::new())),
@@ -152,12 +161,23 @@ pub fn build_router_with_registry_and_governance(
     registry: Option<Arc<dyn Registry>>,
     governance: Option<GovernanceConfig>,
 ) -> Router {
+    build_router_with_registry_governance_and_auth(config, jwt, None, registry, governance)
+}
+
+pub fn build_router_with_registry_governance_and_auth(
+    config: GatewayConfig,
+    jwt: Option<JwtConfig>,
+    api_keys: Option<roze_auth::ApiKeyConfig>,
+    registry: Option<Arc<dyn Registry>>,
+    governance: Option<GovernanceConfig>,
+) -> Router {
     let cors_config = config.cors;
     let mut runtime = GatewayRuntime {
         global_timeout_ms: config.timeout_ms,
         global_fallback: config.fallback,
         request_body_limit_bytes: config.request_body_limit_bytes,
         global_middlewares: normalize_middlewares(config.middlewares),
+        api_keys,
         jwt,
         registry,
         ..Default::default()
@@ -281,9 +301,14 @@ impl GatewayRuntime {
         }
 
         // fixed middleware order: trace -> auth -> rate -> breaker -> timeout -> upstream
-        if self.requires_auth(&route) {
-            match validate_request_auth(&req, self.jwt.as_ref()) {
-                Ok(claims) => inject_auth_context_headers(&mut req, &claims),
+        if let Some(auth_policy) = self.auth_policy(&route) {
+            match validate_request_auth(
+                &req,
+                auth_policy,
+                self.jwt.as_ref(),
+                self.api_keys.as_ref(),
+            ) {
+                Ok(principal) => inject_auth_context_headers(&mut req, &principal),
                 Err(err) => {
                     warn!(
                         error = %err,
@@ -544,11 +569,24 @@ impl GatewayRuntime {
         );
     }
 
-    fn requires_auth(&self, route: &CompiledRoute) -> bool {
-        has_middleware(&route.middlewares, "auth")
-            || has_middleware(&route.middlewares, "jwt")
-            || has_middleware(&self.global_middlewares, "auth")
+    fn auth_policy(&self, route: &CompiledRoute) -> Option<AuthPolicy> {
+        if has_middleware(&route.middlewares, "jwt")
             || has_middleware(&self.global_middlewares, "jwt")
+        {
+            Some(AuthPolicy::Jwt)
+        } else if has_middleware(&route.middlewares, "api_key")
+            || has_middleware(&route.middlewares, "apikey")
+            || has_middleware(&self.global_middlewares, "api_key")
+            || has_middleware(&self.global_middlewares, "apikey")
+        {
+            Some(AuthPolicy::ApiKey)
+        } else if has_middleware(&route.middlewares, "auth")
+            || has_middleware(&self.global_middlewares, "auth")
+        {
+            Some(AuthPolicy::Any)
+        } else {
+            None
+        }
     }
 
     fn inject_trace_headers(&self, req: &mut Request<Body>) {
@@ -1160,17 +1198,51 @@ fn has_middleware(items: &[String], name: &str) -> bool {
     })
 }
 
-fn validate_request_auth(req: &Request<Body>, jwt: Option<&JwtConfig>) -> anyhow::Result<Claims> {
-    let jwt = jwt.ok_or_else(|| anyhow::anyhow!("jwt config missing"))?;
+fn validate_request_auth(
+    req: &Request<Body>,
+    policy: AuthPolicy,
+    jwt: Option<&JwtConfig>,
+    api_keys: Option<&roze_auth::ApiKeyConfig>,
+) -> anyhow::Result<roze_auth::AuthPrincipal> {
+    if matches!(policy, AuthPolicy::Jwt | AuthPolicy::Any) {
+        if let Some(jwt) = jwt {
+            if let Some(token) = bearer_token(req) {
+                if let Ok(claims) = verify_token(token, jwt) {
+                    return Ok(roze_auth::principal(
+                        claims.sub,
+                        claims.roles,
+                        claims.tenant,
+                    ));
+                }
+            }
+        }
+    }
 
-    let auth_header = req
-        .headers()
+    if matches!(policy, AuthPolicy::ApiKey | AuthPolicy::Any) {
+        if let Some(config) = api_keys {
+            if let Some(value) = api_key_value(req, config) {
+                if let Some(principal) = roze_auth::verify_api_key(value, config) {
+                    return Ok(principal);
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("unauthorized")
+}
+
+fn bearer_token(req: &Request<Body>) -> Option<&str> {
+    req.headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(roze_jwt::extract_bearer_token)
-        .ok_or_else(|| anyhow::anyhow!("missing bearer token"))?;
+}
 
-    verify_token(auth_header, jwt).map_err(|err| anyhow::anyhow!(err.to_string()))
+fn api_key_value<'a>(req: &'a Request<Body>, config: &roze_auth::ApiKeyConfig) -> Option<&'a str> {
+    let header_name = config.header.parse::<HeaderName>().ok()?;
+    req.headers()
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
 }
 
 fn ensure_header(req: &mut Request<Body>, key: &str) -> String {
@@ -1187,13 +1259,17 @@ fn ensure_header(req: &mut Request<Body>, key: &str) -> String {
     generated
 }
 
-fn inject_auth_context_headers(req: &mut Request<Body>, claims: &Claims) {
-    insert_header(req, roze_context::SUBJECT_HEADER, &claims.sub);
-    if let Some(tenant) = claims.tenant.as_deref().filter(|tenant| !tenant.is_empty()) {
+fn inject_auth_context_headers(req: &mut Request<Body>, principal: &roze_auth::AuthPrincipal) {
+    insert_header(req, roze_context::SUBJECT_HEADER, &principal.subject);
+    if let Some(tenant) = principal
+        .tenant
+        .as_deref()
+        .filter(|tenant| !tenant.is_empty())
+    {
         insert_header(req, roze_context::TENANT_HEADER, tenant);
     }
-    if !claims.roles.is_empty() {
-        insert_header(req, roze_context::ROLES_HEADER, &claims.roles.join(","));
+    if !principal.roles.is_empty() {
+        insert_header(req, roze_context::ROLES_HEADER, &principal.roles.join(","));
     }
 }
 
@@ -1786,6 +1862,100 @@ mod tests {
         assert_eq!(second_hits.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn api_key_middleware_requires_valid_key() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let upstream_addr = spawn_text_upstream("ok", hits.clone()).await;
+        let gateway = build_router_with_registry_governance_and_auth(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    middlewares: vec!["api_key".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(api_key_config()),
+            None,
+            None,
+        );
+
+        let missing = gateway
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/user")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("missing key response");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        let allowed = gateway
+            .oneshot(
+                Request::builder()
+                    .uri("/user")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("valid key response");
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_accepts_api_key_without_jwt() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let upstream_addr = spawn_text_upstream("ok", hits.clone()).await;
+        let gateway = build_router_with_registry_governance_and_auth(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    middlewares: vec!["auth".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(api_key_config()),
+            None,
+            None,
+        );
+
+        let response = gateway
+            .oneshot(
+                Request::builder()
+                    .uri("/user")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("gateway response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn weighted_route_selection_uses_route_weights() {
         let low = CompiledRoute {
@@ -2026,6 +2196,18 @@ mod tests {
             timeout_ms: None,
             outlier: None,
             health_check: None,
+        }
+    }
+
+    fn api_key_config() -> roze_auth::ApiKeyConfig {
+        roze_auth::ApiKeyConfig {
+            header: "x-api-key".to_string(),
+            keys: vec![roze_auth::ApiKeyCredential {
+                key: "secret".to_string(),
+                subject: "internal".to_string(),
+                roles: vec!["gateway".to_string()],
+                tenant: Some("acme".to_string()),
+            }],
         }
     }
 }

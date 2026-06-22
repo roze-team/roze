@@ -70,9 +70,24 @@ gateway:
 
 ## 3. 鉴权
 
-- `middlewares` 命中 `auth` 或 `jwt` 时，要求请求携带 `Authorization: Bearer <token>`。
-- `jwt` 配置缺失时会返回 401（在网关层报错）。
-- 成功后执行标准 JWT 验签（`roze-jwt::verify_token`）。
+- `middlewares` 命中 `jwt` 时，要求请求携带 `Authorization: Bearer <token>`，并使用 `roze-jwt::verify_token` 验签。
+- `middlewares` 命中 `api_key` 或 `apikey` 时，要求请求携带 `auth.api_keys.header` 指定的 API key header，默认 `x-api-key`。
+- `middlewares` 命中 `auth` 时，允许 JWT 或 API key 任一方式通过。
+- `jwt` 配置缺失、`api_keys` 配置缺失或凭据校验失败时会返回 401。
+- 鉴权成功后，网关会向上游注入标准 auth context header：subject、roles、tenant。
+
+```yaml
+auth:
+  jwt_secret: "secret"
+  jwt_issuer: "roze"
+  api_keys:
+    header: "x-api-key"
+    keys:
+      - key: "service-secret"
+        subject: "internal-worker"
+        roles: ["internal"]
+        tenant: "acme"
+```
 
 ## 4. 路由与转发
 

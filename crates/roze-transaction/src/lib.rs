@@ -283,6 +283,180 @@ impl InboxDeduper {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InboxStatus {
+    Processing,
+    Processed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxMessage {
+    pub idempotency_key: String,
+    pub topic: String,
+    pub group: Option<String>,
+    pub status: InboxStatus,
+    pub attempts: u32,
+    pub first_seen_millis: u64,
+    pub updated_at_millis: u64,
+    pub next_attempt_millis: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl InboxMessage {
+    pub fn new(
+        idempotency_key: impl Into<String>,
+        topic: impl Into<String>,
+        group: Option<String>,
+        now_millis: u64,
+    ) -> Self {
+        Self {
+            idempotency_key: idempotency_key.into(),
+            topic: topic.into(),
+            group,
+            status: InboxStatus::Processing,
+            attempts: 1,
+            first_seen_millis: now_millis,
+            updated_at_millis: now_millis,
+            next_attempt_millis: None,
+            last_error: None,
+        }
+    }
+
+    pub fn mark_processed(&mut self, now_millis: u64) {
+        self.status = InboxStatus::Processed;
+        self.updated_at_millis = now_millis;
+        self.next_attempt_millis = None;
+        self.last_error = None;
+    }
+
+    pub fn mark_failed(
+        &mut self,
+        now_millis: u64,
+        error: impl Into<String>,
+        next_attempt_millis: Option<u64>,
+    ) {
+        self.status = InboxStatus::Failed;
+        self.updated_at_millis = now_millis;
+        self.last_error = Some(error.into());
+        self.next_attempt_millis = next_attempt_millis;
+    }
+
+    pub fn begin_retry(&mut self, now_millis: u64) {
+        self.status = InboxStatus::Processing;
+        self.attempts = self.attempts.saturating_add(1);
+        self.updated_at_millis = now_millis;
+        self.next_attempt_millis = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxBegin {
+    Started,
+    DuplicateProcessed,
+    AlreadyProcessing,
+    RetryStarted,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryInbox {
+    messages: Arc<Mutex<BTreeMap<String, InboxMessage>>>,
+}
+
+impl InMemoryInbox {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn begin(
+        &self,
+        idempotency_key: impl Into<String>,
+        topic: impl Into<String>,
+        group: Option<String>,
+        now_millis: u64,
+    ) -> InboxBegin {
+        let idempotency_key = idempotency_key.into();
+        let topic = topic.into();
+        let mut messages = self.messages.lock().expect("inbox lock poisoned");
+        match messages.get_mut(&idempotency_key) {
+            Some(message) if message.status == InboxStatus::Processed => {
+                InboxBegin::DuplicateProcessed
+            }
+            Some(message) if message.status == InboxStatus::Processing => {
+                InboxBegin::AlreadyProcessing
+            }
+            Some(message)
+                if message.status == InboxStatus::Failed
+                    && message
+                        .next_attempt_millis
+                        .map(|next| next <= now_millis)
+                        .unwrap_or(true) =>
+            {
+                message.begin_retry(now_millis);
+                InboxBegin::RetryStarted
+            }
+            Some(_) => InboxBegin::AlreadyProcessing,
+            None => {
+                messages.insert(
+                    idempotency_key.clone(),
+                    InboxMessage::new(idempotency_key, topic, group, now_millis),
+                );
+                InboxBegin::Started
+            }
+        }
+    }
+
+    pub fn mark_processed(&self, idempotency_key: &str, now_millis: u64) -> bool {
+        let mut messages = self.messages.lock().expect("inbox lock poisoned");
+        let Some(message) = messages.get_mut(idempotency_key) else {
+            return false;
+        };
+        message.mark_processed(now_millis);
+        true
+    }
+
+    pub fn mark_failed(
+        &self,
+        idempotency_key: &str,
+        now_millis: u64,
+        error: impl Into<String>,
+        next_attempt_millis: Option<u64>,
+    ) -> bool {
+        let mut messages = self.messages.lock().expect("inbox lock poisoned");
+        let Some(message) = messages.get_mut(idempotency_key) else {
+            return false;
+        };
+        message.mark_failed(now_millis, error, next_attempt_millis);
+        true
+    }
+
+    pub fn get(&self, idempotency_key: &str) -> Option<InboxMessage> {
+        self.messages
+            .lock()
+            .expect("inbox lock poisoned")
+            .get(idempotency_key)
+            .cloned()
+    }
+
+    pub fn pending_retry(&self, now_millis: u64, limit: usize) -> Vec<InboxMessage> {
+        self.messages
+            .lock()
+            .expect("inbox lock poisoned")
+            .values()
+            .filter(|message| {
+                message.status == InboxStatus::Failed
+                    && message
+                        .next_attempt_millis
+                        .map(|next| next <= now_millis)
+                        .unwrap_or(true)
+            })
+            .take(limit.max(1))
+            .cloned()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +559,51 @@ mod tests {
         assert!(deduper.mark_processed("k1"));
         assert!(!deduper.mark_processed("k1"));
         assert!(deduper.has_processed("k1"));
+    }
+
+    #[test]
+    fn inbox_tracks_processing_processed_and_duplicates() {
+        let inbox = InMemoryInbox::new();
+
+        assert_eq!(
+            inbox.begin("order-1", "orders", Some("workers".to_string()), 100),
+            InboxBegin::Started
+        );
+        assert_eq!(
+            inbox.begin("order-1", "orders", Some("workers".to_string()), 101),
+            InboxBegin::AlreadyProcessing
+        );
+        assert!(inbox.mark_processed("order-1", 110));
+        assert_eq!(
+            inbox.begin("order-1", "orders", Some("workers".to_string()), 120),
+            InboxBegin::DuplicateProcessed
+        );
+
+        let message = inbox.get("order-1").expect("inbox message");
+        assert_eq!(message.status, InboxStatus::Processed);
+        assert_eq!(message.attempts, 1);
+        assert_eq!(message.group.as_deref(), Some("workers"));
+    }
+
+    #[test]
+    fn inbox_failed_messages_become_retryable_after_delay() {
+        let inbox = InMemoryInbox::new();
+
+        assert_eq!(
+            inbox.begin("order-1", "orders", None, 100),
+            InboxBegin::Started
+        );
+        assert!(inbox.mark_failed("order-1", 110, "db timeout", Some(200)));
+        assert!(inbox.pending_retry(150, 10).is_empty());
+        assert_eq!(inbox.pending_retry(200, 10).len(), 1);
+        assert_eq!(
+            inbox.begin("order-1", "orders", None, 200),
+            InboxBegin::RetryStarted
+        );
+
+        let message = inbox.get("order-1").expect("inbox message");
+        assert_eq!(message.status, InboxStatus::Processing);
+        assert_eq!(message.attempts, 2);
+        assert_eq!(message.last_error.as_deref(), Some("db timeout"));
     }
 }

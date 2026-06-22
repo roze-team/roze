@@ -24,6 +24,8 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
     let (config_tx, config_rx) = tokio::sync::watch::channel(config.clone());
     let reload_version = Arc::new(AtomicU64::new(0));
+    let config_history = roze_admin::ConfigReloadHistory::new(128);
+    let registry = roze_rpc::registry::build_service_registry(&config)?;
     if let Some(center) = center {
         let config_tx_for_reload = config_tx.clone();
         center
@@ -33,9 +35,11 @@ async fn main() -> anyhow::Result<()> {
             .await;
 
         let reload_version_for_listener = reload_version.clone();
+        let reload_history = config_history.clone();
         center
             .add_reload_listener(move |result| {
                 reload_version_for_listener.store(result.version, Ordering::SeqCst);
+                reload_history.record(result);
                 let diff_paths = result
                     .diff
                     .iter()
@@ -89,7 +93,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let mut registration = if rest.register {
-        let registry = roze_rpc::registry::build_service_registry(&config)?
+        let registry = registry
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
         Some(
             roze_rpc::rpc::ServiceRegistrationGuard::start(
@@ -103,7 +108,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let ctx = svc::ServiceContext::new(config.clone()).await?;
-    let app = roze_middleware::apply_common(handler::router(ctx));
+    let app = roze_middleware::apply_common(
+        handler::router(ctx).merge(build_admin_router(registry.clone(), config_history.clone())),
+    );
     RestServer::new(rest.addr, app).serve().await?;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
@@ -139,6 +146,20 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn build_admin_router(
+    registry: Option<Arc<dyn roze_rpc::registry::Registry>>,
+    history: roze_admin::ConfigReloadHistory,
+) -> axum::Router {
+    let mut state = roze_admin::AdminState::new().with_config_history(history);
+    if let Some(registry) = registry {
+        state = state.with_registry(roze_admin::RegistryAdmin::new(registry));
+    }
+    if let Some(auth) = roze_admin::AdminAuthConfig::from_env() {
+        state = state.with_auth(auth);
+    }
+    roze_admin::admin_router(state)
 }
 
 fn config_path() -> std::path::PathBuf {

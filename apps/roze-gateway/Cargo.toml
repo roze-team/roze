@@ -14,6 +14,7 @@ tracing.workspace = true
 serde_json.workspace = true
 
 roze-config = { path = "../../crates/roze-config" }
+roze-admin = { path = "../../crates/roze-admin" }
 roze-gateway = { path = "../../crates/roze-gateway" }
 roze-http = { path = "../../crates/roze-http" }
 roze-jwt = { path = "../../crates/roze-jwt" }

@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use roze_jwt::Claims;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthPrincipal {
     pub subject: String,
@@ -11,21 +9,15 @@ pub struct AuthPrincipal {
     pub tenant: Option<String>,
 }
 
-impl From<Claims> for AuthPrincipal {
-    fn from(value: Claims) -> Self {
-        Self {
-            subject: value.sub,
-            roles: value.roles,
-            tenant: value.tenant,
-        }
-    }
-}
-
-pub fn principal_from_claims(claims: &Claims) -> AuthPrincipal {
+pub fn principal(
+    subject: impl Into<String>,
+    roles: impl Into<Vec<String>>,
+    tenant: Option<String>,
+) -> AuthPrincipal {
     AuthPrincipal {
-        subject: claims.sub.clone(),
-        roles: claims.roles.clone(),
-        tenant: claims.tenant.clone(),
+        subject: subject.into(),
+        roles: roles.into(),
+        tenant,
     }
 }
 
@@ -45,25 +37,83 @@ pub fn is_subject(principal: &AuthPrincipal, subject: &str) -> bool {
     principal.subject == subject
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiKeyConfig {
+    #[serde(default = "default_api_key_header")]
+    pub header: String,
+    #[serde(default)]
+    pub keys: Vec<ApiKeyCredential>,
+}
+
+impl Default for ApiKeyConfig {
+    fn default() -> Self {
+        Self {
+            header: default_api_key_header(),
+            keys: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiKeyCredential {
+    pub key: String,
+    pub subject: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub tenant: Option<String>,
+}
+
+pub fn verify_api_key(value: &str, config: &ApiKeyConfig) -> Option<AuthPrincipal> {
+    config
+        .keys
+        .iter()
+        .find(|credential| credential.key == value)
+        .map(|credential| AuthPrincipal {
+            subject: credential.subject.clone(),
+            roles: credential.roles.clone(),
+            tenant: credential.tenant.clone(),
+        })
+}
+
+pub fn default_api_key_header() -> String {
+    "x-api-key".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roze_jwt::Claims;
 
     #[test]
     fn converts_and_checks_roles() {
-        let claims = Claims {
-            sub: "user-1".into(),
-            roles: vec!["admin".into(), "ops".into()],
-            tenant: Some("acme".into()),
-            iss: "roze".into(),
-            iat: 1,
-            exp: 2,
-        };
-        let principal = principal_from_claims(&claims);
+        let principal = principal(
+            "user-1",
+            vec!["admin".to_string(), "ops".to_string()],
+            Some("acme".to_string()),
+        );
         assert!(has_role(&principal, "admin"));
         assert!(has_any_role(&principal, &["support", "ops"]));
         assert!(belongs_to_tenant(&principal, "acme"));
         assert!(is_subject(&principal, "user-1"));
+    }
+
+    #[test]
+    fn verifies_api_key_credentials() {
+        let config = ApiKeyConfig {
+            header: "x-api-key".to_string(),
+            keys: vec![ApiKeyCredential {
+                key: "secret".to_string(),
+                subject: "app-1".to_string(),
+                roles: vec!["internal".to_string()],
+                tenant: Some("acme".to_string()),
+            }],
+        };
+
+        let principal = verify_api_key("secret", &config).expect("principal");
+
+        assert_eq!(principal.subject, "app-1");
+        assert!(has_role(&principal, "internal"));
+        assert!(belongs_to_tenant(&principal, "acme"));
+        assert!(verify_api_key("bad", &config).is_none());
     }
 }

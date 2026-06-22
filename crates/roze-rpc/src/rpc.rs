@@ -15,7 +15,6 @@ use crate::{
         ServiceInstance,
     },
 };
-use roze_auth::principal_from_claims;
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_grpc::transport::{
@@ -190,7 +189,11 @@ pub fn auth_interceptor(
             roles: claims.roles.clone(),
             tenant: claims.tenant.clone(),
         });
-        req.extensions_mut().insert(principal_from_claims(&claims));
+        req.extensions_mut().insert(roze_auth::principal(
+            claims.sub.clone(),
+            claims.roles.clone(),
+            claims.tenant.clone(),
+        ));
         apply_request_context(&mut req, &context);
         Ok(req)
     }

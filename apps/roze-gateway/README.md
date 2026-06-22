@@ -4,7 +4,7 @@
 
 - 跨服务路由映射
 - 方法约束 / 前缀匹配
-- 鉴权（Auth/JWT）
+- 鉴权（JWT / API Key）
 - 路由级限流与熔断
 - trace/request-id 透传
 - 统一 fallback 与超时控制
@@ -65,7 +65,20 @@ gateway:
       breaker:
         failure_threshold: 5
         reset_timeout_ms: 5000
+
+auth:
+  jwt_secret: "secret"
+  jwt_issuer: "roze"
+  api_keys:
+    header: "x-api-key"
+    keys:
+      - key: "service-secret"
+        subject: "internal-worker"
+        roles: ["internal"]
+        tenant: "acme"
 ```
+
+路由中间件 `jwt` 只接受 `Authorization: Bearer <token>`，`api_key`/`apikey` 只接受 API key header，`auth` 接受 JWT 或 API key 任一方式。
 
 ## 配置中心（可选）
 
@@ -78,3 +91,18 @@ gateway:
 - `ROZE_CONFIG_CENTER_DEBOUNCE_MS`
 
 网关配置中心变更将触发运行时路由重建（无进程重启），并在 `gateway.config.hot_reloaded` 日志事件中可观测。
+
+## Admin API
+
+`roze-gateway-app` 默认挂载 `roze-admin` 控制面路由：
+
+- `GET /admin/registry/{service}`：查询 registry 服务实例（仅配置 registry 时可用）。
+- `GET /admin/config/reloads?offset=0&limit=100`：查询配置中心 reload 审计历史。
+
+未配置对应能力时返回 `404`。可通过环境变量启用内置鉴权：
+
+- `ROZE_ADMIN_TOKEN`：要求 `Authorization: Bearer <token>`
+- `ROZE_ADMIN_API_KEY`：要求 API key header
+- `ROZE_ADMIN_API_KEY_HEADER`：API key header 名称，默认 `x-api-key`
+
+未设置上述变量时 Admin 路由不做鉴权，仅适合本地开发或外层已有访问控制的部署。
