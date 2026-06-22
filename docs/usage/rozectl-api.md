@@ -28,9 +28,9 @@ See [usage documentation](./README.md#install-rozectl) for local install,
 upgrade, and PATH troubleshooting.
 
 Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
-instead of inheriting `edition.workspace`. Toasty model generation also defaults
-to MySQL/PostgreSQL features only; sqlite support remains available through the
-Roze SeaORM/sqlx stack.
+instead of inheriting `edition.workspace`. When `--orm toasty` is selected,
+generated Toasty dependencies use MySQL/PostgreSQL features only; sqlite support
+remains available through the Roze SeaORM/sqlx stack.
 
 ## Commands
 

@@ -8,6 +8,14 @@ services.
 - [Project standards](../project-standards.md): repository layout, API/RPC
   project boundaries, generated file ownership, runtime contracts, metrics, and
   verification rules.
+- [Roadmap](../roadmap.md): prioritized P0/P1/P2 work across release maturity,
+  gateway, config center, MQ, governance, generation, docs, and security.
+- [Module maturity matrix](../maturity.md): stable/beta/scaffold/planned status
+  for each framework area.
+- [Release policy](../release.md): SemVer, MSRV, crates.io/GitHub Release
+  expectations, and breaking-change rules.
+- [Production checklist](../production-checklist.md): deployment, config,
+  governance, MQ, observability, and security checklist.
 - [Roze vs go-zero comparison](../go-zero-comparison.md): current parity
   matrix, intentional differences, and remaining gaps.
 - [Middleware contract](../contracts/middleware.md): REST middleware config,

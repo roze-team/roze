@@ -3,9 +3,23 @@
 ## 总则
 - 目标：按模块把行为落到“可验收”的粒度，与 go-zero 的核心使用语义对齐。
 - 交付标准：每个模块都要有配置、运行时行为、监控、错误码、示例、回归测试。
-- 当前优先策略：先补齐网关，再补齐关键治理闭环，最后补充工具链与运维化。
+- 当前优先策略：先补齐发布可信度、网关 v2、配置热更新和 MQ 语义，再统一治理模型，最后补充生产示例、观测资产和安全体系。
 
 ## 模块状态与细化任务
+
+### 0) 发布体系与项目可信度（最高优先级）
+- 当前状态：项目仍处于 pre-release；安装以 Git/local checkout 为主，GitHub Releases、crates.io、MSRV matrix、升级指南和稳定发布节奏尚未完成。
+- 目标状态：用户能判断每个模块成熟度，能按 SemVer 升级，能从 crates.io 或 GitHub Release 安装，并能看到破坏性变更说明。
+- 主要任务：
+  1. 维护 `CHANGELOG.md`、SemVer 规则、MSRV 说明和 release checklist。
+  2. 补齐 GitHub Releases、crates.io 发布、tag 签名和升级指南。
+  3. 维护模块成熟度矩阵，明确 stable/beta/scaffold/planned。
+  4. 补齐 Contributing、Security Policy、Code of Conduct、Issue/PR 模板。
+  5. 在 README 明确当前 pre-release 状态和推荐安装方式。
+- 验收：
+  1. 可以从一个 tag 或 crates.io 版本安装 `rozectl`。
+  2. 每次 release 都有 changelog、升级说明和 breaking changes。
+  3. README 不把 scaffold 模块描述成生产稳定模块。
 
 ### 1) HTTP 网关（高优先级）
 - 当前状态：v1 已落地。`apps/roze-gateway` 基于 Axum/Tower HTTP 提供独立网关，已支持静态上游、路由映射、路径重写、超时、限流/熔断、鉴权、CORS、fallback 和配置中心热更新。
@@ -150,6 +164,8 @@
   2. [ ] 指标与错误路径补齐
 
 ## 执行次序
-- 周期1：网关核心（任务A）
-- 周期2：配置中心收敛（任务B）
-- 周期3：治理统一（任务D）
+- 周期0：发布体系、成熟度矩阵、GitHub 元信息和贡献/安全入口
+- 周期1：网关 v2、配置中心收敛、Kafka/MQ 语义稳定化
+- 周期2：HTTP/RPC/Gateway/MQ 治理统一
+- 周期3：生成器边界测试、OpenAPI/validator 完整性、SDK 扩展
+- 周期4：生产示例、部署清单、观测 dashboard、安全模型

@@ -20,7 +20,7 @@
 | 一致性工具 | 已完成基础版 | saga, in-memory outbox relay, inbox dedupe，outbox 可发布到任意 `roze_mq::Publisher` |
 | DTM 基础服务 | 已完成基础版 | 默认 TCC，Saga 可选，HTTP 分支调用，分支屏障 |
 | 认证授权 | 已完成基础版 | JWT, RBAC, tenant, ABAC attribute rule |
-| ORM 默认契约 | 已完成基础版 | Toasty 默认生成，通用 page/sort/filter/tenant/audit/soft-delete |
+| ORM 默认契约 | 已完成基础版 | SeaORM 默认生成；`--orm toasty` 可切换 Toasty，通用 page/sort/filter/tenant/audit/soft-delete |
 | 健康探针 | 已完成基础版 | liveness/readiness/startup probe report |
 | 集成测试环境 | 已完成骨架 | `docker-compose.integration.yml` |
 

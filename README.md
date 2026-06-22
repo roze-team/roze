@@ -27,7 +27,9 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
 - REST: `axum`, `tower`, and `tower-http` with `roze-result::ApiResponse`, `roze-error::RozeError`, and Roze middleware boundaries.
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
-- ORM: `Toasty` is the default generated model layer; shared ORM request contracts live in `roze-orm`.
+- ORM: SeaORM is the default generated SQL model scaffold; `--orm toasty`
+  switches model generation to Toasty. Shared ORM request contracts live in
+  `roze-orm`.
 - DTM: built-in distributed transaction manager defaults to TCC and keeps Saga as an optional workflow.
 - Governance: registry, balancing, middleware, config center, tracing, NATS JetStream, outbox relay, and error handling live across the `roze-*` crates.
 
@@ -54,13 +56,24 @@ and permission checks.
 ## Usage Documentation
 
 - [Project standards](docs/project-standards.md)
+- [Roadmap](docs/roadmap.md)
+- [Module maturity matrix](docs/maturity.md)
+- [Release policy](docs/release.md)
+- [Production checklist](docs/production-checklist.md)
 - [Usage documentation](docs/usage/README.md)
 - [Roze vs go-zero comparison](docs/go-zero-comparison.md)
 - [Middleware contract](docs/contracts/middleware.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
 - [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
 ## Install rozectl
+
+Roze is currently pre-release. The supported install path is Git or local
+checkout installation; crates.io publishing and GitHub Releases are tracked in
+the [release policy](docs/release.md).
 
 Install from GitHub:
 
