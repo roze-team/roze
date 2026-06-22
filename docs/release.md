@@ -14,13 +14,20 @@ cargo install --git https://github.com/roze-team/roze.git rozectl --force
 cargo install --path apps/rozectl
 ```
 
-Planned before the first stable adoption path:
+Not supported yet:
 
-- Publish `rozectl` and framework crates to crates.io.
-- Create signed Git tags and GitHub Releases.
-- Attach release notes generated from `CHANGELOG.md`.
-- Publish upgrade notes for generated project layout changes.
-- Add a release checklist to CI.
+- `cargo install rozectl`
+- Installing framework crates from crates.io
+- GitHub Release assets
+- Signed release tags
+
+Recommended for evaluation and internal pilots:
+
+- Pin a Git revision instead of tracking a branch.
+- Record the Roze revision in generated service repositories.
+- Read [Module Maturity Matrix](maturity.md) before adopting a crate in a
+  production path.
+- Read [Upgrade Guide](upgrade.md) before regenerating existing projects.
 
 ## Versioning
 
@@ -43,17 +50,55 @@ The current workspace uses Rust 2021. Generated REST/RPC services also pin
 `edition = "2021"` so they do not inherit a parent workspace's Rust 2024
 edition.
 
-Roze does not yet claim a fixed MSRV. Before publishing stable releases, add an
-MSRV matrix to CI and record the supported compiler version here. After that,
-raising MSRV is a breaking change unless it happens before `1.0.0`.
+Roze does not yet claim a fixed MSRV. Until CI proves an MSRV matrix, use the
+latest stable Rust toolchain for local development and evaluation.
+
+Planned MSRV policy before the first stable release:
+
+| Channel | Purpose | Required before stable |
+| --- | --- | --- |
+| latest stable | Primary development and release build | Yes |
+| pinned MSRV | Proves the minimum supported compiler | Yes |
+| beta | Early warning for upcoming Rust changes | Recommended |
+
+After a fixed MSRV is published, raising MSRV is a breaking change unless it
+happens before `1.0.0`.
+
+## crates.io and GitHub Release Plan
+
+Before publishing externally:
+
+1. Confirm crate names and ownership on crates.io.
+2. Ensure every published crate has license, repository, README, description,
+   categories, and keywords where appropriate.
+3. Publish dependency crates before dependent crates.
+4. Publish `rozectl` only after generated REST/RPC project smoke tests pass.
+5. Create a signed Git tag for the same version.
+6. Create a GitHub Release from `CHANGELOG.md` plus upgrade notes.
+7. Verify install paths:
+   - `cargo install rozectl --version <version>`
+   - `cargo install --git https://github.com/roze-team/roze.git --tag v<version> rozectl`
+
+Recommended tag command:
+
+```bash
+git tag -s v0.1.0 -m "Roze v0.1.0"
+git push origin v0.1.0
+```
+
+Unsigned tags are acceptable only for local/internal dry runs and must not be
+documented as production release tags.
 
 ## Release Checklist
 
 Before cutting a release:
 
+- Create a release tracking issue from the release checklist template.
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
+- `cargo check --workspace`
+- `cargo check -p roze-kafka --features rdkafka`
 - `cargo test -p rozectl -- --skip postgres --skip mysql`
 - Generated REST project compiles.
 - Generated RPC project compiles.
@@ -64,6 +109,9 @@ Before cutting a release:
 - Config center tests cover diff, version, rollback, and subscriber failure
   isolation.
 - `CHANGELOG.md` and upgrade notes are updated.
+- `docs/maturity.md` accurately labels modules as stable/beta/scaffold/planned.
+- `README.md` still states the current pre-release install path.
+- Security-sensitive changes are checked against `SECURITY.md`.
 
 ## Breaking Change Notes
 

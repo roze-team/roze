@@ -46,9 +46,26 @@
 - `key`: 配置 key（可选）
 - `changed`: 配置内容 hash 是否变化
 - `diff`: 成功解析时的字段级差异数组，元素包含 `path`、`kind`、`old`、`new`
+- `section_signatures`: 成功解析时的顶层 section 稳定签名数组，元素包含 `section` 和 `hash`
 - `success`: 是否解析成功
 - `error`: 失败原因（仅失败时）
 - `config`: 成功时返回新配置，失败时为 `None`
+
+## ConfigCenterChangeEvent（section 事件）
+
+`ReloadResult::change_events()` 会把字段级 `diff` 聚合成 section 级事件，供应用按子系统做日志、审计或局部重建决策。
+
+- `section`: 顶层配置段，例如 `gateway`、`kafka`、`registry`；根节点变更为 `root`，失败事件为 `*`
+- `paths`: 当前 section 下发生变化的字段路径
+- `diff`: 当前 section 下的字段级差异
+- `section_hash`: 当前 section 的稳定签名；失败事件为空
+- 其余字段继承自 `ReloadResult`：`version/old_version/hash/old_hash/source/namespace/app/key/changed/success/error`
+
+## 字段边界
+
+- 可选字段缺失时必须走默认值或 `None`，不能导致 reload 失败。
+- `kafka.client_id` 缺失或显式为 `null` 时统一使用默认值 `roze-kafka`。
+- section 签名按顶层配置段计算，字段顺序变化不应改变 hash；字段值变化才改变对应 section 的 hash。
 
 ## 触发约束
 - debounce 默认 400ms（可通过 `ROZE_CONFIG_CENTER_DEBOUNCE_MS` 覆盖）
@@ -56,12 +73,14 @@
 - 失败时不更新内存配置；仅记录失败事件
 - 失败事件使用新快照 hash 和旧 hash，但 `diff` 为空，运行态继续保留上一份有效配置
 - 成功事件会输出 `diff_paths`，用于审计“哪些字段发生变化”
+- 应用可额外输出 `config_updated` section 事件，用于审计“哪些配置段发生变化”
 - 默认配置格式为 `yaml`，可用 `ROZE_CONFIG_CENTER_FORMAT` 覆盖
 
 ## 在 `apps/user` 中的观察点
 - `add_reload_listener` 日志：
   - 成功：`event=config.reload.applied`，包含 `version/old_version/hash/old_hash/diff_paths`
   - 失败：`event=config.reload.failed`，包含失败 hash、旧 hash 和错误原因
+  - section 变更：`event=config_updated`，包含 `version/old_version/source/section/paths/changed/section_hash`
 - Etcd 原生 watch 或 fallback poll 下发新配置后触发 Kafka pipeline 重建：
   - 条件：`kafka` 配置签名变更
 

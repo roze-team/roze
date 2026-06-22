@@ -11,11 +11,11 @@
 - 当前状态：项目仍处于 pre-release；安装以 Git/local checkout 为主，GitHub Releases、crates.io、MSRV matrix、升级指南和稳定发布节奏尚未完成。
 - 目标状态：用户能判断每个模块成熟度，能按 SemVer 升级，能从 crates.io 或 GitHub Release 安装，并能看到破坏性变更说明。
 - 主要任务：
-  1. 维护 `CHANGELOG.md`、SemVer 规则、MSRV 说明和 release checklist。
-  2. 补齐 GitHub Releases、crates.io 发布、tag 签名和升级指南。
-  3. 维护模块成熟度矩阵，明确 stable/beta/scaffold/planned。
-  4. 补齐 Contributing、Security Policy、Code of Conduct、Issue/PR 模板。
-  5. 在 README 明确当前 pre-release 状态和推荐安装方式。
+  1. [x] 维护 `CHANGELOG.md`、SemVer 规则、MSRV 说明和 release checklist。
+  2. [ ] 补齐 GitHub Releases、crates.io 发布、tag 签名和升级指南（流程文档与升级指南已补，真实外部发布尚未启用）。
+  3. [x] 维护模块成熟度矩阵，明确 stable/beta/scaffold/planned。
+  4. [x] 补齐 Contributing、Security Policy、Code of Conduct、Issue/PR 模板。
+  5. [x] 在 README 明确当前 pre-release 状态和推荐安装方式。
 - 验收：
   1. 可以从一个 tag 或 crates.io 版本安装 `rozectl`。
   2. 每次 release 都有 changelog、升级说明和 breaking changes。
@@ -44,11 +44,11 @@
 - 当前状态：基本完成，需固化接口一致性与端到端验证。
 - 目标状态：配置变更影响最小重建，带签名比对和变更审计。
 - 主要任务：
-  1. 定义 `ConfigCenterChangeEvent`，按 `section` 推送。
-  2. 规范字段可空边界，修正 `kafka.client_id` 的一致性。
-  3. 为关键子系统加版本签名，避免不必要重建。
-  4. 添加配置变更失败回退策略（保持上次有效配置）。
-  5. 在 `apps/user` 提供日志：`config_updated`, `section=...`。
+  1. [x] 定义 `ConfigCenterChangeEvent`，按 `section` 推送。
+  2. [x] 规范字段可空边界，修正 `kafka.client_id` 的一致性。
+  3. [x] 为关键子系统加版本签名，避免不必要重建。
+  4. [x] 添加配置变更失败回退策略（保持上次有效配置）。
+  5. [x] 在 `apps/user` 提供日志：`config_updated`, `section=...`。
 - 验收：
   1. kafka 配置更新只影响消息子系统。
   2. 无有效值时继续沿用旧配置运行。
@@ -61,11 +61,11 @@
 - 当前状态：已实现 rdkafka + in-memory，需稳定化。
 - 目标状态：生产/消费语义一致，可观测、可回放、可死信。
 - 主要任务：
-  1. 统一 `KafkaRecord` 元数据：`attempt`、`dead_letter_topic`、`timestamp`。
-  2. 明确手工提交场景的 commit/nack 行为。
-  3. 统一 `Producer` 返回值语义（包含 `partition` 与 `offset` 可选）。
-  4. 补偿：消息消费失败时可按配置延迟重试。
-  5. 记录 `topic/group/partition/offset` 指标。
+  1. [x] 统一 `KafkaRecord` 元数据：`attempt`、`dead_letter_topic`、`timestamp`。
+  2. [x] 明确手工提交场景的 commit/nack 行为。
+  3. [x] 统一 `Producer` 返回值语义（包含 `partition` 与 `offset` 可选）。
+  4. [x] 补偿：消息消费失败时可按配置延迟重试。
+  5. [ ] 记录 `topic/group/partition/offset` 指标（topic/group queue metrics 已有；partition/offset 先通过 `PublishResult` 暴露，是否进入指标标签需控制基数风险）。
 - 验收：
   1. `enable_auto_commit=false` 时手工 ack 生效。
   2. nack 达到最大重试后进入 dead letter topic。
@@ -156,12 +156,12 @@
   5. [x] 重试、错误码统一和治理指标
   6. [ ] app 级示例脚本；crate 级 smoke test 已覆盖 registry、retry、health/outlier
 - 任务B：配置中心变更事件完善
-  1. [ ] 变更事件结构和日志
-  2. [ ] 变更失败回退
-  3. [ ] `kafka` 重启验证
+  1. [x] 变更事件结构和日志
+  2. [x] 变更失败回退
+  3. [x] `kafka` 重启验证
 - 任务C：Kafka 手工提交稳定化
-  1. [ ] 重试/回退策略
-  2. [ ] 指标与错误路径补齐
+  1. [x] 重试/回退策略
+  2. [x] 指标与错误路径补齐
 
 ## 执行次序
 - 周期0：发布体系、成熟度矩阵、GitHub 元信息和贡献/安全入口

@@ -20,16 +20,16 @@ Status legend:
 | OpenAPI generation | beta | Produces OpenAPI 3 documents; validator constraint projection still has known gaps. |
 | TS/JS/Dart SDK generation | beta | Covers route/path/query/header/body generation; needs richer error/interceptor/retry/timeout support. |
 | HTTP middleware | beta | Covers trace, recover, metrics, CORS, timeout, max connections, shedding, gunzip, and body limit; needs more end-to-end service tests. |
-| Gateway | beta | v1 exists with route mapping and governance; v2 priority is registry upstreams, retry metrics, fallback boundaries, and hot-reload smoke tests. |
-| Config center | beta | Etcd watch and reload primitives exist; needs change events, diff/versioning, rollback, signatures, and subscriber isolation. |
-| MQ/Kafka/NATS | beta | Publish/subscribe, retry, DLQ, stats, and JetStream paths exist; Kafka ack/nack/retry/dead-letter semantics need stricter tests and documentation. |
+| Gateway | beta | Supports static and registry upstreams, weighted canary routes, retries, fallback, health/outlier handling, JWT/API key auth, governance inheritance, metrics, and config hot reload; still needs production example scripts and broader deploy smoke tests. |
+| Config center | beta | Supports Etcd watch, Env/File fallback, diff/version metadata, section-level change events, reload audit history, and failed-update rollback; still needs subscriber timeout/failure isolation hardening. |
+| MQ/Kafka/NATS | beta | Publish/subscribe, retry, DLQ, stats, queue metrics, Kafka manual ack/nack/retry/dead-letter decisions, in-memory admin replay, NATS JetStream, and outbox/inbox primitives exist; still needs live broker integration coverage and production examples. |
 | Service discovery | beta | memory, DNS, etcd, Consul, watch, and cache primitives exist; needs more failure-mode tests. |
 | Health checks | beta | Probe report types exist; `/healthz`, `/readyz`, dependency details, and K8s templates need standardization. |
 | Lifecycle/bootstrap | scaffold | Several helpers exist, but HTTP/RPC/consumer/job shutdown ordering is not yet one unified lifecycle. |
 | DB/ORM/model generation | beta | SeaORM is the default generated SQL model scaffold; Toasty is optional with `--orm toasty`. Cross-schema ownership and production examples need more polish. |
 | Transactions/outbox/DTM | scaffold | TCC/Saga/outbox/inbox primitives exist; needs full HTTP + DB transaction + outbox + MQ + RPC examples. |
 | Auth/JWT/permission/session | beta | JWT, RBAC, tenant, and ABAC primitives exist; needs a unified security model, OpenAPI permission declarations, key rotation, and test templates. |
-| Observability | beta | tracing, metrics, Prometheus, and OpenTelemetry crates exist; needs dashboards, scrape config, and query examples. |
+| Observability | beta | tracing, metrics, Prometheus, OpenTelemetry, gateway metrics, and queue event metrics exist; needs dashboards, scrape config, and query examples. |
 | Docker/Kubernetes generation | scaffold | Generator commands exist; production checklist and manifest validation need to be added. |
 
 ## Production-Ready Criteria

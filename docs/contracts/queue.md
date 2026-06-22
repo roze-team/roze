@@ -39,6 +39,7 @@
   - `kafka.message.dead_lettered`（`max_retries=0`）
   - `kafka.message.recover_dropped`
   - `kafka.message.requeue_retry`
+- retry/dead-letter topic 在 publish 前只做一次 `topic_prefix` 归一化，避免 `app.retry` 被二次前缀成 `app.app.retry`。
 
 ## 标准消息 metadata
 
@@ -52,6 +53,20 @@
 - `offset`：broker offset；不适用的 broker 可以为空。
 - `group`：consumer group / durable 名称；不适用的 broker 可以为空。
 - `headers`：Context carrier 和业务 header，必须保留 `x-request-id`、`x-trace-id` 等传播字段。
+
+## Producer 返回值
+
+`roze_kafka::Publisher` 保留兼容方法：
+
+- `publish(record) -> Result<()>`：只表达发布成功/失败。
+- `publish_with_result(record) -> Result<PublishResult>`：返回 broker 元数据。
+
+`PublishResult` 字段：
+
+- `topic`：实际发布 topic；rdkafka 会返回加过 `topic_prefix` 的 topic。
+- `partition`：broker partition，memory broker 固定为 `Some(0)`。
+- `offset`：broker offset，memory broker 使用 topic 内单调递增 offset。
+- `timestamp_millis`：框架发布时间。
 
 ## MQ 治理接口
 
@@ -180,6 +195,9 @@ nats:
   - `kafka.startup_publish_ok`
   - `kafka.startup_publish_failed`
   - `kafka.runtime.stopped`
+- Prometheus 指标
+  - `roze_queue_events_total{system="kafka",topic,group,outcome}`：记录 Kafka/MQ 关键路径事件。
+  - 当前 outcome 包括 `published`、`publish_failed`、`delivered`、`acked`、`nacked`、`retry_scheduled`、`dead_lettered`、`replayed`、`commit_failed`、`retry_topic_missing`、`dead_letter_missing` 和 `recover_dropped`。
 
 ### apps/user 观测字段约定（新增）
 - `kafka.pipeline.restarting`
