@@ -71,7 +71,13 @@ impl MetricRegistry {
                     let joined = labels
                         .0
                         .iter()
-                        .map(|(key, value)| format!(r#"{key}="{}""#, escape_label_value(value)))
+                        .map(|(key, value)| {
+                            format!(
+                                r#"{}="{}""#,
+                                normalize_label_key(key),
+                                escape_label_value(value)
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(",");
                     format!("{{{joined}}}")
@@ -250,6 +256,25 @@ fn escape_label_value(value: &str) -> String {
         .replace('"', r#"\""#)
 }
 
+fn normalize_label_key(key: &str) -> String {
+    let mut normalized = String::with_capacity(key.len().max(1));
+    for ch in key.chars() {
+        let valid = ch == '_' || ch.is_ascii_alphanumeric();
+        normalized.push(if valid { ch } else { '_' });
+    }
+    if normalized.is_empty() {
+        return "_".to_string();
+    }
+    if normalized
+        .as_bytes()
+        .first()
+        .is_some_and(|first| first.is_ascii_digit())
+    {
+        normalized.insert(0, '_');
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +313,24 @@ mod tests {
 
         let rendered = registry.render();
         assert!(rendered.contains(r#"path="C:\\tmp\n\"quoted\"""#));
+    }
+
+    #[test]
+    fn normalizes_label_keys() {
+        let registry = MetricRegistry::new();
+        registry.inc_counter(
+            "roze_events_total",
+            MetricLabels::new()
+                .insert("http.status-code", "200")
+                .insert("1route", "/healthz")
+                .insert("", "empty"),
+            1,
+        );
+
+        let rendered = registry.render();
+        assert!(rendered.contains(r#"http_status_code="200""#));
+        assert!(rendered.contains(r#"_1route="/healthz""#));
+        assert!(rendered.contains(r#"_="empty""#));
     }
 
     #[test]

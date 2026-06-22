@@ -7,4 +7,3 @@ version.workspace = true
 [dependencies]
 axum.workspace = true
 serde.workspace = true
-tokio.workspace = true

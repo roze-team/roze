@@ -8,6 +8,5 @@ version.workspace = true
 axum.workspace = true
 serde.workspace = true
 tokio.workspace = true
-roze-result = { path = "../roze-result" }
 roze-grpc = { path = "../roze-grpc" }
 thiserror.workspace = true

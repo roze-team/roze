@@ -567,11 +567,11 @@ fn avg_latency(state: &AdaptiveSheddingState) -> Duration {
 }
 
 fn failure_ratio_per_mille(state: &AdaptiveSheddingState) -> u32 {
-    if state.requests == 0 {
-        0
-    } else {
-        ((state.failures.saturating_mul(1000)) / state.requests) as u32
-    }
+    state
+        .failures
+        .saturating_mul(1000)
+        .checked_div(state.requests)
+        .unwrap_or(0) as u32
 }
 
 fn build_cors_layer(config: Option<&CorsConfig>) -> CorsLayer {
@@ -1160,12 +1160,7 @@ mod tests {
         );
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/slow")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
             .await
             .unwrap();
 

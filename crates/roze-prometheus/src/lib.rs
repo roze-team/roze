@@ -51,9 +51,16 @@ pub fn render_service_metrics(service: impl AsRef<str>, uptime_seconds: u64) -> 
             "# TYPE roze_service_uptime_seconds gauge\n",
             "roze_service_uptime_seconds{{service=\"{}\"}} {}\n"
         ),
-        service.as_ref(),
+        escape_label_value(service.as_ref()),
         uptime_seconds
     )
+}
+
+fn escape_label_value(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
 }
 
 #[cfg(test)]
@@ -65,6 +72,12 @@ mod tests {
     fn renders_metrics() {
         let text = render_service_metrics("demo", 7);
         assert!(text.contains("roze_service_uptime_seconds"));
+    }
+
+    #[test]
+    fn escapes_service_label() {
+        let text = render_service_metrics("demo\\api\n\"v1\"", 7);
+        assert!(text.contains(r#"service="demo\\api\n\"v1\"""#));
     }
 
     #[test]

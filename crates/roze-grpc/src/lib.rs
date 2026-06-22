@@ -84,6 +84,10 @@ impl GrpcServer {
 }
 
 pub fn normalize_endpoint(addr: &str) -> anyhow::Result<String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        anyhow::bail!("gRPC endpoint address is empty");
+    }
     if addr.starts_with("http://") || addr.starts_with("https://") {
         Ok(addr.to_string())
     } else {
@@ -276,13 +280,14 @@ mod tests {
     #[test]
     fn normalizes_addresses() {
         assert_eq!(
-            normalize_endpoint("127.0.0.1:50051").expect("url"),
+            normalize_endpoint(" 127.0.0.1:50051 ").expect("url"),
             "http://127.0.0.1:50051"
         );
         assert_eq!(
             normalize_endpoint("http://127.0.0.1:50051").expect("url"),
             "http://127.0.0.1:50051"
         );
+        assert!(normalize_endpoint("  ").is_err());
     }
 
     #[test]

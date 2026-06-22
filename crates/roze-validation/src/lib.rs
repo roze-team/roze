@@ -231,7 +231,7 @@ pub fn is_uppercase(value: &str) -> bool {
 }
 
 pub fn one_of(value: &str, allowed: &[&str]) -> bool {
-    allowed.iter().any(|item| *item == value)
+    allowed.contains(&value)
 }
 
 pub fn starts_with(value: &str, prefix: &str) -> bool {

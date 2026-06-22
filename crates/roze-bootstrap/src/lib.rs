@@ -114,3 +114,34 @@ pub fn bootstrap_runtime<C>(
 ) -> BootstrapRuntime<C> {
     BootstrapRuntime::new(name, config)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use super::*;
+    use roze_health::HealthStatus;
+
+    #[test]
+    fn bootstrap_collects_state_and_health_checks() {
+        let bootstrap = Bootstrap::new("svc", 7).add_check(HealthCheck::healthy("db"));
+
+        assert_eq!(bootstrap.state().name(), "svc");
+        assert_eq!(bootstrap.state().config(), &7);
+        assert_eq!(
+            bootstrap.health_report().overall_status(),
+            HealthStatus::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_exits_when_shutdown_is_triggered() {
+        let runtime = BootstrapRuntime::new("svc", ());
+        runtime.shutdown_handle().trigger();
+
+        runtime
+            .run(|_, _, _| async { pending::<anyhow::Result<()>>().await })
+            .await
+            .expect("shutdown should exit cleanly");
+    }
+}

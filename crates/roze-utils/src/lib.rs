@@ -104,7 +104,7 @@ pub fn normalize_path_segment(value: impl AsRef<str>) -> String {
 
 pub fn truncate_with_ellipsis(value: impl AsRef<str>, max_len: usize) -> String {
     let value = value.as_ref();
-    if value.len() <= max_len {
+    if value.chars().count() <= max_len {
         return value.to_string();
     }
     if max_len <= 3 {
@@ -128,5 +128,9 @@ mod tests {
         assert_eq!(to_camel_case("roze-http_service"), "RozeHttpService");
         assert_eq!(normalize_path_segment(" /v1/Users "), "v1-users");
         assert_eq!(truncate_with_ellipsis("abcdefgh", 5), "ab...");
+        assert_eq!(
+            truncate_with_ellipsis("\u{4f60}\u{597d}abcd", 5),
+            "\u{4f60}\u{597d}..."
+        );
     }
 }

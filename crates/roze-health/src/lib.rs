@@ -101,9 +101,13 @@ impl HealthReport {
     pub fn render_text(&self) -> String {
         let mut out = format!("status={}\n", self.overall_status());
         for check in &self.checks {
-            out.push_str(&format!("{}={}", check.name, check.status));
+            out.push_str(&format!(
+                "{}={}",
+                escape_text_field(&check.name),
+                check.status
+            ));
             if let Some(message) = &check.message {
-                out.push_str(&format!(" message={message}"));
+                out.push_str(&format!(" message={}", escape_text_field(message)));
             }
             out.push('\n');
         }
@@ -137,6 +141,10 @@ pub struct ProbeReport {
     pub checks: Vec<HealthCheck>,
 }
 
+fn escape_text_field(value: &str) -> String {
+    value.replace('\\', r"\\").replace('\n', r"\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +163,18 @@ mod tests {
         let probe = report.probe(ProbeKind::Readiness);
         assert_eq!(probe.probe, ProbeKind::Readiness);
         assert!(!probe.ready);
+    }
+
+    #[test]
+    fn render_text_escapes_multiline_fields() {
+        let report = HealthReport::new(vec![HealthCheck::degraded(
+            "cache\nprimary",
+            "warming\nslowly",
+        )]);
+
+        let rendered = report.render_text();
+
+        assert!(rendered.contains(r"cache\nprimary=degraded"));
+        assert!(rendered.contains(r"message=warming\nslowly"));
     }
 }

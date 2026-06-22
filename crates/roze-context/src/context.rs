@@ -333,6 +333,16 @@ impl Context {
         next
     }
 
+    pub fn with_merged_metadata(&self, metadata: BTreeMap<String, String>) -> Self {
+        let next = self.fork();
+        next.inner
+            .metadata
+            .lock()
+            .expect("context metadata mutex poisoned")
+            .extend(metadata);
+        next
+    }
+
     pub fn propagation_headers(&self) -> BTreeMap<String, String> {
         let mut headers = BTreeMap::new();
         headers.insert(REQUEST_ID_HEADER.to_string(), self.request_id());
@@ -413,7 +423,7 @@ impl Context {
         }
         let metadata = metadata_from_headers_with_aliases(headers, aliases);
         if !metadata.is_empty() {
-            ctx = ctx.with_metadata_map(metadata);
+            ctx = ctx.with_merged_metadata(metadata);
         }
         if let Some(timeout) = header_value(headers, TIMEOUT_HEADER)
             .and_then(|value| value.parse::<u64>().ok())
@@ -780,5 +790,26 @@ mod tests {
         assert_eq!(restored.request_id(), "request-roze");
         assert_eq!(restored.trace_id(), "trace-roze");
         assert_eq!(restored.subject().as_deref(), Some("user-roze"));
+    }
+
+    #[test]
+    fn propagation_headers_merge_with_existing_metadata() {
+        let ctx = Context::background_with_request_id_and_trace_id("request-old", "trace-old")
+            .with_metadata("existing", "keep")
+            .with_metadata("scope", "old-scope");
+        let headers = BTreeMap::from([
+            (TRACE_ID_HEADER.to_string(), "trace-new".to_string()),
+            (HULA_SCOPE_HEADER.to_string(), "new-scope".to_string()),
+        ]);
+
+        let restored = ctx.with_propagation_headers(&headers);
+
+        assert_eq!(restored.request_id(), "request-old");
+        assert_eq!(restored.trace_id(), "trace-new");
+        assert_eq!(restored.metadata_value("existing").as_deref(), Some("keep"));
+        assert_eq!(
+            restored.metadata_value(SCOPE_METADATA_KEY).as_deref(),
+            Some("new-scope")
+        );
     }
 }

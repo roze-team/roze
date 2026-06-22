@@ -3309,7 +3309,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "roze-grpc",
- "roze-result",
  "serde",
  "thiserror",
  "tokio",
@@ -3635,7 +3634,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "serde",
- "tokio",
 ]
 
 [[package]]

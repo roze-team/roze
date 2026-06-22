@@ -73,7 +73,14 @@ impl std::fmt::Display for CodecDecodeError {
     }
 }
 
-impl std::error::Error for CodecDecodeError {}
+impl std::error::Error for CodecDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CodecDecodeError::Base64(err) => Some(err),
+            CodecDecodeError::Json(err) => Some(err),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -112,5 +119,11 @@ mod tests {
         let encoded = encode_json_base64(&payload).expect("encode");
         let decoded: Payload = decode_json_base64(&encoded).expect("decode");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn decode_error_exposes_source() {
+        let err = decode_json_base64::<Payload>("not-base64").expect_err("decode should fail");
+        assert!(std::error::Error::source(&err).is_some());
     }
 }

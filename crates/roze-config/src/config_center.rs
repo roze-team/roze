@@ -45,7 +45,7 @@ impl FromStr for ConfigFormat {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
+        match value.trim().to_ascii_lowercase().as_str() {
             "json" => Ok(Self::Json),
             "yaml" => Ok(Self::Yaml),
             "yml" => Ok(Self::Yaml),
@@ -807,6 +807,23 @@ struct EtcdWatchUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_config_format_names() {
+        assert!(matches!(
+            " json ".parse::<ConfigFormat>(),
+            Ok(ConfigFormat::Json)
+        ));
+        assert!(matches!(
+            "YML".parse::<ConfigFormat>(),
+            Ok(ConfigFormat::Yaml)
+        ));
+        assert!(matches!(
+            "toml".parse::<ConfigFormat>(),
+            Ok(ConfigFormat::Toml)
+        ));
+        assert!("ini".parse::<ConfigFormat>().is_err());
+    }
 
     #[test]
     fn decodes_etcd_watch_values() {
