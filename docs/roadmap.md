@@ -32,8 +32,9 @@ upgradeable, and recoverable.
 
 ### Gateway v2
 
-- Registry-backed dynamic upstreams.
+- Registry-backed dynamic upstreams with instance weights and metadata tags.
 - Route-level retries and backoff.
+- Weighted gray routes for blue/green and canary traffic.
 - Retry metrics and latency/error counters.
 - Unified gateway error mapping.
 - Clear proxy passthrough vs fallback response boundaries.
@@ -61,8 +62,9 @@ upgradeable, and recoverable.
 
 ## P1: Unified Governance
 
-- Extract one governance schema for timeout, retry, rate limit, breaker,
-  shedding, and fallback across HTTP/RPC/Gateway/MQ where applicable.
+- Extend the shared governance schema for timeout, retry, rate limit, breaker,
+  shedding, and fallback across HTTP/RPC/Gateway/MQ where applicable; Gateway
+  currently inherits timeout, retry, rate limit, and breaker from it.
 - Add optional persistent state for breaker and rate limiter.
 - Align metrics labels across HTTP route, RPC method, gateway route, and queue
   consumer.

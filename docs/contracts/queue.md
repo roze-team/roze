@@ -40,12 +40,26 @@
   - `kafka.message.recover_dropped`
   - `kafka.message.requeue_retry`
 
+## 标准消息 metadata
+
+`roze_mq::Message` 和 `roze_kafka::KafkaRecord` 使用同一组可观测字段：
+
+- `timestamp_millis`：框架创建或接收消息的时间。
+- `attempt`：当前投递尝试次数。
+- `dead_letter_topic`：消息级死信 topic 覆盖。
+- `idempotency_key`：消费侧/本地 broker 去重键。
+- `partition`：broker 分区；不适用的 broker 可以为空。
+- `offset`：broker offset；不适用的 broker 可以为空。
+- `group`：consumer group / durable 名称；不适用的 broker 可以为空。
+- `headers`：Context carrier 和业务 header，必须保留 `x-request-id`、`x-trace-id` 等传播字段。
+
 ## MQ 治理接口
 
 `roze-mq` 提供统一治理 trait：`MqAdmin`。
 
 - `stats()`：返回发布、投递、ack、nack、重复、死信、重放、待处理死信数量。
 - `dead_letters(offset, limit)`：分页查询死信记录。
+- `dead_letters_query(query)`：按 topic/group 分页过滤死信记录。
 - `replay_dead_letter(id)`：按死信 id 重放到原 topic，重置 attempt 并保留 trace header。
 - `purge_dead_letter(id)`：按死信 id 删除记录。
 - `clear_dead_letters()`：清空当前死信记录。

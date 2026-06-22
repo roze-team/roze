@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    hash::{Hash, Hasher},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -18,7 +19,8 @@ use tracing::warn;
 
 use roze_config::{
     BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayHealthCheckConfig,
-    GatewayOutlierConfig, GatewayRoute, GatewayService, RateLimitConfig,
+    GatewayOutlierConfig, GatewayRoute, GatewayService, GovernanceConfig, RateLimitConfig,
+    RouteGovernanceConfig,
 };
 use roze_jwt::{verify_token, Claims, JwtConfig};
 use roze_rpc::registry::Registry;
@@ -46,6 +48,7 @@ struct ServiceEndpoint {
     name: String,
     upstream: String,
     registry_name: Option<String>,
+    instance_tags: BTreeMap<String, String>,
     timeout_ms: Option<u64>,
     outlier: Option<GatewayOutlierConfig>,
     health_check: Option<GatewayHealthCheckConfig>,
@@ -63,6 +66,8 @@ struct CompiledRoute {
     path: String,
     service: String,
     methods: Vec<Method>,
+    weight: u32,
+    instance_tags: BTreeMap<String, String>,
     timeout_ms: Option<u64>,
     retries: u32,
     retry_backoff_ms: u64,
@@ -138,6 +143,15 @@ pub fn build_router_with_registry(
     jwt: Option<JwtConfig>,
     registry: Option<Arc<dyn Registry>>,
 ) -> Router {
+    build_router_with_registry_and_governance(config, jwt, registry, None)
+}
+
+pub fn build_router_with_registry_and_governance(
+    config: GatewayConfig,
+    jwt: Option<JwtConfig>,
+    registry: Option<Arc<dyn Registry>>,
+    governance: Option<GovernanceConfig>,
+) -> Router {
     let cors_config = config.cors;
     let mut runtime = GatewayRuntime {
         global_timeout_ms: config.timeout_ms,
@@ -155,7 +169,7 @@ pub fn build_router_with_registry(
             .insert(service.name.clone(), ServiceEndpoint::from(service));
     }
 
-    let mut routes = compile_routes(config.routes);
+    let mut routes = compile_routes(config.routes, governance.as_ref());
     routes.sort_by_key(|route| std::cmp::Reverse(route.path.len()));
     if routes.is_empty() && !runtime.services.is_empty() {
         if let Some(service) = first_service_name(runtime.services.keys().collect::<Vec<_>>()) {
@@ -167,6 +181,8 @@ pub fn build_router_with_registry(
                 path: "/".to_string(),
                 service: service.to_string(),
                 methods: Vec::new(),
+                weight: 100,
+                instance_tags: BTreeMap::new(),
                 timeout_ms: runtime.global_timeout_ms,
                 retries: 0,
                 retry_backoff_ms: 0,
@@ -219,7 +235,7 @@ impl GatewayRuntime {
         );
         let _enter = span.enter();
 
-        let Some(route) = self.select_route(&request_path, &request_method) else {
+        let Some(route) = self.select_route(&request_path, &request_method, &request_id) else {
             warn!(
                 path = %request_path,
                 method = %request_method,
@@ -555,7 +571,7 @@ impl GatewayRuntime {
             .services
             .get(&route.service)
             .ok_or_else(|| anyhow::anyhow!("service '{}' is not registered", route.service))?;
-        let target = self.resolve_upstream(service).await?;
+        let target = self.resolve_upstream(service, &route.instance_tags).await?;
 
         let method = parse_reqwest_method(&method)?;
         let rewritten_path = rewrite_path(&route.path, route.rewrite.as_deref(), &incoming_path);
@@ -606,7 +622,11 @@ impl GatewayRuntime {
         Ok(response)
     }
 
-    async fn resolve_upstream(&self, service: &ServiceEndpoint) -> anyhow::Result<UpstreamTarget> {
+    async fn resolve_upstream(
+        &self,
+        service: &ServiceEndpoint,
+        route_instance_tags: &BTreeMap<String, String>,
+    ) -> anyhow::Result<UpstreamTarget> {
         let registry_name = service
             .registry_name
             .as_deref()
@@ -624,19 +644,26 @@ impl GatewayRuntime {
                 .available_instances(
                     name,
                     instances,
+                    &effective_instance_tags(&service.instance_tags, route_instance_tags),
                     service.outlier,
                     service.health_check.as_ref(),
                 )
                 .await;
             if !available.is_empty() {
+                let weighted = roze_rpc::registry::weighted_instances(&available);
+                let candidates = if weighted.is_empty() {
+                    &available
+                } else {
+                    &weighted
+                };
                 let idx = {
                     let mut cursors = self.registry_cursors.lock().await;
                     let cursor = cursors.entry(name.to_string()).or_default();
-                    let idx = *cursor % available.len();
+                    let idx = *cursor % candidates.len();
                     *cursor = cursor.wrapping_add(1);
                     idx
                 };
-                let instance = &available[idx];
+                let instance = &candidates[idx];
                 return Ok(UpstreamTarget {
                     base: normalize_upstream_base(&instance.addr),
                     instance_key: upstream_instance_key(name, &instance.addr),
@@ -660,10 +687,11 @@ impl GatewayRuntime {
         &self,
         service_name: &str,
         instances: Vec<roze_rpc::registry::ServiceInstance>,
+        required_tags: &BTreeMap<String, String>,
         outlier: Option<GatewayOutlierConfig>,
         health_check: Option<&GatewayHealthCheckConfig>,
     ) -> Vec<roze_rpc::registry::ServiceInstance> {
-        if outlier.is_none() && health_check.is_none() {
+        if required_tags.is_empty() && outlier.is_none() && health_check.is_none() {
             return instances;
         }
         let now = Instant::now();
@@ -672,6 +700,9 @@ impl GatewayRuntime {
         let mut available = instances
             .iter()
             .filter(|instance| {
+                if !instance_matches_tags(instance, required_tags) {
+                    return false;
+                }
                 let key = upstream_instance_key(service_name, &instance.addr);
                 let ejected = outlier_states
                     .get(&key)
@@ -683,7 +714,7 @@ impl GatewayRuntime {
             })
             .cloned()
             .collect::<Vec<_>>();
-        if available.is_empty() {
+        if available.is_empty() && required_tags.is_empty() {
             available = instances;
         }
         available
@@ -824,11 +855,18 @@ impl GatewayRuntime {
         }
     }
 
-    fn select_route(&self, path: &str, method: &Method) -> Option<CompiledRoute> {
-        self.routes
+    fn select_route(&self, path: &str, method: &Method, seed: &str) -> Option<CompiledRoute> {
+        let matches = self
+            .routes
             .iter()
-            .find(|route| route.matches_path(path) && route.method_allowed(method))
-            .cloned()
+            .filter(|route| route.matches_path(path) && route.method_allowed(method))
+            .collect::<Vec<_>>();
+        let longest = matches.iter().map(|route| route.path.len()).max()?;
+        let candidates = matches
+            .into_iter()
+            .filter(|route| route.path.len() == longest)
+            .collect::<Vec<_>>();
+        pick_weighted_route(&candidates, seed).cloned()
     }
 
     async fn rate_allowed(&self, route: &CompiledRoute) -> bool {
@@ -926,23 +964,123 @@ fn first_service_name(mut services: Vec<&String>) -> Option<&str> {
     services.first().map(|service| service.as_str())
 }
 
-fn compile_routes(routes: Vec<GatewayRoute>) -> Vec<CompiledRoute> {
+fn pick_weighted_route<'a>(routes: &[&'a CompiledRoute], seed: &str) -> Option<&'a CompiledRoute> {
+    if routes.is_empty() {
+        return None;
+    }
+    if routes.len() == 1 {
+        return Some(routes[0]);
+    }
+
+    let total = routes
+        .iter()
+        .map(|route| route.weight.max(1) as u64)
+        .sum::<u64>();
+    let mut point = stable_hash(seed) % total;
+    for route in routes {
+        let weight = route.weight.max(1) as u64;
+        if point < weight {
+            return Some(*route);
+        }
+        point -= weight;
+    }
+
+    routes.first().copied()
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn effective_instance_tags(
+    service_tags: &BTreeMap<String, String>,
+    route_tags: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut tags = service_tags.clone();
+    tags.extend(route_tags.clone());
+    tags
+}
+
+fn instance_matches_tags(
+    instance: &roze_rpc::registry::ServiceInstance,
+    required_tags: &BTreeMap<String, String>,
+) -> bool {
+    required_tags.iter().all(|(key, expected)| {
+        instance
+            .metadata
+            .get(key)
+            .is_some_and(|actual| actual == expected)
+    })
+}
+
+fn compile_routes(
+    routes: Vec<GatewayRoute>,
+    governance: Option<&GovernanceConfig>,
+) -> Vec<CompiledRoute> {
     routes
         .into_iter()
-        .map(|route| CompiledRoute {
-            path: normalize_path_prefix(&route.path),
-            service: route.service,
-            methods: parse_methods(&route.methods),
-            timeout_ms: route.timeout_ms,
-            retries: route.retries.unwrap_or_default(),
-            retry_backoff_ms: route.retry_backoff_ms.unwrap_or_default(),
-            rewrite: route.rewrite,
-            fallback: route.fallback,
-            rate_limit: route.rate_limit,
-            breaker: route.breaker,
-            middlewares: normalize_middlewares(route.middlewares),
+        .map(|route| {
+            let path = normalize_path_prefix(&route.path);
+            let route_governance = gateway_route_governance(governance, &path, &route.service);
+            let retry = effective_retry(governance, route_governance);
+            CompiledRoute {
+                path,
+                service: route.service,
+                methods: parse_methods(&route.methods),
+                weight: route.weight,
+                instance_tags: route.instance_tags,
+                timeout_ms: route
+                    .timeout_ms
+                    .or_else(|| route_governance.and_then(|route| route.timeout_ms))
+                    .or_else(|| governance.and_then(|governance| governance.timeout_ms)),
+                retries: route
+                    .retries
+                    .unwrap_or_else(|| retry.map(retries_from_max_attempts).unwrap_or_default()),
+                retry_backoff_ms: route
+                    .retry_backoff_ms
+                    .unwrap_or_else(|| retry.map(|retry| retry.backoff_ms).unwrap_or_default()),
+                rewrite: route.rewrite,
+                fallback: route.fallback,
+                rate_limit: route
+                    .rate_limit
+                    .or_else(|| route_governance.and_then(|route| route.rate_limit))
+                    .or_else(|| governance.and_then(|governance| governance.rate_limit)),
+                breaker: route
+                    .breaker
+                    .or_else(|| route_governance.and_then(|route| route.breaker))
+                    .or_else(|| governance.and_then(|governance| governance.breaker)),
+                middlewares: normalize_middlewares(route.middlewares),
+            }
         })
         .collect()
+}
+
+fn gateway_route_governance<'a>(
+    governance: Option<&'a GovernanceConfig>,
+    path: &str,
+    service: &str,
+) -> Option<&'a RouteGovernanceConfig> {
+    let governance = governance?;
+    governance
+        .routes
+        .get(path)
+        .or_else(|| governance.routes.get(path.trim_start_matches('/')))
+        .or_else(|| governance.routes.get(service))
+}
+
+fn effective_retry(
+    governance: Option<&GovernanceConfig>,
+    route_governance: Option<&RouteGovernanceConfig>,
+) -> Option<roze_config::RetryConfig> {
+    route_governance
+        .and_then(|route| route.retry)
+        .or_else(|| governance.and_then(|governance| governance.retry))
+}
+
+fn retries_from_max_attempts(retry: roze_config::RetryConfig) -> u32 {
+    retry.max_attempts.saturating_sub(1)
 }
 
 impl CompiledRoute {
@@ -1266,6 +1404,7 @@ impl From<GatewayService> for ServiceEndpoint {
             name: value.name,
             upstream: value.upstream,
             registry_name: value.registry_name,
+            instance_tags: value.instance_tags,
             timeout_ms: value.timeout_ms,
             outlier: value.outlier,
             health_check: value.health_check,
@@ -1539,6 +1678,239 @@ mod tests {
         assert_eq!(good_hits.load(Ordering::SeqCst), 3);
     }
 
+    #[tokio::test]
+    async fn route_instance_tags_filter_registry_instances() {
+        let blue_hits = Arc::new(AtomicUsize::new(0));
+        let green_hits = Arc::new(AtomicUsize::new(0));
+        let blue_addr = spawn_text_upstream("blue", blue_hits.clone()).await;
+        let green_addr = spawn_text_upstream("green", green_hits.clone()).await;
+
+        let registry = Arc::new(MemoryRegistry::default());
+        let mut blue = ServiceInstance::new("user", blue_addr.to_string());
+        blue.metadata
+            .insert("version".to_string(), "blue".to_string());
+        registry.register(blue).await.expect("register blue");
+        let mut green = ServiceInstance::new("user", green_addr.to_string());
+        green
+            .metadata
+            .insert("version".to_string(), "green".to_string());
+        registry.register(green).await.expect("register green");
+
+        let gateway = build_router_with_registry(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    registry_name: Some("user".to_string()),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    instance_tags: BTreeMap::from([("version".to_string(), "green".to_string())]),
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(registry as Arc<dyn Registry>),
+        );
+
+        for _ in 0..3 {
+            let response = gateway
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/user")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("gateway response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(blue_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(green_hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn registry_instance_weight_controls_gateway_pick_order() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let first_addr = spawn_text_upstream("first", first_hits.clone()).await;
+        let second_addr = spawn_text_upstream("second", second_hits.clone()).await;
+
+        let registry = Arc::new(MemoryRegistry::default());
+        let mut first = ServiceInstance::new("user", first_addr.to_string());
+        first.weight = 2;
+        registry.register(first).await.expect("register first");
+        let mut second = ServiceInstance::new("user", second_addr.to_string());
+        second.weight = 1;
+        registry.register(second).await.expect("register second");
+
+        let gateway = build_router_with_registry(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "user".to_string(),
+                    registry_name: Some("user".to_string()),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/user".to_string(),
+                    service: "user".to_string(),
+                    methods: vec!["GET".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+            Some(registry as Arc<dyn Registry>),
+        );
+
+        for _ in 0..3 {
+            let response = gateway
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/user")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("gateway response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn weighted_route_selection_uses_route_weights() {
+        let low = CompiledRoute {
+            path: "/user".to_string(),
+            service: "v1".to_string(),
+            methods: Vec::new(),
+            weight: 1,
+            instance_tags: BTreeMap::new(),
+            timeout_ms: None,
+            retries: 0,
+            retry_backoff_ms: 0,
+            rewrite: None,
+            fallback: None,
+            rate_limit: None,
+            breaker: None,
+            middlewares: Vec::new(),
+        };
+        let high = CompiledRoute {
+            service: "v2".to_string(),
+            weight: 9,
+            ..low.clone()
+        };
+        let routes = vec![&low, &high];
+        let mut low_count = 0;
+        let mut high_count = 0;
+
+        for idx in 0..100 {
+            match pick_weighted_route(&routes, &format!("request-{idx}"))
+                .expect("route")
+                .service
+                .as_str()
+            {
+                "v1" => low_count += 1,
+                "v2" => high_count += 1,
+                other => panic!("unexpected service {other}"),
+            }
+        }
+
+        assert!(high_count > low_count);
+    }
+
+    #[test]
+    fn routes_inherit_unified_governance_defaults() {
+        let mut governance = GovernanceConfig {
+            timeout_ms: Some(500),
+            retry: Some(roze_config::RetryConfig {
+                max_attempts: 3,
+                backoff_ms: 25,
+                max_backoff_ms: 250,
+                budget_percent: None,
+            }),
+            rate_limit: Some(RateLimitConfig {
+                burst: 10,
+                refill_ms: 100,
+            }),
+            breaker: Some(BreakerConfig {
+                failure_threshold: 4,
+                reset_timeout_ms: 1_000,
+            }),
+            ..Default::default()
+        };
+        governance.routes.insert(
+            "/user".to_string(),
+            RouteGovernanceConfig {
+                timeout_ms: Some(100),
+                retry: Some(roze_config::RetryConfig {
+                    max_attempts: 2,
+                    backoff_ms: 5,
+                    max_backoff_ms: 50,
+                    budget_percent: None,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let routes = compile_routes(
+            vec![GatewayRoute {
+                path: "/user".to_string(),
+                service: "user".to_string(),
+                methods: vec!["GET".to_string()],
+                ..empty_gateway_route()
+            }],
+            Some(&governance),
+        );
+        let route = routes.first().expect("compiled route");
+
+        assert_eq!(route.timeout_ms, Some(100));
+        assert_eq!(route.retries, 1);
+        assert_eq!(route.retry_backoff_ms, 5);
+        assert_eq!(route.rate_limit.expect("rate limit").burst, 10);
+        assert_eq!(route.breaker.expect("breaker").failure_threshold, 4);
+    }
+
+    #[test]
+    fn route_fields_override_unified_governance() {
+        let governance = GovernanceConfig {
+            timeout_ms: Some(500),
+            retry: Some(roze_config::RetryConfig {
+                max_attempts: 3,
+                backoff_ms: 25,
+                max_backoff_ms: 250,
+                budget_percent: None,
+            }),
+            ..Default::default()
+        };
+
+        let routes = compile_routes(
+            vec![GatewayRoute {
+                path: "/user".to_string(),
+                service: "user".to_string(),
+                methods: vec!["GET".to_string()],
+                timeout_ms: Some(50),
+                retries: Some(4),
+                retry_backoff_ms: Some(1),
+                ..empty_gateway_route()
+            }],
+            Some(&governance),
+        );
+        let route = routes.first().expect("compiled route");
+
+        assert_eq!(route.timeout_ms, Some(50));
+        assert_eq!(route.retries, 4);
+        assert_eq!(route.retry_backoff_ms, 1);
+    }
+
     async fn spawn_text_upstream(
         text: &'static str,
         hits: Arc<AtomicUsize>,
@@ -1632,6 +2004,8 @@ mod tests {
             path: String::new(),
             service: String::new(),
             methods: Vec::new(),
+            weight: 100,
+            instance_tags: BTreeMap::new(),
             middlewares: Vec::new(),
             timeout_ms: None,
             retries: None,
@@ -1648,6 +2022,7 @@ mod tests {
             name: String::new(),
             upstream: String::new(),
             registry_name: None,
+            instance_tags: BTreeMap::new(),
             timeout_ms: None,
             outlier: None,
             health_check: None,

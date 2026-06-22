@@ -68,6 +68,8 @@ pub struct GatewayService {
     #[serde(default)]
     pub registry_name: Option<String>,
     #[serde(default)]
+    pub instance_tags: BTreeMap<String, String>,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub outlier: Option<GatewayOutlierConfig>,
@@ -105,6 +107,10 @@ pub struct GatewayRoute {
     pub service: String,
     #[serde(default)]
     pub methods: Vec<String>,
+    #[serde(default = "default_gateway_route_weight")]
+    pub weight: u32,
+    #[serde(default)]
+    pub instance_tags: BTreeMap<String, String>,
     #[serde(default)]
     pub middlewares: Vec<String>,
     #[serde(default)]
@@ -147,6 +153,10 @@ pub struct GatewayCorsConfig {
 
 fn default_gateway_fallback_status() -> u16 {
     503
+}
+
+fn default_gateway_route_weight() -> u32 {
+    100
 }
 
 fn default_gateway_outlier_failure_threshold() -> u32 {
@@ -516,9 +526,15 @@ pub struct GovernanceConfig {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
+    pub retry: Option<RetryConfig>,
+    #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
     pub breaker: Option<BreakerConfig>,
+    #[serde(default)]
+    pub shedding: Option<SheddingConfig>,
+    #[serde(default)]
+    pub fallback: Option<GovernanceFallbackConfig>,
     #[serde(default)]
     pub routes: BTreeMap<String, RouteGovernanceConfig>,
 }
@@ -528,9 +544,44 @@ pub struct RouteGovernanceConfig {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
+    pub retry: Option<RetryConfig>,
+    #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
     pub breaker: Option<BreakerConfig>,
+    #[serde(default)]
+    pub shedding: Option<SheddingConfig>,
+    #[serde(default)]
+    pub fallback: Option<GovernanceFallbackConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetryConfig {
+    #[serde(default = "default_retry_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_retry_backoff_ms")]
+    pub backoff_ms: u64,
+    #[serde(default = "default_retry_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+    #[serde(default)]
+    pub budget_percent: Option<u32>,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_retry_max_attempts(),
+            backoff_ms: default_retry_backoff_ms(),
+            max_backoff_ms: default_retry_max_backoff_ms(),
+            budget_percent: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovernanceFallbackConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -618,6 +669,18 @@ fn default_idle_timeout_secs() -> u64 {
 
 fn default_sqlx_logging() -> bool {
     true
+}
+
+fn default_retry_max_attempts() -> u32 {
+    1
+}
+
+fn default_retry_backoff_ms() -> u64 {
+    0
+}
+
+fn default_retry_max_backoff_ms() -> u64 {
+    1_000
 }
 
 fn default_rpc_client_timeout_ms() -> u64 {
@@ -801,11 +864,27 @@ register = false
 [governance]
 timeout_ms = 250
 
+[governance.retry]
+max_attempts = 3
+backoff_ms = 25
+max_backoff_ms = 250
+budget_percent = 20
+
 [governance.rate_limit]
 burst = 10
 
+[governance.shedding]
+concurrency = 32
+
+[governance.fallback]
+enabled = true
+
 [governance.routes.login.breaker]
 failure_threshold = 2
+
+[governance.routes.login.retry]
+max_attempts = 2
+backoff_ms = 5
 "#;
         let config: ServiceConfig = config::Config::builder()
             .add_source(config::File::from_str(source, config::FileFormat::Toml))
@@ -817,10 +896,17 @@ failure_threshold = 2
         assert!(!config.rest.expect("rest").register);
         let governance = config.governance;
         assert_eq!(governance.timeout_ms, Some(250));
+        let retry = governance.retry.expect("retry");
+        assert_eq!(retry.max_attempts, 3);
+        assert_eq!(retry.backoff_ms, 25);
+        assert_eq!(retry.max_backoff_ms, 250);
+        assert_eq!(retry.budget_percent, Some(20));
         assert_eq!(
             governance.rate_limit.expect("rate limit").refill_ms,
             default_rate_limit_refill_ms()
         );
+        assert_eq!(governance.shedding.expect("shedding").concurrency, 32);
+        assert!(governance.fallback.expect("fallback").enabled);
         assert_eq!(
             governance
                 .routes
@@ -829,6 +915,15 @@ failure_threshold = 2
                 .expect("route breaker")
                 .reset_timeout_ms,
             default_breaker_reset_timeout_ms()
+        );
+        assert_eq!(
+            governance
+                .routes
+                .get("login")
+                .and_then(|route| route.retry)
+                .expect("route retry")
+                .backoff_ms,
+            5
         );
     }
 

@@ -1234,6 +1234,7 @@ mod tests {
                     refill_ms: 5,
                 }),
                 breaker: None,
+                ..Default::default()
             },
         );
 

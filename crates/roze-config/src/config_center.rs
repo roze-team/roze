@@ -16,8 +16,8 @@ use std::{
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::StreamExt;
-use serde::{de::DeserializeOwned, Deserialize};
-use serde_json::json;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Value};
 use tokio::{
     sync::{mpsc, RwLock},
     time::{self, Instant},
@@ -70,9 +70,26 @@ where
     pub app: Option<String>,
     pub key: Option<String>,
     pub changed: bool,
+    pub diff: Vec<ConfigDiffEntry>,
     pub success: bool,
     pub error: Option<String>,
     pub config: Option<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDiffEntry {
+    pub path: String,
+    pub kind: ConfigDiffKind,
+    pub old: Option<String>,
+    pub new: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDiffKind {
+    Added,
+    Removed,
+    Changed,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +108,7 @@ impl<T> ReloadResult<T>
 where
     T: Clone,
 {
-    fn success(meta: ReloadMetadata, config: T) -> Self {
+    fn success(meta: ReloadMetadata, config: T, diff: Vec<ConfigDiffEntry>) -> Self {
         let changed = meta.old_hash != meta.hash;
         Self {
             version: meta.version,
@@ -104,6 +121,7 @@ where
             app: meta.app,
             key: meta.key,
             changed,
+            diff,
             success: true,
             error: None,
             config: Some(config),
@@ -122,6 +140,7 @@ where
             app: meta.app,
             key: meta.key,
             changed: false,
+            diff: Vec::new(),
             success: false,
             error: Some(error.into()),
             config: None,
@@ -420,7 +439,7 @@ where
 async fn watch_loop<T>(
     subscriber: Arc<dyn Subscriber>,
     options: ConfigCenterConfig,
-    last_snapshot: String,
+    mut last_snapshot: String,
     inner: Arc<ConfigCenterInner<T>>,
 ) where
     T: DeserializeOwned + Clone + Send + Sync + 'static,
@@ -523,10 +542,12 @@ async fn watch_loop<T>(
         let next_version = inner.version.fetch_add(1, Ordering::SeqCst) + 1;
         let old_version = next_version - 1;
         let old_hash = last_hash.clone();
+        let diff = config_diff(&last_snapshot, &snapshot, options.format);
 
         {
             *inner.value.write().await = parsed.clone();
             last_hash = snapshot_hash.clone();
+            last_snapshot = snapshot.clone();
         }
 
         let result = ReloadResult::success(
@@ -541,6 +562,7 @@ async fn watch_loop<T>(
                 source: source.clone(),
             },
             parsed.clone(),
+            diff,
         );
 
         if result.changed {
@@ -556,12 +578,19 @@ async fn watch_loop<T>(
         }
 
         pending = None;
+        let changed_paths = result
+            .diff
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
         tracing::info!(
             source = %source,
             version = result.version,
             old_version = result.old_version,
             hash = %result.hash,
             changed = result.changed,
+            changed_paths = %changed_paths,
             success = result.success,
             "config center reload applied"
         );
@@ -593,6 +622,92 @@ fn snapshot_hash(raw: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut hasher);
     hasher.finish().to_string()
+}
+
+pub fn config_diff(old_raw: &str, new_raw: &str, format: ConfigFormat) -> Vec<ConfigDiffEntry> {
+    let Ok(old_value) = parse_config_value(old_raw, format) else {
+        return Vec::new();
+    };
+    let Ok(new_value) = parse_config_value(new_raw, format) else {
+        return Vec::new();
+    };
+    let mut diff = Vec::new();
+    collect_config_diff("", &old_value, &new_value, &mut diff);
+    diff
+}
+
+fn parse_config_value(raw: &str, format: ConfigFormat) -> Result<Value> {
+    config::Config::builder()
+        .add_source(config::File::from_str(raw, format.as_file_format()))
+        .build()?
+        .try_deserialize::<Value>()
+        .map_err(Into::into)
+}
+
+fn collect_config_diff(
+    path: &str,
+    old_value: &Value,
+    new_value: &Value,
+    diff: &mut Vec<ConfigDiffEntry>,
+) {
+    match (old_value, new_value) {
+        (Value::Object(old), Value::Object(new)) => {
+            let mut keys = old.keys().chain(new.keys()).collect::<Vec<_>>();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                let child_path = join_config_path(path, key);
+                match (old.get(key), new.get(key)) {
+                    (Some(old_child), Some(new_child)) => {
+                        collect_config_diff(&child_path, old_child, new_child, diff);
+                    }
+                    (None, Some(new_child)) => diff.push(ConfigDiffEntry {
+                        path: child_path,
+                        kind: ConfigDiffKind::Added,
+                        old: None,
+                        new: Some(config_value_summary(new_child)),
+                    }),
+                    (Some(old_child), None) => diff.push(ConfigDiffEntry {
+                        path: child_path,
+                        kind: ConfigDiffKind::Removed,
+                        old: Some(config_value_summary(old_child)),
+                        new: None,
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ if old_value != new_value => diff.push(ConfigDiffEntry {
+            path: if path.is_empty() {
+                "$".to_string()
+            } else {
+                path.to_string()
+            },
+            kind: ConfigDiffKind::Changed,
+            old: Some(config_value_summary(old_value)),
+            new: Some(config_value_summary(new_value)),
+        }),
+        _ => {}
+    }
+}
+
+fn join_config_path(parent: &str, key: &str) -> String {
+    if parent.is_empty() {
+        key.to_string()
+    } else {
+        format!("{parent}.{key}")
+    }
+}
+
+fn config_value_summary(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        Value::Array(value) => format!("[{} items]", value.len()),
+        Value::Object(value) => format!("{{{} keys}}", value.len()),
+    }
 }
 
 fn current_millis() -> u64 {
@@ -853,5 +968,46 @@ mod tests {
             config_center_endpoints(&["127.0.0.1:2379".to_string()], "http://default"),
             vec!["http://127.0.0.1:2379"]
         );
+    }
+
+    #[test]
+    fn config_diff_reports_changed_added_and_removed_paths() {
+        let old = r#"
+name: demo
+gateway:
+  timeout_ms: 1000
+  services:
+    - name: user
+removed: true
+"#;
+        let new = r#"
+name: demo
+gateway:
+  timeout_ms: 2000
+  services:
+    - name: user
+added: yes
+"#;
+
+        let diff = config_diff(old, new, ConfigFormat::Yaml);
+
+        assert!(diff.contains(&ConfigDiffEntry {
+            path: "added".to_string(),
+            kind: ConfigDiffKind::Added,
+            old: None,
+            new: Some("yes".to_string()),
+        }));
+        assert!(diff.contains(&ConfigDiffEntry {
+            path: "gateway.timeout_ms".to_string(),
+            kind: ConfigDiffKind::Changed,
+            old: Some("1000".to_string()),
+            new: Some("2000".to_string()),
+        }));
+        assert!(diff.contains(&ConfigDiffEntry {
+            path: "removed".to_string(),
+            kind: ConfigDiffKind::Removed,
+            old: Some("true".to_string()),
+            new: None,
+        }));
     }
 }

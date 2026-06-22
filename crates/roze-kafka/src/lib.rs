@@ -196,6 +196,14 @@ pub struct KafkaRecord {
     pub key: Option<String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub timestamp_millis: u64,
+    #[serde(default)]
+    pub partition: Option<i32>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+    #[serde(default)]
+    pub group: Option<String>,
     pub payload: serde_json::Value,
     #[serde(default)]
     pub attempt: u32,
@@ -219,6 +227,10 @@ impl KafkaRecord {
             topic: topic.into(),
             key: None,
             headers,
+            timestamp_millis: current_millis(),
+            partition: None,
+            offset: None,
+            group: None,
             payload,
             attempt: 0,
             dead_letter_topic: None,
@@ -255,6 +267,10 @@ impl KafkaRecord {
             topic: event.topic,
             key: event.key,
             headers: event.headers,
+            timestamp_millis: current_millis(),
+            partition: None,
+            offset: None,
+            group: None,
             payload: event.payload,
             attempt: event.attempt,
             dead_letter_topic: None,
@@ -266,6 +282,10 @@ impl KafkaRecord {
             topic: self.topic.clone(),
             key: self.key.clone(),
             headers: self.headers.clone(),
+            timestamp_millis: self.timestamp_millis,
+            partition: self.partition,
+            offset: self.offset,
+            group: self.group.clone(),
             attempt: self.attempt,
             dead_letter_topic: self.dead_letter_topic.clone(),
             idempotency_key: None,
@@ -279,6 +299,10 @@ impl KafkaRecord {
             topic: message.topic,
             key: message.key,
             headers: message.headers,
+            timestamp_millis: message.timestamp_millis,
+            partition: message.partition,
+            offset: message.offset,
+            group: message.group,
             payload: message.payload,
             attempt: message.attempt,
             dead_letter_topic: message.dead_letter_topic,
@@ -359,6 +383,7 @@ pub trait Subscriber: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct InMemoryKafkaBroker {
     topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>>,
+    topic_offsets: Arc<Mutex<HashMap<String, i64>>>,
     dead_letters: Arc<Mutex<VecDeque<roze_mq::DeadLetterRecord>>>,
     dead_letter_topic: Option<String>,
     max_attempts: u32,
@@ -375,6 +400,7 @@ impl InMemoryKafkaBroker {
     pub fn new() -> Self {
         Self {
             topics: Arc::new(Mutex::new(HashMap::new())),
+            topic_offsets: Arc::new(Mutex::new(HashMap::new())),
             dead_letters: Arc::new(Mutex::new(VecDeque::new())),
             dead_letter_topic: None,
             max_attempts: 3,
@@ -467,6 +493,7 @@ impl InMemoryKafkaBroker {
     }
 
     fn route_or_dead_letter(&self, mut message: KafkaRecord) {
+        self.prepare_delivery_metadata(&mut message);
         message.attempt = message.attempt.saturating_add(1);
         if message.attempt > self.max_attempts {
             self.push_dead_letter(message.clone(), "max_attempts_exceeded");
@@ -487,6 +514,21 @@ impl InMemoryKafkaBroker {
             .sender_for(&message.topic)
             .send(self.make_delivery(message));
         self.delivered.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn prepare_delivery_metadata(&self, message: &mut KafkaRecord) {
+        if message.timestamp_millis == 0 {
+            message.timestamp_millis = current_millis();
+        }
+        if message.partition.is_none() {
+            message.partition = Some(0);
+        }
+        if message.offset.is_none() {
+            let mut offsets = self.topic_offsets.lock().expect("broker lock poisoned");
+            let offset = offsets.entry(message.topic.clone()).or_insert(0);
+            message.offset = Some(*offset);
+            *offset = offset.saturating_add(1);
+        }
     }
 
     async fn route(&self, message: KafkaRecord) {
@@ -930,6 +972,10 @@ impl Subscriber for RdkafkaSubscriber {
                                     topic: msg.topic().to_string(),
                                     key: msg.key().map(|value| String::from_utf8_lossy(value).into_owned()),
                                     headers: collect_headers(msg.headers()),
+                                    timestamp_millis: current_millis(),
+                                    partition: Some(msg.partition()),
+                                    offset: Some(msg.offset()),
+                                    group: Some(cfg.group_id_or_default()),
                                     payload: payload.clone(),
                                     attempt: parse_attempt(msg.headers()),
                                     dead_letter_topic: cfg.dead_letter_topic.clone(),
@@ -1097,6 +1143,9 @@ mod tests {
         let delivery = receiver.recv().await.expect("delivery");
         assert_eq!(delivery.message().topic, "orders");
         assert_eq!(delivery.message().payload["id"], 1);
+        assert!(delivery.message().timestamp_millis > 0);
+        assert_eq!(delivery.message().partition, Some(0));
+        assert_eq!(delivery.message().offset, Some(0));
         let trace_id = delivery
             .message()
             .headers
@@ -1106,6 +1155,27 @@ mod tests {
             uuid::Uuid::parse_str(trace_id).unwrap().get_version_num(),
             7
         );
+    }
+
+    #[test]
+    fn kafka_record_preserves_standard_mq_metadata() {
+        let mut record = KafkaRecord::new("orders", serde_json::json!({"id": 1}));
+        record.timestamp_millis = 42;
+        record.partition = Some(3);
+        record.offset = Some(99);
+        record.group = Some("workers".to_string());
+
+        let mq = record.to_mq_message();
+        assert_eq!(mq.timestamp_millis, 42);
+        assert_eq!(mq.partition, Some(3));
+        assert_eq!(mq.offset, Some(99));
+        assert_eq!(mq.group.as_deref(), Some("workers"));
+
+        let restored = KafkaRecord::from_mq_message(mq);
+        assert_eq!(restored.timestamp_millis, 42);
+        assert_eq!(restored.partition, Some(3));
+        assert_eq!(restored.offset, Some(99));
+        assert_eq!(restored.group.as_deref(), Some("workers"));
     }
 
     #[tokio::test]

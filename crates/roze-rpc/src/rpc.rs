@@ -1078,6 +1078,7 @@ mod tests {
                 timeout_ms: Some(50),
                 rate_limit: None,
                 breaker: None,
+                ..Default::default()
             },
         );
 

@@ -33,16 +33,23 @@ gateway:
         expected_status: 200
     - name: order
       registry_name: order-api
+      instance_tags: { env: prod }
       timeout_ms: 3000
   routes:
     - path: /user
       service: user
       methods: [GET, POST]
+      weight: 90
       rewrite: /user
       fallback: { status: 503, body: { code: 503, message: "..." }, headers: {...} }
       middlewares: [trace, rate, breaker, auth]
       rate_limit: { burst: 20, refill_ms: 200 }
       breaker: { failure_threshold: 5, reset_timeout_ms: 5000 }
+    - path: /user
+      service: user-v2
+      methods: [GET, POST]
+      weight: 10
+      instance_tags: { version: v2 }
 ```
 
 ### fallback
@@ -58,6 +65,8 @@ gateway:
 字段覆盖策略：
 
 - `route.fallback` 优先于 `gateway.fallback`，未设置时仅使用 HTTP code + message。
+- Gateway route 显式字段优先于 `governance.routes`，`governance.routes` 优先于全局 `governance`。
+- Gateway 当前继承的统一治理字段包括 `timeout_ms`、`retry`、`rate_limit` 和 `breaker`；`shedding` 与 `fallback` 已进入统一配置模型，网关执行逻辑后续接入。
 
 ## 3. 鉴权
 
@@ -70,7 +79,12 @@ gateway:
 - 默认转发 preserve path，支持 `rewrite`：
   - `route.rewrite` 若存在则用重写后的前缀替换匹配前缀；
   - 无 `rewrite` 则保留原始请求路径。
+- 多条路由匹配同一路径和方法时，先按最长路径分组，再按 `route.weight` 做稳定加权选择；可用于 `v1:90 / v2:10` 灰度路由。
 - 上游可配置静态 `service.upstream`，也可配置 `service.registry_name` 从注册中心动态发现实例；两者同时存在时，`registry_name` 优先，静态 upstream 作为未启用动态发现时的默认路径。
+- registry 动态实例支持 `weight` 和 `metadata`：
+  - `weight` 影响网关实例轮询顺序，用于蓝绿/金丝雀流量比例；
+  - `service.instance_tags` 和 `route.instance_tags` 会合并后过滤实例 metadata，route 级同名 key 覆盖 service 级 key；
+  - 若配置了标签且没有匹配实例，网关不会回退到无标签实例，避免灰度流量误打到错误版本。
 - 注册中心发现由 `CachedRegistryResolver` 维护本地实例快照；etcd registry 支持原生 `/v3/watch`，实例变更会即时刷新缓存，周期 refresh 作为 watch 断线兜底。
 - `service.outlier` 开启实例级被动摘除：
   - `failure_threshold`：同一实例连续失败阈值，默认 3；
@@ -87,6 +101,8 @@ gateway:
 - 支持路由级重试：
   - `retries`：失败后的额外重试次数，默认 0；
   - `retry_backoff_ms`：每次重试前的等待时间，默认 0；
+  - 未设置 `retries` 时继承 `governance.routes.<path>.retry.max_attempts` 或 `governance.retry.max_attempts`，并转换为额外重试次数；
+  - 未设置 `retry_backoff_ms` 时继承 `governance.routes.<path>.retry.backoff_ms` 或 `governance.retry.backoff_ms`；
   - 每次尝试独立应用 `timeout_ms`，全部尝试失败后才触发 breaker failure 记录。
 - 自动透传请求头、body 与 query-string，保留 `x-request-id`、`x-trace-id`（若未提供则自动补齐）。
 - 默认请求体上限：2MB（可配置 `request_body_limit_bytes`）。

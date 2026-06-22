@@ -152,17 +152,28 @@ Route governance still lives under `governance`:
 ```yaml
 governance:
   timeout_ms: 5000
+  retry:
+    max_attempts: 2
+    backoff_ms: 50
+    max_backoff_ms: 500
   rate_limit:
     burst: 100
     refill_ms: 10
   breaker:
     failure_threshold: 5
     reset_timeout_ms: 30000
+  shedding:
+    concurrency: 1000
+    max_avg_latency_ms: 500
+  fallback:
+    enabled: true
   routes: {}
 ```
 
 `begin_route` applies route/global rate limit and breaker policy and attaches
-the effective timeout to `roze_context::Context`.
+the effective timeout to `roze_context::Context`. `retry`, `shedding`, and
+`fallback` are part of the shared governance schema so Gateway/RPC/MQ can use
+the same configuration model where applicable.
 
 Timeout is intentionally a framework concern:
 

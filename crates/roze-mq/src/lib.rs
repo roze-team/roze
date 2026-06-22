@@ -24,6 +24,14 @@ pub struct Message {
     #[serde(default)]
     pub headers: HashMap<String, String>,
     #[serde(default)]
+    pub timestamp_millis: u64,
+    #[serde(default)]
+    pub partition: Option<i32>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
     pub attempt: u32,
     #[serde(default)]
     pub dead_letter_topic: Option<String>,
@@ -42,6 +50,18 @@ pub struct DeadLetterRecord {
     pub failed_at_millis: u64,
     pub replay_count: u32,
     pub message: Message,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeadLetterQuery {
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_dead_letter_query_limit")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +92,10 @@ impl Message {
             topic: topic.into(),
             key: None,
             headers,
+            timestamp_millis: current_millis(),
+            partition: None,
+            offset: None,
+            group: None,
             attempt: 0,
             dead_letter_topic: None,
             idempotency_key: None,
@@ -89,6 +113,10 @@ impl Message {
             topic: topic.into(),
             key: None,
             headers: context.propagation_headers().into_iter().collect(),
+            timestamp_millis: current_millis(),
+            partition: None,
+            offset: None,
+            group: None,
             attempt: 0,
             dead_letter_topic: None,
             idempotency_key: None,
@@ -126,6 +154,11 @@ impl Message {
 
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
         self
     }
 
@@ -213,6 +246,28 @@ pub trait MqAdmin: Send + Sync + 'static {
         offset: usize,
         limit: usize,
     ) -> anyhow::Result<Vec<DeadLetterRecord>>;
+    async fn dead_letters_query(
+        &self,
+        query: DeadLetterQuery,
+    ) -> anyhow::Result<Vec<DeadLetterRecord>> {
+        Ok(self
+            .dead_letters(query.offset, query.limit)
+            .await?
+            .into_iter()
+            .filter(|record| {
+                query
+                    .topic
+                    .as_ref()
+                    .is_none_or(|topic| &record.original_topic == topic)
+            })
+            .filter(|record| {
+                query
+                    .group
+                    .as_ref()
+                    .is_none_or(|group| record.message.group.as_ref() == Some(group))
+            })
+            .collect())
+    }
     async fn replay_dead_letter(&self, id: u64) -> anyhow::Result<Option<Message>>;
     async fn purge_dead_letter(&self, id: u64) -> anyhow::Result<Option<DeadLetterRecord>>;
     async fn clear_dead_letters(&self) -> anyhow::Result<usize>;
@@ -221,6 +276,7 @@ pub trait MqAdmin: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct InMemoryBroker {
     topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>>,
+    topic_offsets: Arc<Mutex<HashMap<String, i64>>>,
     dead_letters: Arc<Mutex<VecDeque<DeadLetterRecord>>>,
     seen_idempotency_keys: Arc<Mutex<HashSet<String>>>,
     dead_letter_topic: Option<String>,
@@ -239,6 +295,7 @@ impl InMemoryBroker {
     pub fn new() -> Self {
         Self {
             topics: Arc::new(Mutex::new(HashMap::new())),
+            topic_offsets: Arc::new(Mutex::new(HashMap::new())),
             dead_letters: Arc::new(Mutex::new(VecDeque::new())),
             seen_idempotency_keys: Arc::new(Mutex::new(HashSet::new())),
             dead_letter_topic: None,
@@ -308,6 +365,7 @@ impl InMemoryBroker {
     }
 
     async fn route_delivery_now(&self, mut message: Message) -> anyhow::Result<()> {
+        self.prepare_delivery_metadata(&mut message);
         message.attempt = message.attempt.saturating_add(1);
         if message.attempt > self.max_attempts {
             self.push_dead_letter(message.clone(), "max_attempts_exceeded");
@@ -341,6 +399,21 @@ impl InMemoryBroker {
             self.duplicated.fetch_add(1, Ordering::SeqCst);
         }
         duplicate
+    }
+
+    fn prepare_delivery_metadata(&self, message: &mut Message) {
+        if message.timestamp_millis == 0 {
+            message.timestamp_millis = current_millis();
+        }
+        if message.partition.is_none() {
+            message.partition = Some(0);
+        }
+        if message.offset.is_none() {
+            let mut offsets = self.topic_offsets.lock().expect("broker lock poisoned");
+            let offset = offsets.entry(message.topic.clone()).or_insert(0);
+            message.offset = Some(*offset);
+            *offset = offset.saturating_add(1);
+        }
     }
 
     async fn requeue_or_dead_letter(&self, message: Message) -> anyhow::Result<()> {
@@ -570,6 +643,10 @@ fn current_millis() -> u64 {
     }
 }
 
+fn default_dead_letter_query_limit() -> usize {
+    100
+}
+
 fn delivery_delay(message: &Message) -> Option<Duration> {
     let available_at = message.available_at_millis?;
     let now = current_millis();
@@ -592,6 +669,9 @@ mod tests {
         let received = rx.recv().await.expect("message");
         assert_eq!(received.message().topic, "events");
         assert_eq!(received.message().payload["ok"], true);
+        assert!(received.message().timestamp_millis > 0);
+        assert_eq!(received.message().partition, Some(0));
+        assert_eq!(received.message().offset, Some(0));
         let trace_id = received
             .message()
             .headers
@@ -726,6 +806,54 @@ mod tests {
             .expect("record");
         assert_eq!(purged.id, records[0].id);
         assert_eq!(broker.clear_dead_letters().await.expect("clear"), 0);
+    }
+
+    #[tokio::test]
+    async fn admin_filters_dead_letters_by_topic_and_group() {
+        let broker = InMemoryBroker::with_dead_letter("dead", 1);
+        let mut orders = broker.subscribe("orders").await.expect("subscribe orders");
+        let mut invoices = broker
+            .subscribe("invoices")
+            .await
+            .expect("subscribe invoices");
+
+        broker
+            .publish(Message::new("orders", serde_json::json!({"id": 1})).with_group("billing"))
+            .await
+            .expect("publish order");
+        orders
+            .recv()
+            .await
+            .expect("order")
+            .nack()
+            .await
+            .expect("nack");
+
+        broker
+            .publish(Message::new("invoices", serde_json::json!({"id": 2})).with_group("billing"))
+            .await
+            .expect("publish invoice");
+        invoices
+            .recv()
+            .await
+            .expect("invoice")
+            .nack()
+            .await
+            .expect("nack");
+
+        let records = broker
+            .dead_letters_query(DeadLetterQuery {
+                topic: Some("orders".to_string()),
+                group: Some("billing".to_string()),
+                offset: 0,
+                limit: 10,
+            })
+            .await
+            .expect("dead letters");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].original_topic, "orders");
+        assert_eq!(records[0].message.group.as_deref(), Some("billing"));
     }
 
     #[tokio::test]

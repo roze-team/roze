@@ -36,6 +36,12 @@ async fn main() -> anyhow::Result<()> {
         center
             .add_reload_listener(move |result| {
                 reload_version_for_listener.store(result.version, Ordering::SeqCst);
+                let diff_paths = result
+                    .diff
+                    .iter()
+                    .map(|entry| entry.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 if let Some(error) = &result.error {
                     tracing::warn!(
                         event = "config.reload.failed",
@@ -48,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
                         app = result.app.as_deref().unwrap_or_default(),
                         key = result.key.as_deref().unwrap_or_default(),
                         changed = result.changed,
+                        diff_paths = %diff_paths,
                         ts_millis = result.ts_millis,
                         error = %error,
                         "config center reload failed"
@@ -64,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
                         app = result.app.as_deref().unwrap_or_default(),
                         key = result.key.as_deref().unwrap_or_default(),
                         changed = result.changed,
+                        diff_paths = %diff_paths,
                         success = result.success,
                         ts_millis = result.ts_millis,
                         "config center reload applied"

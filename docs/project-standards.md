@@ -181,7 +181,8 @@ RPC 测试要求：
 ## 服务发现、网关和治理
 
 - 服务发现统一走 `roze_rpc::registry`，支持 memory、dns、etcd、consul 和 cached resolver。
-- Gateway upstream 可以来自静态 `upstream` 或 registry 动态发现；动态发现优先使用健康状态和 outlier 状态过滤实例。
+- Gateway upstream 可以来自静态 `upstream` 或 registry 动态发现；动态发现优先使用 instance tags、健康状态和 outlier 状态过滤实例，并按实例 `weight` 做加权轮询。
+- 多条同前缀同方法 Gateway route 可以通过 `weight` 做稳定加权灰度；标签路由必须显式配置 `instance_tags`，避免流量误打到错误版本。
 - route 级治理优先级高于 service 级和全局配置。
 - retry 只记录真实发生的重试，不把最后一次失败计入 retry。
 - 限流、熔断、超时、fallback、健康检查、outlier、registry 行为必须有 crate 级 smoke test；可运行 app 级示例脚本作为交付验收。

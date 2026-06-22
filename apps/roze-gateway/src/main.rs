@@ -65,11 +65,15 @@ async fn main() -> anyhow::Result<()> {
     let listen = gateway
         .listen
         .unwrap_or_else(|| "127.0.0.1:8081".parse().expect("default addr"));
-    let initial_gateway_signature = route_signature(&gateway);
+    let initial_gateway_signature = route_signature(&gateway, &config.governance);
     let registry = roze_rpc::registry::build_service_registry(&config)?;
 
-    let initial_router =
-        roze_gateway::build_router_with_registry(gateway.clone(), jwt.clone(), registry.clone());
+    let initial_router = roze_gateway::build_router_with_registry_and_governance(
+        gateway.clone(),
+        jwt.clone(),
+        registry.clone(),
+        Some(config.governance.clone()),
+    );
     let dynamic_gateway = DynamicGatewayRouter::new(initial_router);
     let dynamic_router = Router::new()
         .fallback(any(dynamic_gateway_handler))
@@ -100,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 };
 
-                let next_signature = route_signature(&updated_gateway);
+                let next_signature = route_signature(&updated_gateway, &updated_config.governance);
                 let mut current_signature = center_signature.write().await;
                 if *current_signature == next_signature {
                     tracing::debug!(
@@ -113,10 +117,11 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                let next = roze_gateway::build_router_with_registry(
+                let next = roze_gateway::build_router_with_registry_and_governance(
                     updated_gateway,
                     center_jwt.clone(),
                     center_registry.clone(),
+                    Some(updated_config.governance),
                 );
                 center_router.set_route(next).await;
                 *current_signature = next_signature.clone();
@@ -134,6 +139,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(center) = center {
         center
             .add_reload_listener(|result| {
+                let diff_paths = result
+                    .diff
+                    .iter()
+                    .map(|entry| entry.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 if let Some(error) = &result.error {
                     tracing::warn!(
                         event = "gateway.config.reload.failed",
@@ -142,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
                         hash = %result.hash,
                         old_hash = %result.old_hash,
                         source = %result.source,
+                        diff_paths = %diff_paths,
                         error = %error,
                         "gateway config reload failed"
                     );
@@ -154,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
                         old_hash = %result.old_hash,
                         source = %result.source,
                         changed = result.changed,
+                        diff_paths = %diff_paths,
                         "gateway config reload applied"
                     );
                 }
@@ -171,8 +184,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn route_signature(config: &roze_config::GatewayConfig) -> String {
-    serde_json::to_string(config).unwrap_or_else(|_| String::new())
+fn route_signature(
+    gateway: &roze_config::GatewayConfig,
+    governance: &roze_config::GovernanceConfig,
+) -> String {
+    serde_json::to_string(&(gateway, governance)).unwrap_or_else(|_| String::new())
 }
 
 fn config_path() -> std::path::PathBuf {
