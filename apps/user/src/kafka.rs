@@ -33,6 +33,14 @@ impl std::fmt::Display for PipelineFailureReason {
 
 const USER_TOPIC: &str = "events";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KafkaRestartDecision {
+    should_restart: bool,
+    signature: String,
+    previous_signature: String,
+    bootstrap: String,
+}
+
 #[derive(Default)]
 struct RunningKafkaPipeline {
     producer: Option<roze_kafka::RdkafkaProducer>,
@@ -115,45 +123,36 @@ pub fn start_center_driven_kafka(
         loop {
             let config = config_rx.borrow().clone();
             let version = reload_version.load(Ordering::SeqCst);
-            let kafka_config = map_kafka_config(&config);
-            let kafka_signature = kafka_config
-                .as_ref()
-                .map(serialize_signature)
-                .unwrap_or_default();
-            let bootstrap = kafka_config
-                .as_ref()
-                .map(|k| k.brokers_csv())
-                .unwrap_or_default();
+            let decision = kafka_restart_decision(last_signature.as_deref(), &config);
 
-            if Some(&kafka_signature) != last_signature.as_ref() {
-                let previous_signature = last_signature.clone().unwrap_or_default();
-                last_signature = Some(kafka_signature.clone());
+            if decision.should_restart {
+                last_signature = Some(decision.signature.clone());
 
                 tracing::info!(
                     app = %app_name,
                     event = "kafka.signature.changed",
                     version = version,
-                    previous_signature = %previous_signature,
-                    signature = %kafka_signature,
-                    bootstrap = %bootstrap,
+                    previous_signature = %decision.previous_signature,
+                    signature = %decision.signature,
+                    bootstrap = %decision.bootstrap,
                     "kafka config signature changed, restart pipeline"
                 );
                 tracing::info!(
                     app = %app_name,
                     event = "kafka.pipeline.restarting",
                     version = version,
-                    bootstrap = %bootstrap,
-                    previous_signature = %previous_signature,
-                    signature = %kafka_signature,
+                    bootstrap = %decision.bootstrap,
+                    previous_signature = %decision.previous_signature,
+                    signature = %decision.signature,
                     topic = %USER_TOPIC,
                     "kafka pipeline restart started"
                 );
                 restart_kafka_pipeline(
                     app_name.clone(),
                     version,
-                    &bootstrap,
-                    &kafka_signature,
-                    &previous_signature,
+                    &decision.bootstrap,
+                    &decision.signature,
+                    &decision.previous_signature,
                     &config,
                     &mut running,
                 )
@@ -163,8 +162,8 @@ pub fn start_center_driven_kafka(
                     app = %app_name,
                     event = "kafka.signature.unchanged",
                     version = version,
-                    signature = %kafka_signature,
-                    bootstrap = %bootstrap,
+                    signature = %decision.signature,
+                    bootstrap = %decision.bootstrap,
                     "kafka config signature unchanged, skip restart"
                 );
             }
@@ -187,6 +186,29 @@ pub fn start_center_driven_kafka(
             "kafka runtime stopped"
         );
     })
+}
+
+fn kafka_restart_decision(
+    previous_signature: Option<&str>,
+    config: &crate::config::Config,
+) -> KafkaRestartDecision {
+    let kafka_config = map_kafka_config(config);
+    let signature = kafka_config
+        .as_ref()
+        .map(serialize_signature)
+        .unwrap_or_default();
+    let bootstrap = kafka_config
+        .as_ref()
+        .map(|k| k.brokers_csv())
+        .unwrap_or_default();
+    let previous_signature = previous_signature.unwrap_or_default().to_string();
+
+    KafkaRestartDecision {
+        should_restart: signature != previous_signature,
+        signature,
+        previous_signature,
+        bootstrap,
+    }
 }
 
 fn serialize_signature(config: &roze_kafka::KafkaConfig) -> String {
@@ -677,5 +699,104 @@ fn should_nack(payload: &Value) -> bool {
             .get("type")
             .and_then(|v| v.as_str())
             .is_some_and(|v| v == "nack"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kafka_restart_decision_changes_only_for_kafka_signature() {
+        let base = parse_config(
+            r#"
+name: user-service
+kafka:
+  brokers: ["127.0.0.1:9092"]
+  client_id: user-service
+  group_id: user-workers
+  topic_prefix: user
+  enable_auto_commit: false
+  enable_manual_ack: true
+  consumer_workers: 2
+governance: {}
+"#,
+        );
+        let non_kafka_change = parse_config(
+            r#"
+name: renamed-user-service
+kafka:
+  brokers: ["127.0.0.1:9092"]
+  client_id: user-service
+  group_id: user-workers
+  topic_prefix: user
+  enable_auto_commit: false
+  enable_manual_ack: true
+  consumer_workers: 2
+governance:
+  timeout_ms: 500
+"#,
+        );
+        let kafka_change = parse_config(
+            r#"
+name: user-service
+kafka:
+  brokers: ["127.0.0.1:9093"]
+  client_id: user-service
+  group_id: user-workers
+  topic_prefix: user
+  enable_auto_commit: false
+  enable_manual_ack: true
+  consumer_workers: 2
+governance: {}
+"#,
+        );
+
+        let initial = kafka_restart_decision(None, &base);
+        assert!(initial.should_restart);
+        assert_eq!(initial.bootstrap, "127.0.0.1:9092");
+
+        let unchanged = kafka_restart_decision(Some(&initial.signature), &non_kafka_change);
+        assert!(!unchanged.should_restart);
+        assert_eq!(unchanged.signature, initial.signature);
+
+        let changed = kafka_restart_decision(Some(&initial.signature), &kafka_change);
+        assert!(changed.should_restart);
+        assert_ne!(changed.signature, initial.signature);
+        assert_eq!(changed.bootstrap, "127.0.0.1:9093");
+    }
+
+    #[test]
+    fn kafka_restart_decision_restarts_when_kafka_is_removed() {
+        let with_kafka = parse_config(
+            r#"
+name: user-service
+kafka:
+  brokers: ["127.0.0.1:9092"]
+governance: {}
+"#,
+        );
+        let without_kafka = parse_config(
+            r#"
+name: user-service
+governance: {}
+"#,
+        );
+        let initial = kafka_restart_decision(None, &with_kafka);
+
+        let removed = kafka_restart_decision(Some(&initial.signature), &without_kafka);
+
+        assert!(removed.should_restart);
+        assert!(removed.signature.is_empty());
+        assert!(removed.bootstrap.is_empty());
+    }
+
+    fn parse_config(raw: &str) -> crate::config::Config {
+        config::Config::builder()
+            .add_source(config::File::from_str(raw, config::FileFormat::Yaml))
+            .build()
+            .expect("build config")
+            .try_deserialize()
+            .expect("deserialize config")
     }
 }

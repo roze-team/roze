@@ -79,6 +79,7 @@ pub struct ConfigReloadAuditRecord {
     pub success: bool,
     pub error: Option<String>,
     pub diff: Vec<roze_config::ConfigDiffEntry>,
+    pub section_signatures: Vec<roze_config::ConfigSectionSignature>,
 }
 
 impl ConfigReloadAuditRecord {
@@ -100,6 +101,7 @@ impl ConfigReloadAuditRecord {
             success: result.success,
             error: result.error.clone(),
             diff: result.diff.clone(),
+            section_signatures: result.section_signatures.clone(),
         }
     }
 }
@@ -515,6 +517,7 @@ mod tests {
             success: true,
             error: None,
             diff: Vec::new(),
+            section_signatures: Vec::new(),
         });
         history.push(ConfigReloadAuditRecord {
             version: 2,
@@ -530,6 +533,7 @@ mod tests {
             success: true,
             error: None,
             diff: Vec::new(),
+            section_signatures: Vec::new(),
         });
         history.push(ConfigReloadAuditRecord {
             version: 3,
@@ -545,6 +549,7 @@ mod tests {
             success: false,
             error: Some("bad config".to_string()),
             diff: Vec::new(),
+            section_signatures: Vec::new(),
         });
 
         let records = history.list(0, 10);

@@ -182,6 +182,19 @@ async fn main() -> anyhow::Result<()> {
                         diff_paths = %diff_paths,
                         "gateway config reload applied"
                     );
+                    for event in result.change_events() {
+                        tracing::info!(
+                            event = "gateway.config_updated",
+                            version = event.version,
+                            old_version = event.old_version,
+                            source = %event.source,
+                            section = %event.section,
+                            section_hash = event.section_hash.as_deref().unwrap_or_default(),
+                            paths = %event.paths.join(","),
+                            changed = event.changed,
+                            "gateway config section updated"
+                        );
+                    }
                 }
             })
             .await;

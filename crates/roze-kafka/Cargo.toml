@@ -18,6 +18,7 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 roze-mq = { path = "../roze-mq" }
+roze-metrics = { path = "../roze-metrics" }
 roze-trace = { path = "../roze-trace" }
 roze-eventbus = { path = "../roze-eventbus" }
 

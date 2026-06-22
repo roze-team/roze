@@ -189,6 +189,54 @@ impl KafkaConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecoverAction {
+    Retry {
+        topic: String,
+        attempt: u32,
+        backoff_ms: u64,
+    },
+    DeadLetter {
+        topic: String,
+    },
+    Drop {
+        reason: &'static str,
+    },
+}
+
+fn recover_action(cfg: &KafkaConfig, message: &KafkaRecord) -> RecoverAction {
+    if cfg.max_retries == 0 {
+        return cfg
+            .dead_letter_topic
+            .clone()
+            .map(|topic| RecoverAction::DeadLetter { topic })
+            .unwrap_or(RecoverAction::Drop {
+                reason: "recover_dropped",
+            });
+    }
+
+    if cfg.should_retry(message.attempt) {
+        return cfg
+            .retry_topic
+            .clone()
+            .map(|topic| RecoverAction::Retry {
+                topic,
+                attempt: message.attempt.saturating_add(1),
+                backoff_ms: cfg.retry_backoff_ms,
+            })
+            .unwrap_or(RecoverAction::Drop {
+                reason: "retry_topic_missing",
+            });
+    }
+
+    cfg.dead_letter_topic
+        .clone()
+        .map(|topic| RecoverAction::DeadLetter { topic })
+        .unwrap_or(RecoverAction::Drop {
+            reason: "dead_letter_missing",
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KafkaRecord {
     pub topic: String,
@@ -310,6 +358,25 @@ impl KafkaRecord {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublishResult {
+    pub topic: String,
+    pub partition: Option<i32>,
+    pub offset: Option<i64>,
+    pub timestamp_millis: u64,
+}
+
+impl PublishResult {
+    fn from_record(record: &KafkaRecord) -> Self {
+        Self {
+            topic: record.topic.clone(),
+            partition: record.partition,
+            offset: record.offset,
+            timestamp_millis: record.timestamp_millis,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DeliveryState {
     acked: AtomicBool,
@@ -373,6 +440,12 @@ impl Delivery {
 #[async_trait::async_trait]
 pub trait Publisher: Send + Sync + 'static {
     async fn publish(&self, message: KafkaRecord) -> anyhow::Result<()>;
+
+    async fn publish_with_result(&self, message: KafkaRecord) -> anyhow::Result<PublishResult> {
+        let result = PublishResult::from_record(&message);
+        self.publish(message).await?;
+        Ok(result)
+    }
 }
 
 #[async_trait::async_trait]
@@ -452,6 +525,7 @@ impl InMemoryKafkaBroker {
     }
 
     fn push_dead_letter(&self, message: KafkaRecord, reason: impl Into<String>) {
+        record_kafka_event(&message.topic, message.group.as_deref(), "dead_lettered");
         let record = roze_mq::DeadLetterRecord {
             id: self.next_dead_letter_id.fetch_add(1, Ordering::SeqCst),
             original_topic: message.topic.clone(),
@@ -470,12 +544,17 @@ impl InMemoryKafkaBroker {
     fn make_delivery(&self, message: KafkaRecord) -> Delivery {
         let broker = self.clone();
         let message_for_nack = message.clone();
+        let ack_topic = message.topic.clone();
+        let ack_group = message.group.clone();
 
         let ack_broker = self.clone();
         let ack_fn: DeliveryAction = Arc::new(move || {
             let broker = ack_broker.clone();
+            let topic = ack_topic.clone();
+            let group = ack_group.clone();
             Box::pin(async move {
                 broker.acked.fetch_add(1, Ordering::SeqCst);
+                record_kafka_event(&topic, group.as_deref(), "acked");
                 Ok(())
             })
         });
@@ -484,6 +563,7 @@ impl InMemoryKafkaBroker {
             let message = message_for_nack.clone();
             Box::pin(async move {
                 broker.nacked.fetch_add(1, Ordering::SeqCst);
+                record_kafka_event(&message.topic, message.group.as_deref(), "nacked");
                 broker.requeue_or_dead_letter(message).await;
                 Ok(())
             })
@@ -492,8 +572,9 @@ impl InMemoryKafkaBroker {
         Delivery::new(message, ack_fn, nack_fn)
     }
 
-    fn route_or_dead_letter(&self, mut message: KafkaRecord) {
+    fn route_or_dead_letter(&self, mut message: KafkaRecord) -> PublishResult {
         self.prepare_delivery_metadata(&mut message);
+        let result = PublishResult::from_record(&message);
         message.attempt = message.attempt.saturating_add(1);
         if message.attempt > self.max_attempts {
             self.push_dead_letter(message.clone(), "max_attempts_exceeded");
@@ -507,13 +588,15 @@ impl InMemoryKafkaBroker {
                 dead.attempt = 0;
                 let _ = self.sender_for(&dead.topic).send(self.make_delivery(dead));
             }
-            return;
+            return result;
         }
 
-        let _ = self
-            .sender_for(&message.topic)
-            .send(self.make_delivery(message));
+        let topic = message.topic.clone();
+        let group = message.group.clone();
+        let _ = self.sender_for(&topic).send(self.make_delivery(message));
         self.delivered.fetch_add(1, Ordering::SeqCst);
+        record_kafka_event(&topic, group.as_deref(), "delivered");
+        result
     }
 
     fn prepare_delivery_metadata(&self, message: &mut KafkaRecord) {
@@ -531,8 +614,8 @@ impl InMemoryKafkaBroker {
         }
     }
 
-    async fn route(&self, message: KafkaRecord) {
-        self.route_or_dead_letter(message);
+    async fn route(&self, message: KafkaRecord) -> PublishResult {
+        self.route_or_dead_letter(message)
     }
 
     async fn requeue_or_dead_letter(&self, message: KafkaRecord) {
@@ -548,11 +631,15 @@ impl Default for InMemoryKafkaBroker {
 
 #[async_trait::async_trait]
 impl Publisher for InMemoryKafkaBroker {
-    async fn publish(&self, mut message: KafkaRecord) -> anyhow::Result<()> {
+    async fn publish(&self, message: KafkaRecord) -> anyhow::Result<()> {
+        self.publish_with_result(message).await.map(|_| ())
+    }
+
+    async fn publish_with_result(&self, mut message: KafkaRecord) -> anyhow::Result<PublishResult> {
         message.ensure_trace_id();
+        record_kafka_event(&message.topic, message.group.as_deref(), "published");
         self.published.fetch_add(1, Ordering::SeqCst);
-        self.route(message).await;
-        Ok(())
+        Ok(self.route(message).await)
     }
 }
 
@@ -614,6 +701,7 @@ impl roze_mq::MqAdmin for InMemoryKafkaBroker {
         };
         message.ensure_trace_id();
         self.replayed.fetch_add(1, Ordering::SeqCst);
+        record_kafka_event(&message.topic, message.group.as_deref(), "replayed");
         self.route(KafkaRecord::from_mq_message(message.clone()))
             .await;
         Ok(Some(message))
@@ -686,9 +774,19 @@ impl RdkafkaProducer {
 #[cfg(feature = "rdkafka")]
 #[async_trait::async_trait]
 impl Publisher for RdkafkaProducer {
-    async fn publish(&self, mut message: KafkaRecord) -> anyhow::Result<()> {
+    async fn publish(&self, message: KafkaRecord) -> anyhow::Result<()> {
+        self.publish_with_result(message).await.map(|_| ())
+    }
+
+    async fn publish_with_result(&self, mut message: KafkaRecord) -> anyhow::Result<PublishResult> {
         message.ensure_trace_id();
-        let topic = self.config.topic_name(message.topic);
+        let metric_topic = self.config.topic_name(&message.topic);
+        let topic = metric_topic.clone();
+        let timestamp_millis = if message.timestamp_millis == 0 {
+            current_millis()
+        } else {
+            message.timestamp_millis
+        };
         let payload = serde_json::to_vec(&message.payload)?;
         let mut headers = OwnedHeaders::new();
         for (key, value) in &message.headers {
@@ -716,8 +814,19 @@ impl Publisher for RdkafkaProducer {
             )
             .await
         {
-            Ok((_partition, _offset)) => Ok(()),
-            Err((error, _)) => Err(anyhow::anyhow!(error.to_string())),
+            Ok((_partition, _offset)) => {
+                record_kafka_event(&metric_topic, message.group.as_deref(), "published");
+                Ok(PublishResult {
+                    topic: metric_topic,
+                    partition: Some(_partition),
+                    offset: Some(_offset),
+                    timestamp_millis,
+                })
+            }
+            Err((error, _)) => {
+                record_kafka_event(&metric_topic, message.group.as_deref(), "publish_failed");
+                Err(anyhow::anyhow!(error.to_string()))
+            }
         }
     }
 }
@@ -778,80 +887,57 @@ where
 
 #[cfg(feature = "rdkafka")]
 async fn publish_recover(cfg: KafkaConfig, mut message: KafkaRecord) -> anyhow::Result<()> {
-    if cfg.max_retries == 0 {
-        if let Some(topic) = cfg.dead_letter_topic.clone() {
-            message.topic = cfg.topic_name(topic);
-            message.attempt = 0;
-            let log_topic = message.topic.clone();
-            let log_attempt = message.attempt;
-            RdkafkaProducer::new(cfg)?.publish(message).await?;
-            tracing::warn!(
-                event = "kafka.message.dead_lettered",
-                topic = %log_topic,
-                attempt = %log_attempt,
-                "kafka message dead letter handled (max_retries=0)"
-            );
-            return Ok(());
-        }
-        tracing::warn!(
-            event = "kafka.message.recover_dropped",
-            topic = %message.topic,
-            attempt = %message.attempt,
-            "kafka message no retry or dead-letter topic configured, message dropped"
-        );
-        return Ok(());
-    }
-
-    if cfg.should_retry(message.attempt) {
-        if let Some(topic) = cfg.retry_topic.clone() {
-            message.topic = cfg.topic_name(topic);
-            message.attempt = message.attempt.saturating_add(1);
-            let backoff_ms = cfg.retry_backoff_ms;
+    match recover_action(&cfg, &message) {
+        RecoverAction::Retry {
+            topic,
+            attempt,
+            backoff_ms,
+        } => {
+            message.topic = topic;
+            message.attempt = attempt;
+            let metric_topic = cfg.topic_name(&message.topic);
+            record_kafka_event(&metric_topic, message.group.as_deref(), "retry_scheduled");
             tracing::warn!(
                 event = "kafka.message.requeue_retry",
-                topic = %message.topic,
+                topic = %metric_topic,
                 attempt = %message.attempt,
                 retry_backoff_ms = backoff_ms,
                 max_retries = cfg.max_retries,
                 "kafka message retry topic configured, requeueing"
             );
-            tokio::time::sleep(Duration::from_millis(cfg.retry_backoff_ms)).await;
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             RdkafkaProducer::new(cfg)?.publish(message).await?;
-        } else {
+            Ok(())
+        }
+        RecoverAction::DeadLetter { topic } => {
+            message.topic = topic;
+            message.attempt = 0;
+            let log_topic = cfg.topic_name(&message.topic);
+            let log_attempt = message.attempt;
+            let max_retries = cfg.max_retries;
+            record_kafka_event(&log_topic, message.group.as_deref(), "dead_lettered");
+            RdkafkaProducer::new(cfg)?.publish(message).await?;
             tracing::warn!(
-                event = "kafka.message.retry_topic_missing",
+                event = "kafka.message.dead_lettered",
+                topic = %log_topic,
+                attempt = %log_attempt,
+                max_retries = max_retries,
+                "kafka message moved to dead letter"
+            );
+            Ok(())
+        }
+        RecoverAction::Drop { reason } => {
+            record_kafka_event(&message.topic, message.group.as_deref(), reason);
+            tracing::warn!(
+                event = %format!("kafka.message.{reason}"),
                 topic = %message.topic,
                 attempt = %message.attempt,
-                "kafka message retry topic not configured, message dropped"
+                max_retries = cfg.max_retries,
+                "kafka message recovery path dropped message"
             );
+            Ok(())
         }
-        return Ok(());
     }
-
-    if let Some(topic) = cfg.dead_letter_topic.clone() {
-        message.topic = cfg.topic_name(topic);
-        message.attempt = 0;
-        let log_topic = message.topic.clone();
-        let log_attempt = message.attempt;
-        RdkafkaProducer::new(cfg.clone())?.publish(message).await?;
-        tracing::warn!(
-            event = "kafka.message.dead_lettered",
-            topic = %log_topic,
-            attempt = %log_attempt,
-            max_retries = cfg.max_retries,
-            "kafka message moved to dead letter"
-        );
-        return Ok(());
-    }
-
-    tracing::warn!(
-        event = "kafka.message.dead_letter_missing",
-        topic = %message.topic,
-        attempt = %message.attempt,
-        max_retries = cfg.max_retries,
-        "kafka message dead-letter topic not configured, message dropped"
-    );
-    Ok(())
 }
 
 #[cfg(feature = "rdkafka")]
@@ -1004,6 +1090,11 @@ impl Subscriber for RdkafkaSubscriber {
                                         let cfg = cfg_for_nack.clone();
                                         let message = message_for_nack.clone();
                                         Box::pin(async move {
+                                            record_kafka_event(
+                                                &message.topic,
+                                                message.group.as_deref(),
+                                                "nacked",
+                                            );
                                             publish_recover(cfg, message).await
                                         })
                                     }),
@@ -1018,7 +1109,10 @@ impl Subscriber for RdkafkaSubscriber {
                     maybe_ack = ack_rx.recv() => {
                         if let Some(RdkafkaAckCmd::Commit(meta)) = maybe_ack {
                             if let Err(err) = RdkafkaSubscriber::commit_with_consumer(&consumer, &meta) {
+                                record_kafka_event(&meta.topic, Some(&cfg.group_id_or_default()), "commit_failed");
                                 tracing::warn!(topic=%meta.topic, error=%err, "kafka commit failed");
+                            } else {
+                                record_kafka_event(&meta.topic, Some(&cfg.group_id_or_default()), "acked");
                             }
                         }
                     }
@@ -1041,11 +1135,28 @@ where
     publisher.publish(KafkaRecord::new(topic, payload)).await
 }
 
+pub async fn publish_json_with_result<P>(
+    publisher: &P,
+    topic: impl Into<String>,
+    payload: serde_json::Value,
+) -> anyhow::Result<PublishResult>
+where
+    P: Publisher,
+{
+    publisher
+        .publish_with_result(KafkaRecord::new(topic, payload))
+        .await
+}
+
 fn current_millis() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_millis() as u64,
         Err(_) => 0,
     }
+}
+
+fn record_kafka_event(topic: &str, group: Option<&str>, outcome: &str) {
+    roze_metrics::record_queue_event("kafka", topic, group.unwrap_or_default(), outcome);
 }
 
 pub async fn spawn_consumer<S, F, Fut>(
@@ -1157,6 +1268,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn publish_with_result_returns_broker_metadata() {
+        let broker = InMemoryKafkaBroker::new();
+        let mut receiver = broker.subscribe("orders").await.expect("subscribe");
+
+        let result = broker
+            .publish_with_result(KafkaRecord::new("orders", serde_json::json!({"id": 7})))
+            .await
+            .expect("publish");
+
+        assert_eq!(result.topic, "orders");
+        assert_eq!(result.partition, Some(0));
+        assert_eq!(result.offset, Some(0));
+        assert!(result.timestamp_millis > 0);
+
+        let delivery = receiver.recv().await.expect("delivery");
+        assert_eq!(delivery.message().offset, result.offset);
+    }
+
     #[test]
     fn kafka_record_preserves_standard_mq_metadata() {
         let mut record = KafkaRecord::new("orders", serde_json::json!({"id": 1}));
@@ -1176,6 +1306,77 @@ mod tests {
         assert_eq!(restored.partition, Some(3));
         assert_eq!(restored.offset, Some(99));
         assert_eq!(restored.group.as_deref(), Some("workers"));
+    }
+
+    #[test]
+    fn recover_action_retries_to_raw_retry_topic() {
+        let cfg = KafkaConfig {
+            topic_prefix: "app".to_string(),
+            retry_topic: Some("orders.retry".to_string()),
+            dead_letter_topic: Some("orders.dlq".to_string()),
+            retry_backoff_ms: 250,
+            max_retries: 3,
+            ..Default::default()
+        };
+        let mut record = KafkaRecord::new("orders", serde_json::json!({"id": 1}));
+        record.attempt = 1;
+
+        let action = recover_action(&cfg, &record);
+
+        assert_eq!(
+            action,
+            RecoverAction::Retry {
+                topic: "orders.retry".to_string(),
+                attempt: 2,
+                backoff_ms: 250,
+            }
+        );
+        if let RecoverAction::Retry { topic, .. } = action {
+            assert_eq!(cfg.topic_name(topic), "app.orders.retry");
+        }
+    }
+
+    #[test]
+    fn recover_action_dead_letters_after_retry_limit() {
+        let cfg = KafkaConfig {
+            topic_prefix: "app".to_string(),
+            retry_topic: Some("orders.retry".to_string()),
+            dead_letter_topic: Some("orders.dlq".to_string()),
+            max_retries: 3,
+            ..Default::default()
+        };
+        let mut record = KafkaRecord::new("orders", serde_json::json!({"id": 1}));
+        record.attempt = 3;
+
+        let action = recover_action(&cfg, &record);
+
+        assert_eq!(
+            action,
+            RecoverAction::DeadLetter {
+                topic: "orders.dlq".to_string(),
+            }
+        );
+        if let RecoverAction::DeadLetter { topic } = action {
+            assert_eq!(cfg.topic_name(topic), "app.orders.dlq");
+        }
+    }
+
+    #[test]
+    fn recover_action_drops_when_recovery_topic_missing() {
+        let cfg = KafkaConfig {
+            max_retries: 3,
+            retry_topic: None,
+            dead_letter_topic: Some("orders.dlq".to_string()),
+            ..Default::default()
+        };
+        let record = KafkaRecord::new("orders", serde_json::json!({"id": 1}));
+
+        assert_eq!(
+            recover_action(&cfg, &record),
+            RecoverAction::Drop {
+                reason: "retry_topic_missing",
+            }
+        );
     }
 
     #[tokio::test]
@@ -1198,6 +1399,14 @@ mod tests {
         let dead_delivery = dead.recv().await.expect("dead");
         assert_eq!(dead_delivery.message().topic, "dead");
         assert_eq!(dead_delivery.message().payload["id"], 1);
+
+        let metrics = roze_metrics::http_metrics();
+        assert!(metrics.contains("roze_queue_events_total"));
+        assert!(metrics.contains(r#"system="kafka""#));
+        assert!(metrics.contains(r#"topic="orders""#));
+        assert!(metrics.contains(r#"outcome="published""#));
+        assert!(metrics.contains(r#"outcome="nacked""#));
+        assert!(metrics.contains(r#"outcome="dead_lettered""#));
     }
 
     #[tokio::test]

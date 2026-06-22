@@ -59,6 +59,7 @@ and permission checks.
 - [Roadmap](docs/roadmap.md)
 - [Module maturity matrix](docs/maturity.md)
 - [Release policy](docs/release.md)
+- [Upgrade guide](docs/upgrade.md)
 - [Production checklist](docs/production-checklist.md)
 - [Usage documentation](docs/usage/README.md)
 - [Roze vs go-zero comparison](docs/go-zero-comparison.md)

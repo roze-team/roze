@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, net::SocketAddr, path::Path};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 pub mod config_center;
@@ -406,7 +406,10 @@ pub struct KafkaConfig {
     pub topic_prefix: String,
     #[serde(default, alias = "group")]
     pub group_id: Option<String>,
-    #[serde(default = "default_kafka_client_id")]
+    #[serde(
+        default = "default_kafka_client_id",
+        deserialize_with = "deserialize_kafka_client_id"
+    )]
     pub client_id: String,
     #[serde(default = "default_kafka_acks")]
     pub acks: String,
@@ -761,6 +764,13 @@ fn default_kafka_client_id() -> String {
     "roze-kafka".to_string()
 }
 
+fn deserialize_kafka_client_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(default_kafka_client_id))
+}
+
 fn default_kafka_acks() -> String {
     "all".to_string()
 }
@@ -1110,6 +1120,28 @@ interval_ms = 500
         assert!(outbox.enabled);
         assert_eq!(outbox.batch_size, 50);
         assert_eq!(outbox.interval_ms, 500);
+    }
+
+    #[test]
+    fn kafka_client_id_null_uses_default() {
+        let source = r#"
+name: demo
+kafka:
+  brokers: ["127.0.0.1:9092"]
+  client_id: null
+governance: {}
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        assert_eq!(
+            config.kafka.expect("kafka").client_id,
+            default_kafka_client_id()
+        );
     }
 
     #[test]

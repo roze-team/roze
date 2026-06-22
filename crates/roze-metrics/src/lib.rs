@@ -13,6 +13,7 @@ static REQUEST_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
 static ROUTE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RPC_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static GATEWAY_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static QUEUE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetricLabels(BTreeMap<String, String>);
@@ -204,6 +205,20 @@ pub fn record_gateway_upstream(
     gateway_metrics_registry().inc_counter("roze_gateway_upstream_events_total", labels, 1);
 }
 
+pub fn record_queue_event(
+    system: impl Into<String>,
+    topic: impl Into<String>,
+    group: impl Into<String>,
+    outcome: impl Into<String>,
+) {
+    let labels = MetricLabels::new()
+        .insert("system", system.into())
+        .insert("topic", topic.into())
+        .insert("group", group.into())
+        .insert("outcome", outcome.into());
+    queue_metrics_registry().inc_counter("roze_queue_events_total", labels, 1);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -230,6 +245,7 @@ pub fn http_metrics() -> String {
     out.push_str(&route_metrics_registry().render());
     out.push_str(&rpc_metrics_registry().render());
     out.push_str(&gateway_metrics_registry().render());
+    out.push_str(&queue_metrics_registry().render());
     out
 }
 
@@ -247,6 +263,10 @@ pub fn rpc_metrics_registry() -> &'static MetricRegistry {
 
 pub fn gateway_metrics_registry() -> &'static MetricRegistry {
     GATEWAY_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn queue_metrics_registry() -> &'static MetricRegistry {
+    QUEUE_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -364,5 +384,18 @@ mod tests {
         assert!(metrics.contains("roze_gateway_route_retries_total"));
         assert!(metrics.contains("roze_gateway_upstream_events_total"));
         assert!(metrics.contains(r#"outcome="ok""#));
+    }
+
+    #[test]
+    fn renders_queue_metrics_with_labels() {
+        record_queue_event("kafka", "orders", "workers", "acked");
+
+        let metrics = http_metrics();
+
+        assert!(metrics.contains("roze_queue_events_total"));
+        assert!(metrics.contains(r#"system="kafka""#));
+        assert!(metrics.contains(r#"topic="orders""#));
+        assert!(metrics.contains(r#"group="workers""#));
+        assert!(metrics.contains(r#"outcome="acked""#));
     }
 }

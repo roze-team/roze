@@ -80,6 +80,19 @@ async fn main() -> anyhow::Result<()> {
                         ts_millis = result.ts_millis,
                         "config center reload applied"
                     );
+                    for event in result.change_events() {
+                        tracing::info!(
+                            event = "config_updated",
+                            version = event.version,
+                            old_version = event.old_version,
+                            source = %event.source,
+                            section = %event.section,
+                            section_hash = event.section_hash.as_deref().unwrap_or_default(),
+                            paths = %event.paths.join(","),
+                            changed = event.changed,
+                            "config center section updated"
+                        );
+                    }
                 }
             })
             .await;

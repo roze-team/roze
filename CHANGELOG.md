@@ -28,6 +28,18 @@ Semantic Versioning once releases begin.
   timeout overrides are enforced by generated handler adapters.
 - `rozectl api client` can generate TypeScript, JavaScript, and Dart clients.
 - `rozectl openapi generate` emits OpenAPI 3 documents from `.api` contracts.
+- `apps/roze-gateway` supports registry-backed upstreams, weighted canary
+  routing, route retries, health/outlier handling, unified governance defaults,
+  JWT/API key auth, and config-center hot reload.
+- `roze-config` config center emits reload metadata, field diffs, rollback
+  events, and section-level `ConfigCenterChangeEvent` values.
+- `roze-mq`, `roze-kafka`, `roze-nats`, and `roze-transaction` share standard
+  message metadata for attempts, dead-letter topics, timestamp, partition,
+  offset, and group where supported.
+- `roze-kafka` includes retry/dead-letter recovery decisions, queue metrics,
+  in-memory admin dead-letter replay, and rdkafka feature checks.
+- `roze-admin` provides registry, config reload, and MQ/DLQ control-plane
+  endpoints with optional token/API key protection.
 
 ### Changed
 
@@ -37,12 +49,16 @@ Semantic Versioning once releases begin.
   generator-owned server/client/protobuf glue.
 - The project documentation now separates production-ready, beta, scaffold, and
   planned modules.
+- Gateway route fields inherit unified governance defaults when route-level
+  fields are not set.
+- Config reload listeners keep the last valid config when parsing a new value
+  fails.
 
 ### Known Gaps
 
 - GitHub Releases and crates.io publishing are not enabled yet.
-- Gateway, config hot reload, MQ/Kafka semantics, and lifecycle orchestration
-  still need production hardening and end-to-end tests.
+- Lifecycle orchestration, release automation, dashboards, and production
+  examples still need hardening.
 - Validator/OpenAPI projection does not yet cover every go-playground validator
   edge case.
 - Java/Kotlin SDK generation is not implemented.

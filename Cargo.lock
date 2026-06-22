@@ -3471,6 +3471,7 @@ dependencies = [
  "rdkafka",
  "regex",
  "roze-eventbus",
+ "roze-metrics",
  "roze-mq",
  "roze-trace",
  "serde",

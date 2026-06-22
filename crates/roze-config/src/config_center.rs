@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -71,6 +72,7 @@ where
     pub key: Option<String>,
     pub changed: bool,
     pub diff: Vec<ConfigDiffEntry>,
+    pub section_signatures: Vec<ConfigSectionSignature>,
     pub success: bool,
     pub error: Option<String>,
     pub config: Option<T>,
@@ -92,6 +94,32 @@ pub enum ConfigDiffKind {
     Changed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSectionSignature {
+    pub section: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigCenterChangeEvent {
+    pub version: u64,
+    pub old_version: u64,
+    pub hash: String,
+    pub old_hash: String,
+    pub ts_millis: u64,
+    pub source: String,
+    pub namespace: Option<String>,
+    pub app: Option<String>,
+    pub key: Option<String>,
+    pub section: String,
+    pub changed: bool,
+    pub success: bool,
+    pub error: Option<String>,
+    pub paths: Vec<String>,
+    pub diff: Vec<ConfigDiffEntry>,
+    pub section_hash: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ReloadMetadata {
     version: u64,
@@ -108,7 +136,60 @@ impl<T> ReloadResult<T>
 where
     T: Clone,
 {
-    fn success(meta: ReloadMetadata, config: T, diff: Vec<ConfigDiffEntry>) -> Self {
+    pub fn change_events(&self) -> Vec<ConfigCenterChangeEvent> {
+        if !self.success {
+            return vec![self.change_event("*", Vec::new())];
+        }
+
+        let mut sections = BTreeMap::<String, Vec<ConfigDiffEntry>>::new();
+        for entry in &self.diff {
+            sections
+                .entry(config_section(&entry.path).to_string())
+                .or_default()
+                .push(entry.clone());
+        }
+
+        if sections.is_empty() {
+            return vec![self.change_event("root", Vec::new())];
+        }
+
+        sections
+            .into_iter()
+            .map(|(section, diff)| self.change_event(&section, diff))
+            .collect()
+    }
+
+    fn change_event(&self, section: &str, diff: Vec<ConfigDiffEntry>) -> ConfigCenterChangeEvent {
+        ConfigCenterChangeEvent {
+            version: self.version,
+            old_version: self.old_version,
+            hash: self.hash.clone(),
+            old_hash: self.old_hash.clone(),
+            ts_millis: self.ts_millis,
+            source: self.source.clone(),
+            namespace: self.namespace.clone(),
+            app: self.app.clone(),
+            key: self.key.clone(),
+            section: section.to_string(),
+            changed: self.changed,
+            success: self.success,
+            error: self.error.clone(),
+            paths: diff.iter().map(|entry| entry.path.clone()).collect(),
+            diff,
+            section_hash: self
+                .section_signatures
+                .iter()
+                .find(|signature| signature.section == section)
+                .map(|signature| signature.hash.clone()),
+        }
+    }
+
+    fn success(
+        meta: ReloadMetadata,
+        config: T,
+        diff: Vec<ConfigDiffEntry>,
+        section_signatures: Vec<ConfigSectionSignature>,
+    ) -> Self {
         let changed = meta.old_hash != meta.hash;
         Self {
             version: meta.version,
@@ -122,6 +203,7 @@ where
             key: meta.key,
             changed,
             diff,
+            section_signatures,
             success: true,
             error: None,
             config: Some(config),
@@ -141,6 +223,7 @@ where
             key: meta.key,
             changed: false,
             diff: Vec::new(),
+            section_signatures: Vec::new(),
             success: false,
             error: Some(error.into()),
             config: None,
@@ -543,6 +626,7 @@ async fn watch_loop<T>(
         let old_version = next_version - 1;
         let old_hash = last_hash.clone();
         let diff = config_diff(&last_snapshot, &snapshot, options.format);
+        let section_signatures = config_section_signatures(&snapshot, options.format);
 
         {
             *inner.value.write().await = parsed.clone();
@@ -563,6 +647,7 @@ async fn watch_loop<T>(
             },
             parsed.clone(),
             diff,
+            section_signatures,
         );
 
         if result.changed {
@@ -636,6 +721,29 @@ pub fn config_diff(old_raw: &str, new_raw: &str, format: ConfigFormat) -> Vec<Co
     diff
 }
 
+pub fn config_section_signatures(raw: &str, format: ConfigFormat) -> Vec<ConfigSectionSignature> {
+    let Ok(value) = parse_config_value(raw, format) else {
+        return Vec::new();
+    };
+    match value {
+        Value::Object(map) => {
+            let mut sections = map
+                .into_iter()
+                .map(|(section, value)| ConfigSectionSignature {
+                    section,
+                    hash: stable_config_hash(&value),
+                })
+                .collect::<Vec<_>>();
+            sections.sort_by(|left, right| left.section.cmp(&right.section));
+            sections
+        }
+        other => vec![ConfigSectionSignature {
+            section: "root".to_string(),
+            hash: stable_config_hash(&other),
+        }],
+    }
+}
+
 fn parse_config_value(raw: &str, format: ConfigFormat) -> Result<Value> {
     config::Config::builder()
         .add_source(config::File::from_str(raw, format.as_file_format()))
@@ -696,6 +804,44 @@ fn join_config_path(parent: &str, key: &str) -> String {
         key.to_string()
     } else {
         format!("{parent}.{key}")
+    }
+}
+
+fn config_section(path: &str) -> &str {
+    if path.is_empty() || path == "$" {
+        return "root";
+    }
+    path.split('.').next().unwrap_or("root")
+}
+
+fn stable_config_hash(value: &Value) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    stable_config_value(value).hash(&mut hasher);
+    hasher.finish().to_string()
+}
+
+fn stable_config_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => format!("bool:{value}"),
+        Value::Number(value) => format!("number:{value}"),
+        Value::String(value) => format!("string:{value}"),
+        Value::Array(items) => {
+            let inner = items
+                .iter()
+                .map(stable_config_value)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("array:[{inner}]")
+        }
+        Value::Object(map) => {
+            let mut entries = map
+                .iter()
+                .map(|(key, value)| format!("{key}:{}", stable_config_value(value)))
+                .collect::<Vec<_>>();
+            entries.sort();
+            format!("object:{{{}}}", entries.join(","))
+        }
     }
 }
 
@@ -1009,5 +1155,136 @@ added: yes
             old: Some("true".to_string()),
             new: None,
         }));
+    }
+
+    #[test]
+    fn reload_result_groups_change_events_by_section() {
+        let result = ReloadResult::success(
+            ReloadMetadata {
+                version: 2,
+                old_version: 1,
+                hash: "new".to_string(),
+                old_hash: "old".to_string(),
+                namespace: Some("prod".to_string()),
+                app: Some("user".to_string()),
+                key: Some("roze/user/config".to_string()),
+                source: "etcd".to_string(),
+            },
+            (),
+            vec![
+                ConfigDiffEntry {
+                    path: "gateway.timeout_ms".to_string(),
+                    kind: ConfigDiffKind::Changed,
+                    old: Some("1000".to_string()),
+                    new: Some("2000".to_string()),
+                },
+                ConfigDiffEntry {
+                    path: "kafka.client_id".to_string(),
+                    kind: ConfigDiffKind::Changed,
+                    old: Some("old-client".to_string()),
+                    new: Some("new-client".to_string()),
+                },
+                ConfigDiffEntry {
+                    path: "kafka.group_id".to_string(),
+                    kind: ConfigDiffKind::Added,
+                    old: None,
+                    new: Some("workers".to_string()),
+                },
+            ],
+            vec![
+                ConfigSectionSignature {
+                    section: "gateway".to_string(),
+                    hash: "gateway-hash".to_string(),
+                },
+                ConfigSectionSignature {
+                    section: "kafka".to_string(),
+                    hash: "kafka-hash".to_string(),
+                },
+            ],
+        );
+
+        let events = result.change_events();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].section, "gateway");
+        assert_eq!(events[0].paths, vec!["gateway.timeout_ms"]);
+        assert_eq!(events[0].section_hash.as_deref(), Some("gateway-hash"));
+        assert_eq!(events[1].section, "kafka");
+        assert_eq!(events[1].paths, vec!["kafka.client_id", "kafka.group_id"]);
+        assert_eq!(events[1].section_hash.as_deref(), Some("kafka-hash"));
+        assert!(events.iter().all(|event| event.changed && event.success));
+    }
+
+    #[test]
+    fn section_signatures_are_stable_and_section_scoped() {
+        let first = r#"
+name: demo
+kafka:
+  brokers: ["127.0.0.1:9092"]
+  client_id: worker
+gateway:
+  timeout_ms: 1000
+"#;
+        let reordered = r#"
+gateway:
+  timeout_ms: 1000
+kafka:
+  client_id: worker
+  brokers: ["127.0.0.1:9092"]
+name: demo
+"#;
+        let changed = r#"
+name: demo
+kafka:
+  brokers: ["127.0.0.1:9093"]
+  client_id: worker
+gateway:
+  timeout_ms: 1000
+"#;
+
+        let first_signatures = config_section_signatures(first, ConfigFormat::Yaml);
+        let reordered_signatures = config_section_signatures(reordered, ConfigFormat::Yaml);
+        let changed_signatures = config_section_signatures(changed, ConfigFormat::Yaml);
+
+        assert_eq!(first_signatures, reordered_signatures);
+        assert_ne!(
+            section_hash(&first_signatures, "kafka"),
+            section_hash(&changed_signatures, "kafka")
+        );
+        assert_eq!(
+            section_hash(&first_signatures, "gateway"),
+            section_hash(&changed_signatures, "gateway")
+        );
+    }
+
+    #[test]
+    fn failed_reload_result_emits_failure_change_event() {
+        let result = ReloadResult::<()>::failed(
+            ReloadMetadata {
+                version: 2,
+                old_version: 1,
+                hash: "bad".to_string(),
+                old_hash: "old".to_string(),
+                namespace: None,
+                app: None,
+                key: None,
+                source: "file".to_string(),
+            },
+            "parse failed",
+        );
+
+        let events = result.change_events();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].section, "*");
+        assert!(!events[0].success);
+        assert_eq!(events[0].error.as_deref(), Some("parse failed"));
+    }
+
+    fn section_hash(signatures: &[ConfigSectionSignature], section: &str) -> Option<String> {
+        signatures
+            .iter()
+            .find(|signature| signature.section == section)
+            .map(|signature| signature.hash.clone())
     }
 }
