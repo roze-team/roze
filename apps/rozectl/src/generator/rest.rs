@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
-    generator::{rust_identifier, to_snake_case},
+    generator::{rust_identifier, to_pascal_case, to_snake_case},
     parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute},
 };
 
@@ -11,6 +11,7 @@ mod handler;
 mod logic;
 mod middleware;
 mod openapi;
+mod route;
 mod svc;
 mod types;
 
@@ -37,7 +38,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let ctx = svc::ServiceContext::new(config).await?;
-    let app = roze_middleware::apply_common(handler::router(ctx));
+    let middleware_config = roze_middleware::CommonMiddlewareConfig::from(&rest.middlewares);
+    let app = roze_middleware::apply_common_with_config(route::router(ctx), middleware_config);
     RestServer::new(rest.addr, app).serve().await?;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
@@ -59,6 +61,7 @@ fn config_path() -> std::path::PathBuf {
     .to_string()
 }
 
+#[cfg(test)]
 pub fn render_handlers(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(unused_imports)]\n\n");
     out.push_str(
@@ -134,6 +137,144 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
     out
 }
 
+pub fn render_handler_mod(spec: &ApiSpec) -> String {
+    let mut out = String::from("#![allow(unused_imports)]\n\n");
+    for group in route_groups(spec).keys() {
+        out.push_str(&format!("pub mod {group};\n"));
+    }
+    if !spec.rest_routes.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(
+        "use axum::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, Json};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+    );
+    if spec.rest_routes.iter().any(|route| {
+        route_request_spec(spec, route).is_some_and(|spec| spec.has_header)
+            || route_uses_auth(spec, route)
+    }) {
+        out.push_str(
+            "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
+        );
+    }
+    if spec
+        .rest_routes
+        .iter()
+        .any(|route| route_uses_auth(spec, route))
+    {
+        out.push_str(
+            "fn authorize(headers: &HeaderMap, ctx: &ServiceContext) -> Result<roze_context::AuthContext, RozeError> {\n    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;\n    let header_value = headers\n        .get(\"authorization\")\n        .and_then(|value| value.to_str().ok())\n        .ok_or(RozeError::Unauthorized)?;\n    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;\n    let claims = roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;\n    Ok(roze_context::AuthContext {\n        subject: claims.sub,\n        roles: claims.roles,\n        tenant: claims.tenant,\n    })\n}\n\n",
+        );
+    }
+
+    out
+}
+
+pub fn render_route_mod(spec: &ApiSpec) -> String {
+    let mut out = String::from("#![allow(unused_imports)]\n\n");
+    for group in route_groups(spec).keys() {
+        out.push_str(&format!("mod {group};\n"));
+    }
+    if !spec.rest_routes.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(
+        "use axum::{routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+    );
+    out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
+    out.push_str("    Router::new()\n");
+    out.push_str(&format!(
+        "        .route(\"{}\", get(health))\n",
+        axum_route_path(&full_route_path(spec, "/healthz"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", get(metrics))\n",
+        axum_route_path(&full_route_path(spec, "/metrics"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", get(openapi_doc))\n",
+        axum_route_path(&full_route_path(spec, "/openapi.json"))
+    ));
+
+    for group in route_groups(spec).keys() {
+        out.push_str(&format!(
+            "        .merge({group}::routes())\n",
+            group = group
+        ));
+    }
+
+    out.push_str("        .with_state(ctx)\n");
+    out.push_str("}\n\n");
+
+    out.push_str(
+        "async fn health() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ok\"))\n}\n\n",
+    );
+    out.push_str("async fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n");
+    out.push_str(
+        "async fn openapi_doc() -> Json<serde_json::Value> {\n    Json(openapi::document())\n}\n\n",
+    );
+
+    out
+}
+
+pub fn render_route_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
+    route_groups(spec)
+        .into_iter()
+        .map(|(group, routes)| {
+            let mut out = String::from("use axum::{routing::{delete, get, patch, post, put}, Router};\n\nuse crate::handler;\nuse crate::svc::ServiceContext;\n\npub fn routes() -> Router<ServiceContext> {\n    Router::new()\n");
+            for route in routes {
+                let handler = resolved_handler_name(route);
+                let routing_fn = match route.method {
+                    HttpMethod::Get => "get",
+                    HttpMethod::Post => "post",
+                    HttpMethod::Put => "put",
+                    HttpMethod::Patch => "patch",
+                    HttpMethod::Delete => "delete",
+                };
+                out.push_str(&format!(
+                    "        .route(\"{}\", {}(handler::{}::{}))\n",
+                    axum_route_path(&full_route_path_for_route(spec, route)),
+                    routing_fn,
+                    group,
+                    handler
+                ));
+            }
+            out.push_str("}\n");
+            (group, out)
+        })
+        .collect()
+}
+
+pub fn render_handler_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
+    route_groups(spec)
+        .into_iter()
+        .map(|(group, routes)| {
+            let mut out = String::new();
+            for route in routes {
+                let handler = resolved_handler_name(route);
+                out.push_str(&format!("mod {handler};\n"));
+                out.push_str(&format!("pub(crate) use {handler}::{handler};\n"));
+            }
+            (group, out)
+        })
+        .collect()
+}
+
+pub fn render_handler_files(spec: &ApiSpec) -> Vec<(String, String, String)> {
+    spec.rest_routes
+        .iter()
+        .map(|route| {
+            let group = route_group_name(route);
+            let handler = resolved_handler_name(route);
+            let content = format!(
+                "use super::super::*;\n\n{}",
+                render_route_handler(spec, route)
+            );
+            (group, handler, content)
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub fn render_middleware(spec: &ApiSpec) -> String {
     let custom = custom_middlewares(spec);
     let mut out = String::from("#![allow(dead_code, unused_imports, unused_variables)]\n\n");
@@ -152,6 +293,35 @@ pub fn render_middleware(spec: &ApiSpec) -> String {
     out
 }
 
+pub fn render_middleware_mod(spec: &ApiSpec) -> String {
+    let custom = custom_middlewares(spec);
+    let mut out = String::from("#![allow(dead_code, unused_imports, unused_variables)]\n\n");
+    if custom.is_empty() {
+        out.push_str(
+            "// Add custom middleware hooks here when `.api` declares non-built-in middleware.\n",
+        );
+        return out;
+    }
+    for name in custom {
+        out.push_str(&format!("mod {name};\n"));
+        out.push_str(&format!("pub use {name}::{name};\n"));
+    }
+    out
+}
+
+pub fn render_middleware_files(spec: &ApiSpec) -> Vec<(String, String)> {
+    custom_middlewares(spec)
+        .into_iter()
+        .map(|name| {
+            let content = format!(
+                "use roze_context::Context;\nuse roze_error::RozeError;\n\nuse crate::svc::ServiceContext;\n\npub async fn {name}(ctx: &ServiceContext, request_ctx: &Context) -> Result<(), RozeError> {{\n    let _ = ctx;\n    let _ = request_ctx;\n    Ok(())\n}}\n"
+            );
+            (name, content)
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub fn render_logic(spec: &ApiSpec) -> String {
     if spec.rest_routes.is_empty() {
         return String::new();
@@ -196,6 +366,70 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 
     out.push_str(&render_default_impls(spec));
     out
+}
+
+fn render_logic_fn(route: &RestRoute) -> String {
+    let handler = resolved_handler_name(route);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
+        handler = handler,
+        request = route.request,
+        response = route.response
+    ));
+    out.push_str("    let _ = ctx;\n");
+    out.push_str("    let _ = request_ctx;\n");
+    out.push_str("    let _ = req;\n");
+    out.push_str(&format!(
+        "    Ok({response}::default_response())\n",
+        response = route.response
+    ));
+    out.push_str("}\n");
+    out
+}
+
+pub fn render_logic_mod(spec: &ApiSpec) -> String {
+    let mut out = String::from("use roze_error::RozeError;\n\n");
+    out.push_str("use crate::svc::ServiceContext;\n");
+    out.push_str("use crate::types::*;\n\n");
+
+    for group in route_groups(spec).keys() {
+        out.push_str(&format!("pub mod {group};\n"));
+        out.push_str(&format!("pub use {group}::*;\n"));
+    }
+    if !spec.rest_routes.is_empty() {
+        out.push('\n');
+    }
+
+    out.push_str(&render_default_impls(spec));
+    out
+}
+
+pub fn render_logic_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
+    route_groups(spec)
+        .into_iter()
+        .map(|(group, routes)| {
+            let mut out = String::new();
+            for route in routes {
+                let handler = resolved_handler_name(route);
+                out.push_str(&format!("mod {handler};\n"));
+                out.push_str(&format!("pub use {handler}::{handler};\n"));
+            }
+            (group, out)
+        })
+        .collect()
+}
+
+pub fn render_logic_files(spec: &ApiSpec) -> Vec<(String, String, String)> {
+    spec.rest_routes
+        .iter()
+        .map(|route| {
+            let group = route_group_name(route);
+            let handler = resolved_handler_name(route);
+            let content = format!("use super::super::*;\n\n{}", render_logic_fn(route));
+            (group, handler, content)
+        })
+        .collect()
 }
 
 pub fn render_openapi(spec: &ApiSpec) -> String {
@@ -380,7 +614,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         FieldSource::Json,
     ] {
         if let Some(fields) = route_spec.groups.get(&source) {
-            let struct_name = partial_struct_name(&request_ty.name, source);
+            let struct_name = partial_struct_name(&handler, &request_ty.name, source);
             out.push_str(&render_partial_struct(&struct_name, fields));
         }
     }
@@ -392,25 +626,25 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     if route_spec.groups.contains_key(&FieldSource::Path) {
         params.push(format!(
             "Path(path): Path<{}>",
-            partial_struct_name(&request_ty.name, FieldSource::Path)
+            partial_struct_name(&handler, &request_ty.name, FieldSource::Path)
         ));
     }
     if route_spec.groups.contains_key(&FieldSource::Query) {
         params.push(format!(
             "Query(query): Query<{}>",
-            partial_struct_name(&request_ty.name, FieldSource::Query)
+            partial_struct_name(&handler, &request_ty.name, FieldSource::Query)
         ));
     }
     if route_spec.groups.contains_key(&FieldSource::Form) {
         params.push(format!(
             "Form(form): Form<{}>",
-            partial_struct_name(&request_ty.name, FieldSource::Form)
+            partial_struct_name(&handler, &request_ty.name, FieldSource::Form)
         ));
     }
     if route_spec.groups.contains_key(&FieldSource::Json) {
         params.push(format!(
             "Json(body): Json<{}>",
-            partial_struct_name(&request_ty.name, FieldSource::Json)
+            partial_struct_name(&handler, &request_ty.name, FieldSource::Json)
         ));
     }
     if route_spec.has_header || uses_auth {
@@ -418,7 +652,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
 
     out.push_str(&format!(
-        "async fn {handler}({params}) -> Result<ApiResponse<{response}>, RozeError> {{\n",
+        "pub(super) async fn {handler}({params}) -> Result<ApiResponse<{response}>, RozeError> {{\n",
         handler = handler,
         params = params.join(", "),
         response = route.response
@@ -429,11 +663,11 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         http_method_name(&route.method)
     ));
     if uses_auth {
-        out.push_str("    let request_ctx = match authorize(headers, ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
+        out.push_str("    let request_ctx = match authorize(headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
     }
     for name in custom {
         out.push_str(&format!(
-            "    if let Err(err) = crate::middleware::{name}(ctx, &request_ctx).await {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+            "    if let Err(err) = crate::middleware::{name}(&ctx, &request_ctx).await {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
         ));
     }
     for source in [
@@ -471,7 +705,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
     out.push_str(&render_request_validation_checks(&request_ty.fields));
     out.push_str(&format!(
-        "    let result = crate::logic::{handler}(ctx.clone(), request_ctx, req).await;\n",
+        "    let timeout = request_ctx.remaining_timeout();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n",
         handler = handler
     ));
     out.push_str("    match result {\n        Ok(resp) => {\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }\n    }\n");
@@ -491,6 +725,27 @@ fn route_middlewares(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Vec<St
     }
     names.extend(route.middlewares.clone());
     names
+}
+
+fn route_groups(spec: &ApiSpec) -> BTreeMap<String, Vec<&RestRoute>> {
+    let mut groups = BTreeMap::<String, Vec<&RestRoute>>::new();
+    for route in &spec.rest_routes {
+        groups
+            .entry(route_group_name(route))
+            .or_default()
+            .push(route);
+    }
+    groups
+}
+
+fn route_group_name(route: &RestRoute) -> String {
+    route
+        .path
+        .split('/')
+        .find(|segment| !segment.is_empty() && !segment.starts_with(':'))
+        .map(to_snake_case)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "base".to_string())
 }
 
 fn route_has_jwt(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
@@ -1089,7 +1344,7 @@ fn rust_field_name(field: &Field) -> String {
     rust_identifier(&field.name)
 }
 
-fn partial_struct_name(name: &str, source: FieldSource) -> String {
+fn partial_struct_name(handler: &str, name: &str, source: FieldSource) -> String {
     let suffix = match source {
         FieldSource::Path => "Path",
         FieldSource::Query => "Query",
@@ -1098,7 +1353,7 @@ fn partial_struct_name(name: &str, source: FieldSource) -> String {
         FieldSource::Header => "Header",
         FieldSource::Auto => "Auto",
     };
-    format!("{}{}", name, suffix)
+    format!("{}{}{}", to_pascal_case(handler), name, suffix)
 }
 
 fn route_path_params(path: &str) -> HashSet<String> {
@@ -1784,8 +2039,8 @@ mod tests {
         assert!(handlers.contains(".route(\"/api/v1/users/{id}\", get(get_user))"));
         assert!(handlers.contains(".route(\"/internal/stats\", get(get_stats))"));
         assert!(handlers.contains(".route(\"/internal/users/{id}\", patch(update_user))"));
-        assert!(handlers.contains("authorize(headers, ctx)"));
-        assert!(handlers.contains("crate::middleware::audit(ctx, &request_ctx).await"));
+        assert!(handlers.contains("authorize(headers, &ctx)"));
+        assert!(handlers.contains("crate::middleware::audit(&ctx, &request_ctx).await"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains("builder.security_scheme(\"bearerAuth\""));
@@ -1795,5 +2050,37 @@ mod tests {
             openapi.contains("builder.add_operation(\"/internal/users/:id\", HttpMethod::Patch")
         );
         assert!(openapi.contains(".require_security(\"bearerAuth\")"));
+    }
+
+    #[test]
+    fn reused_request_types_get_route_scoped_extractor_names() {
+        let spec = crate::parser::parse_api(
+            r#"
+            service user-api {
+                @handler getUserByIds
+                post /users/batch (UserBatchReq) returns (UserBatchResp)
+
+                @handler getAllUserState
+                post /users/state (UserBatchReq) returns (UserBatchResp)
+            }
+
+            type UserBatchReq {
+                ids []u64 `json:"ids"`
+            }
+
+            type UserBatchResp {
+                ids []u64
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let handlers = render_handlers(&spec);
+
+        assert!(handlers.contains("struct GetUserByIdsUserBatchReqJson"));
+        assert!(handlers.contains("Json(body): Json<GetUserByIdsUserBatchReqJson>"));
+        assert!(handlers.contains("struct GetAllUserStateUserBatchReqJson"));
+        assert!(handlers.contains("Json(body): Json<GetAllUserStateUserBatchReqJson>"));
+        assert!(!handlers.contains("struct UserBatchReqJson"));
     }
 }

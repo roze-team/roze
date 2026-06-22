@@ -34,13 +34,13 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.
 
 Generated REST services always expose the same Rust project shape:
-`src/main.rs`, `src/config.rs`, `src/context.rs`, `src/middleware.rs`,
-`src/openapi.rs`, `src/routes.rs`, `src/svc.rs`, `src/types.rs`,
-`src/handler/`, and `src/logic/`. Generated RPC services use
-`build.rs`, `proto/service.proto`, `proto/source.proto`, `src/client.rs`,
-`src/pb.rs`, `src/rpc.rs`, `src/svc.rs`, `src/types.rs`, and `src/logic/`.
-This keeps handler boundaries, context, validation, errors, tracing, and
-response contracts uniform across teams.
+`src/main.rs`, `src/config/mod.rs`, `src/route/`, `src/handler/`,
+`src/logic/`, `src/middleware/`, `src/openapi/mod.rs`, `src/svc/mod.rs`, and
+`src/types/mod.rs`. Generated RPC services use `build.rs`,
+`proto/service.proto`, `src/client/mod.rs`, `src/server/mod.rs`,
+`src/pb/mod.rs`, `src/svc/mod.rs`, `src/types/mod.rs`, and `src/logic/`.
+This keeps route registration, handler adaptation, business logic, context,
+validation, errors, tracing, and response contracts uniform across teams.
 Generated services also include optional NATS/outbox slots in `ServiceContext`,
 so reliable event publishing follows the same convention in API and RPC
 projects.
@@ -55,6 +55,7 @@ and permission checks.
 
 - [Project standards](docs/project-standards.md)
 - [Usage documentation](docs/usage/README.md)
+- [Middleware contract](docs/contracts/middleware.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
 - [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)
 
@@ -112,8 +113,8 @@ rpc generate` creates a gRPC service from `rpc` method declarations. The two
 commands intentionally reject mixed definitions so API and RPC projects keep
 different layouts and dependency sets.
 
-Regenerate framework-owned files while preserving `src/logic/mod.rs` and
-`config.yaml`:
+Regenerate framework-owned files while preserving application-owned logic,
+custom middleware, and `config.yaml`:
 
 ```bash
 cargo run -p rozectl -- api generate example/user.api \
@@ -122,6 +123,10 @@ cargo run -p rozectl -- api generate example/user.api \
   --roze-source path
 ```
 
+`--update` preserves `src/logic/<group>/<method>.rs`, RPC
+`src/logic/<method>.rs`, custom REST middleware files under `src/middleware/`,
+and `config.yaml`. Generated glue such as `src/route/`, `src/handler/`,
+`src/server/`, `src/client/`, DTOs, OpenAPI, and proto/build files is refreshed.
 Use `--force` only for a full rebuild. New projects use
 `https://github.com/roze-team/roze.git` dependencies by default; pass
 `--roze-source path` for projects inside this repository.
@@ -232,20 +237,20 @@ Supported SQL input focuses on common MySQL and Postgres DDL:
 - common scalar column types such as integers, booleans, text, JSON, timestamps, UUIDs, and blobs
 - unsupported features such as composite keys and foreign keys fail fast with a clear error
 
-Generated service layout:
+Generated RPC service layout:
 
 ```text
 src/
-  config.rs
-  handler/mod.rs
-  logic/mod.rs
-  pb.rs
+  config/mod.rs
+  logic/
+  pb/mod.rs
   svc/mod.rs
-  types.rs
-  rpc.rs
+  types/mod.rs
+  server/mod.rs
+  client/mod.rs
 build.rs
 proto/service.proto
-  config.yaml
+config.yaml
 ```
 
 ### Rozectl verification

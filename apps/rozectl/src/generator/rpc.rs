@@ -11,8 +11,9 @@ pub fn render_main(spec: &ApiSpec) -> String {
     format!(
         r#"mod config;
 mod client;
+mod logic;
 mod pb;
-mod rpc;
+mod server;
 mod svc;
 mod types;
 
@@ -40,7 +41,7 @@ async fn main() -> anyhow::Result<()> {{
     let ctx = svc::ServiceContext::new(config).await?;
     RpcServer::new(rpc.addr)
         .builder()
-        .add_service({service}Server::new(rpc::RpcService::new(ctx)))
+        .add_service({service}Server::new(server::RpcService::new(ctx)))
         .serve(rpc.addr)
         .await?;
     registration.shutdown().await?;
@@ -252,7 +253,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str(&format!(
         "        let result = crate::logic::{handler}({args}).await;\n",
         handler = handler,
-        args = "self.ctx.clone(), request_ctx, req"
+        args = "self.ctx.clone(), request_ctx.clone(), req"
     ));
     out.push_str("        match result {\n");
     out.push_str(&format!(
@@ -293,19 +294,70 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     );
     out.push_str("        }\n");
     out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
-    out.push_str("        let _ = req;\n");
     out.push_str(&format!(
-        "        let resp = {} {{ {} }};\n",
-        resp_ty,
-        default_fields(spec, resp_ty)
+        "        let result = crate::logic::{method_name}(self.ctx.clone(), request_ctx.clone(), req).await;\n",
+        method_name = method_name
     ));
-    out.push_str("        roze_rpc::rpc::finish_method(method_guard, \"ok\");\n");
+    out.push_str("        match result {\n");
     out.push_str(&format!(
-        "        Ok(Response::new({}))\n",
+        "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
         app_to_proto(spec, resp_ty, "resp")
     ));
+    out.push_str("            Err(err) => {\n                roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }\n        }\n");
     out.push_str("    }\n");
     out
+}
+
+pub fn render_logic_mod(spec: &ApiSpec) -> String {
+    let mut out = String::from("use roze_error::RozeError;\n\n");
+    out.push_str("use crate::svc::ServiceContext;\n");
+    out.push_str("use crate::types::*;\n\n");
+    for method in rpc_logic_methods(spec) {
+        out.push_str(&format!("mod {method};\n"));
+        out.push_str(&format!("pub use {method}::{method};\n"));
+    }
+    out
+}
+
+pub fn render_logic_files(spec: &ApiSpec) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    for route in &spec.rest_routes {
+        let method = resolved_handler_name(route);
+        files.push((
+            method.clone(),
+            render_logic_file(spec, &method, &route.request, &route.response),
+        ));
+    }
+    for rpc in &spec.rpc_methods {
+        let method = to_snake_case(&rpc.name);
+        files.push((
+            method.clone(),
+            render_logic_file(spec, &method, &rpc.request, &rpc.response),
+        ));
+    }
+    files
+}
+
+fn render_logic_file(spec: &ApiSpec, method: &str, req_ty: &str, resp_ty: &str) -> String {
+    format!(
+        "use super::*;\n\npub async fn {method}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {req_ty}) -> Result<{resp_ty}, RozeError> {{\n    let _ = ctx;\n    let _ = request_ctx;\n    let _ = req;\n    Ok({resp_ty} {{ {defaults} }})\n}}\n",
+        method = method,
+        req_ty = req_ty,
+        resp_ty = resp_ty,
+        defaults = default_fields(spec, resp_ty)
+    )
+}
+
+fn rpc_logic_methods(spec: &ApiSpec) -> Vec<String> {
+    spec.rest_routes
+        .iter()
+        .map(resolved_handler_name)
+        .chain(
+            spec.rpc_methods
+                .iter()
+                .map(|method| to_snake_case(&method.name)),
+        )
+        .collect()
 }
 
 fn resolved_handler_name(route: &RestRoute) -> String {

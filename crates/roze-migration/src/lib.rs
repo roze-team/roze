@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{mysql::MySqlPool, postgres::PgPool, sqlite::SqlitePool};
+use sqlx::{mysql::MySqlPool, postgres::PgPool, sqlite::SqlitePool, AssertSqlSafe};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SqlMigration {
@@ -32,8 +32,6 @@ pub struct MigrationRecord {
     pub name: String,
 }
 
-const LEDGER_TABLE: &str = "roze_migrations";
-
 macro_rules! impl_runner {
     ($fn_name:ident, $ensure_fn:ident, $applied_fn:ident, $pool:ty, $insert_sql:expr) => {
         pub async fn $fn_name(pool: &$pool, migrations: &[SqlMigration]) -> anyhow::Result<()> {
@@ -45,12 +43,10 @@ macro_rules! impl_runner {
                     continue;
                 }
 
-                sqlx::query(&migration.up_sql).execute(pool).await?;
-                let insert_sql = format!(
-                    "INSERT INTO {} (version, name) VALUES {}",
-                    LEDGER_TABLE, $insert_sql
-                );
-                sqlx::query(&insert_sql)
+                sqlx::query(AssertSqlSafe(migration.up_sql.as_str()))
+                    .execute(pool)
+                    .await?;
+                sqlx::query($insert_sql)
                     .bind(migration.version)
                     .bind(&migration.name)
                     .execute(pool)
@@ -67,80 +63,71 @@ impl_runner!(
     ensure_sqlite_ledger,
     applied_sqlite_versions,
     SqlitePool,
-    "(?, ?)"
+    "INSERT INTO roze_migrations (version, name) VALUES (?, ?)"
 );
 impl_runner!(
     apply_postgres_migrations,
     ensure_postgres_ledger,
     applied_postgres_versions,
     PgPool,
-    "($1, $2)"
+    "INSERT INTO roze_migrations (version, name) VALUES ($1, $2)"
 );
 impl_runner!(
     apply_mysql_migrations,
     ensure_mysql_ledger,
     applied_mysql_versions,
     MySqlPool,
-    "(?, ?)"
+    "INSERT INTO roze_migrations (version, name) VALUES (?, ?)"
 );
 
 async fn ensure_sqlite_ledger(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-        LEDGER_TABLE
-    ))
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS roze_migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
     .execute(pool)
     .await?;
     Ok(())
 }
 
 async fn ensure_postgres_ledger(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-        LEDGER_TABLE
-    ))
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS roze_migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
     .execute(pool)
     .await?;
     Ok(())
 }
 
 async fn ensure_mysql_ledger(pool: &MySqlPool) -> anyhow::Result<()> {
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-        LEDGER_TABLE
-    ))
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS roze_migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
     .execute(pool)
     .await?;
     Ok(())
 }
 
 async fn applied_sqlite_versions(pool: &SqlitePool) -> anyhow::Result<Vec<i64>> {
-    let rows = sqlx::query_as::<_, (i64,)>(&format!(
-        "SELECT version FROM {} ORDER BY version ASC",
-        LEDGER_TABLE
-    ))
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query_as::<_, (i64,)>("SELECT version FROM roze_migrations ORDER BY version ASC")
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|row| row.0).collect())
 }
 
 async fn applied_postgres_versions(pool: &PgPool) -> anyhow::Result<Vec<i64>> {
-    let rows = sqlx::query_as::<_, (i64,)>(&format!(
-        "SELECT version FROM {} ORDER BY version ASC",
-        LEDGER_TABLE
-    ))
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query_as::<_, (i64,)>("SELECT version FROM roze_migrations ORDER BY version ASC")
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|row| row.0).collect())
 }
 
 async fn applied_mysql_versions(pool: &MySqlPool) -> anyhow::Result<Vec<i64>> {
-    let rows = sqlx::query_as::<_, (i64,)>(&format!(
-        "SELECT version FROM {} ORDER BY version ASC",
-        LEDGER_TABLE
-    ))
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query_as::<_, (i64,)>("SELECT version FROM roze_migrations ORDER BY version ASC")
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|row| row.0).collect())
 }
 

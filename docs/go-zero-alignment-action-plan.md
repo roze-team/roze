@@ -60,18 +60,24 @@
   - [apps/user/src/kafka.rs](/Users/yangcuiwang/go/src/hualiang/roze/apps/user/src/kafka.rs)
 
 ### 4) HTTP/RPC 治理统一（中高优先级）
-- 当前状态：已具备基础治理实现。
+- 当前状态：已具备统一治理实现。REST 入口支持 recover、trace、stat、prometheus、cors、timeout、max_conns、adaptive shedding、gunzip、request body limit；route 级治理支持 auth/JWT、timeout、rate limit、breaker 和自定义 middleware；RPC client/method 侧已具备 trace/stat/prometheus/breaker 与方法级 rate limit/breaker。
 - 目标状态：REST 与 RPC 共用相同策略模型。
 - 主要任务：
-  1. 统一治理配置模型命名和优先级（全局/服务/路由/方法）。
-  2. `breaker`/`ratelimit` 状态持久化可选。
-  3. 与 `roze-event`、`roze-http`、`roze-rpc` 指标口径统一。
+  1. [x] 统一 REST 服务级 middleware 配置：`rest.middlewares`。
+  2. [x] 统一 `.api` 内建 middleware 名称解析，避免把 go-zero 常见 middleware 误生成成自定义 stub。
+  3. [x] HTTP timeout 从 Context metadata 升级为生成 handler 中真实 `tokio::time::timeout` 执行。
+  4. [x] Adaptive shedding 支持并发上限、窗口样本数、平均延迟阈值、失败率阈值和冷却时间。
+  5. [ ] `breaker`/`ratelimit` 状态持久化可选。
+  6. [ ] 与 `roze-event`、`roze-http`、`roze-rpc` 指标口径进一步统一。
 - 验收：
-  1. 同一配置字段在 HTTP 与 RPC 产生一致限制行为。
+  1. [x] REST 生成服务可通过 `rest.middlewares` 启停服务级 middleware。
+  2. [x] `.api` 中声明 `trace/cors/recover/stat/prometheus/max_conns/shedding/gunzip/body_limit` 等内建名称不会生成自定义 middleware 文件。
+  3. [x] 同一 governance timeout 字段在 HTTP route 产生实际超时行为。
 - 关联参考：
   - [crates/roze-middleware/src/lib.rs](/Users/yangcuiwang/go/src/hualiang/roze/crates/roze-middleware/src/lib.rs)
   - [crates/roze-rpc/src/rpc.rs](/Users/yangcuiwang/go/src/hualiang/roze/crates/roze-rpc/src/rpc.rs)
   - [crates/roze-config/src/lib.rs](/Users/yangcuiwang/go/src/hualiang/roze/crates/roze-config/src/lib.rs)
+  - [docs/contracts/middleware.md](/Users/yangcuiwang/go/src/hualiang/roze/docs/contracts/middleware.md)
 
 ### 5) 启动生命周期与优雅停机（中优先级）
 - 当前状态：各应用各自实现。
@@ -84,14 +90,14 @@
 - 验收：
   1. 发起终止后，HTTP、RPC、消费者均能优雅退出。
 
-### 6) API 生成与代码骨架（中优先级）
-- 当前状态：核心生成器存在；已新增 `rozectl api client ts/js/dart`，可从 REST `.api` 生成 TypeScript SDK、JSDoc JavaScript SDK 或 Dart `package:http` SDK；`rozectl openapi generate` 已输出参数、请求体、响应和组件 schema；service block 内多个 `@server` 分组已能按 route 生效到 prefix、middleware、JWT、OpenAPI 和 SDK 路径；parser 已兼容 `syntax = "v1"`、`info(`/`type(`/`@server(` 紧凑块、`returns(Resp)` 紧凑签名、`@handler(...)`/`@doc(...)`/`@middleware(...)` 注解和 `import (...)` 导入块；REST/OpenAPI/SDK 已支持 `patch` 方法；无 request 的 `get /path returns (Resp)` 路由会自动补 `EmptyReq`，无 response 的 `post /path (Req)` 或 `get /path` 路由会自动补 `EmptyResp`，并正常生成项目、OpenAPI 和 SDK；TS/JS SDK 对空请求方法已默认 `req = {}`，调用方不再需要手写空对象；生成的 Rust DTO 已派生 `Default`，并使用稳定 snake_case 字段名加 serde rename 保留 wire 名称；REST/types/OpenAPI 已支持 goctl 风格 `[]T`、`map[K]V` 与 Rust 风格 `Vec<T>`、`HashMap<K,V>` 容器类型；REST partial struct 已参考 Go validator tag 映射 `required/min/max/len/email/url/uri/ip/ipv4/ipv6/contains/excludes/gte/lte/gt/lt/optional/omitempty`，按 Rust validator 支持的 `length`、`range`、`email`、`url`、`ip`、`contains`、`does_not_contain` 生成属性；生成器自定义请求级校验已补 `oneof/startswith/endswith/alpha/alphanum/ascii/numeric/eqfield/nefield/gtfield/gtefield/ltfield/ltefield/required_if/required_unless/required_with/required_without`，覆盖 Rust validator derive 暂不支持但 Go validator 常用的单字段、跨字段和条件必填 tag；`dive` 已支持切片元素基础校验以及 map 的 `keys/endkeys` 基础校验，`dive` 前 `min/max/len/required` 作用于容器长度，`dive` 后规则作用于每个元素或 key/value。
+### 6) API/RPC 生成与代码骨架（中优先级）
+- 当前状态：核心生成器已按 go-zero 风格目录拆分。REST 生成 `src/route/<group>.rs`、`src/handler/<group>/<method>.rs`、`src/logic/<group>/<method>.rs`、`src/middleware/<custom>.rs`、`src/config/mod.rs`、`src/openapi/mod.rs`、`src/types/mod.rs` 和 `src/svc/mod.rs`；RPC 生成 `src/server/mod.rs`、`src/client/mod.rs`、`src/pb/mod.rs`、`src/logic/<method>.rs`、`src/config/mod.rs`、`src/types/mod.rs` 和 `src/svc/mod.rs`。`--update` 保留业务逻辑文件、REST 自定义 middleware 文件和 `config.yaml`，刷新生成器拥有的 glue 文件。API 层默认不链接 DB/Mongo/Toasty；数据库默认示例为 PostgreSQL。生成服务固定 `edition = "2021"`。已新增 `rozectl api client ts/js/dart`，可从 REST `.api` 生成 TypeScript SDK、JSDoc JavaScript SDK 或 Dart `package:http` SDK；`rozectl openapi generate` 已输出参数、请求体、响应和组件 schema；service block 内多个 `@server` 分组已能按 route 生效到 prefix、middleware、JWT、OpenAPI 和 SDK 路径；parser 已兼容 `syntax = "v1"`、`info(`/`type(`/`@server(` 紧凑块、`returns(Resp)` 紧凑签名、`@handler(...)`/`@doc(...)`/`@middleware(...)` 注解和 `import (...)` 导入块；REST/OpenAPI/SDK 已支持 `patch` 方法；无 request 的 `get /path returns (Resp)` 路由会自动补 `EmptyReq`，无 response 的 `post /path (Req)` 或 `get /path` 路由会自动补 `EmptyResp`，并正常生成项目、OpenAPI 和 SDK；TS/JS SDK 对空请求方法已默认 `req = {}`，调用方不再需要手写空对象；生成的 Rust DTO 已派生 `Default`，并使用稳定 snake_case 字段名加 serde rename 保留 wire 名称；REST/types/OpenAPI 已支持 goctl 风格 `[]T`、`map[K]V` 与 Rust 风格 `Vec<T>`、`HashMap<K,V>` 容器类型；REST partial struct 已参考 Go validator tag 映射 `required/min/max/len/email/url/uri/ip/ipv4/ipv6/contains/excludes/gte/lte/gt/lt/optional/omitempty`，按 Rust validator 支持的 `length`、`range`、`email`、`url`、`ip`、`contains`、`does_not_contain` 生成属性；生成器自定义请求级校验已补 `oneof/startswith/endswith/alpha/alphanum/ascii/numeric/eqfield/nefield/gtfield/gtefield/ltfield/ltefield/required_if/required_unless/required_with/required_without`，覆盖 Rust validator derive 暂不支持但 Go validator 常用的单字段、跨字段和条件必填 tag；`dive` 已支持切片元素基础校验以及 map 的 `keys/endkeys` 基础校验，`dive` 前 `min/max/len/required` 作用于容器长度，`dive` 后规则作用于每个元素或 key/value。
 - 目标状态：生成器行为和goctl语义更接近。
 - 主要任务：
   1. 继续扩展注释、更多 goctl 边界语法和更完整 validator tag 的解析兼容性。
-  2. 保持用户自定义代码块的覆盖策略不变。
-  3. 加入网关专用模板和示例。
-  4. 继续补齐 Java/Kotlin 等客户端生成。
+  2. [x] 保持用户自定义业务逻辑和自定义 middleware 的覆盖策略不变。
+  3. [ ] 加入网关专用模板和示例。
+  4. [ ] 继续补齐 Java/Kotlin 等客户端生成。
 - 验收：
   1. 不丢失用户逻辑文件的更新。
   2. `rozectl api client ts/js/dart` 能生成可注入 base URL、全局 headers、按调用 headers 的客户端 SDK。

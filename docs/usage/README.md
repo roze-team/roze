@@ -8,6 +8,9 @@ services.
 - [Project standards](../project-standards.md): repository layout, API/RPC
   project boundaries, generated file ownership, runtime contracts, metrics, and
   verification rules.
+- [Middleware contract](../contracts/middleware.md): REST middleware config,
+  go-zero-compatible built-in names, adaptive shedding, and generated file
+  ownership.
 - [rozectl API generator](./rozectl-api.md): `.api` syntax, REST generation,
   client SDKs, OpenAPI output, type mapping, and validator tag support.
 - [rozectl goctl compatibility](./rozectl-goctl-compat.md): direct mapping from

@@ -3,7 +3,8 @@
 `rozectl api generate` reads a go-zero/goctl-style `.api` file and generates a
 Rust-native Axum REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
-`src/logic/mod.rs` and `config.yaml` when `--update` is used.
+method-level logic, custom middleware, and `config.yaml` when `--update` is
+used.
 
 Think of `rozectl` as a generator for project structure and integration code.
 It can generate API layers, RPC layers, model scaffolds, documentation, client
@@ -53,6 +54,50 @@ cargo run -p rozectl -- api generate example/user.api \
   --update \
   --roze-source path
 ```
+
+`--update` preserves:
+
+- REST `src/logic/<group>/<method>.rs`
+- REST custom middleware files under `src/middleware/<name>.rs`
+- RPC `src/logic/<method>.rs`
+- `config.yaml`
+
+Generated glue such as route registration, handler adapters, DTOs, OpenAPI,
+RPC server/client adapters, protobuf include modules, `build.rs`, and
+`proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.
+
+## Generated REST layout
+
+```text
+config.yaml
+Cargo.toml
+src/
+  main.rs
+  config/mod.rs
+  route/
+    mod.rs
+    <group>.rs
+  handler/
+    mod.rs
+    <group>/
+      mod.rs
+      <method>.rs
+  logic/
+    mod.rs
+    <group>/
+      mod.rs
+      <method>.rs
+  middleware/
+    mod.rs
+    <custom>.rs
+  openapi/mod.rs
+  svc/mod.rs
+  types/mod.rs
+```
+
+Generated API crates do not depend on `roze-db`, `roze-mongo`, or Toasty by
+default. API services can still call RPC clients, cache, MQ, NATS, outbox, auth,
+metrics, OpenAPI, validation, and middleware crates.
 
 Generate client SDKs:
 
@@ -184,6 +229,48 @@ Generated routes:
 
 - `GET /api/v1/users/:id`
 - `GET /internal/stats`
+
+## Middleware
+
+Service-wide HTTP middleware is configured in generated `config.yaml` under
+`rest.middlewares`:
+
+```yaml
+rest:
+  addr: 127.0.0.1:3000
+  register: false
+  middlewares:
+    recover: true
+    trace: true
+    stat: true
+    prometheus: true
+    cors: true
+    timeout: true
+    # max_conns: 1000
+    # shedding:
+    #   concurrency: 1000
+    #   window_ms: 1000
+    #   min_samples: 100
+    #   max_avg_latency_ms: 500
+    #   max_failure_ratio_per_mille: 500
+    #   cool_down_ms: 1000
+    # gunzip: true
+    # request_body_limit_bytes: 2097152
+```
+
+Route-scoped middleware declared in `.api` is resolved as either built-in or
+custom. Built-in names include `auth`, `jwt`, `trace`, `recover`, `stat`,
+`prometheus`, `metrics`, `cors`, `timeout`, `rate_limit`, `breaker`,
+`max_conns`, `shedding`, `gunzip`, `body_limit`, and `idempotency`. Built-ins do
+not generate custom files.
+
+Unknown middleware names are application-owned hooks. For example,
+`middleware: auth, audit` uses built-in auth and generates
+`src/middleware/audit.rs`. Custom middleware files are preserved during
+`--update`.
+
+See [Middleware Contract](../contracts/middleware.md) for the complete alias
+table and adaptive shedding behavior.
 
 ## Empty request and response
 
@@ -356,15 +443,26 @@ config.yaml
 Cargo.toml
 src/
   main.rs
-  config.rs
-  context.rs
-  middleware.rs
-  openapi.rs
-  routes.rs
-  svc.rs
-  types.rs
+  config/mod.rs
+  route/
+    mod.rs
+    <group>.rs
   handler/
+    mod.rs
+    <group>/
+      mod.rs
+      <method>.rs
   logic/
+    mod.rs
+    <group>/
+      mod.rs
+      <method>.rs
+  middleware/
+    mod.rs
+    <custom>.rs
+  openapi/mod.rs
+  svc/mod.rs
+  types/mod.rs
 ```
 
 RPC services:
@@ -375,23 +473,26 @@ Cargo.toml
 build.rs
 proto/
   service.proto
-  source.proto
 src/
   main.rs
-  client.rs
-  config.rs
-  context.rs
-  pb.rs
-  rpc.rs
-  svc.rs
-  types.rs
+  client/mod.rs
+  config/mod.rs
+  pb/mod.rs
+  server/mod.rs
+  svc/mod.rs
+  types/mod.rs
   logic/
+    mod.rs
+    <method>.rs
 ```
 
 Framework-owned files can be regenerated with `--update`. Business code should
-live in `src/logic`, while generated boundary files keep HTTP/RPC parsing,
-validation, context extraction, errors, tracing, and response contracts
-consistent across services.
+live in REST `src/logic/<group>/<method>.rs` or RPC
+`src/logic/<method>.rs`. REST custom middleware lives in
+`src/middleware/<custom>.rs`. These application-owned files and `config.yaml`
+are preserved on `--update`, while generated boundary files keep HTTP/RPC
+parsing, validation, context extraction, errors, tracing, and response
+contracts consistent across services.
 
 ## OpenAPI output
 
@@ -424,17 +525,16 @@ Cargo.toml
 build.rs
 config.yaml
 proto/service.proto
-proto/source.proto
-src/config.rs
-src/pb.rs
-src/rpc.rs
-src/client.rs
-src/logic/mod.rs
+src/config/mod.rs
+src/pb/mod.rs
+src/server/mod.rs
+src/client/mod.rs
+src/logic/<method>.rs
 src/svc/mod.rs
 ```
 
-`proto/source.proto` preserves the input file. `proto/service.proto` is the
-normalized build input used by the generated Rust project.
+`proto/service.proto` is the normalized build input used by the generated Rust
+project.
 
 The proto parser supports line and block comments, multi-line `rpc`
 signatures, qualified type names, `stream` request/response markers,

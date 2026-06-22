@@ -31,26 +31,38 @@ config.yaml
 Cargo.toml
 src/
   main.rs
-  config.rs
-  context.rs
-  middleware.rs
-  openapi.rs
-  routes.rs
-  svc.rs
-  types.rs
+  config/mod.rs
+  route/
+    mod.rs
+    <group>.rs
   handler/
+    mod.rs
+    <group>/
+      mod.rs
+      <method>.rs
   logic/
+    mod.rs
+    <group>/
+      mod.rs
+      <method>.rs
+  middleware/
+    mod.rs
+    <custom>.rs
+  openapi/mod.rs
+  svc/mod.rs
+  types/mod.rs
 ```
 
 文件归属：
 
-- `src/logic`：业务逻辑唯一默认落点。复杂 SQL、领域校验、事务、授权和权限检查都写在这里或这里调用的业务模块。
+- `src/logic/<group>/<method>.rs`：业务逻辑唯一默认落点。复杂 SQL、领域校验、事务、授权和权限检查都写在这里或这里调用的业务模块。`--update` 保留这些文件。
 - `src/handler`：HTTP handler 适配层，由生成器维护，只做请求解析、Context 提取、调用 logic 和响应包装。
-- `src/routes.rs`：路由注册，由生成器维护。
-- `src/types.rs`：请求/响应 DTO，由 `.api` 生成。
-- `src/openapi.rs`：OpenAPI schema 和文档导出，由生成器维护。
-- `src/middleware.rs`：应用 middleware 入口，可按生成器约定扩展，但不能承载业务流程。
-- `src/svc.rs`：依赖注入和服务上下文，只放 DB、cache、MQ、配置、外部 client 等依赖。
+- `src/route`：路由注册，由生成器维护，并按 route group 拆分。
+- `src/types/mod.rs`：请求/响应 DTO，由 `.api` 生成。
+- `src/openapi/mod.rs`：OpenAPI schema 和文档导出，由生成器维护。
+- `src/middleware/mod.rs`：自定义 middleware 聚合入口，由生成器维护。
+- `src/middleware/<custom>.rs`：应用自定义 middleware。`--update` 保留这些文件。
+- `src/svc/mod.rs`：依赖注入和服务上下文，只放 cache、MQ、配置、外部 client 等依赖。API 层默认不链接数据库。
 - `config.yaml`：本地和部署配置，`--update` 默认保留。
 
 API 运行边界：
@@ -59,14 +71,16 @@ API 运行边界：
 - HTTP 错误统一使用 `RozeError`，禁止在 handler 中手写不一致的错误 JSON。
 - 请求入口必须注入和传播 `roze-context` 标准 header。
 - REST route 级别治理包括 timeout、JWT、middleware、rate limit、breaker 和 OpenAPI 安全声明。
+- REST 服务级 middleware 由 `rest.middlewares` 配置，包括 recover、trace、stat、prometheus、cors、timeout、max_conns、shedding、gunzip 和 request body limit。详细行为见 [Middleware Contract](contracts/middleware.md)。
 - `rozectl openapi generate`、`rozectl api swagger` 和生成服务的 `/openapi.json` 必须保持同一 schema 语义。
 
 API 生成策略：
 
-- 使用 `--update` 重新生成框架拥有的文件，并保留 `src/logic/mod.rs` 和 `config.yaml`。
+- 使用 `--update` 重新生成框架拥有的文件，并保留 `src/logic/<group>/<method>.rs`、`src/middleware/<custom>.rs` 和 `config.yaml`。
 - 使用 `--force` 只适合全量重建或一次性脚手架验证。
 - API 定义不能包含 RPC method；如果 `.api` 中存在 `rpc`，应使用 `rozectl rpc generate`。
 - 无 request 的 REST 路由生成 `EmptyReq`，无 response 的 REST 路由生成 `EmptyResp`。
+- `.api` 中声明的 go-zero 常见 middleware 名称会先解析为内建项；只有未知名称才会生成自定义 middleware 文件。
 
 API 测试要求：
 
@@ -89,26 +103,27 @@ proto/
   source.proto
 src/
   main.rs
-  client.rs
-  config.rs
-  context.rs
-  pb.rs
-  rpc.rs
-  svc.rs
-  types.rs
+  client/mod.rs
+  config/mod.rs
+  pb/mod.rs
+  server/mod.rs
+  svc/mod.rs
+  types/mod.rs
   logic/
+    mod.rs
+    <method>.rs
 ```
 
 文件归属：
 
-- `src/logic`：RPC 业务逻辑默认落点。
-- `src/rpc.rs`：tonic server 适配层，由生成器维护，负责 Context 提取、参数校验、错误转换和调用 logic。
-- `src/client.rs`：生成的 RPC client，由生成器维护，负责 Context metadata 注入、超时、retry 和 registry 连接。
-- `src/pb.rs`：prost include 入口，由生成器维护。
-- `src/types.rs`：共享类型或辅助类型，由生成器维护。
-- `src/svc.rs`：依赖注入和服务上下文，只放依赖，不放业务流程。
+- `src/logic/<method>.rs`：RPC 业务逻辑默认落点。`--update` 保留这些文件。
+- `src/server/mod.rs`：tonic server 适配层，由生成器维护，负责 Context 提取、参数校验、错误转换和调用 logic。
+- `src/client/mod.rs`：生成的 RPC client，由生成器维护，负责 Context metadata 注入、超时、retry 和 registry 连接。
+- `src/pb/mod.rs`：prost include 入口，由生成器维护。
+- `src/types/mod.rs`：共享类型或辅助类型，由生成器维护。
+- `src/svc/mod.rs`：依赖注入和服务上下文，只放依赖，不放业务流程。
 - `config.yaml` 属于部署配置，`--update` 默认保留。
-- `proto/source.proto` 保留用户输入，`proto/service.proto` 是生成器规范化后的构建输入。
+- `proto/service.proto` 是生成器规范化后的构建输入。
 
 RPC 运行边界：
 
@@ -127,7 +142,7 @@ RPC 生成策略：
 
 RPC 测试要求：
 
-- RPC 生成器改动必须覆盖 `rpc.rs`、`client.rs`、`proto/service.proto` 和保留 `proto/source.proto` 的行为。
+- RPC 生成器改动必须覆盖 `src/server/mod.rs`、`src/client/mod.rs`、`src/pb/mod.rs`、`proto/service.proto` 和业务 logic 保留行为。
 - Context metadata、validation、retry、registry resolver、错误 metadata 必须有测试。
 - 改动 RPC runtime 时至少运行 `cargo test -p roze-rpc` 和相关生成器测试。
 

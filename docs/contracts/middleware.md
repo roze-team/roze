@@ -1,0 +1,143 @@
+# Middleware Contract
+
+Roze HTTP middleware is split into two layers:
+
+- Service-wide middleware configured by `rest.middlewares` in `config.yaml`.
+- Route-scoped governance and custom hooks declared in `.api` with `@server`,
+  `@middleware`, or `jwt`.
+
+Generated REST services call
+`roze_middleware::apply_common_with_config(route::router(ctx), config)` from
+`src/main.rs`. The generated `config.yaml` exposes the service-wide knobs under
+`rest.middlewares`.
+
+## Service-wide Middleware
+
+```yaml
+rest:
+  addr: 127.0.0.1:3000
+  register: false
+  middlewares:
+    recover: true
+    trace: true
+    stat: true
+    prometheus: true
+    cors: true
+    timeout: true
+    # max_conns: 1000
+    # shedding:
+    #   concurrency: 1000
+    #   window_ms: 1000
+    #   min_samples: 100
+    #   max_avg_latency_ms: 500
+    #   max_failure_ratio_per_mille: 500
+    #   cool_down_ms: 1000
+    # gunzip: true
+    # request_body_limit_bytes: 2097152
+```
+
+| Field | Default | Behavior |
+| --- | --- | --- |
+| `recover` | `true` | Converts panics into HTTP responses through Tower HTTP panic recovery. |
+| `trace` | `true` | Creates request spans and logs request completion/failure. |
+| `stat` | `true` | Enables request metrics recording through the trace middleware. |
+| `prometheus` | `true` | Keeps metrics collection enabled for `/metrics` output. |
+| `cors` | `true` | Applies permissive CORS by default. |
+| `timeout` | `true` | Enables generated handlers to enforce `governance.timeout_ms` and route timeout values. |
+| `max_conns` | unset | Hard concurrent request cap. Exceeded requests return `503`. |
+| `shedding` | unset | Adaptive load shedding. Exceeded concurrency or unhealthy recent windows return `503`. |
+| `gunzip` | `false` | Decompresses gzip request bodies before extraction. |
+| `request_body_limit_bytes` | unset | Rejects oversized request bodies with `413`. |
+
+`trace`, `stat`, and `prometheus` share the same request observation path today:
+`trace` creates spans/logs, and the same layer records HTTP metrics. `/metrics`
+is still served by generated route glue.
+
+## Adaptive Shedding
+
+`shedding` combines a hard concurrency limit with a rolling health window:
+
+- `concurrency`: maximum concurrent requests allowed through the shedding guard.
+- `window_ms`: statistics window duration.
+- `min_samples`: minimum completed requests before latency/failure thresholds
+  can trigger shedding.
+- `max_avg_latency_ms`: average latency threshold for the active window.
+- `max_failure_ratio_per_mille`: failure ratio threshold, in per-mille units.
+  For example, `500` means 50%.
+- `cool_down_ms`: how long to reject requests after an unhealthy window is
+  detected.
+
+The guard records completed request status and elapsed time. If a window has at
+least `min_samples` requests and either average latency or failure ratio exceeds
+the configured threshold, the service enters cool-down and returns `503 service
+overloaded` until the cool-down expires.
+
+## Route-scoped Middleware
+
+`.api` middleware names are resolved into built-ins and custom hooks.
+
+Built-in names are not generated as `src/middleware/<name>.rs` stubs:
+
+| Built-in | Accepted aliases |
+| --- | --- |
+| Auth | `auth`, `jwt` |
+| Trace | `trace`, `tracing` |
+| Recover | `recover`, `recovery`, `panic_recover` |
+| Stat | `stat`, `stats` |
+| Prometheus | `prometheus`, `metrics`, `metric` |
+| CORS | `cors` |
+| Timeout | `timeout` |
+| Rate limit | `rate_limit`, `ratelimit`, `rate` |
+| Breaker | `breaker`, `circuit_breaker` |
+| Max connections | `max_conns`, `max_connections`, `max_conn`, `max_connection` |
+| Shedding | `shedding`, `load_shed`, `load_shedding` |
+| Gunzip | `gunzip`, `gzip`, `request_gunzip` |
+| Body limit | `body_limit`, `request_body_limit`, `max_bytes`, `max_body_bytes` |
+| Idempotency | `idempotency`, `idempotency_key` |
+
+Unknown names are treated as custom application middleware. The generator
+creates `src/middleware/<name>.rs` once and preserves it during `--update`.
+
+Example:
+
+```go
+@server (
+  prefix: /api/v1
+  middleware: auth, trace, audit
+)
+service user-api {
+  @handler getUser
+  get /users/:id (GetUserReq) returns (UserResp)
+}
+```
+
+`auth` and `trace` are built-ins. `audit` is custom, so the generated handler
+calls `crate::middleware::audit(&ctx, &request_ctx).await`.
+
+## Governance Interaction
+
+Route governance still lives under `governance`:
+
+```yaml
+governance:
+  timeout_ms: 5000
+  rate_limit:
+    burst: 100
+    refill_ms: 10
+  breaker:
+    failure_threshold: 5
+    reset_timeout_ms: 30000
+  routes: {}
+```
+
+`begin_route` applies route/global rate limit and breaker policy and attaches
+the effective timeout to `roze_context::Context`. Generated handlers then wrap
+the logic future with `tokio::time::timeout` when a timeout is present.
+
+## Ownership
+
+- Service-wide middleware config is owned by `config.yaml`; `--update`
+  preserves existing `config.yaml`.
+- Built-in route middleware is generator/framework-owned.
+- Custom route middleware files are application-owned and preserved on
+  `--update`.

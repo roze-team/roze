@@ -185,6 +185,78 @@ fn default_gateway_health_check_expected_status() -> u16 {
 pub struct RestConfig {
     pub addr: SocketAddr,
     pub register: bool,
+    #[serde(default)]
+    pub middlewares: HttpMiddlewaresConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpMiddlewaresConfig {
+    #[serde(default = "default_true")]
+    pub recover: bool,
+    #[serde(default = "default_true")]
+    pub trace: bool,
+    #[serde(default = "default_true")]
+    pub stat: bool,
+    #[serde(default = "default_true")]
+    pub prometheus: bool,
+    #[serde(default = "default_true")]
+    pub cors: bool,
+    #[serde(default)]
+    pub timeout: bool,
+    #[serde(default)]
+    pub max_conns: Option<usize>,
+    #[serde(default)]
+    pub shedding: Option<SheddingConfig>,
+    #[serde(default)]
+    pub gunzip: bool,
+    #[serde(default)]
+    pub request_body_limit_bytes: Option<usize>,
+}
+
+impl Default for HttpMiddlewaresConfig {
+    fn default() -> Self {
+        Self {
+            recover: true,
+            trace: true,
+            stat: true,
+            prometheus: true,
+            cors: true,
+            timeout: true,
+            max_conns: None,
+            shedding: None,
+            gunzip: false,
+            request_body_limit_bytes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SheddingConfig {
+    #[serde(default = "default_shedding_concurrency")]
+    pub concurrency: usize,
+    #[serde(default = "default_shedding_window_ms")]
+    pub window_ms: u64,
+    #[serde(default = "default_shedding_min_samples")]
+    pub min_samples: u64,
+    #[serde(default = "default_shedding_max_avg_latency_ms")]
+    pub max_avg_latency_ms: u64,
+    #[serde(default = "default_shedding_max_failure_ratio_per_mille")]
+    pub max_failure_ratio_per_mille: u32,
+    #[serde(default = "default_shedding_cool_down_ms")]
+    pub cool_down_ms: u64,
+}
+
+impl Default for SheddingConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: default_shedding_concurrency(),
+            window_ms: default_shedding_window_ms(),
+            min_samples: default_shedding_min_samples(),
+            max_avg_latency_ms: default_shedding_max_avg_latency_ms(),
+            max_failure_ratio_per_mille: default_shedding_max_failure_ratio_per_mille(),
+            cool_down_ms: default_shedding_cool_down_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +639,30 @@ fn default_rate_limit_burst() -> u32 {
 
 fn default_rate_limit_refill_ms() -> u64 {
     10
+}
+
+fn default_shedding_concurrency() -> usize {
+    1000
+}
+
+fn default_shedding_window_ms() -> u64 {
+    1000
+}
+
+fn default_shedding_min_samples() -> u64 {
+    100
+}
+
+fn default_shedding_max_avg_latency_ms() -> u64 {
+    500
+}
+
+fn default_shedding_max_failure_ratio_per_mille() -> u32 {
+    500
+}
+
+fn default_shedding_cool_down_ms() -> u64 {
+    1000
 }
 
 fn default_breaker_failure_threshold() -> u32 {

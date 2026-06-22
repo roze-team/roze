@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use roze_sqlx::{SqlxConfig, SqlxDatabaseKind, SqlxPool};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use super::{to_pascal_case, to_snake_case, GenerateMode, GenerateOptions};
 
@@ -96,6 +96,8 @@ fn write_model_project(
     let model_dir = out.join("src/model");
     fs::create_dir_all(&model_dir)?;
 
+    // Model files are schema-owned generated artifacts. Refresh them on --update
+    // so database/schema changes are reflected deterministically.
     fs::write(model_dir.join("mod.rs"), render_model_mod(models, orm))?;
     for model in models {
         let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
@@ -120,6 +122,8 @@ fn write_mongo_model_project(
     let model_dir = out.join("src/model");
     fs::create_dir_all(&model_dir)?;
 
+    // Model files are schema-owned generated artifacts. Refresh them on --update
+    // so database/schema changes are reflected deterministically.
     fs::write(model_dir.join("mod.rs"), render_mongo_model_mod(models))?;
     for model in models {
         let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
@@ -1331,10 +1335,10 @@ async fn inspect_sqlite_table(
 ) -> anyhow::Result<ModelSpec> {
     let table_name = strip_sql_identifier(table);
     let pragma_table = table_name.clone();
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "PRAGMA table_info({})",
         sqlite_identifier(&pragma_table)
-    ))
+    )))
     .fetch_all(pool)
     .await?;
 
@@ -1381,9 +1385,12 @@ async fn inspect_sqlite_unique_cache_keys(
     pool: &sqlx::SqlitePool,
     table: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let rows = sqlx::query(&format!("PRAGMA index_list({})", sqlite_identifier(table)))
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(AssertSqlSafe(format!(
+        "PRAGMA index_list({})",
+        sqlite_identifier(table)
+    )))
+    .fetch_all(pool)
+    .await?;
     let mut keys = Vec::new();
     for row in rows {
         let unique: i64 = row.try_get("unique")?;
@@ -1393,10 +1400,10 @@ async fn inspect_sqlite_unique_cache_keys(
             continue;
         }
         let index_name: String = row.try_get("name")?;
-        let columns = sqlx::query(&format!(
+        let columns = sqlx::query(AssertSqlSafe(format!(
             "PRAGMA index_info({})",
             sqlite_identifier(&index_name)
-        ))
+        )))
         .fetch_all(pool)
         .await?
         .into_iter()
@@ -3156,11 +3163,13 @@ mod types;
                 .expect("time")
                 .as_nanos()
         );
-        sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#))
-            .execute(&pool)
-            .await
-            .expect("create schema");
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
+            r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#
+        )))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+        sqlx::query(AssertSqlSafe(format!(
             r#"
             CREATE TABLE IF NOT EXISTS "{schema}".rozectl_users (
                 id BIGSERIAL PRIMARY KEY,
@@ -3168,7 +3177,7 @@ mod types;
                 nickname TEXT DEFAULT 'guest'
             )
             "#
-        ))
+        )))
         .execute(&pool)
         .await
         .expect("create table");
@@ -3351,11 +3360,13 @@ mod types;
                 .expect("time")
                 .as_nanos()
         );
-        sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#))
-            .execute(&pool)
-            .await
-            .expect("create schema");
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
+            r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#
+        )))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+        sqlx::query(AssertSqlSafe(format!(
             r#"
             CREATE TABLE IF NOT EXISTS "{schema}".rozectl_users (
                 id BIGSERIAL PRIMARY KEY,
@@ -3363,7 +3374,7 @@ mod types;
                 nickname TEXT NULL
             )
             "#
-        ))
+        )))
         .execute(&pool)
         .await
         .expect("create table");

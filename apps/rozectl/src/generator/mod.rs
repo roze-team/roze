@@ -16,7 +16,7 @@ use anyhow::{bail, Context};
 use crate::parser::ApiSpec;
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 18] = [
+const REST_ROZE_CRATES: [&str; 16] = [
     "roze-config",
     "roze-error",
     "roze-http",
@@ -26,8 +26,6 @@ const REST_ROZE_CRATES: [&str; 18] = [
     "roze-jwt",
     "roze-cache",
     "roze-context",
-    "roze-db",
-    "roze-mongo",
     "roze-mq",
     "roze-nats",
     "roze-openapi",
@@ -859,6 +857,33 @@ fn remove_path_if_exists(path: &Path) -> anyhow::Result<()> {
     }
 }
 
+fn migrate_flat_module_file(
+    out: &Path,
+    old_relative: &str,
+    new_relative: &str,
+    mode: GenerateMode,
+) -> anyhow::Result<()> {
+    let old_path = out.join(old_relative);
+    let new_path = out.join(new_relative);
+    if !old_path.exists() {
+        return Ok(());
+    }
+    if mode == GenerateMode::Update && !new_path.exists() {
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&old_path, &new_path).with_context(|| {
+            format!(
+                "failed to migrate {} to {}",
+                old_path.display(),
+                new_path.display()
+            )
+        })?;
+        return Ok(());
+    }
+    remove_path_if_exists(&old_path)
+}
+
 fn generate_rest_project(
     spec: &ApiSpec,
     out: &Path,
@@ -867,9 +892,14 @@ fn generate_rest_project(
     ensure_output(out, options.mode)?;
 
     fs::create_dir_all(out.join("src"))?;
+    fs::create_dir_all(out.join("src/config"))?;
     fs::create_dir_all(out.join("src/handler"))?;
     fs::create_dir_all(out.join("src/logic"))?;
+    fs::create_dir_all(out.join("src/middleware"))?;
+    fs::create_dir_all(out.join("src/openapi"))?;
+    fs::create_dir_all(out.join("src/route"))?;
     fs::create_dir_all(out.join("src/svc"))?;
+    fs::create_dir_all(out.join("src/types"))?;
     fs::create_dir_all(out.join(".cargo"))?;
     write_cargo_toml(spec, out, options, ProjectKind::Rest)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
@@ -879,21 +909,65 @@ fn generate_rest_project(
         config_yaml(spec, ProjectKind::Rest),
         options.mode,
     )?;
-    fs::write(out.join("src/config.rs"), config_rs())?;
-    fs::write(out.join("src/openapi.rs"), rest::render_openapi(spec))?;
-    fs::write(out.join("src/handler/mod.rs"), rest::render_handlers(spec))?;
-    write_preserved(
-        &out.join("src/middleware.rs"),
-        rest::render_middleware(spec),
+    remove_path_if_exists(&out.join("src/config.rs"))?;
+    remove_path_if_exists(&out.join("src/openapi.rs"))?;
+    remove_path_if_exists(&out.join("src/types.rs"))?;
+    fs::write(out.join("src/config/mod.rs"), config_rs())?;
+    fs::write(out.join("src/openapi/mod.rs"), rest::render_openapi(spec))?;
+    fs::write(
+        out.join("src/handler/mod.rs"),
+        rest::render_handler_mod(spec),
+    )?;
+    fs::write(out.join("src/route/mod.rs"), rest::render_route_mod(spec))?;
+    for (group, content) in rest::render_route_group_mods(spec) {
+        fs::write(out.join("src/route").join(format!("{group}.rs")), content)?;
+    }
+    for (group, content) in rest::render_handler_group_mods(spec) {
+        let dir = out.join("src/handler").join(&group);
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("mod.rs"), content)?;
+    }
+    for (group, handler, content) in rest::render_handler_files(spec) {
+        let dir = out.join("src/handler").join(&group);
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(format!("{handler}.rs")), content)?;
+    }
+    migrate_flat_module_file(
+        out,
+        "src/middleware.rs",
+        "src/middleware/mod.rs",
         options.mode,
     )?;
-    write_preserved(
-        &out.join("src/logic/mod.rs"),
-        rest::render_logic(spec),
-        options.mode,
+    fs::write(
+        out.join("src/middleware/mod.rs"),
+        rest::render_middleware_mod(spec),
     )?;
-    fs::write(out.join("src/types.rs"), types::render_types(&spec.types))?;
-    fs::write(out.join("src/svc/mod.rs"), service_context_rs())?;
+    for (name, content) in rest::render_middleware_files(spec) {
+        write_preserved(
+            &out.join("src/middleware").join(format!("{name}.rs")),
+            content,
+            options.mode,
+        )?;
+    }
+    fs::write(out.join("src/logic/mod.rs"), rest::render_logic_mod(spec))?;
+    for (group, content) in rest::render_logic_group_mods(spec) {
+        let dir = out.join("src/logic").join(&group);
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("mod.rs"), content)?;
+    }
+    for (group, handler, content) in rest::render_logic_files(spec) {
+        let dir = out.join("src/logic").join(&group);
+        fs::create_dir_all(&dir)?;
+        write_preserved(&dir.join(format!("{handler}.rs")), content, options.mode)?;
+    }
+    fs::write(
+        out.join("src/types/mod.rs"),
+        types::render_types(&spec.types),
+    )?;
+    fs::write(
+        out.join("src/svc/mod.rs"),
+        service_context_rs(ProjectKind::Rest),
+    )?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
     ensure_model_module(out)?;
     Ok(())
@@ -907,9 +981,20 @@ pub(super) fn generate_rpc_project(
     ensure_output(out, options.mode)?;
 
     fs::create_dir_all(out.join("src"))?;
+    fs::create_dir_all(out.join("src/client"))?;
+    fs::create_dir_all(out.join("src/config"))?;
+    fs::create_dir_all(out.join("src/logic"))?;
+    fs::create_dir_all(out.join("src/pb"))?;
+    fs::create_dir_all(out.join("src/server"))?;
     fs::create_dir_all(out.join("src/svc"))?;
+    fs::create_dir_all(out.join("src/types"))?;
     fs::create_dir_all(out.join("proto"))?;
     fs::create_dir_all(out.join(".cargo"))?;
+    remove_path_if_exists(&out.join("src/client.rs"))?;
+    remove_path_if_exists(&out.join("src/config.rs"))?;
+    remove_path_if_exists(&out.join("src/pb.rs"))?;
+    remove_path_if_exists(&out.join("src/rpc.rs"))?;
+    remove_path_if_exists(&out.join("src/types.rs"))?;
     write_cargo_toml(spec, out, options, ProjectKind::Rpc)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rpc))?;
@@ -919,12 +1004,26 @@ pub(super) fn generate_rpc_project(
         config_yaml(spec, ProjectKind::Rpc),
         options.mode,
     )?;
-    fs::write(out.join("src/config.rs"), config_rs())?;
-    fs::write(out.join("src/pb.rs"), render_pb(spec))?;
-    fs::write(out.join("src/types.rs"), types::render_types(&spec.types))?;
-    fs::write(out.join("src/svc/mod.rs"), service_context_rs())?;
-    fs::write(out.join("src/rpc.rs"), rpc::render_rpc(spec))?;
-    fs::write(out.join("src/client.rs"), rpc::render_client(spec))?;
+    fs::write(out.join("src/config/mod.rs"), config_rs())?;
+    fs::write(out.join("src/pb/mod.rs"), render_pb(spec))?;
+    fs::write(
+        out.join("src/types/mod.rs"),
+        types::render_types(&spec.types),
+    )?;
+    fs::write(
+        out.join("src/svc/mod.rs"),
+        service_context_rs(ProjectKind::Rpc),
+    )?;
+    fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
+    fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
+    fs::write(out.join("src/logic/mod.rs"), rpc::render_logic_mod(spec))?;
+    for (method, content) in rpc::render_logic_files(spec) {
+        write_preserved(
+            &out.join("src/logic").join(format!("{method}.rs")),
+            content,
+            options.mode,
+        )?;
+    }
     fs::write(out.join("src/main.rs"), rpc::render_main(spec))?;
     fs::write(out.join("proto/service.proto"), render_proto(spec)?)?;
     Ok(())
@@ -941,6 +1040,8 @@ fn ensure_output(out: &Path, mode: GenerateMode) -> anyhow::Result<()> {
 }
 
 fn write_preserved(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
+    // Business-owned files, such as generated logic and middleware stubs, must not be
+    // overwritten during --update because users are expected to edit them.
     if mode == GenerateMode::Update && path.exists() {
         return Ok(());
     }
@@ -985,6 +1086,7 @@ fn write_cargo_toml(
     kind: ProjectKind,
 ) -> anyhow::Result<()> {
     let path = out.join("Cargo.toml");
+    let package_name = package_name_from_output(out, spec);
     let workspace_root = find_workspace_root(out)?;
     let local_crates_prefix = match options.dependency_source {
         DependencySource::Git => None,
@@ -1002,6 +1104,7 @@ fn write_cargo_toml(
             &path,
             cargo_toml(
                 spec,
+                &package_name,
                 options.dependency_source,
                 local_crates_prefix.as_deref(),
                 workspace_root.is_some(),
@@ -1127,7 +1230,8 @@ git-fetch-with-cli = true
 }
 
 fn cargo_toml(
-    spec: &ApiSpec,
+    _spec: &ApiSpec,
+    package_name: &str,
     dependency_source: DependencySource,
     local_crates_prefix: Option<&str>,
     in_workspace: bool,
@@ -1155,20 +1259,18 @@ config.workspace = true
 axum.workspace = true"#
             } else {
                 r#"anyhow = "1"
-config = { version = "0.14", default-features = false, features = ["json", "yaml", "toml"] }
+config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
 axum = { version = "0.8", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }"#
             },
             if in_workspace {
                 r#"serde.workspace = true
 serde_json.workspace = true
-toasty.workspace = true
 validator.workspace = true
 tokio.workspace = true
 tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }
 validator = { version = "0.20", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1""#
@@ -1182,34 +1284,36 @@ config.workspace = true
 prost.workspace = true"#
             } else {
                 r#"anyhow = "1"
-config = { version = "0.14", default-features = false, features = ["json", "yaml", "toml"] }
-prost = "0.12""#
+config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
+prost = "0.14""#
             },
             if in_workspace {
                 r#"serde.workspace = true
 serde_json.workspace = true
-toasty.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+tonic-prost.workspace = true
 validator.workspace = true
 tracing.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tonic = "0.11"
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
 validator = { version = "0.20", features = ["derive"] }
 tracing = "0.1""#
             },
             if in_workspace {
                 r#"protoc-bin-vendored.workspace = true
-roze-grpc.workspace = true"#
+roze-grpc.workspace = true
+tonic-prost-build.workspace = true"#
             } else {
                 r#"protoc-bin-vendored = "3"
-roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#
+roze-grpc = { git = "https://github.com/roze-team/roze.git" }
+tonic-prost-build = "0.14.6""#
             },
         ),
     };
@@ -1221,7 +1325,7 @@ roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#
 
     format!(
         r#"[package]
-name = "{}-service"
+name = "{package_name}"
 {package}
 
 [dependencies]
@@ -1229,13 +1333,36 @@ name = "{}-service"
 {roze_dependencies}
 {remaining_dependencies}
 {build_dependencies_section}"#,
-        spec.service,
+        package_name = package_name,
         package = package,
         dependencies = dependencies,
         roze_dependencies = roze_dependencies,
         remaining_dependencies = remaining_dependencies,
         build_dependencies_section = build_dependencies_section,
     )
+}
+
+fn package_name_from_output(out: &Path, spec: &ApiSpec) -> String {
+    out.file_name()
+        .and_then(|name| name.to_str())
+        .map(normalize_crate_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| normalize_crate_name(&spec.service))
+}
+
+fn normalize_crate_name(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_sep = false;
+    for ch in to_snake_case(input).chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_sep = false;
+        } else if !last_was_sep {
+            out.push('-');
+            last_was_sep = true;
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 fn roze_dependencies(
@@ -1385,6 +1512,23 @@ fn config_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
 rest:
   addr: 127.0.0.1:3000
   register: false
+  middlewares:
+    recover: true
+    trace: true
+    stat: true
+    prometheus: true
+    cors: true
+    timeout: true
+    # max_conns: 1000
+    # shedding:
+    #   concurrency: 1000
+    #   window_ms: 1000
+    #   min_samples: 100
+    #   max_avg_latency_ms: 500
+    #   max_failure_ratio_per_mille: 500
+    #   cool_down_ms: 1000
+    # gunzip: true
+    # request_body_limit_bytes: 2097152
 registry:
   kind: memory
   endpoints: []
@@ -1399,14 +1543,6 @@ governance:
     failure_threshold: 5
     reset_timeout_ms: 30000
   routes: {{}}
-# database:
-#   url: sqlite://data/{}.db?mode=rwc
-#   # policy: round-robin # round-robin or random
-#   # replicas:
-#   #   - sqlite://data/{}.replica.db?mode=rwc
-# mongo:
-#   url: mongodb://127.0.0.1:27017
-#   database: {}
 # rpc_client:
 #   endpoints: ["127.0.0.1:4000"]
 #   # target: dns:///user.rpc
@@ -1453,9 +1589,6 @@ governance:
             spec.service,
             spec.service,
             spec.service,
-            spec.service,
-            spec.service,
-            spec.service,
             spec.service
         ),
         ProjectKind::Rpc => format!(
@@ -1477,10 +1610,10 @@ governance:
     reset_timeout_ms: 30000
   routes: {{}}
 # database:
-#   url: sqlite://data/{}.db?mode=rwc
+#   url: postgres://postgres:postgres@127.0.0.1:5432/{}
 #   # policy: round-robin # round-robin or random
 #   # replicas:
-#   #   - sqlite://data/{}.replica.db?mode=rwc
+#   #   - postgres://postgres:postgres@127.0.0.1:5432/{}_replica
 # mongo:
 #   url: mongodb://127.0.0.1:27017
 #   database: {}
@@ -1670,7 +1803,68 @@ pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigE
     .to_string()
 }
 
-fn service_context_rs() -> String {
+fn service_context_rs(kind: ProjectKind) -> String {
+    match kind {
+        ProjectKind::Rest => rest_service_context_rs(),
+        ProjectKind::Rpc => rpc_service_context_rs(),
+    }
+}
+
+fn rest_service_context_rs() -> String {
+    r#"#![allow(dead_code)]
+
+use std::sync::Arc;
+
+use crate::config::Config;
+
+#[derive(Clone, Debug)]
+pub struct ServiceContext {
+    pub config: Config,
+    pub cache: Option<roze_cache::RedisCache>,
+    pub mq: Option<Arc<roze_nats::NatsJetStream>>,
+    pub outbox: roze_transaction::InMemoryOutbox,
+}
+
+impl ServiceContext {
+    pub async fn new(config: Config) -> anyhow::Result<Self> {
+        let cache = match config.cache.as_ref() {
+            Some(cache) => Some(
+                roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
+                    url: cache.url.clone(),
+                    namespace: cache.namespace.clone(),
+                    default_ttl_secs: cache.default_ttl_secs,
+                })
+                .await?,
+            ),
+            None => None,
+        };
+        let mq = match config.nats.as_ref() {
+            Some(nats) => Some(Arc::new(roze_nats::NatsJetStream::connect(nats.clone()).await?)),
+            None => None,
+        };
+        Ok(Self {
+            config,
+            cache,
+            mq,
+            outbox: roze_transaction::InMemoryOutbox::new(),
+        })
+    }
+
+    pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
+        self.config.auth.as_ref().map(Into::into)
+    }
+
+    pub fn mq(&self) -> anyhow::Result<Arc<roze_nats::NatsJetStream>> {
+        self.mq
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("nats jetstream is not configured"))
+    }
+}
+"#
+    .to_string()
+}
+
+fn rpc_service_context_rs() -> String {
     r#"#![allow(dead_code)]
 
 use std::sync::Arc;
@@ -2099,13 +2293,22 @@ mod tests {
         )
         .expect("valid api");
 
-        let cargo = cargo_toml(&spec, DependencySource::Git, None, true, ProjectKind::Rest);
+        let cargo = cargo_toml(
+            &spec,
+            "user-api",
+            DependencySource::Git,
+            None,
+            true,
+            ProjectKind::Rest,
+        );
 
         assert!(
             cargo.contains(r#"roze-config = { git = "https://github.com/roze-team/roze.git" }"#)
         );
-        assert!(cargo.contains(r#"roze-mongo = { git = "https://github.com/roze-team/roze.git" }"#));
         assert!(cargo.contains(r#"roze-rpc = { git = "https://github.com/roze-team/roze.git" }"#));
+        assert!(!cargo.contains("roze-db"));
+        assert!(!cargo.contains("roze-mongo"));
+        assert!(!cargo.contains("toasty"));
         assert!(!cargo.contains(r#"path = "../../crates/roze-"#));
         assert!(!cargo.contains("[build-dependencies]"));
     }
@@ -2131,6 +2334,7 @@ mod tests {
 
         let cargo = cargo_toml(
             &spec,
+            "user-api",
             DependencySource::Path,
             Some("../../crates"),
             true,
@@ -2138,8 +2342,10 @@ mod tests {
         );
 
         assert!(cargo.contains(r#"roze-config = { path = "../../crates/roze-config" }"#));
-        assert!(cargo.contains(r#"roze-mongo = { path = "../../crates/roze-mongo" }"#));
         assert!(cargo.contains(r#"roze-rpc = { path = "../../crates/roze-rpc" }"#));
+        assert!(!cargo.contains("roze-db"));
+        assert!(!cargo.contains("roze-mongo"));
+        assert!(!cargo.contains("toasty"));
         assert!(!cargo.contains(ROZE_GIT_URL));
     }
 
@@ -2162,7 +2368,14 @@ mod tests {
         )
         .expect("valid api");
 
-        let cargo = cargo_toml(&spec, DependencySource::Git, None, false, ProjectKind::Rpc);
+        let cargo = cargo_toml(
+            &spec,
+            "user",
+            DependencySource::Git,
+            None,
+            false,
+            ProjectKind::Rpc,
+        );
 
         assert!(cargo.contains(r#"edition = "2021""#));
         assert!(cargo.contains(r#"version = "0.1.0""#));
@@ -2170,6 +2383,44 @@ mod tests {
         assert!(cargo.contains(r#"tokio = { version = "1""#));
         assert!(cargo.contains(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#));
         assert!(!cargo.contains(".workspace = true"));
+    }
+
+    #[test]
+    fn generated_package_name_uses_output_directory() {
+        let spec = parse_api(
+            r#"
+            service HulaAuth {
+                rpc Login (LoginReq) returns (LoginResp)
+            }
+
+            type LoginReq {
+                token: string
+            }
+
+            type LoginResp {
+                ok: bool
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-package-name-test");
+        let out = root.join("services/hula-auth");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("generate rpc project");
+
+        let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
+        assert!(cargo.contains(r#"name = "hula-auth""#));
+        assert!(!cargo.contains(r#"name = "HulaAuth-service""#));
+
+        fs::remove_dir_all(root).expect("remove test output");
     }
 
     #[test]
@@ -2210,9 +2461,13 @@ mod tests {
             .expect("generate api project");
 
         assert!(out.join("src/handler/mod.rs").is_file());
-        assert!(out.join("src/middleware.rs").is_file());
-        assert!(out.join("src/openapi.rs").is_file());
+        assert!(out.join("src/handler/users/get_users_id.rs").is_file());
+        assert!(out.join("src/middleware/mod.rs").is_file());
+        assert!(out.join("src/openapi/mod.rs").is_file());
         assert!(out.join("src/logic/mod.rs").is_file());
+        assert!(out.join("src/logic/users/get_users_id.rs").is_file());
+        assert!(out.join("src/config/mod.rs").is_file());
+        assert!(out.join("src/types/mod.rs").is_file());
         assert!(!out.join("src/rpc.rs").exists());
         assert!(!out.join("src/client.rs").exists());
         assert!(!out.join("src/pb.rs").exists());
@@ -2221,6 +2476,18 @@ mod tests {
         assert!(fs::read_to_string(out.join("Cargo.toml"))
             .expect("read cargo")
             .contains("roze-rpc"));
+        let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
+        assert!(!cargo.contains("roze-db"));
+        assert!(!cargo.contains("roze-mongo"));
+        assert!(!cargo.contains("toasty"));
+        let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("read svc");
+        assert!(!svc.contains("DatabaseConnections"));
+        assert!(!svc.contains("connect_connections_optional"));
+        assert!(!svc.contains("read_db"));
+        let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
+        assert!(!config.contains("database:"));
+        assert!(!config.contains("mongo:"));
+        assert!(!config.contains("sqlite://"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -2257,17 +2524,27 @@ mod tests {
             })
             .expect("generate rpc project");
 
-        assert!(out.join("src/rpc.rs").is_file());
-        assert!(out.join("src/client.rs").is_file());
-        assert!(out.join("src/pb.rs").is_file());
+        assert!(out.join("src/server/mod.rs").is_file());
+        assert!(out.join("src/client/mod.rs").is_file());
+        assert!(out.join("src/config/mod.rs").is_file());
+        assert!(out.join("src/pb/mod.rs").is_file());
+        assert!(out.join("src/types/mod.rs").is_file());
+        assert!(out.join("src/logic/get_user.rs").is_file());
         assert!(out.join("build.rs").is_file());
         assert!(out.join("proto/service.proto").is_file());
         assert!(!out.join("src/handler").exists());
         assert!(!out.join("src/openapi.rs").exists());
-        assert!(!out.join("src/logic").exists());
+        assert!(!out.join("src/config.rs").exists());
+        assert!(!out.join("src/types.rs").exists());
         assert!(!fs::read_to_string(out.join("Cargo.toml"))
             .expect("read cargo")
             .contains("roze-http"));
+        assert!(!fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read cargo")
+            .contains("toasty"));
+        let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
+        assert!(config.contains("postgres://postgres:postgres@127.0.0.1:5432/user"));
+        assert!(!config.contains("sqlite://"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -2349,6 +2626,10 @@ mod tests {
         let spec = parse_api(
             r#"
             service user-api {
+                @server (
+                    middleware: tenantGuard
+                )
+                @handler getUser
                 get /users/:id (GetUserReq) returns (UserResp)
             }
 
@@ -2381,14 +2662,20 @@ mod tests {
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
         )
         .expect("initial generation");
-        fs::write(out.join("src/logic/mod.rs"), "// custom logic\n").expect("write custom logic");
+        fs::write(out.join("src/logic/users/get_user.rs"), "// custom logic\n")
+            .expect("write custom logic");
+        fs::write(
+            out.join("src/middleware/tenant_guard.rs"),
+            "// custom middleware\n",
+        )
+        .expect("write custom middleware");
         fs::write(out.join("config.yaml"), "name: custom\n").expect("write custom config");
         fs::write(out.join("src/handler/mod.rs"), "// stale handler\n")
             .expect("write stale handler");
         let cargo_path = out.join("Cargo.toml");
         let cargo = fs::read_to_string(&cargo_path)
             .expect("read initial cargo")
-            .replace("name = \"user-api-service\"", "name = \"custom-service\"")
+            .replace("name = \"user\"", "name = \"custom-service\"")
             .replace(
                 "anyhow.workspace = true",
                 "anyhow.workspace = true\ncustom.workspace = true",
@@ -2403,16 +2690,27 @@ mod tests {
         .expect("update generation");
 
         assert_eq!(
-            fs::read_to_string(out.join("src/logic/mod.rs")).expect("read logic"),
+            fs::read_to_string(out.join("src/logic/users/get_user.rs")).expect("read logic"),
             "// custom logic\n"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("src/middleware/tenant_guard.rs"))
+                .expect("read middleware"),
+            "// custom middleware\n"
         );
         assert_eq!(
             fs::read_to_string(out.join("config.yaml")).expect("read config"),
             "name: custom\n"
         );
-        assert!(fs::read_to_string(out.join("src/handler/mod.rs"))
-            .expect("read handler")
+        assert!(fs::read_to_string(out.join("src/route/mod.rs"))
+            .expect("read route")
             .contains("pub fn router"));
+        assert!(fs::read_to_string(out.join("src/route/users.rs"))
+            .expect("read user routes")
+            .contains("handler::users::get_user"));
+        assert!(fs::read_to_string(out.join("src/middleware/mod.rs"))
+            .expect("read middleware mod")
+            .contains("pub use tenant_guard::tenant_guard;"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));

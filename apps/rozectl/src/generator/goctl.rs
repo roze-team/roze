@@ -1151,8 +1151,10 @@ mod tests {
 
         assert!(out.join("proto/service.proto").is_file());
         assert!(out.join("proto/source.proto").is_file());
-        assert!(out.join("src/rpc.rs").is_file());
-        assert!(out.join("src/client.rs").is_file());
+        assert!(out.join("src/server/mod.rs").is_file());
+        assert!(out.join("src/client/mod.rs").is_file());
+        assert!(out.join("src/pb/mod.rs").is_file());
+        assert!(out.join("src/logic/get_user.rs").is_file());
         let service_proto =
             fs::read_to_string(out.join("proto/service.proto")).expect("read proto");
         assert!(service_proto.contains("repeated string tags"));

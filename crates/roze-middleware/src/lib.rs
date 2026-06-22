@@ -1,16 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Request as AxumRequest, State},
-    http::{HeaderMap, HeaderName, HeaderValue},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::Next,
-    response::Response as AxumResponse,
+    response::{IntoResponse, Response as AxumResponse},
     Router,
 };
-use tower::ServiceBuilder;
-use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tower_http::{
+    catch_panic::CatchPanicLayer, cors::CorsLayer, decompression::RequestDecompressionLayer,
+    limit::RequestBodyLimitLayer,
+};
 use tracing::Instrument;
 
 use roze_auth::{principal_from_claims, AuthPrincipal};
@@ -28,13 +31,239 @@ pub fn apply_common<S>(router: Router<S>) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    router.layer(
-        ServiceBuilder::new()
-            .layer(CatchPanicLayer::new())
-            .layer(CorsLayer::permissive())
-            .layer(axum::middleware::from_fn(axum_trace))
-            .layer(axum::middleware::from_fn(axum_request_context)),
-    )
+    apply_common_with_config(router, CommonMiddlewareConfig::default())
+}
+
+pub fn apply_common_with_config<S>(router: Router<S>, config: CommonMiddlewareConfig) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let state = CommonMiddlewareState::from(&config);
+    let mut router = router.layer(axum::middleware::from_fn(axum_request_context));
+    if config.trace || config.stat || config.prometheus {
+        router = router.layer(axum::middleware::from_fn(axum_trace));
+    }
+    router = router.layer(axum::middleware::from_fn_with_state(
+        state,
+        axum_capacity_guard,
+    ));
+    if let Some(limit) = config.request_body_limit_bytes {
+        router = router.layer(RequestBodyLimitLayer::new(limit));
+    }
+    if config.gunzip {
+        router = router.layer(RequestDecompressionLayer::new().gzip(true));
+    }
+    if config.cors {
+        router = router.layer(CorsLayer::permissive());
+    }
+    if config.recover {
+        router = router.layer(CatchPanicLayer::new());
+    }
+    router
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonMiddlewareConfig {
+    pub recover: bool,
+    pub trace: bool,
+    pub stat: bool,
+    pub prometheus: bool,
+    pub cors: bool,
+    pub max_conns: Option<usize>,
+    pub shedding: Option<SheddingConfig>,
+    pub gunzip: bool,
+    pub request_body_limit_bytes: Option<usize>,
+}
+
+impl Default for CommonMiddlewareConfig {
+    fn default() -> Self {
+        Self {
+            recover: true,
+            trace: true,
+            stat: true,
+            prometheus: true,
+            cors: true,
+            max_conns: None,
+            shedding: None,
+            gunzip: false,
+            request_body_limit_bytes: None,
+        }
+    }
+}
+
+impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
+    fn from(config: &roze_config::HttpMiddlewaresConfig) -> Self {
+        Self {
+            recover: config.recover,
+            trace: config.trace,
+            stat: config.stat,
+            prometheus: config.prometheus,
+            cors: config.cors,
+            max_conns: config.max_conns,
+            shedding: config.shedding.map(|shedding| SheddingConfig {
+                concurrency: shedding.concurrency,
+                window: Duration::from_millis(shedding.window_ms),
+                min_samples: shedding.min_samples,
+                max_avg_latency: Duration::from_millis(shedding.max_avg_latency_ms),
+                max_failure_ratio_per_mille: shedding.max_failure_ratio_per_mille,
+                cool_down: Duration::from_millis(shedding.cool_down_ms),
+            }),
+            gunzip: config.gunzip,
+            request_body_limit_bytes: config.request_body_limit_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheddingConfig {
+    pub concurrency: usize,
+    pub window: Duration,
+    pub min_samples: u64,
+    pub max_avg_latency: Duration,
+    pub max_failure_ratio_per_mille: u32,
+    pub cool_down: Duration,
+}
+
+#[derive(Clone)]
+struct CommonMiddlewareState {
+    max_conns: Option<Arc<Semaphore>>,
+    shedding: Option<Arc<AdaptiveShedding>>,
+}
+
+impl From<&CommonMiddlewareConfig> for CommonMiddlewareState {
+    fn from(config: &CommonMiddlewareConfig) -> Self {
+        Self {
+            max_conns: config
+                .max_conns
+                .filter(|limit| *limit > 0)
+                .map(|limit| Arc::new(Semaphore::new(limit))),
+            shedding: config
+                .shedding
+                .filter(|config| config.concurrency > 0)
+                .map(AdaptiveShedding::new)
+                .map(Arc::new),
+        }
+    }
+}
+
+struct AdaptiveShedding {
+    config: SheddingConfig,
+    concurrency: Arc<Semaphore>,
+    state: Mutex<AdaptiveSheddingState>,
+}
+
+#[derive(Debug)]
+struct AdaptiveSheddingState {
+    window_started: Instant,
+    requests: u64,
+    failures: u64,
+    total_latency: Duration,
+    overloaded_until: Option<Instant>,
+}
+
+struct SheddingPermit {
+    runtime: Arc<AdaptiveShedding>,
+    permit: OwnedSemaphorePermit,
+    started: Instant,
+}
+
+impl AdaptiveShedding {
+    fn new(config: SheddingConfig) -> Self {
+        Self {
+            config,
+            concurrency: Arc::new(Semaphore::new(config.concurrency)),
+            state: Mutex::new(AdaptiveSheddingState {
+                window_started: Instant::now(),
+                requests: 0,
+                failures: 0,
+                total_latency: Duration::ZERO,
+                overloaded_until: None,
+            }),
+        }
+    }
+
+    fn try_begin(self: &Arc<Self>) -> Result<SheddingPermit, SheddingRejectReason> {
+        let now = Instant::now();
+        if self.should_shed(now) {
+            return Err(SheddingRejectReason::Overloaded);
+        }
+        let permit = self
+            .concurrency
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SheddingRejectReason::Concurrency)?;
+        Ok(SheddingPermit {
+            runtime: self.clone(),
+            permit,
+            started: now,
+        })
+    }
+
+    fn should_shed(&self, now: Instant) -> bool {
+        let mut state = self.state.lock().expect("adaptive shedding lock poisoned");
+        self.rotate_window_if_needed(&mut state, now);
+        if state
+            .overloaded_until
+            .is_some_and(|overloaded_until| now < overloaded_until)
+        {
+            return true;
+        }
+        if state.requests < self.config.min_samples.max(1) {
+            return false;
+        }
+
+        let avg_latency = avg_latency(&state);
+        let failure_ratio = failure_ratio_per_mille(&state);
+        let latency_overloaded = avg_latency > self.config.max_avg_latency;
+        let failure_overloaded = failure_ratio > self.config.max_failure_ratio_per_mille;
+        if latency_overloaded || failure_overloaded {
+            state.overloaded_until = Some(now + self.config.cool_down);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record(&self, success: bool, elapsed: Duration) {
+        let now = Instant::now();
+        let mut state = self.state.lock().expect("adaptive shedding lock poisoned");
+        self.rotate_window_if_needed(&mut state, now);
+        state.requests = state.requests.saturating_add(1);
+        if !success {
+            state.failures = state.failures.saturating_add(1);
+        }
+        state.total_latency = state.total_latency.saturating_add(elapsed);
+    }
+
+    fn rotate_window_if_needed(&self, state: &mut AdaptiveSheddingState, now: Instant) {
+        let window = self.config.window.max(Duration::from_millis(1));
+        if now.duration_since(state.window_started) < window {
+            return;
+        }
+        state.window_started = now;
+        state.requests = 0;
+        state.failures = 0;
+        state.total_latency = Duration::ZERO;
+        if state
+            .overloaded_until
+            .is_some_and(|overloaded_until| now >= overloaded_until)
+        {
+            state.overloaded_until = None;
+        }
+    }
+}
+
+impl SheddingPermit {
+    fn record(self, success: bool) {
+        self.runtime.record(success, self.started.elapsed());
+        drop(self.permit);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SheddingRejectReason {
+    Concurrency,
+    Overloaded,
 }
 
 pub fn apply_auth<S>(router: Router<S>, config: JwtConfig) -> Router<S>
@@ -186,23 +415,120 @@ pub async fn axum_idempotency_key(mut req: AxumRequest, next: Next) -> AxumRespo
     next.run(req).await
 }
 
+async fn axum_capacity_guard(
+    State(state): State<CommonMiddlewareState>,
+    req: AxumRequest,
+    next: Next,
+) -> AxumResponse {
+    let max_conns_permit = match state.max_conns {
+        Some(semaphore) => match semaphore.try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "maximum connections exceeded",
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let shedding_permit = match state.shedding {
+        Some(shedding) => match shedding.try_begin() {
+            Ok(permit) => Some(permit),
+            Err(SheddingRejectReason::Concurrency) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "shedding concurrency exceeded",
+                )
+                    .into_response();
+            }
+            Err(SheddingRejectReason::Overloaded) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, "service overloaded").into_response();
+            }
+        },
+        None => None,
+    };
+
+    let response = next.run(req).await;
+    let success = response.status().is_success();
+    if let Some(permit) = shedding_permit {
+        permit.record(success);
+    }
+    drop(max_conns_permit);
+    response
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltInMiddleware {
     Auth,
+    Trace,
+    Recover,
+    Stat,
+    Prometheus,
+    Cors,
     Timeout,
     RateLimit,
     Breaker,
+    MaxConns,
+    Shedding,
+    Gunzip,
+    BodyLimit,
+    Idempotency,
 }
 
 impl BuiltInMiddleware {
     pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "auth" => Some(Self::Auth),
+        match normalize_middleware_name(name).as_str() {
+            "auth" | "jwt" => Some(Self::Auth),
+            "trace" | "tracing" => Some(Self::Trace),
+            "recover" | "recovery" | "panic_recover" => Some(Self::Recover),
+            "stat" | "stats" => Some(Self::Stat),
+            "prometheus" | "metrics" | "metric" => Some(Self::Prometheus),
+            "cors" => Some(Self::Cors),
             "timeout" => Some(Self::Timeout),
-            "rate_limit" | "ratelimit" => Some(Self::RateLimit),
+            "rate_limit" | "ratelimit" | "rate" => Some(Self::RateLimit),
             "breaker" | "circuit_breaker" => Some(Self::Breaker),
+            "max_conns" | "max_connections" | "max_conn" | "max_connection" => Some(Self::MaxConns),
+            "shedding" | "load_shed" | "load_shedding" => Some(Self::Shedding),
+            "gunzip" | "gzip" | "request_gunzip" => Some(Self::Gunzip),
+            "body_limit" | "request_body_limit" | "max_bytes" | "max_body_bytes" => {
+                Some(Self::BodyLimit)
+            }
+            "idempotency" | "idempotency_key" => Some(Self::Idempotency),
             _ => None,
         }
+    }
+}
+
+fn normalize_middleware_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .flat_map(|ch| match ch {
+            '-' | ' ' => ['_'].into_iter().collect::<Vec<_>>(),
+            ch if ch.is_ascii_uppercase() => ['_', ch.to_ascii_lowercase()]
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ch => [ch].into_iter().collect::<Vec<_>>(),
+        })
+        .collect::<String>()
+        .trim_start_matches('_')
+        .to_string()
+}
+
+fn avg_latency(state: &AdaptiveSheddingState) -> Duration {
+    if state.requests == 0 {
+        Duration::ZERO
+    } else {
+        state.total_latency / state.requests as u32
+    }
+}
+
+fn failure_ratio_per_mille(state: &AdaptiveSheddingState) -> u32 {
+    if state.requests == 0 {
+        0
+    } else {
+        ((state.failures.saturating_mul(1000)) / state.requests) as u32
     }
 }
 
@@ -716,9 +1042,33 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_shedding_rejects_after_unhealthy_window() {
+        let runtime = Arc::new(AdaptiveShedding::new(SheddingConfig {
+            concurrency: 10,
+            window: Duration::from_millis(1000),
+            min_samples: 1,
+            max_avg_latency: Duration::from_millis(500),
+            max_failure_ratio_per_mille: 0,
+            cool_down: Duration::from_millis(1000),
+        }));
+
+        runtime.record(false, Duration::from_millis(10));
+
+        assert!(matches!(
+            runtime.try_begin(),
+            Err(SheddingRejectReason::Overloaded)
+        ));
+    }
+
+    #[test]
     fn resolves_builtin_and_custom_middleware() {
         let plan = resolve_middleware_plan(&[
             "auth".to_string(),
+            "trace".to_string(),
+            "cors".to_string(),
+            "maxConns".to_string(),
+            "gunzip".to_string(),
+            "body-limit".to_string(),
             "breaker".to_string(),
             "audit".to_string(),
             "auth".to_string(),
@@ -726,7 +1076,15 @@ mod tests {
 
         assert_eq!(
             plan.builtins,
-            vec![BuiltInMiddleware::Auth, BuiltInMiddleware::Breaker]
+            vec![
+                BuiltInMiddleware::Auth,
+                BuiltInMiddleware::Trace,
+                BuiltInMiddleware::Cors,
+                BuiltInMiddleware::MaxConns,
+                BuiltInMiddleware::Gunzip,
+                BuiltInMiddleware::BodyLimit,
+                BuiltInMiddleware::Breaker,
+            ]
         );
         assert_eq!(plan.custom, vec!["audit"]);
     }
@@ -910,5 +1268,54 @@ mod tests {
             .expect("body");
 
         assert_eq!(body.as_ref(), b"idem-1");
+    }
+
+    #[tokio::test]
+    async fn capacity_guard_rejects_when_shedding_limit_is_full() {
+        let app = apply_common_with_config(
+            axum::Router::new().route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    "ok"
+                }),
+            ),
+            CommonMiddlewareConfig {
+                trace: false,
+                stat: false,
+                prometheus: false,
+                shedding: Some(SheddingConfig {
+                    concurrency: 1,
+                    window: Duration::from_millis(1000),
+                    min_samples: 100,
+                    max_avg_latency: Duration::from_millis(500),
+                    max_failure_ratio_per_mille: 500,
+                    cool_down: Duration::from_millis(1000),
+                }),
+                ..Default::default()
+            },
+        );
+
+        let first = tokio::spawn(
+            app.clone().oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .body(Body::empty())
+                    .expect("request"),
+            ),
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        first.await.expect("first request").expect("first response");
     }
 }

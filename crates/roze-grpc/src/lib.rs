@@ -18,15 +18,14 @@ pub mod transport {
 pub mod build {
     use std::{error::Error, path::Path};
 
-    pub fn compile<P, I>(proto_files: &[P], includes: &[I]) -> Result<(), Box<dyn Error>>
+    pub fn compile<P>(proto_files: &[P], includes: &[P]) -> Result<(), Box<dyn Error>>
     where
         P: AsRef<Path>,
-        I: AsRef<Path>,
     {
-        tonic_build::configure()
+        tonic_prost_build::configure()
             .build_server(true)
             .build_client(true)
-            .compile(proto_files, includes)?;
+            .compile_protos(proto_files, includes)?;
         Ok(())
     }
 }
