@@ -128,6 +128,10 @@ enum Commands {
         #[arg(long)]
         tool: Vec<String>,
     },
+    Doc {
+        #[command(subcommand)]
+        command: DocCommands,
+    },
     Openapi {
         #[command(subcommand)]
         command: OpenApiCommands,
@@ -405,6 +409,18 @@ enum DiffCommands {
         format: ModelFormat,
         #[arg(long, value_enum, default_value_t)]
         orm: ModelOrm,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocCommands {
+    Service {
+        #[arg(short = 'a', long = "api")]
+        api: PathBuf,
+        #[arg(long, default_value = "SERVICE.md")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -821,6 +837,11 @@ fn main() -> anyhow::Result<()> {
             tcp,
             tool,
         } => run_doctor(config, port, tcp, tool)?,
+        Commands::Doc { command } => match command {
+            DocCommands::Service { api, out, force } => {
+                generator::write_service_markdown_doc(&api, &out, force)?;
+            }
+        },
         Commands::Openapi { command } => match command {
             OpenApiCommands::Generate { api, out } => {
                 generator::write_openapi_json(&api, &out)?;
@@ -1261,6 +1282,24 @@ mod tests {
         ])
         .expect("parse doctor");
         assert!(matches!(doctor.command, Commands::Doctor { .. }));
+
+        let doc_service = Cli::try_parse_from([
+            "rozectl",
+            "doc",
+            "service",
+            "--api",
+            "user.api",
+            "--out",
+            "SERVICE.md",
+            "--force",
+        ])
+        .expect("parse doc service");
+        assert!(matches!(
+            doc_service.command,
+            Commands::Doc {
+                command: DocCommands::Service { force: true, .. }
+            }
+        ));
 
         let client = Cli::try_parse_from([
             "rozectl",

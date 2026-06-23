@@ -177,6 +177,7 @@ rozectl docker -go main.go --binary user-api --port 8080
 rozectl kube deploy --name user-api --image registry.example.com/user-api:latest
 rozectl api swagger -api example/user.api -dir docs/openapi --format yaml
 rozectl api doc -api example/user.api -dir . -o docs/api
+rozectl doc service --api example/user.api --out SERVICE.md
 ```
 
 `rozectl model generate example/user.model --out apps/roze-example` writes a
@@ -205,13 +206,21 @@ rozectl model mysql ddl \
 The default Toasty output uses `#[derive(toasty::Model)]`, preserves
 auto-increment primary keys with `#[auto]`, marks generated cache-key lookups as
 `#[unique]`, and adds `toasty` to the target service manifest when a
-`Cargo.toml` is present. It expects application code to pass a configured
-`toasty::Db`. Generated repositories include single-table primary/cache-key
+`Cargo.toml` is present. Generated Toasty repository methods accept
+`&mut dyn toasty::Executor`, so the same CRUD helpers can run against a
+configured `toasty::Db` or a `toasty::Transaction`. Generated repositories
+include single-table primary/cache-key
 lookup, `list`, `insert`, `update`, `delete_by_<primary>`, `count`, paginated
-query, equality/IN/range filters, typed sorting, batch insert/delete,
+query, equality/IN/range filters, nullable equality/`IS NULL` filters, typed sorting, batch insert/delete,
 soft-delete helpers, and tenant-scoped lookup when matching columns are
 configured or inferred. SeaORM output uses the same repository surface with
-set-based batch operations.
+set-based batch operations. Toasty and SeaORM repositories both include local
+transaction helpers; SeaORM passes `sea_orm::DatabaseTransaction` to the
+callback. Field metadata is generated separately as
+`src/model/<model>_fields.rs`, exporting table constants and `{Model}Field`
+enums for codegen, validation, and AI-readable context. Handwritten model or
+repository extensions belong in `src/model/<model>_ext.rs`; `--update`
+preserves that file and `--force` rewrites it.
 
 Use `--schema` to make the target schema explicit when the table name is
 shared across namespaces:

@@ -37,7 +37,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
 | 10 | 数据库、缓存、事务 | 中 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm` | 连接、ORM、cache、singleflight、TCC/Saga/outbox/inbox primitives 已有；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
 | 11 | 部署和运维 | 中低 | `rozectl docker`, `rozectl kube`, `docker-compose.integration.yml` | Docker/K8s 生成已有；缺 Helm、doctor、manifest validation、NetworkPolicy/ServiceAccount/PDB/HPA 更完整模板和生产验收脚本。 |
-| 12 | CLI/生成器/AI 友好 | 中 | `rozectl api/rpc/model/openapi/client/docker/kube/diff/doctor`, 稳定生成目录 | 生成主干很强；已具备文件级 `diff` 预览和本机 `doctor` 检查；仍缺 `dev`、`stream gen`、`test gen`、`mock gen`、`AI_CONTEXT.md`/`SERVICE.md` 自动生成。 |
+| 12 | CLI/生成器/AI 友好 | 中 | `rozectl api/rpc/model/openapi/client/docker/kube/diff/doctor/doc`, 稳定生成目录 | 生成主干很强；已具备文件级 `diff` 预览、本机 `doctor` 检查和 `SERVICE.md` 生成；仍缺 `dev`、`stream gen`、`test gen`、`mock gen`、`AI_CONTEXT.md`/`ARCHITECTURE.md`/`DEPENDENCIES.md` 自动生成。 |
 
 ## 功能规格清单
 
@@ -149,7 +149,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | 功能 | MVP | 增强项 | 推荐落点 | 验收 |
 | --- | --- | --- | --- | --- |
-| Model 生成 | Toasty 默认、SeaORM 可选，生成单表 CRUD、`count`、分页、等值/IN/范围条件、排序、批量、软删、租户限定方法 | schema namespace、关系、索引策略、跨字段复杂条件、事务模板 | `apps/rozectl`, `roze-orm` | 默认生成 Toasty，`--orm sea-orm` 切换；基础增删改查和增强查询可直接调用。 |
+| Model 生成 | Toasty 默认、SeaORM 可选，生成单表 CRUD、`count`、分页、等值/IN/范围条件、可空字段等值/IS NULL、排序、批量、软删、租户限定方法、独立字段文件、extension 保留文件、复合索引查询方法、Toasty/SeaORM 本地事务 helper | schema namespace、关系、跨字段复杂条件、Unit of Work 示例、事务边界守卫 | `apps/rozectl`, `roze-orm` | 默认生成 Toasty，`--orm sea-orm` 切换；字段元数据独立，`<model>_ext.rs` 在 `--update` 保留，基础增删改查和增强查询可直接调用，Toasty/SeaORM 可显式开启本地事务边界。 |
 | DB 连接 | pool config、timeout | read/write split、多数据源 | `roze-db`, `roze-sqlx` | 连接失败影响 readiness。 |
 | Migration | migration scaffold | rollback、dry-run、status | `roze-migration`, `rozectl migrate` | 本地示例能执行 migration。 |
 | 事务上下文 | 本地事务 helper | Unit of Work、nested boundary guard | `roze-transaction` | 业务 logic 能显式控制事务。 |
@@ -176,7 +176,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | diff | 文件级 diff | ownership-aware diff、breaking change report | `rozectl diff` | 默认不写盘，输出清晰。 |
 | doctor/dev | `doctor` 已有本机工具、端口、配置和 TCP live probe；`dev` 待补 | 自动修复建议、profile 管理、协议级 probe | `rozectl doctor/dev` | 本地 onboarding 时间可控。 |
 | doc/sdk/test/mock | 文档、SDK、测试、mock 生成 | multi-language SDK、contract tests | `apps/rozectl` | 从契约能生成可运行辅助资产。 |
-| AI_CONTEXT | SERVICE/AI_CONTEXT/ARCHITECTURE/DEPENDENCIES | 依赖图、topic/cache key 提取 | `rozectl doc gen` | AI 能知道哪些文件能改、哪些不能改。 |
+| AI_CONTEXT | `rozectl doc service` 已可从 `.api` 生成 `SERVICE.md`，包含接口、所有权边界、常用命令和 AI notes | AI_CONTEXT/ARCHITECTURE/DEPENDENCIES、依赖图、topic/cache key 提取 | `rozectl doc service` / `rozectl doc gen` | AI 能知道哪些文件能改、哪些不能改。 |
 | upgrade | update/diff/compat check | migration guide automation | `rozectl update` | 框架升级能预览影响并保护业务代码。 |
 
 ## 当前架构资产盘点
@@ -364,7 +364,7 @@ P0 不应该继续扩模块，而应该补“可信闭环”。
 ### P2：让框架成为团队和 AI 的默认协作底座
 
 1. `rozectl mock gen`、`rozectl test gen`、`rozectl stream gen`、`rozectl dev`、`rozectl bench`。
-2. 自动生成 `SERVICE.md`、`AI_CONTEXT.md`、`ARCHITECTURE.md`、`DEPENDENCIES.md`。
+2. `SERVICE.md` 已支持从 `.api` 生成；继续自动生成 `AI_CONTEXT.md`、`ARCHITECTURE.md`、`DEPENDENCIES.md`。
 3. Admin API/UI：registry instances、config reload history、DLQ snapshots/replay/purge、breaker/rate limiter 状态。
 4. 高级流量治理：A/B testing、traffic mirror、blue/green、header/cookie/tenant/user routing。
 5. 完整示例：REST CRUD、REST+RPC+DB+Redis、Gateway+Registry+MQ+Outbox+DTM。
@@ -486,7 +486,7 @@ AI Collaboration Layer
 4. 完善健康接口模板：REST 已输出 `/healthz`、`/readyz`、`/startupz`、`/metrics`；继续补 RPC/Gateway 和依赖 readiness。
 5. 给 Gateway 增加 app 级 smoke script：一键起 mock upstream + gateway，覆盖 rewrite/auth/rate/breaker/retry/fallback。
 6. 给 MQ 增加真实 Kafka/NATS integration profile：默认跳过，显式 env 开启。
-7. 生成 `SERVICE.md`：从 `.api` 服务名、路由、依赖配置、MQ topic、DB/Redis 配置推导 AI 上下文。
+7. 生成 `SERVICE.md`：已支持从 `.api` 服务名、REST/RPC 接口和所有权边界生成；下一步从依赖配置、MQ topic、DB/Redis 配置推导更完整 AI 上下文。
 
 ## 建议新增 CLI 命令契约
 
@@ -497,6 +497,7 @@ AI Collaboration Layer
 | `rozectl dev` | P1 | 启动本地依赖或提示 docker compose 命令；输出服务端口和健康检查地址。 |
 | `rozectl test gen` | P1 | 从 `.api` 生成 HTTP/RPC smoke tests 和最小断言。 |
 | `rozectl mock gen` | P1 | 从 `.api`/OpenAPI 生成 mock server 或 mock handler。 |
+| `rozectl doc service` | P1 | 已支持从 `.api` 生成 `SERVICE.md`，包含接口清单、生成器所有权边界、常用命令和 AI editing notes。 |
 | `rozectl stream gen` | P2 | 从事件契约生成 producer/consumer skeleton、DLQ 配置和 envelope 类型。 |
 | `rozectl bench` | P2 | 生成或运行基础压测脚本，输出延迟、错误率和吞吐。 |
 
