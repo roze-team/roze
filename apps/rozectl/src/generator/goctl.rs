@@ -47,7 +47,18 @@ pub struct KubeDeployOptions {
     pub env: Vec<String>,
     pub env_file: Option<PathBuf>,
     pub config_map: Option<String>,
+    pub service_account: bool,
+    pub pdb: bool,
+    pub min_available: String,
+    pub network_policy: bool,
     pub out: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct HelmOptions {
+    pub deploy: KubeDeployOptions,
+    pub chart_version: String,
+    pub app_version: String,
 }
 
 pub fn write_swagger(api: &Path, dir: &Path, format: OpenApiOutputFormat) -> anyhow::Result<()> {
@@ -142,6 +153,49 @@ pub fn write_kube_deploy(options: KubeDeployOptions) -> anyhow::Result<()> {
     .with_context(|| format!("failed to write {}", options.out.display()))
 }
 
+pub fn write_helm_chart(options: HelmOptions) -> anyhow::Result<()> {
+    validate_kube_options(&options.deploy)?;
+    let out = &options.deploy.out;
+    fs::create_dir_all(out.join("templates"))
+        .with_context(|| format!("failed to create {}", out.join("templates").display()))?;
+    fs::write(out.join("Chart.yaml"), render_helm_chart_yaml(&options))
+        .with_context(|| format!("failed to write {}", out.join("Chart.yaml").display()))?;
+    fs::write(
+        out.join("values.yaml"),
+        render_helm_values_yaml(&options.deploy),
+    )
+    .with_context(|| format!("failed to write {}", out.join("values.yaml").display()))?;
+    fs::write(
+        out.join("templates/deployment.yaml"),
+        render_helm_deployment(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("templates/deployment.yaml").display()
+        )
+    })?;
+    fs::write(out.join("templates/service.yaml"), render_helm_service()).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("templates/service.yaml").display()
+        )
+    })?;
+    fs::write(out.join("templates/hpa.yaml"), render_helm_hpa()).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("templates/hpa.yaml").display()
+        )
+    })?;
+    fs::write(out.join("templates/_helpers.tpl"), render_helm_helpers()).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("templates/_helpers.tpl").display()
+        )
+    })?;
+    Ok(())
+}
+
 pub fn generate_rpc_from_proto(
     proto: &Path,
     out: &Path,
@@ -220,11 +274,15 @@ fn render_kube_deploy(
 ) -> String {
     let env = render_kube_env(options);
     let env_from = render_kube_env_from(options);
+    let service_account = render_kube_service_account(options);
+    let service_account_name = render_kube_service_account_name(options);
+    let pdb = render_kube_pdb(options);
+    let network_policy = render_kube_network_policy(options);
     let env_config_map = env_file_entries
         .map(|entries| render_kube_config_map(&format!("{}-env", options.name), options, entries))
         .unwrap_or_default();
     format!(
-        r#"{env_config_map}apiVersion: apps/v1
+        r#"{env_config_map}{service_account}apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {name}
@@ -239,6 +297,7 @@ spec:
       labels:
         app: {name}
     spec:
+{service_account_name}      terminationGracePeriodSeconds: 30
       containers:
       - name: {name}
         image: {image}
@@ -304,8 +363,9 @@ spec:
     resource:
       name: cpu
       target:
-        type: Utilization
-        averageUtilization: {target_cpu}
+          type: Utilization
+          averageUtilization: {target_cpu}
+{pdb}{network_policy}
 "#,
         name = options.name,
         namespace = options.namespace,
@@ -313,6 +373,8 @@ spec:
         image = options.image,
         port = options.port,
         env_config_map = env_config_map,
+        service_account = service_account,
+        service_account_name = service_account_name,
         env = env,
         env_from = env_from,
         cpu_request = options.cpu_request,
@@ -321,8 +383,232 @@ spec:
         memory_limit = options.memory_limit,
         min_replicas = options.min_replicas,
         max_replicas = options.max_replicas,
-        target_cpu = options.target_cpu
+        target_cpu = options.target_cpu,
+        pdb = pdb,
+        network_policy = network_policy
     )
+}
+
+fn render_helm_chart_yaml(options: &HelmOptions) -> String {
+    format!(
+        r#"apiVersion: v2
+name: {name}
+description: Roze service chart for {name}
+type: application
+version: {chart_version}
+appVersion: {app_version:?}
+"#,
+        name = options.deploy.name,
+        chart_version = options.chart_version,
+        app_version = options.app_version
+    )
+}
+
+fn render_helm_values_yaml(options: &KubeDeployOptions) -> String {
+    let env = options
+        .env
+        .iter()
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(name, value)| format!("  {name}: {value:?}\n"))
+        .collect::<String>();
+    let env_from = options
+        .config_map
+        .as_deref()
+        .map(|name| format!("  - configMapRef:\n      name: {name}\n"))
+        .unwrap_or_default();
+    format!(
+        r#"replicaCount: {replicas}
+
+image:
+  repository: {image_repository:?}
+  tag: {image_tag:?}
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: {port}
+
+resources:
+  requests:
+    cpu: {cpu_request}
+    memory: {memory_request}
+  limits:
+    cpu: {cpu_limit}
+    memory: {memory_limit}
+
+autoscaling:
+  enabled: true
+  minReplicas: {min_replicas}
+  maxReplicas: {max_replicas}
+  targetCPUUtilizationPercentage: {target_cpu}
+
+probes:
+  liveness:
+    path: /healthz
+  readiness:
+    path: /readyz
+  startup:
+    path: /startupz
+
+env:
+{env}envFrom:
+{env_from}"#,
+        replicas = options.replicas,
+        image_repository = helm_image_repository(&options.image),
+        image_tag = helm_image_tag(&options.image),
+        port = options.port,
+        cpu_request = options.cpu_request,
+        memory_request = options.memory_request,
+        cpu_limit = options.cpu_limit,
+        memory_limit = options.memory_limit,
+        min_replicas = options.min_replicas,
+        max_replicas = options.max_replicas,
+        target_cpu = options.target_cpu,
+        env = if env.is_empty() {
+            "  {}\n".to_string()
+        } else {
+            env
+        },
+        env_from = if env_from.is_empty() {
+            "  []\n".to_string()
+        } else {
+            env_from
+        }
+    )
+}
+
+fn render_helm_deployment() -> &'static str {
+    r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "roze.fullname" . }}
+  labels:
+    {{- include "roze.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "roze.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "roze.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          {{- with .Values.env }}
+          env:
+            {{- range $name, $value := . }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.service.port }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.service.port }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: {{ .Values.service.port }}
+"#
+}
+
+fn render_helm_service() -> &'static str {
+    r#"apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "roze.fullname" . }}
+  labels:
+    {{- include "roze.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "roze.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+"#
+}
+
+fn render_helm_hpa() -> &'static str {
+    r#"{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "roze.fullname" . }}
+  labels:
+    {{- include "roze.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "roze.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+"#
+}
+
+fn render_helm_helpers() -> &'static str {
+    r#"{{- define "roze.fullname" -}}
+{{- .Chart.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "roze.labels" -}}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+{{ include "roze.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{- define "roze.selectorLabels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+"#
+}
+
+fn helm_image_repository(image: &str) -> String {
+    helm_image_parts(image)
+        .map(|(repo, _)| repo.to_string())
+        .unwrap_or_else(|| image.to_string())
+}
+
+fn helm_image_tag(image: &str) -> String {
+    helm_image_parts(image)
+        .map(|(_, tag)| tag.to_string())
+        .unwrap_or_else(|| "latest".to_string())
+}
+
+fn helm_image_parts(image: &str) -> Option<(&str, &str)> {
+    let (repo, tag) = image.rsplit_once(':')?;
+    if tag.contains('/') {
+        None
+    } else {
+        Some((repo, tag))
+    }
 }
 
 fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
@@ -332,6 +618,9 @@ fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
     if options.target_cpu == 0 || options.target_cpu > 100 {
         bail!("--target-cpu must be between 1 and 100");
     }
+    if options.pdb && options.min_available.trim().is_empty() {
+        bail!("--min-available cannot be empty when --pdb is enabled");
+    }
     for entry in &options.env {
         let Some((name, _)) = entry.split_once('=') else {
             bail!("--env entries must use KEY=VALUE format: {entry}");
@@ -339,6 +628,84 @@ fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
         validate_env_name(name)?;
     }
     Ok(())
+}
+
+fn render_kube_service_account(options: &KubeDeployOptions) -> String {
+    if !options.service_account {
+        return String::new();
+    }
+    format!(
+        r#"apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {name}
+  namespace: {namespace}
+---
+"#,
+        name = options.name,
+        namespace = options.namespace
+    )
+}
+
+fn render_kube_service_account_name(options: &KubeDeployOptions) -> String {
+    if options.service_account {
+        format!("      serviceAccountName: {}\n", options.name)
+    } else {
+        String::new()
+    }
+}
+
+fn render_kube_pdb(options: &KubeDeployOptions) -> String {
+    if !options.pdb {
+        return String::new();
+    }
+    format!(
+        r#"---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  minAvailable: {min_available}
+  selector:
+    matchLabels:
+      app: {name}
+"#,
+        name = options.name,
+        namespace = options.namespace,
+        min_available = options.min_available
+    )
+}
+
+fn render_kube_network_policy(options: &KubeDeployOptions) -> String {
+    if !options.network_policy {
+        return String::new();
+    }
+    format!(
+        r#"---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  podSelector:
+    matchLabels:
+      app: {name}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector: {{}}
+    ports:
+    - protocol: TCP
+      port: {port}
+"#,
+        name = options.name,
+        namespace = options.namespace,
+        port = options.port
+    )
 }
 
 fn read_env_file(path: &Path) -> anyhow::Result<Vec<(String, String)>> {
@@ -1070,6 +1437,73 @@ mod tests {
         assert!(rendered.contains("envFrom:"));
         assert!(rendered.contains("name: user-config"));
         assert!(rendered.contains("name: user-env"));
+    }
+
+    #[test]
+    fn renders_and_writes_helm_chart() {
+        let root = temp_root("helm");
+        let out = root.join("chart");
+        let options = HelmOptions {
+            deploy: KubeDeployOptions {
+                name: "user".to_string(),
+                image: "registry.example.com/user:1.2.3".to_string(),
+                namespace: "default".to_string(),
+                replicas: 2,
+                port: 3000,
+                cpu_request: "100m".to_string(),
+                cpu_limit: "500m".to_string(),
+                memory_request: "128Mi".to_string(),
+                memory_limit: "512Mi".to_string(),
+                min_replicas: 1,
+                max_replicas: 5,
+                target_cpu: 70,
+                env: vec!["RUST_LOG=info".to_string()],
+                env_file: None,
+                config_map: Some("user-config".to_string()),
+                out: out.clone(),
+            },
+            chart_version: "0.1.0".to_string(),
+            app_version: "1.2.3".to_string(),
+        };
+
+        let values = render_helm_values_yaml(&options.deploy);
+        assert!(values.contains(r#"repository: "registry.example.com/user""#));
+        assert!(values.contains(r#"tag: "1.2.3""#));
+        assert!(values.contains("RUST_LOG: \"info\""));
+        assert!(values.contains("name: user-config"));
+
+        write_helm_chart(options).expect("write helm chart");
+        assert!(fs::read_to_string(out.join("Chart.yaml"))
+            .expect("read chart")
+            .contains("name: user"));
+        assert!(fs::read_to_string(out.join("templates/deployment.yaml"))
+            .expect("read deployment")
+            .contains("kind: Deployment"));
+        assert!(fs::read_to_string(out.join("templates/service.yaml"))
+            .expect("read service")
+            .contains("kind: Service"));
+        assert!(fs::read_to_string(out.join("templates/hpa.yaml"))
+            .expect("read hpa")
+            .contains("kind: HorizontalPodAutoscaler"));
+        assert!(fs::read_to_string(out.join("templates/_helpers.tpl"))
+            .expect("read helpers")
+            .contains("roze.fullname"));
+
+        fs::remove_dir_all(root).expect("remove helm temp");
+    }
+
+    #[test]
+    fn helm_image_parser_allows_registry_ports_without_tags() {
+        assert_eq!(
+            helm_image_repository("localhost:5000/user-api"),
+            "localhost:5000/user-api"
+        );
+        assert_eq!(helm_image_tag("localhost:5000/user-api"), "latest");
+        assert_eq!(
+            helm_image_repository("localhost:5000/user-api:1.2.3"),
+            "localhost:5000/user-api"
+        );
+        assert_eq!(helm_image_tag("localhost:5000/user-api:1.2.3"), "1.2.3");
     }
 
     #[test]

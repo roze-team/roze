@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use roze_sqlx::SqlxDatabaseKind;
 
 use generator::{
-    goctl::{DockerOptions, KubeDeployOptions, OpenApiOutputFormat},
+    goctl::{DockerOptions, HelmOptions, KubeDeployOptions, OpenApiOutputFormat},
     DependencySource, GenerateMode, GenerateOptions, GeneratorCommand,
 };
 
@@ -128,6 +128,14 @@ enum Commands {
         #[command(subcommand)]
         command: MockCommands,
     },
+    Test {
+        #[command(subcommand)]
+        command: TestCommands,
+    },
+    Dev {
+        #[command(subcommand)]
+        command: DevCommands,
+    },
     Doctor {
         #[arg(long)]
         config: Option<PathBuf>,
@@ -165,6 +173,10 @@ enum Commands {
     Kube {
         #[command(subcommand)]
         command: KubeCommands,
+    },
+    Helm {
+        #[command(subcommand)]
+        command: HelmCommands,
     },
     #[command(hide = true)]
     Generate {
@@ -376,7 +388,53 @@ enum KubeCommands {
         env_file: Option<PathBuf>,
         #[arg(long)]
         config_map: Option<String>,
+        #[arg(long)]
+        service_account: bool,
+        #[arg(long)]
+        pdb: bool,
+        #[arg(long, default_value = "1")]
+        min_available: String,
+        #[arg(long)]
+        network_policy: bool,
         #[arg(long, default_value = "deploy/kubernetes.yaml")]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HelmCommands {
+    Chart {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        image: String,
+        #[arg(long, default_value_t = 2)]
+        replicas: u32,
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        #[arg(long, alias = "request-cpu", default_value = "100m")]
+        cpu_request: String,
+        #[arg(long, alias = "limit-cpu", default_value = "500m")]
+        cpu_limit: String,
+        #[arg(long, alias = "request-memory", default_value = "128Mi")]
+        memory_request: String,
+        #[arg(long, alias = "limit-memory", default_value = "512Mi")]
+        memory_limit: String,
+        #[arg(long, default_value_t = 1)]
+        min_replicas: u32,
+        #[arg(long, default_value_t = 5)]
+        max_replicas: u32,
+        #[arg(long, default_value_t = 70)]
+        target_cpu: u32,
+        #[arg(long)]
+        env: Vec<String>,
+        #[arg(long)]
+        config_map: Option<String>,
+        #[arg(long, default_value = "0.1.0")]
+        chart_version: String,
+        #[arg(long, default_value = "0.1.0")]
+        app_version: String,
+        #[arg(long, default_value = "deploy/chart")]
         out: PathBuf,
     },
 }
@@ -445,11 +503,71 @@ enum MockCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum TestCommands {
+    Gen {
+        #[arg(short = 'a', long = "api")]
+        api: PathBuf,
+        #[arg(long, default_value = "contract-tests")]
+        out: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        base_url: String,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DevCommands {
+    Up {
+        #[arg(
+            short = 'f',
+            long = "file",
+            default_value = "docker-compose.integration.yml"
+        )]
+        file: PathBuf,
+        #[arg(long)]
+        profile: Vec<String>,
+        #[arg(long)]
+        detach: bool,
+    },
+    Down {
+        #[arg(
+            short = 'f',
+            long = "file",
+            default_value = "docker-compose.integration.yml"
+        )]
+        file: PathBuf,
+        #[arg(long)]
+        profile: Vec<String>,
+        #[arg(short = 'v', long)]
+        volumes: bool,
+    },
+    Status {
+        #[arg(
+            short = 'f',
+            long = "file",
+            default_value = "docker-compose.integration.yml"
+        )]
+        file: PathBuf,
+        #[arg(long)]
+        profile: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DocCommands {
     Service {
         #[arg(short = 'a', long = "api")]
         api: PathBuf,
         #[arg(long, default_value = "SERVICE.md")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    AiContext {
+        #[arg(short = 'a', long = "api")]
+        api: PathBuf,
+        #[arg(long, default_value = "AI_CONTEXT.md")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -869,6 +987,17 @@ fn main() -> anyhow::Result<()> {
                 generator::write_mock_server_project(&api, &out, force)?;
             }
         },
+        Commands::Test { command } => match command {
+            TestCommands::Gen {
+                api,
+                out,
+                base_url,
+                force,
+            } => {
+                generator::write_http_smoke_test_project(&api, &out, &base_url, force)?;
+            }
+        },
+        Commands::Dev { command } => run_dev(command)?,
         Commands::Doctor {
             config,
             port,
@@ -878,6 +1007,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Doc { command } => match command {
             DocCommands::Service { api, out, force } => {
                 generator::write_service_markdown_doc(&api, &out, force)?;
+            }
+            DocCommands::AiContext { api, out, force } => {
+                generator::write_ai_context_markdown_doc(&api, &out, force)?;
             }
         },
         Commands::Openapi { command } => match command {
@@ -937,6 +1069,47 @@ fn main() -> anyhow::Result<()> {
                 env_file,
                 config_map,
                 out,
+            })?,
+        },
+        Commands::Helm { command } => match command {
+            HelmCommands::Chart {
+                name,
+                image,
+                replicas,
+                port,
+                cpu_request,
+                cpu_limit,
+                memory_request,
+                memory_limit,
+                min_replicas,
+                max_replicas,
+                target_cpu,
+                env,
+                config_map,
+                chart_version,
+                app_version,
+                out,
+            } => generator::goctl::write_helm_chart(HelmOptions {
+                deploy: KubeDeployOptions {
+                    name,
+                    image,
+                    namespace: "default".to_string(),
+                    replicas,
+                    port,
+                    cpu_request,
+                    cpu_limit,
+                    memory_request,
+                    memory_limit,
+                    min_replicas,
+                    max_replicas,
+                    target_cpu,
+                    env,
+                    env_file: None,
+                    config_map,
+                    out,
+                },
+                chart_version,
+                app_version,
             })?,
         },
     }
@@ -1345,6 +1518,66 @@ fn check_tcp(target: &str) -> DoctorCheck {
     }
 }
 
+fn run_dev(command: DevCommands) -> anyhow::Result<()> {
+    let args = dev_compose_args(&command)?;
+    let status = Command::new("docker")
+        .args(args)
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to run docker compose: {err}"))?;
+    if !status.success() {
+        anyhow::bail!("docker compose exited with {status}");
+    }
+    Ok(())
+}
+
+fn dev_compose_args(command: &DevCommands) -> anyhow::Result<Vec<OsString>> {
+    let (file, profiles, action_args): (&Path, &[String], Vec<OsString>) = match command {
+        DevCommands::Up {
+            file,
+            profile,
+            detach,
+        } => {
+            let mut action_args = vec![OsString::from("up")];
+            if *detach {
+                action_args.push(OsString::from("-d"));
+            }
+            (file.as_path(), profile.as_slice(), action_args)
+        }
+        DevCommands::Down {
+            file,
+            profile,
+            volumes,
+        } => {
+            let mut action_args = vec![OsString::from("down")];
+            if *volumes {
+                action_args.push(OsString::from("-v"));
+            }
+            (file.as_path(), profile.as_slice(), action_args)
+        }
+        DevCommands::Status { file, profile } => (
+            file.as_path(),
+            profile.as_slice(),
+            vec![OsString::from("ps")],
+        ),
+    };
+
+    if !file.is_file() {
+        anyhow::bail!("compose file {} does not exist", file.display());
+    }
+
+    let mut args = vec![
+        OsString::from("compose"),
+        OsString::from("-f"),
+        file.as_os_str().to_os_string(),
+    ];
+    for profile in profiles {
+        args.push(OsString::from("--profile"));
+        args.push(OsString::from(profile));
+    }
+    args.extend(action_args);
+    Ok(args)
+}
+
 fn run_diff(command: DiffCommands, registry: &generator::GeneratorRegistry) -> anyhow::Result<()> {
     let (out, generator_command) = match command {
         DiffCommands::Api {
@@ -1558,6 +1791,26 @@ mod tests {
             }
         ));
 
+        let test_gen = Cli::try_parse_from([
+            "rozectl",
+            "test",
+            "gen",
+            "--api",
+            "user.api",
+            "--out",
+            "contract-tests",
+            "--base-url",
+            "http://127.0.0.1:3000",
+            "--force",
+        ])
+        .expect("parse test gen");
+        assert!(matches!(
+            test_gen.command,
+            Commands::Test {
+                command: TestCommands::Gen { force: true, .. }
+            }
+        ));
+
         let doctor = Cli::try_parse_from([
             "rozectl",
             "doctor",
@@ -1588,6 +1841,42 @@ mod tests {
             doc_service.command,
             Commands::Doc {
                 command: DocCommands::Service { force: true, .. }
+            }
+        ));
+
+        let doc_ai_context = Cli::try_parse_from([
+            "rozectl",
+            "doc",
+            "ai-context",
+            "--api",
+            "user.api",
+            "--out",
+            "AI_CONTEXT.md",
+            "--force",
+        ])
+        .expect("parse doc ai-context");
+        assert!(matches!(
+            doc_ai_context.command,
+            Commands::Doc {
+                command: DocCommands::AiContext { force: true, .. }
+            }
+        ));
+
+        let dev = Cli::try_parse_from([
+            "rozectl",
+            "dev",
+            "up",
+            "--file",
+            "docker-compose.integration.yml",
+            "--profile",
+            "mq",
+            "--detach",
+        ])
+        .expect("parse dev up");
+        assert!(matches!(
+            dev.command,
+            Commands::Dev {
+                command: DevCommands::Up { detach: true, .. }
             }
         ));
 
@@ -1780,6 +2069,29 @@ mod tests {
             }
         ));
 
+        let helm = Cli::try_parse_from([
+            "rozectl",
+            "helm",
+            "chart",
+            "--name",
+            "user",
+            "--image",
+            "registry.example.com/user:1.2.3",
+            "--env",
+            "RUST_LOG=info",
+            "--config-map",
+            "user-config",
+            "--out",
+            "deploy/user-chart",
+        ])
+        .expect("parse helm chart");
+        assert!(matches!(
+            helm.command,
+            Commands::Helm {
+                command: HelmCommands::Chart { .. }
+            }
+        ));
+
         let mysql_ddl = parse([
             "rozectl", "model", "mysql", "ddl", "-src", "user.sql", "-dir", "out",
         ]);
@@ -1862,6 +2174,44 @@ mod tests {
                 command: ModelCommands::Mongo { .. }
             }
         ));
+    }
+
+    #[test]
+    fn dev_compose_args_include_file_profiles_and_action() {
+        let root = std::env::temp_dir().join(format!(
+            "rozectl-dev-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create dev test root");
+        let file = root.join("compose.yml");
+        fs::write(&file, "services: {}\n").expect("write compose file");
+
+        let args = dev_compose_args(&DevCommands::Up {
+            file: file.clone(),
+            profile: vec!["mq".to_string(), "db".to_string()],
+            detach: true,
+        })
+        .expect("compose args");
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("compose"),
+                OsString::from("-f"),
+                file.as_os_str().to_os_string(),
+                OsString::from("--profile"),
+                OsString::from("mq"),
+                OsString::from("--profile"),
+                OsString::from("db"),
+                OsString::from("up"),
+                OsString::from("-d"),
+            ]
+        );
+
+        fs::remove_dir_all(root).expect("remove dev test root");
     }
 
     #[test]

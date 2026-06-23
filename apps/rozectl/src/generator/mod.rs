@@ -461,6 +461,49 @@ pub fn write_mock_server_project(api: &Path, out: &Path, force: bool) -> anyhow:
     Ok(())
 }
 
+pub fn write_http_smoke_test_project(
+    api: &Path,
+    out: &Path,
+    base_url: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    if out.exists() && !force {
+        bail!(
+            "{} already exists; pass --force to overwrite contract test files",
+            out.display()
+        );
+    }
+
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)
+        .with_context(|| format!("failed to parse api file {}", api.display()))?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+
+    fs::create_dir_all(out.join("tests"))
+        .with_context(|| format!("failed to create {}", out.join("tests").display()))?;
+    fs::write(
+        out.join("Cargo.toml"),
+        render_http_smoke_test_cargo_toml(&spec),
+    )
+    .with_context(|| format!("failed to write {}", out.join("Cargo.toml").display()))?;
+    fs::write(
+        out.join("tests/http_smoke.rs"),
+        render_http_smoke_tests(&spec, base_url),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("tests/http_smoke.rs").display()
+        )
+    })?;
+    fs::write(
+        out.join("README.md"),
+        render_http_smoke_test_readme(&spec, api, base_url),
+    )
+    .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
+    Ok(())
+}
+
 fn write_api_markdown_doc_with(
     api: &Path,
     out: &Path,
@@ -856,6 +899,266 @@ fn render_mock_readme(spec: &ApiSpec, api: &Path) -> String {
         }
     }
     out
+}
+
+fn render_http_smoke_test_cargo_toml(spec: &ApiSpec) -> String {
+    let package = sanitize_package_name(&format!("{}-contract-tests", spec.service));
+    format!(
+        r#"[package]
+name = "{package}"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+reqwest = {{ version = "0.12", default-features = false, features = ["json", "rustls-tls"] }}
+serde_json = "1"
+tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
+"#
+    )
+}
+
+fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(&mut out, "use reqwest::StatusCode;").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "fn base_url() -> String {{ std::env::var(\"ROZE_TEST_BASE_URL\").unwrap_or_else(|_| {:?}.to_string()) }}",
+        base_url.trim_end_matches('/')
+    )
+    .unwrap();
+    writeln!(&mut out).unwrap();
+
+    for (idx, route) in spec.rest_routes.iter().enumerate() {
+        let test_name = http_smoke_test_name(route, idx);
+        let method = http_method_name(&route.method).to_ascii_lowercase();
+        let path = http_smoke_sample_path(spec, route);
+        let headers = http_smoke_header_fields(spec, route);
+        let query = http_smoke_query_fields(spec, route);
+        let form = http_smoke_form_fields(spec, route);
+        let body = http_smoke_json_body(spec, route);
+        writeln!(&mut out, "#[tokio::test]").unwrap();
+        writeln!(
+            &mut out,
+            "async fn {test_name}() -> Result<(), Box<dyn std::error::Error>> {{"
+        )
+        .unwrap();
+        writeln!(&mut out, "    let client = reqwest::Client::new();").unwrap();
+        writeln!(
+            &mut out,
+            "    let url = format!(\"{{}}{{}}\", base_url().trim_end_matches('/'), {:?});",
+            path
+        )
+        .unwrap();
+        writeln!(&mut out, "    let response = client.{method}(url)").unwrap();
+        for (name, value) in headers {
+            writeln!(&mut out, "        .header({name:?}, {value:?})").unwrap();
+        }
+        if !query.is_empty() {
+            writeln!(
+                &mut out,
+                "        .query(&{:?})",
+                query
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect::<Vec<_>>()
+            )
+            .unwrap();
+        }
+        if !form.is_empty() {
+            writeln!(
+                &mut out,
+                "        .form(&{:?})",
+                form.iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect::<Vec<_>>()
+            )
+            .unwrap();
+        } else if let Some(body) = body {
+            let body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".to_string());
+            writeln!(&mut out, "        .json(&serde_json::json!({body}))").unwrap();
+        }
+        writeln!(&mut out, "        .send()").unwrap();
+        writeln!(&mut out, "        .await?;").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
+            "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    if response.status() != StatusCode::NO_CONTENT {{"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or(\"\");"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        assert!(content_type.contains(\"json\"), \"expected JSON response, got {{content_type}}\");"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "        let _: serde_json::Value = response.json().await?;"
+        )
+        .unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out, "    Ok(())").unwrap();
+        writeln!(&mut out, "}}").unwrap();
+        writeln!(&mut out).unwrap();
+    }
+
+    if spec.rest_routes.is_empty() {
+        writeln!(&mut out, "#[test]").unwrap();
+        writeln!(&mut out, "fn no_rest_routes_declared() {{}}").unwrap();
+    }
+
+    out
+}
+
+fn render_http_smoke_test_readme(spec: &ApiSpec, api: &Path, base_url: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(&mut out, "# {} Contract Tests", spec.service).unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "Generated from `{}` by `rozectl test gen`.",
+        api.display()
+    )
+    .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Run").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "```bash").unwrap();
+    writeln!(&mut out, "ROZE_TEST_BASE_URL={} cargo test", base_url).unwrap();
+    writeln!(&mut out, "```").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "If `ROZE_TEST_BASE_URL` is not set, tests use `{}`.",
+        base_url
+    )
+    .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Routes").unwrap();
+    writeln!(&mut out).unwrap();
+    if spec.rest_routes.is_empty() {
+        writeln!(&mut out, "- No REST routes declared.").unwrap();
+    } else {
+        for route in &spec.rest_routes {
+            writeln!(
+                &mut out,
+                "- `{}` `{}`",
+                http_method_name(&route.method),
+                rest::full_route_path_for_route(spec, route)
+            )
+            .unwrap();
+        }
+    }
+    out
+}
+
+fn http_smoke_test_name(route: &crate::parser::RestRoute, idx: usize) -> String {
+    let base = route.handler.as_deref().unwrap_or(route.path.as_str());
+    format!("smoke_{}_{}", sanitize_rust_ident(base), idx)
+}
+
+fn http_smoke_sample_path(spec: &ApiSpec, route: &crate::parser::RestRoute) -> String {
+    let request_ty = spec.types.iter().find(|ty| ty.name == route.request);
+    let mut path = rest::full_route_path_for_route(spec, route);
+    for param in route_path_params(&path) {
+        let value = request_ty
+            .and_then(|ty| {
+                ty.fields
+                    .iter()
+                    .find(|field| normalize_ident(&field_wire_name(field)) == param)
+            })
+            .map(|field| http_smoke_sample_string(&field.ty))
+            .unwrap_or_else(|| "1".to_string());
+        path = path.replace(&format!(":{param}"), &value);
+        path = path.replace(&format!("{{{param}}}"), &value);
+    }
+    path
+}
+
+fn http_smoke_query_fields(
+    spec: &ApiSpec,
+    route: &crate::parser::RestRoute,
+) -> Vec<(String, String)> {
+    http_smoke_fields_for_source(spec, route, crate::parser::FieldSource::Query)
+}
+
+fn http_smoke_header_fields(
+    spec: &ApiSpec,
+    route: &crate::parser::RestRoute,
+) -> Vec<(String, String)> {
+    http_smoke_fields_for_source(spec, route, crate::parser::FieldSource::Header)
+}
+
+fn http_smoke_form_fields(
+    spec: &ApiSpec,
+    route: &crate::parser::RestRoute,
+) -> Vec<(String, String)> {
+    http_smoke_fields_for_source(spec, route, crate::parser::FieldSource::Form)
+}
+
+fn http_smoke_fields_for_source(
+    spec: &ApiSpec,
+    route: &crate::parser::RestRoute,
+    source: crate::parser::FieldSource,
+) -> Vec<(String, String)> {
+    let Some(request_ty) = spec.types.iter().find(|ty| ty.name == route.request) else {
+        return Vec::new();
+    };
+    request_ty
+        .fields
+        .iter()
+        .filter(|field| openapi_field_source(field, route) == source)
+        .map(|field| (field_wire_name(field), http_smoke_sample_string(&field.ty)))
+        .collect()
+}
+
+fn http_smoke_json_body(
+    spec: &ApiSpec,
+    route: &crate::parser::RestRoute,
+) -> Option<serde_json::Value> {
+    let request_ty = spec.types.iter().find(|ty| ty.name == route.request)?;
+    let mut map = serde_json::Map::new();
+    for field in &request_ty.fields {
+        if openapi_field_source(field, route) == crate::parser::FieldSource::Json {
+            map.insert(
+                field_wire_name(field),
+                mock_json_for_field_type(spec, &field.ty),
+            );
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
+    }
+}
+
+fn http_smoke_sample_string(ty: &str) -> String {
+    let normalized = ty.trim();
+    if normalized.starts_with("[]") {
+        return "string".to_string();
+    }
+    match normalized {
+        "bool" | "boolean" => "true".to_string(),
+        "i8" | "i16" | "i32" | "i64" | "int" | "int8" | "int16" | "int32" | "int64" | "u8"
+        | "u16" | "u32" | "u64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" => {
+            "1".to_string()
+        }
+        "f32" | "f64" | "float" | "double" => "1.0".to_string(),
+        _ => "string".to_string(),
+    }
 }
 
 fn mock_axum_method(method: &crate::parser::HttpMethod) -> &'static str {
@@ -3779,6 +4082,62 @@ mod tests {
         assert!(main.contains(r#""active": true"#));
         assert!(main.contains(r#""score": 1"#));
         assert!(main.contains(r#""tags": ["#));
+    }
+
+    #[test]
+    fn writes_http_smoke_test_project_from_api_contract() {
+        let root = temp_test_root("rozectl-contract-test-gen");
+        fs::create_dir_all(&root).expect("create contract test root");
+        let api = root.join("user.api");
+        let out = root.join("contract-tests");
+        fs::write(
+            &api,
+            r#"
+            @server(
+                prefix: /api
+            )
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+
+                @handler createUser
+                post /users (CreateUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id string `path:"id"`
+                traceId string `header:"x-trace-id"`
+                verbose bool `query:"verbose,optional"`
+            }
+
+            type CreateUserReq {
+                name string `json:"name"`
+            }
+
+            type UserResp {
+                id string `json:"id"`
+            }
+            "#,
+        )
+        .expect("write api");
+
+        write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", false)
+            .expect("write contract tests");
+
+        let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
+        let tests = fs::read_to_string(out.join("tests/http_smoke.rs")).expect("read tests");
+        assert!(cargo.contains(r#"name = "user-api-contract-tests""#));
+        assert!(tests.contains(r#"std::env::var("ROZE_TEST_BASE_URL")"#));
+        assert!(tests.contains("let response = client.get(url)"));
+        assert!(tests.contains(r#""/api/users/string""#));
+        assert!(tests.contains(r#".header("x-trace-id", "string")"#));
+        assert!(tests.contains(r#".query(&[("verbose", "true")])"#));
+        assert!(tests.contains(r#""name": "string""#));
+        assert!(write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", false).is_err());
+        write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", true)
+            .expect("force contract tests");
+
+        fs::remove_dir_all(root).expect("remove contract test project");
     }
 
     #[test]

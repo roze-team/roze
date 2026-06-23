@@ -105,6 +105,20 @@ routes declared in `.api` and returns default JSON values derived from each
 route response type. Pass `--force` to overwrite mock server files in an
 existing output directory.
 
+Generate HTTP smoke tests from the same contract:
+
+```bash
+rozectl test gen --api example/user.api --out contract-tests
+cd contract-tests
+ROZE_TEST_BASE_URL=http://127.0.0.1:3000 cargo test
+```
+
+The generated contract test project uses `reqwest` and `tokio`. It builds sample
+path, query, header, form, and JSON requests from the `.api` request types,
+asserts successful HTTP status codes, and verifies JSON responses. The default
+base URL is `http://127.0.0.1:3000`; pass `--base-url` when generating or set
+`ROZE_TEST_BASE_URL` at runtime.
+
 Check the local development environment:
 
 ```bash
@@ -112,6 +126,18 @@ rozectl doctor --config apps/roze-example/config.yaml --port 3000
 rozectl doctor --tcp 127.0.0.1:6379 --tcp 127.0.0.1:9092
 rozectl doctor --tool helm --tool etcdctl
 ```
+
+Start, stop, or inspect the local dependency stack:
+
+```bash
+rozectl dev up --detach
+rozectl dev status
+rozectl dev down
+```
+
+`rozectl dev` defaults to `docker-compose.integration.yml`. Pass
+`--file compose.yml` to use another Compose file and repeat `--profile name`
+to enable Docker Compose profiles.
 
 `rozectl doctor` checks the default local tools `rustc`, `cargo`, `docker`, and
 `kubectl`. Extra `--tool` values are checked with `--version`. `--config`
@@ -612,11 +638,14 @@ Generate an AI- and team-readable service summary from a `.api` contract:
 
 ```bash
 rozectl doc service --api user.api --out SERVICE.md
+rozectl doc ai-context --api user.api --out AI_CONTEXT.md
 ```
 
 The generated `SERVICE.md` includes the service name, REST/RPC surface,
 generated-file ownership rules, common generation/diff commands, and AI editing
 notes. Existing files are not overwritten unless `--force` is passed.
+`AI_CONTEXT.md` is a shorter agent handoff document focused on ownership
+boundaries, safe edit areas, generated files, and the regenerate workflow.
 
 ## RPC proto generation
 
@@ -806,6 +835,34 @@ Generated probes target the standard service endpoints:
 - liveness: `/healthz`
 - readiness: `/readyz`
 - startup: `/startupz`
+
+## Helm chart generation
+
+`rozectl helm chart` writes a minimal application chart with `Chart.yaml`,
+`values.yaml`, and Deployment/Service/HPA templates. It uses the same resource,
+probe, autoscaling, image, env, and ConfigMap settings as `kube deploy`.
+
+```bash
+rozectl helm chart \
+  --name user-api \
+  --image registry.example.com/user-api:1.2.3 \
+  --replicas 2 \
+  --port 8080 \
+  --min-replicas 2 \
+  --max-replicas 5 \
+  --target-cpu 70 \
+  --env RUST_LOG=info \
+  --config-map user-api-config \
+  --chart-version 0.1.0 \
+  --app-version 1.2.3 \
+  --out deploy/user-api-chart
+```
+
+Validate the generated chart before shipping:
+
+```bash
+helm template user-api deploy/user-api-chart
+```
 
 ## Plugin contract
 
