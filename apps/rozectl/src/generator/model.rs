@@ -30,6 +30,8 @@ pub struct ModelSpec {
     pub schema_name: Option<String>,
     pub table: String,
     pub primary: String,
+    pub soft_delete: Option<String>,
+    pub tenant: Option<String>,
     pub cache: bool,
     pub cache_ttl_secs: Option<u64>,
     pub negative_cache_ttl_secs: Option<u64>,
@@ -285,7 +287,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{ActiveModelTrait, ColumnTrait, DatabaseConnection, DeleteResult, EntityTrait, IntoActiveModel, QueryFilter}};"
+        "use sea_orm::{{sea_query::Expr, ActiveModelTrait, ColumnTrait, DatabaseConnection, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, Select, UpdateResult}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -339,6 +341,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "impl ActiveModelBehavior for ActiveModel {{}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_query_types(&mut out, model, &pascal, "Model");
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
     writeln!(&mut out, "}}").unwrap();
@@ -372,6 +375,21 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "        \"{}\"", table_name).unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    render_sea_orm_scope_methods(&mut out, model);
+    writeln!(
+        &mut out,
+        "    pub async fn count(&self) -> anyhow::Result<u64> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
+    writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(&mut out, "        select = self.apply_live_scope(select);").unwrap();
+    }
+    writeln!(&mut out, "        Ok(select.count(db).await?)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    render_sea_orm_query_methods(&mut out, model, &pascal, primary, &primary_ty);
     writeln!(
         &mut out,
         "    pub async fn find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
@@ -475,7 +493,11 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
-    writeln!(&mut out, "        Ok(Entity::find().all(db).await?)").unwrap();
+    writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(&mut out, "        select = self.apply_live_scope(select);").unwrap();
+    }
+    writeln!(&mut out, "        Ok(select.all(db).await?)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -500,6 +522,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "        Ok(inserted)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    render_sea_orm_batch_methods(&mut out, model, primary, &primary_ty);
     writeln!(
         &mut out,
         "    pub async fn update(&self, model: Model) -> anyhow::Result<Model> {{"
@@ -565,6 +588,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "        Ok(result)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
+    render_sea_orm_soft_delete_methods(&mut out, model, primary, &primary_ty);
     if model.cache {
         writeln!(&mut out).unwrap();
         writeln!(
@@ -737,6 +761,402 @@ fn render_model_module(model: &ModelSpec) -> String {
     out
 }
 
+fn render_query_types(out: &mut String, model: &ModelSpec, pascal: &str, item_ty: &str) {
+    use std::fmt::Write as _;
+    writeln!(
+        out,
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]"
+    )
+    .unwrap();
+    writeln!(out, "pub enum {pascal}SortField {{").unwrap();
+    for field in sea_orm_filter_fields(model) {
+        writeln!(out, "    {},", to_pascal_case(&field.name)).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "#[derive(Clone, Debug, Default, Serialize, Deserialize)]"
+    )
+    .unwrap();
+    writeln!(out, "pub struct {pascal}Query {{").unwrap();
+    writeln!(out, "    pub page: u64,").unwrap();
+    writeln!(out, "    pub page_size: u64,").unwrap();
+    writeln!(out, "    pub sort_by: Option<{pascal}SortField>,").unwrap();
+    writeln!(out, "    pub sort_desc: bool,").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out, "    pub include_deleted: bool,").unwrap();
+    }
+    for field in sea_orm_filter_fields(model) {
+        writeln!(out, "    pub {}: Option<{}>,", field.name, field.ty).unwrap();
+        writeln!(out, "    pub {}_in: Vec<{}>,", field.name, field.ty).unwrap();
+        if is_numeric_type(&field.ty) {
+            writeln!(out, "    pub {}_min: Option<{}>,", field.name, field.ty).unwrap();
+            writeln!(out, "    pub {}_max: Option<{}>,", field.name, field.ty).unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
+    writeln!(out, "pub struct {pascal}Page {{").unwrap();
+    writeln!(out, "    pub items: Vec<{item_ty}>,").unwrap();
+    writeln!(out, "    pub total: u64,").unwrap();
+    writeln!(out, "    pub page: u64,").unwrap();
+    writeln!(out, "    pub page_size: u64,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_scope_methods(out: &mut String, model: &ModelSpec) {
+    use std::fmt::Write as _;
+    let Some(field) = model
+        .soft_delete
+        .as_deref()
+        .and_then(|name| model.fields.iter().find(|field| field.name == name))
+    else {
+        return;
+    };
+    let column = to_pascal_case(&field.name);
+    writeln!(
+        out,
+        "    fn apply_live_scope(&self, select: Select<Entity>) -> Select<Entity> {{"
+    )
+    .unwrap();
+    if field.ty == "bool" {
+        writeln!(out, "        select.filter(Column::{column}.eq(false))").unwrap();
+    } else if is_optional_type(&field.ty) {
+        writeln!(out, "        select.filter(Column::{column}.is_null())").unwrap();
+    } else {
+        writeln!(out, "        select").unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_query_methods(
+    out: &mut String,
+    model: &ModelSpec,
+    pascal: &str,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+    writeln!(
+        out,
+        "    pub async fn query(&self, req: {pascal}Query) -> anyhow::Result<{pascal}Page> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let page = if req.page == 0 {{ 1 }} else {{ req.page }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
+    )
+    .unwrap();
+    writeln!(out, "        let mut select = Entity::find();").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(
+            out,
+            "        if !req.include_deleted {{ select = self.apply_live_scope(select); }}"
+        )
+        .unwrap();
+    }
+    for field in sea_orm_filter_fields(model) {
+        let column = to_pascal_case(&field.name);
+        writeln!(
+            out,
+            "        if let Some(value) = req.{} {{ select = select.filter(Column::{column}.eq(value)); }}",
+            field.name
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        if !req.{}_in.is_empty() {{ select = select.filter(Column::{column}.is_in(req.{}_in)); }}",
+            field.name, field.name
+        )
+        .unwrap();
+        if is_numeric_type(&field.ty) {
+            writeln!(
+                out,
+                "        if let Some(value) = req.{}_min {{ select = select.filter(Column::{column}.gte(value)); }}",
+                field.name
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        if let Some(value) = req.{}_max {{ select = select.filter(Column::{column}.lte(value)); }}",
+                field.name
+            )
+            .unwrap();
+        }
+    }
+    render_sea_orm_sort(out, model, pascal);
+    writeln!(
+        out,
+        "        let paginator = select.paginate(db, page_size);"
+    )
+    .unwrap();
+    writeln!(out, "        let total = paginator.num_items().await?;").unwrap();
+    writeln!(
+        out,
+        "        let items = paginator.fetch_page(page.saturating_sub(1)).await?;"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        Ok({pascal}Page {{ items, total, page, page_size }})"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn list_page(&self, page: u64, page_size: u64) -> anyhow::Result<{pascal}Page> {{"
+    )
+    .unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(
+            out,
+            "        self.query({pascal}Query {{ page, page_size, include_deleted: false, ..Default::default() }}).await"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "        self.query({pascal}Query {{ page, page_size, ..Default::default() }}).await"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+    if let Some(tenant_field) = tenant_field(model) {
+        writeln!(out).unwrap();
+        let tenant_column = to_pascal_case(&tenant_field.name);
+        let primary_column = to_pascal_case(primary);
+        writeln!(
+            out,
+            "    pub async fn find_by_{primary}_for_{}(&self, {primary}: {primary_ty}, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            tenant_field.name, tenant_field.name, tenant_field.ty
+        )
+        .unwrap();
+        writeln!(out, "        let db = self.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let mut select = Entity::find().filter(Column::{primary_column}.eq({primary})).filter(Column::{tenant_column}.eq({}));",
+            tenant_field.name
+        )
+        .unwrap();
+        if model.soft_delete.is_some() {
+            writeln!(out, "        select = self.apply_live_scope(select);").unwrap();
+        }
+        writeln!(out, "        Ok(select.one(db).await?)").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_sort(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+    let fields = sea_orm_filter_fields(model);
+    if fields.is_empty() {
+        return;
+    }
+    writeln!(out, "        match req.sort_by {{").unwrap();
+    for field in fields {
+        let variant = to_pascal_case(&field.name);
+        writeln!(
+            out,
+            "            Some({pascal}SortField::{variant}) if req.sort_desc => select = select.order_by_desc(Column::{variant}),"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            Some({pascal}SortField::{variant}) => select = select.order_by_asc(Column::{variant}),"
+        )
+        .unwrap();
+    }
+    writeln!(out, "            None => {{}}").unwrap();
+    writeln!(out, "        }}").unwrap();
+}
+
+fn render_sea_orm_batch_methods(
+    out: &mut String,
+    model: &ModelSpec,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+    let primary_column = to_pascal_case(primary);
+    writeln!(
+        out,
+        "    pub async fn insert_many(&self, models: Vec<Model>) -> anyhow::Result<()> {{"
+    )
+    .unwrap();
+    writeln!(out, "        if models.is_empty() {{ return Ok(()); }}").unwrap();
+    writeln!(out, "        let db = self.write_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let active_models = models.into_iter().map(IntoActiveModel::into_active_model).collect::<Vec<_>>();"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        Entity::insert_many(active_models).exec(db).await?;"
+    )
+    .unwrap();
+    writeln!(out, "        Ok(())").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn delete_many_by_ids(&self, ids: Vec<{primary_ty}>) -> anyhow::Result<DeleteResult> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if ids.is_empty() {{ return Ok(DeleteResult {{ rows_affected: 0 }}); }}"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.write_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let result = Entity::delete_many().filter(Column::{primary_column}.is_in(ids.clone())).exec(db).await?;"
+    )
+    .unwrap();
+    if model.cache {
+        writeln!(out, "        for id in ids {{").unwrap();
+        writeln!(
+            out,
+            "            self.invalidate_cache_field(\"{primary}\", &id).await?;"
+        )
+        .unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
+    writeln!(out, "        Ok(result)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_soft_delete_methods(
+    out: &mut String,
+    model: &ModelSpec,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+    let Some(field) = model
+        .soft_delete
+        .as_deref()
+        .and_then(|name| model.fields.iter().find(|field| field.name == name))
+    else {
+        return;
+    };
+    let primary_column = to_pascal_case(primary);
+    let soft_column = to_pascal_case(&field.name);
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn soft_delete_by_{primary}(&self, {primary}: {primary_ty}) -> anyhow::Result<UpdateResult> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.write_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let mut update = Entity::update_many().filter(Column::{primary_column}.eq({primary}.clone()));"
+    )
+    .unwrap();
+    render_soft_delete_assignment(out, field, &soft_column);
+    writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+    if model.cache {
+        writeln!(
+            out,
+            "        self.invalidate_cache_field(\"{primary}\", &{primary}).await?;"
+        )
+        .unwrap();
+    }
+    writeln!(out, "        Ok(result)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn soft_delete_many_by_ids(&self, ids: Vec<{primary_ty}>) -> anyhow::Result<UpdateResult> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if ids.is_empty() {{ return Ok(UpdateResult {{ rows_affected: 0 }}); }}"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.write_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let mut update = Entity::update_many().filter(Column::{primary_column}.is_in(ids.clone()));"
+    )
+    .unwrap();
+    render_soft_delete_assignment(out, field, &soft_column);
+    writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+    if model.cache {
+        writeln!(out, "        for id in ids {{").unwrap();
+        writeln!(
+            out,
+            "            self.invalidate_cache_field(\"{primary}\", &id).await?;"
+        )
+        .unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
+    writeln!(out, "        Ok(result)").unwrap();
+    writeln!(out, "    }}").unwrap();
+}
+
+fn render_soft_delete_assignment(out: &mut String, field: &ModelField, column: &str) {
+    use std::fmt::Write as _;
+    if field.ty == "bool" {
+        writeln!(
+            out,
+            "        update = update.col_expr(Column::{column}, Expr::value(true));"
+        )
+        .unwrap();
+    } else if field.ty == "Option<String>" {
+        writeln!(
+            out,
+            "        update = update.col_expr(Column::{column}, Expr::value(Some(format!(\"{{:?}}\", std::time::SystemTime::now()))));"
+        )
+        .unwrap();
+    } else if field.ty == "Option<i64>" || field.ty == "Option<u64>" {
+        writeln!(
+            out,
+            "        update = update.col_expr(Column::{column}, Expr::value(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as {}).unwrap_or_default())));",
+            field.ty.trim_start_matches("Option<").trim_end_matches('>')
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "        update = update.col_expr(Column::{column}, Expr::value(Default::default()));"
+        )
+        .unwrap();
+    }
+}
+
+fn sea_orm_filter_fields(model: &ModelSpec) -> Vec<&ModelField> {
+    model
+        .fields
+        .iter()
+        .filter(|field| Some(field.name.as_str()) != model.soft_delete.as_deref())
+        .filter(|field| !is_optional_type(&field.ty))
+        .collect()
+}
+
+fn tenant_field(model: &ModelSpec) -> Option<&ModelField> {
+    model
+        .tenant
+        .as_deref()
+        .and_then(|name| model.fields.iter().find(|field| field.name == name))
+}
+
 fn render_toasty_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
@@ -796,6 +1216,7 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_query_types(&mut out, model, &pascal, &pascal);
     writeln!(&mut out, "pub struct {}Repository;", pascal).unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "impl {}Repository {{", pascal).unwrap();
@@ -803,6 +1224,7 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "        \"{}\"", table_name).unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    render_toasty_query_methods(&mut out, model, &pascal, primary, &primary_ty);
     writeln!(
         &mut out,
         "    pub async fn find_by_{}(db: &mut toasty::Db, {}: &{}) -> toasty::Result<{}> {{",
@@ -890,6 +1312,7 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "        Ok(model)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    render_toasty_batch_methods(&mut out, model, &pascal, primary, &primary_ty);
     writeln!(
         &mut out,
         "    pub async fn delete_by_{}(db: &mut toasty::Db, {}: &{}) -> toasty::Result<()> {{",
@@ -904,9 +1327,331 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     .unwrap();
     writeln!(&mut out, "        model.delete().exec(db).await").unwrap();
     writeln!(&mut out, "    }}").unwrap();
+    render_toasty_soft_delete_methods(&mut out, model, &pascal, primary, &primary_ty);
     writeln!(&mut out, "}}").unwrap();
 
     out
+}
+
+fn render_toasty_query_methods(
+    out: &mut String,
+    model: &ModelSpec,
+    pascal: &str,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+    writeln!(
+        out,
+        "    fn build_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = toasty::stmt::Query::<toasty::stmt::List<{pascal}>>::all();"
+    )
+    .unwrap();
+    if let Some(field) = soft_delete_field(model) {
+        if field.ty == "bool" {
+            writeln!(
+                out,
+                "        if !req.include_deleted {{ query = query.and({pascal}::fields().{}().eq(false)); }}",
+                field.name
+            )
+            .unwrap();
+        } else if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(
+                out,
+                "        if !req.include_deleted {{ query = query.and({pascal}::fields().{}().eq(None::<{inner_ty}>)); }}",
+                field.name
+            )
+            .unwrap();
+        }
+    }
+    for field in sea_orm_filter_fields(model) {
+        writeln!(
+            out,
+            "        if let Some(value) = req.{}.clone() {{ query = query.and({pascal}::fields().{}().eq(value)); }}",
+            field.name, field.name
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        if !req.{}_in.is_empty() {{ query = query.and({pascal}::fields().{}().in_list(req.{}_in.clone())); }}",
+            field.name, field.name, field.name
+        )
+        .unwrap();
+        if is_numeric_type(&field.ty) {
+            writeln!(
+                out,
+                "        if let Some(value) = req.{}_min.clone() {{ query = query.and({pascal}::fields().{}().ge(value)); }}",
+                field.name, field.name
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        if let Some(value) = req.{}_max.clone() {{ query = query.and({pascal}::fields().{}().le(value)); }}",
+                field.name, field.name
+            )
+            .unwrap();
+        }
+    }
+    render_toasty_sort(out, model, pascal);
+    writeln!(out, "        query").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn count(db: &mut toasty::Db) -> toasty::Result<u64> {{"
+    )
+    .unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(
+            out,
+            "        Self::build_query(&{pascal}Query {{ include_deleted: false, ..Default::default() }}).count().exec(db).await"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "        Self::build_query(&{pascal}Query::default()).count().exec(db).await"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn query(db: &mut toasty::Db, req: {pascal}Query) -> toasty::Result<{pascal}Page> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page = if req.page == 0 {{ 1 }} else {{ req.page }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
+    )
+    .unwrap();
+    writeln!(out, "        let mut query = Self::build_query(&req);").unwrap();
+    writeln!(
+        out,
+        "        let total = query.clone().count().exec(db).await?;"
+    )
+    .unwrap();
+    writeln!(out, "        query.limit(page_size as usize);").unwrap();
+    writeln!(
+        out,
+        "        query.offset(page.saturating_sub(1).saturating_mul(page_size) as usize);"
+    )
+    .unwrap();
+    writeln!(out, "        let items = query.exec(db).await?;").unwrap();
+    writeln!(
+        out,
+        "        Ok({pascal}Page {{ items, total, page, page_size }})"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn list_page(db: &mut toasty::Db, page: u64, page_size: u64) -> toasty::Result<{pascal}Page> {{"
+    )
+    .unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(
+            out,
+            "        Self::query(db, {pascal}Query {{ page, page_size, include_deleted: false, ..Default::default() }}).await"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "        Self::query(db, {pascal}Query {{ page, page_size, ..Default::default() }}).await"
+        )
+        .unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+    if let Some(tenant_field) = tenant_field(model) {
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "    pub async fn find_by_{primary}_for_{}(db: &mut toasty::Db, {primary}: &{primary_ty}, {}: &{}) -> toasty::Result<Option<{pascal}>> {{",
+            tenant_field.name, tenant_field.name, tenant_field.ty
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        let page = Self::query(db, {pascal}Query {{ {primary}: Some({primary}.clone()), {}: Some({}.clone()), page: 1, page_size: 1, {}..Default::default() }}).await?;",
+            tenant_field.name,
+            tenant_field.name,
+            if model.soft_delete.is_some() {
+                "include_deleted: false, "
+            } else {
+                ""
+            }
+        )
+        .unwrap();
+        writeln!(out, "        Ok(page.items.into_iter().next())").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_sort(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+    let fields = sea_orm_filter_fields(model);
+    if fields.is_empty() {
+        return;
+    }
+    writeln!(out, "        match req.sort_by {{").unwrap();
+    for field in fields {
+        let variant = to_pascal_case(&field.name);
+        writeln!(
+            out,
+            "            Some({pascal}SortField::{variant}) if req.sort_desc => {{ query.order_by({pascal}::fields().{}().desc()); }}",
+            field.name
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            Some({pascal}SortField::{variant}) => {{ query.order_by({pascal}::fields().{}().asc()); }}",
+            field.name
+        )
+        .unwrap();
+    }
+    writeln!(out, "            None => {{}}").unwrap();
+    writeln!(out, "        }}").unwrap();
+}
+
+fn render_toasty_batch_methods(
+    out: &mut String,
+    _model: &ModelSpec,
+    pascal: &str,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+    writeln!(
+        out,
+        "    pub async fn insert_many(db: &mut toasty::Db, models: Vec<{pascal}>) -> toasty::Result<Vec<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut inserted = Vec::with_capacity(models.len());"
+    )
+    .unwrap();
+    writeln!(out, "        for model in models {{").unwrap();
+    writeln!(
+        out,
+        "            inserted.push(Self::insert(db, model).await?);"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        Ok(inserted)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn delete_many_by_ids(db: &mut toasty::Db, ids: Vec<{primary_ty}>) -> toasty::Result<u64> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let mut rows_affected = 0;").unwrap();
+    writeln!(out, "        for id in ids {{").unwrap();
+    writeln!(
+        out,
+        "            Self::delete_by_{primary}(db, &id).await?;"
+    )
+    .unwrap();
+    writeln!(out, "            rows_affected += 1;").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        Ok(rows_affected)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_soft_delete_methods(
+    out: &mut String,
+    model: &ModelSpec,
+    pascal: &str,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+    let Some(field) = soft_delete_field(model) else {
+        return;
+    };
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn soft_delete_by_{primary}(db: &mut toasty::Db, {primary}: &{primary_ty}) -> toasty::Result<{pascal}> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut model = Self::find_by_{primary}(db, {primary}).await?;"
+    )
+    .unwrap();
+    write!(out, "        model.update()\n            .{}", field.name).unwrap();
+    render_toasty_soft_delete_value(out, field);
+    writeln!(out, "\n            .exec(db)\n            .await?;").unwrap();
+    writeln!(out, "        Ok(model)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn soft_delete_many_by_ids(db: &mut toasty::Db, ids: Vec<{primary_ty}>) -> toasty::Result<u64> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let mut rows_affected = 0;").unwrap();
+    writeln!(out, "        for id in ids {{").unwrap();
+    writeln!(
+        out,
+        "            Self::soft_delete_by_{primary}(db, &id).await?;"
+    )
+    .unwrap();
+    writeln!(out, "            rows_affected += 1;").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        Ok(rows_affected)").unwrap();
+    writeln!(out, "    }}").unwrap();
+}
+
+fn render_toasty_soft_delete_value(out: &mut String, field: &ModelField) {
+    use std::fmt::Write as _;
+    if field.ty == "bool" {
+        write!(out, "(true)").unwrap();
+    } else if field.ty == "Option<String>" {
+        write!(
+            out,
+            "(Some(format!(\"{{:?}}\", std::time::SystemTime::now())))"
+        )
+        .unwrap();
+    } else if field.ty == "Option<i64>" || field.ty == "Option<u64>" {
+        let inner = field.ty.trim_start_matches("Option<").trim_end_matches('>');
+        write!(
+            out,
+            "(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as {inner}).unwrap_or_default()))"
+        )
+        .unwrap();
+    } else {
+        write!(out, "(Default::default())").unwrap();
+    }
+}
+
+fn soft_delete_field(model: &ModelSpec) -> Option<&ModelField> {
+    model
+        .soft_delete
+        .as_deref()
+        .and_then(|name| model.fields.iter().find(|field| field.name == name))
+}
+
+fn optional_inner_type(ty: &str) -> Option<&str> {
+    ty.trim()
+        .strip_prefix("Option<")
+        .and_then(|ty| ty.strip_suffix('>'))
 }
 
 fn render_mongo_model_module(model: &ModelSpec) -> String {
@@ -1714,6 +2459,8 @@ fn build_inspected_model(
         negative_cache_ttl_secs: None,
         cache_keys,
         cache_prefix: None,
+        soft_delete: infer_soft_delete_field(&fields),
+        tenant: infer_tenant_field(&fields),
         fields,
     })
 }
@@ -1740,8 +2487,110 @@ fn normalize_cache_keys(
     keys
 }
 
+fn validate_model_field(
+    model_name: &str,
+    directive: &str,
+    field_name: &str,
+    fields: &[ModelField],
+) -> anyhow::Result<()> {
+    if fields.iter().any(|field| field.name == field_name) {
+        Ok(())
+    } else {
+        bail!("model `{model_name}` {directive} field `{field_name}` not found in fields")
+    }
+}
+
+fn validate_soft_delete_field(
+    model_name: &str,
+    field_name: &str,
+    fields: &[ModelField],
+) -> anyhow::Result<()> {
+    let Some(field) = fields.iter().find(|field| field.name == field_name) else {
+        bail!("model `{model_name}` soft_delete field `{field_name}` not found in fields")
+    };
+    if matches!(
+        field.ty.as_str(),
+        "bool" | "Option<String>" | "Option<i64>" | "Option<u64>"
+    ) {
+        Ok(())
+    } else {
+        bail!(
+            "model `{model_name}` soft_delete field `{field_name}` must be bool, Option<String>, Option<i64>, or Option<u64>"
+        )
+    }
+}
+
+fn validate_tenant_field(
+    model_name: &str,
+    field_name: &str,
+    fields: &[ModelField],
+) -> anyhow::Result<()> {
+    let Some(field) = fields.iter().find(|field| field.name == field_name) else {
+        bail!("model `{model_name}` tenant field `{field_name}` not found in fields")
+    };
+    if is_optional_type(&field.ty) {
+        bail!("model `{model_name}` tenant field `{field_name}` cannot be optional")
+    }
+    Ok(())
+}
+
+fn infer_soft_delete_field(fields: &[ModelField]) -> Option<String> {
+    for candidate in ["deleted", "is_deleted"] {
+        if fields
+            .iter()
+            .any(|field| field.name == candidate && field.ty == "bool")
+        {
+            return Some(candidate.to_string());
+        }
+    }
+
+    for candidate in ["deleted_at", "delete_time", "deleted_at_millis"] {
+        if fields.iter().any(|field| {
+            field.name == candidate
+                && matches!(
+                    field.ty.as_str(),
+                    "Option<String>" | "Option<i64>" | "Option<u64>"
+                )
+        }) {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
+fn infer_tenant_field(fields: &[ModelField]) -> Option<String> {
+    ["tenant_id", "org_id", "account_id"]
+        .into_iter()
+        .find(|candidate| {
+            fields
+                .iter()
+                .any(|field| field.name == *candidate && !is_optional_type(&field.ty))
+        })
+        .map(ToOwned::to_owned)
+}
+
 fn is_optional_type(ty: &str) -> bool {
     ty.trim_start().starts_with("Option<")
+}
+
+fn is_numeric_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
 }
 
 fn normalize_table_reference(
@@ -1856,6 +2705,8 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         let mut negative_cache_ttl_secs = None;
         let mut cache_keys = Vec::new();
         let mut cache_prefix = None;
+        let mut soft_delete = None;
+        let mut tenant = None;
         let mut fields = Vec::new();
 
         while i < lines.len() {
@@ -1902,6 +2753,14 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 cache_prefix = Some(value.trim().trim_matches('"').to_string());
                 continue;
             }
+            if let Some(value) = inner.strip_prefix("soft_delete:") {
+                soft_delete = Some(value.trim().to_string());
+                continue;
+            }
+            if let Some(value) = inner.strip_prefix("tenant:") {
+                tenant = Some(value.trim().to_string());
+                continue;
+            }
             if let Some(value) = inner.strip_prefix("field ") {
                 let mut parts = value.split_whitespace();
                 let field_name = parts.next().ok_or_else(|| {
@@ -1921,7 +2780,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             }
 
             bail!(
-                "line {}: expected `table:`, `primary:`, `cache:`, `cache_key:`, `cache_prefix:`, `cache_ttl_secs:`, `negative_cache_ttl_secs:` or `field`",
+                "line {}: expected `table:`, `primary:`, `cache:`, `cache_key:`, `cache_prefix:`, `cache_ttl_secs:`, `negative_cache_ttl_secs:`, `soft_delete:`, `tenant:` or `field`",
                 inner_line_no + 1
             );
         }
@@ -1945,12 +2804,30 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 bail!("model `{name}` cache key field `{key}` cannot be optional");
             }
         }
+        let soft_delete = match soft_delete {
+            Some(field) => {
+                validate_model_field(&name, "soft_delete", &field, &fields)?;
+                validate_soft_delete_field(&name, &field, &fields)?;
+                Some(field)
+            }
+            None => infer_soft_delete_field(&fields),
+        };
+        let tenant = match tenant {
+            Some(field) => {
+                validate_model_field(&name, "tenant", &field, &fields)?;
+                validate_tenant_field(&name, &field, &fields)?;
+                Some(field)
+            }
+            None => infer_tenant_field(&fields),
+        };
 
         models.push(ModelSpec {
             name,
             schema_name: None,
             table,
             primary,
+            soft_delete,
+            tenant,
             cache,
             cache_ttl_secs,
             negative_cache_ttl_secs,
@@ -2198,6 +3075,8 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         schema_name,
         table,
         primary: primary.clone(),
+        soft_delete: infer_soft_delete_field(&fields),
+        tenant: infer_tenant_field(&fields),
         cache: true,
         cache_ttl_secs: None,
         negative_cache_ttl_secs: None,
@@ -2837,8 +3716,12 @@ mod tests {
             cache_prefix: account
             cache_ttl_secs: 300
             negative_cache_ttl_secs: 30
+            soft_delete: deleted
+            tenant: tenant_id
             field id i64
+            field tenant_id String
             field name String
+            field deleted bool
         }
         "#;
 
@@ -2851,6 +3734,8 @@ mod tests {
         assert_eq!(models[0].cache_keys, vec!["id"]);
         assert_eq!(models[0].cache_prefix.as_deref(), Some("account"));
         assert_eq!(models[0].negative_cache_ttl_secs, Some(30));
+        assert_eq!(models[0].soft_delete.as_deref(), Some("deleted"));
+        assert_eq!(models[0].tenant.as_deref(), Some("tenant_id"));
     }
 
     #[test]
@@ -2858,8 +3743,10 @@ mod tests {
         let source = r#"
         CREATE TABLE `users` (
             `id` bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            `tenant_id` varchar(64) NOT NULL,
             `name` varchar(255) NOT NULL,
             `nickname` varchar(255) NULL DEFAULT 'guest' COMMENT 'Nickname',
+            `deleted` tinyint(1) NOT NULL DEFAULT 0,
             `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY `uniq_users_name` (`name`),
             UNIQUE KEY `uniq_users_name_created_at` (`name`, `created_at`)
@@ -2874,18 +3761,20 @@ mod tests {
         assert_eq!(models[0].primary, "id");
         assert!(models[0].cache);
         assert_eq!(models[0].cache_keys, vec!["id", "name"]);
+        assert_eq!(models[0].soft_delete.as_deref(), Some("deleted"));
+        assert_eq!(models[0].tenant.as_deref(), Some("tenant_id"));
         assert_eq!(models[0].fields[0].ty, "u64");
-        assert_eq!(models[0].fields[2].ty, "Option<String>");
+        assert_eq!(models[0].fields[3].ty, "Option<String>");
         assert_eq!(
-            models[0].fields[2].default_value.as_deref(),
+            models[0].fields[3].default_value.as_deref(),
             Some("'guest'")
         );
         assert_eq!(
-            models[0].fields[2].comment.as_deref(),
+            models[0].fields[3].comment.as_deref(),
             Some("nickname from profile")
         );
         assert_eq!(
-            models[0].fields[3].default_value.as_deref(),
+            models[0].fields[5].default_value.as_deref(),
             Some("CURRENT_TIMESTAMP")
         );
     }
@@ -2912,6 +3801,8 @@ mod tests {
             schema_name: None,
             table: "users".to_string(),
             primary: "id".to_string(),
+            soft_delete: Some("deleted".to_string()),
+            tenant: Some("tenant_id".to_string()),
             cache: true,
             cache_ttl_secs: Some(300),
             negative_cache_ttl_secs: None,
@@ -2932,11 +3823,38 @@ mod tests {
                     default_value: None,
                     comment: None,
                 },
+                ModelField {
+                    name: "tenant_id".to_string(),
+                    ty: "String".to_string(),
+                    auto_increment: false,
+                    default_value: None,
+                    comment: None,
+                },
+                ModelField {
+                    name: "deleted".to_string(),
+                    ty: "bool".to_string(),
+                    auto_increment: false,
+                    default_value: None,
+                    comment: None,
+                },
             ],
         };
 
         let rendered = render_model_module(&model);
         assert!(rendered.contains("DeriveEntityModel"));
+        assert!(rendered.contains("PaginatorTrait"));
+        assert!(rendered.contains("pub async fn count(&self) -> anyhow::Result<u64>"));
+        assert!(rendered.contains("pub struct UserQuery"));
+        assert!(rendered.contains("pub enum UserSortField"));
+        assert!(rendered.contains("pub async fn query(&self, req: UserQuery)"));
+        assert!(rendered.contains("pub id_in: Vec<i64>"));
+        assert!(rendered.contains("pub id_min: Option<i64>"));
+        assert!(rendered.contains("Column::Id.is_in(req.id_in)"));
+        assert!(rendered.contains("Column::Id.gte(value)"));
+        assert!(rendered.contains("order_by_desc(Column::Id)"));
+        assert!(rendered.contains("pub async fn insert_many"));
+        assert!(rendered.contains("pub async fn soft_delete_by_id"));
+        assert!(rendered.contains("pub async fn find_by_id_for_tenant_id"));
         assert!(rendered.contains("pub async fn cached_find_by_id"));
         assert!(rendered.contains("pub async fn delete_by_id"));
     }
@@ -2946,9 +3864,11 @@ mod tests {
         let source = r#"
         CREATE TABLE users (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            tenant_id VARCHAR(64) NOT NULL,
             email VARCHAR(255) NOT NULL,
             name VARCHAR(255) NOT NULL,
             nickname VARCHAR(255) NULL,
+            deleted TINYINT(1) NOT NULL DEFAULT 0,
             UNIQUE KEY uniq_users_email (email)
         );
         "#;
@@ -2964,6 +3884,17 @@ mod tests {
         assert!(
             rendered.contains("pub async fn find_by_email(db: &mut toasty::Db, email: &String)")
         );
+        assert!(rendered.contains("pub struct UserQuery"));
+        assert!(rendered.contains("pub enum UserSortField"));
+        assert!(rendered.contains("pub async fn query(db: &mut toasty::Db, req: UserQuery)"));
+        assert!(rendered.contains("pub id_in: Vec<u64>"));
+        assert!(rendered.contains("pub id_min: Option<u64>"));
+        assert!(rendered.contains("User::fields().id().in_list(req.id_in.clone())"));
+        assert!(rendered.contains("User::fields().id().ge(value)"));
+        assert!(rendered.contains("query.order_by(User::fields().id().desc())"));
+        assert!(rendered.contains("pub async fn insert_many"));
+        assert!(rendered.contains("pub async fn soft_delete_by_id"));
+        assert!(rendered.contains("pub async fn find_by_id_for_tenant_id"));
         assert!(rendered.contains("User::all().collect::<Vec<_>>(db).await"));
         assert!(rendered.contains(".email(model.email)"));
         assert!(!rendered.contains(".id(model.id)"));

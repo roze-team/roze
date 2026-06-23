@@ -65,7 +65,7 @@
   2. [x] 明确手工提交场景的 commit/nack 行为。
   3. [x] 统一 `Producer` 返回值语义（包含 `partition` 与 `offset` 可选）。
   4. [x] 补偿：消息消费失败时可按配置延迟重试。
-  5. [ ] 记录 `topic/group/partition/offset` 指标（topic/group queue metrics 已有；partition/offset 先通过 `PublishResult` 暴露，是否进入指标标签需控制基数风险）。
+  5. [x] 记录 `topic/group/partition/offset` 指标（offset 作为 gauge value，不进入 label，避免高基数）。
 - 验收：
   1. `enable_auto_commit=false` 时手工 ack 生效。
   2. nack 达到最大重试后进入 dead letter topic。

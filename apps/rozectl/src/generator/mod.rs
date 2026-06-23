@@ -6,9 +6,10 @@ pub mod rpc;
 pub mod types;
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context};
@@ -139,6 +140,20 @@ impl GeneratorCommand {
             Self::ModelInspect { .. } => "model.inspect",
         }
     }
+
+    fn with_out(mut self, next_out: PathBuf) -> Self {
+        match &mut self {
+            Self::ApiGenerate { out, .. }
+            | Self::ApiNew { out, .. }
+            | Self::RpcGenerate { out, .. }
+            | Self::RpcNew { out, .. }
+            | Self::ModelGenerate { out, .. }
+            | Self::ModelInspect { out, .. } => {
+                *out = next_out;
+            }
+        }
+        self
+    }
 }
 
 type GeneratorHandler = fn(GeneratorCommand) -> anyhow::Result<()>;
@@ -205,6 +220,193 @@ impl GeneratorRegistry {
 
 pub fn registry() -> GeneratorRegistry {
     GeneratorRegistry::new()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffStatus {
+    Added,
+    Modified,
+    Deleted,
+}
+
+impl DiffStatus {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Added => "A",
+            Self::Modified => "M",
+            Self::Deleted => "D",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DiffWorkspace {
+    root: PathBuf,
+}
+
+impl DiffWorkspace {
+    fn new(target: &Path) -> anyhow::Result<Self> {
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = parent.join(format!(".rozectl-diff-{nanos}"));
+        fs::create_dir_all(&root)
+            .with_context(|| format!("failed to create diff workspace {}", root.display()))?;
+        Ok(Self { root })
+    }
+
+    fn output_path(&self, target: &Path) -> PathBuf {
+        let name = target
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| std::ffi::OsStr::new("project"));
+        self.root.join(name)
+    }
+}
+
+impl Drop for DiffWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+pub fn diff_project(
+    target: &Path,
+    command: GeneratorCommand,
+    registry: &GeneratorRegistry,
+) -> anyhow::Result<String> {
+    let workspace = DiffWorkspace::new(target)?;
+    let generated = workspace.output_path(target);
+    if target.exists() {
+        copy_dir_recursive(target, &generated)?;
+    }
+    registry.dispatch(command.with_out(generated.clone()))?;
+    render_project_diff(target, &generated)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if src.is_file() {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dst)
+            .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))?;
+        return Ok(());
+    }
+
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if should_skip_diff_path(&path) {
+            continue;
+        }
+        let next_dst = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &next_dst)?;
+        } else if path.is_file() {
+            fs::copy(&path, &next_dst).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    path.display(),
+                    next_dst.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn render_project_diff(before: &Path, after: &Path) -> anyhow::Result<String> {
+    let before_files = collect_files(before)?;
+    let after_files = collect_files(after)?;
+    let mut paths = BTreeSet::new();
+    paths.extend(before_files.keys().cloned());
+    paths.extend(after_files.keys().cloned());
+
+    let mut lines = Vec::new();
+    for path in paths {
+        let status = match (before_files.get(&path), after_files.get(&path)) {
+            (None, Some(_)) => Some(DiffStatus::Added),
+            (Some(_), None) => Some(DiffStatus::Deleted),
+            (Some(before_path), Some(after_path)) => {
+                if files_equal(before_path, after_path)? {
+                    None
+                } else {
+                    Some(DiffStatus::Modified)
+                }
+            }
+            (None, None) => None,
+        };
+        if let Some(status) = status {
+            lines.push(format!("{} {}", status.marker(), path.display()));
+        }
+    }
+
+    if lines.is_empty() {
+        Ok(String::new())
+    } else {
+        lines.push(String::new());
+        Ok(lines.join("\n"))
+    }
+}
+
+fn collect_files(root: &Path) -> anyhow::Result<BTreeMap<PathBuf, PathBuf>> {
+    let mut files = BTreeMap::new();
+    if !root.exists() {
+        return Ok(files);
+    }
+    collect_files_inner(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_files_inner(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeMap<PathBuf, PathBuf>,
+) -> anyhow::Result<()> {
+    if should_skip_diff_path(current) {
+        return Ok(());
+    }
+    if current.is_file() {
+        let relative = current
+            .strip_prefix(root)
+            .with_context(|| format!("failed to relativize {}", current.display()))?
+            .to_path_buf();
+        files.insert(relative, current.to_path_buf());
+        return Ok(());
+    }
+    if !current.is_dir() {
+        return Ok(());
+    }
+    for entry in
+        fs::read_dir(current).with_context(|| format!("failed to read {}", current.display()))?
+    {
+        let entry = entry?;
+        collect_files_inner(root, &entry.path(), files)?;
+    }
+    Ok(())
+}
+
+fn files_equal(left: &Path, right: &Path) -> anyhow::Result<bool> {
+    let left = fs::read(left).with_context(|| format!("failed to read {}", left.display()))?;
+    let right = fs::read(right).with_context(|| format!("failed to read {}", right.display()))?;
+    Ok(left == right)
+}
+
+fn should_skip_diff_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == ".git" || name == "target" || name.starts_with(".rozectl-diff-")
 }
 
 pub fn template(name: &str) -> anyhow::Result<String> {
@@ -1445,6 +1647,8 @@ cargo run
 ## Endpoints
 
 - REST: `GET /healthz`
+- REST: `GET /readyz`
+- REST: `GET /startupz`
 - REST: `GET /metrics`
 - REST: `GET /openapi.json`
 {rest_routes}
@@ -2471,6 +2675,11 @@ mod tests {
         assert!(out.join("src/handler/users/get_users_id.rs").is_file());
         assert!(out.join("src/middleware/mod.rs").is_file());
         assert!(out.join("src/openapi/mod.rs").is_file());
+        let routes = fs::read_to_string(out.join("src/route/mod.rs")).expect("read routes");
+        assert!(routes.contains("/healthz"));
+        assert!(routes.contains("/readyz"));
+        assert!(routes.contains("/startupz"));
+        assert!(routes.contains("/metrics"));
         assert!(out.join("src/logic/mod.rs").is_file());
         assert!(out.join("src/logic/users/get_users_id.rs").is_file());
         assert!(out.join("src/config/mod.rs").is_file());
@@ -2495,6 +2704,84 @@ mod tests {
         assert!(!config.contains("database:"));
         assert!(!config.contains("mongo:"));
         assert!(!config.contains("sqlite://"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn diff_project_preserves_business_logic_during_update_preview() {
+        let root = temp_test_root("rozectl-diff-update-test");
+        let api = root.join("user.api");
+        let out = root.join("user");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(
+            &api,
+            r#"
+            service user-api {
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("write api");
+
+        let registry = registry();
+        registry
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: api.clone(),
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+            })
+            .expect("generate api project");
+
+        let logic = out.join("src/logic/users/get_users_id.rs");
+        fs::write(&logic, "// custom business logic\n").expect("customize logic");
+        fs::write(
+            &api,
+            r#"
+            service user-api {
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                name: string
+                email: string
+            }
+            "#,
+        )
+        .expect("update api");
+
+        let report = diff_project(
+            &out,
+            GeneratorCommand::ApiGenerate {
+                api,
+                out: PathBuf::new(),
+                options: GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            },
+            &registry,
+        )
+        .expect("diff project");
+
+        assert!(report.contains("M src/types/mod.rs"), "{report}");
+        assert!(
+            !report.contains("src/logic/users/get_users_id.rs"),
+            "{report}"
+        );
+        assert_eq!(
+            fs::read_to_string(logic).expect("read logic"),
+            "// custom business logic\n"
+        );
 
         fs::remove_dir_all(root).expect("remove test output");
     }

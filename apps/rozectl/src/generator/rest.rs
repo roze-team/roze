@@ -74,6 +74,14 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         axum_route_path(&full_route_path(spec, "/healthz"))
     ));
     out.push_str(&format!(
+        "        .route(\"{}\", get(readiness))\n",
+        axum_route_path(&full_route_path(spec, "/readyz"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", get(startup))\n",
+        axum_route_path(&full_route_path(spec, "/startupz"))
+    ));
+    out.push_str(&format!(
         "        .route(\"{}\", get(metrics))\n",
         axum_route_path(&full_route_path(spec, "/metrics"))
     ));
@@ -104,6 +112,14 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
 
     out.push_str(
         "async fn health() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ok\"))\n}\n\n",
+    );
+
+    out.push_str(
+        "async fn readiness() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ready\"))\n}\n\n",
+    );
+
+    out.push_str(
+        "async fn startup() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"started\"))\n}\n\n",
     );
 
     out.push_str("async fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n");
@@ -187,6 +203,14 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         axum_route_path(&full_route_path(spec, "/healthz"))
     ));
     out.push_str(&format!(
+        "        .route(\"{}\", get(readiness))\n",
+        axum_route_path(&full_route_path(spec, "/readyz"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", get(startup))\n",
+        axum_route_path(&full_route_path(spec, "/startupz"))
+    ));
+    out.push_str(&format!(
         "        .route(\"{}\", get(metrics))\n",
         axum_route_path(&full_route_path(spec, "/metrics"))
     ));
@@ -208,6 +232,12 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
 
     out.push_str(
         "async fn health() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ok\"))\n}\n\n",
+    );
+    out.push_str(
+        "async fn readiness() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ready\"))\n}\n\n",
+    );
+    out.push_str(
+        "async fn startup() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"started\"))\n}\n\n",
     );
     out.push_str("async fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n");
     out.push_str(

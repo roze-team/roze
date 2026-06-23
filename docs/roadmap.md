@@ -93,8 +93,8 @@ upgradeable, and recoverable.
 
 ## P1: Data Boundary
 
-- Keep SeaORM as the default generated SQL model scaffold unless the CLI flag
-  requests Toasty.
+- Keep Toasty as the default generated SQL model scaffold unless the CLI flag
+  requests SeaORM.
 - Document transaction boundaries, domain validation, authorization checks, and
   reliable event publishing as application-owned code.
 - Provide full examples for DB transaction + outbox + MQ publish + RPC call +

@@ -38,7 +38,7 @@ These commands remain available in addition to the compatibility aliases:
 rozectl api generate example/user.api --out services/user-api
 rozectl rpc generate example/user.api --out services/user-rpc
 rozectl model generate example/user.sql --out services/user-api --format sql
-rozectl model generate example/user.sql --out services/user-api --format sql --orm toasty
+rozectl model generate example/user.sql --out services/user-api --format sql --orm sea-orm
 rozectl model inspect users --db-kind postgres --db-url postgres://... --out services/user-api
 rozectl openapi generate example/user.api --out openapi.json
 rozectl api client js example/user.api --out sdk/user.js
@@ -51,7 +51,7 @@ projects remain Rust-native:
 
 - REST services use Axum, Tower/Tower HTTP, and Roze HTTP helpers.
 - RPC services use tonic/prost and Roze RPC helpers.
-- SQL models use SeaORM-style Rust modules by default; `--orm toasty` generates Toasty model modules.
+- SQL models use Toasty model modules by default; `--orm sea-orm` generates SeaORM-style Rust modules.
 - Mongo models generate Rust repository helpers.
 - Dockerfiles build Rust binaries.
 - Kubernetes output targets generated Roze service containers.

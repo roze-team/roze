@@ -1,7 +1,13 @@
 mod generator;
 mod parser;
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use roze_sqlx::SqlxDatabaseKind;
@@ -107,6 +113,20 @@ enum Commands {
     Template {
         #[command(subcommand)]
         command: TemplateCommands,
+    },
+    Diff {
+        #[command(subcommand)]
+        command: DiffCommands,
+    },
+    Doctor {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        port: Vec<u16>,
+        #[arg(long)]
+        tcp: Vec<String>,
+        #[arg(long)]
+        tool: Vec<String>,
     },
     Openapi {
         #[command(subcommand)]
@@ -356,6 +376,35 @@ enum TemplateCommands {
     Init {
         #[arg(long, default_value = "templates")]
         out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DiffCommands {
+    Api {
+        api: PathBuf,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
+    Rpc {
+        api: PathBuf,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
+    Model {
+        schema: PathBuf,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        format: ModelFormat,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
     },
 }
 
@@ -765,6 +814,13 @@ fn main() -> anyhow::Result<()> {
                 generator::init_templates(&out)?;
             }
         },
+        Commands::Diff { command } => run_diff(command, &registry)?,
+        Commands::Doctor {
+            config,
+            port,
+            tcp,
+            tool,
+        } => run_doctor(config, port, tcp, tool)?,
         Commands::Openapi { command } => match command {
             OpenApiCommands::Generate { api, out } => {
                 generator::write_openapi_json(&api, &out)?;
@@ -829,6 +885,248 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl DoctorStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::Warn => "WARN",
+            Self::Fail => "FAIL",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DoctorCheck {
+    status: DoctorStatus,
+    name: String,
+    detail: String,
+}
+
+impl DoctorCheck {
+    fn ok(name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            status: DoctorStatus::Ok,
+            name: name.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn warn(name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            status: DoctorStatus::Warn,
+            name: name.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn fail(name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            status: DoctorStatus::Fail,
+            name: name.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+fn run_doctor(
+    config: Option<PathBuf>,
+    ports: Vec<u16>,
+    tcp_targets: Vec<String>,
+    extra_tools: Vec<String>,
+) -> anyhow::Result<()> {
+    let mut checks = Vec::new();
+    for tool in doctor_tools(extra_tools) {
+        checks.push(check_tool(&tool));
+    }
+    if let Some(config) = config {
+        checks.push(check_config(&config));
+    }
+    for port in ports {
+        checks.push(check_port(port));
+    }
+    for target in tcp_targets {
+        checks.push(check_tcp(&target));
+    }
+
+    let has_failures = checks
+        .iter()
+        .any(|check| matches!(check.status, DoctorStatus::Fail));
+    for check in checks {
+        println!(
+            "{} {:<18} {}",
+            check.status.label(),
+            check.name,
+            check.detail
+        );
+    }
+    if has_failures {
+        anyhow::bail!("doctor found failing checks");
+    }
+    Ok(())
+}
+
+fn doctor_tools(extra_tools: Vec<String>) -> Vec<String> {
+    let mut tools = vec![
+        "rustc".to_string(),
+        "cargo".to_string(),
+        "docker".to_string(),
+        "kubectl".to_string(),
+    ];
+    for tool in extra_tools {
+        if !tools.iter().any(|existing| existing == &tool) {
+            tools.push(tool);
+        }
+    }
+    tools
+}
+
+fn check_tool(tool: &str) -> DoctorCheck {
+    let output = tool_version_command(tool)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let version = version.lines().next().unwrap_or("available").trim();
+            DoctorCheck::ok(format!("tool:{tool}"), version)
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr
+                .lines()
+                .next()
+                .unwrap_or("version check failed")
+                .trim();
+            DoctorCheck::warn(format!("tool:{tool}"), detail)
+        }
+        Err(err) => DoctorCheck::warn(format!("tool:{tool}"), format!("not available: {err}")),
+    }
+}
+
+fn tool_version_command(tool: &str) -> Command {
+    let mut command = Command::new(tool);
+    match tool {
+        "kubectl" => {
+            command.args(["version", "--client"]);
+        }
+        _ => {
+            command.arg("--version");
+        }
+    }
+    command
+}
+
+fn check_config(path: &Path) -> DoctorCheck {
+    if path.is_file() {
+        DoctorCheck::ok("config", format!("{} exists", path.display()))
+    } else if path.exists() {
+        DoctorCheck::fail("config", format!("{} is not a file", path.display()))
+    } else {
+        DoctorCheck::fail("config", format!("{} does not exist", path.display()))
+    }
+}
+
+fn check_port(port: u16) -> DoctorCheck {
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener);
+            DoctorCheck::ok(format!("port:{port}"), "available")
+        }
+        Err(err) => DoctorCheck::fail(format!("port:{port}"), format!("unavailable: {err}")),
+    }
+}
+
+fn check_tcp(target: &str) -> DoctorCheck {
+    let mut addrs = match target.to_socket_addrs() {
+        Ok(addrs) => addrs,
+        Err(err) => {
+            return DoctorCheck::fail(format!("tcp:{target}"), format!("invalid target: {err}"));
+        }
+    };
+    let Some(addr) = addrs.next() else {
+        return DoctorCheck::fail(format!("tcp:{target}"), "no socket address resolved");
+    };
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+        Ok(stream) => {
+            drop(stream);
+            DoctorCheck::ok(format!("tcp:{target}"), "reachable")
+        }
+        Err(err) => DoctorCheck::fail(format!("tcp:{target}"), format!("unreachable: {err}")),
+    }
+}
+
+fn run_diff(command: DiffCommands, registry: &generator::GeneratorRegistry) -> anyhow::Result<()> {
+    let (out, generator_command) = match command {
+        DiffCommands::Api {
+            api,
+            out,
+            roze_source,
+        } => {
+            let mode = diff_mode(&out);
+            let command = GeneratorCommand::ApiGenerate {
+                api,
+                out: PathBuf::new(),
+                options: GenerateOptions::new(mode, roze_source.into()),
+            };
+            (out, command)
+        }
+        DiffCommands::Rpc {
+            api,
+            out,
+            roze_source,
+        } => {
+            let mode = diff_mode(&out);
+            let command = GeneratorCommand::RpcGenerate {
+                api,
+                out: PathBuf::new(),
+                options: GenerateOptions::new(mode, roze_source.into()),
+            };
+            (out, command)
+        }
+        DiffCommands::Model {
+            schema,
+            out,
+            roze_source,
+            format,
+            orm,
+        } => {
+            let mode = diff_mode(&out);
+            let command = GeneratorCommand::ModelGenerate {
+                schema,
+                out: PathBuf::new(),
+                options: GenerateOptions::new(mode, roze_source.into()),
+                format: format.into(),
+                orm: orm.into(),
+            };
+            (out, command)
+        }
+    };
+
+    let report = generator::diff_project(&out, generator_command, registry)?;
+    if report.is_empty() {
+        println!("No changes.");
+    } else {
+        print!("{report}");
+    }
+    Ok(())
+}
+
+fn diff_mode(out: &Path) -> GenerateMode {
+    if out.exists() {
+        GenerateMode::Update
+    } else {
+        GenerateMode::Create
+    }
+}
+
 fn normalize_goctl_args<I>(args: I) -> Vec<OsString>
 where
     I: IntoIterator,
@@ -888,6 +1186,14 @@ mod tests {
     }
 
     #[test]
+    fn doctor_tcp_check_accepts_reachable_endpoint() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let check = check_tcp(&addr.to_string());
+        assert_eq!(check.status, DoctorStatus::Ok);
+    }
+
+    #[test]
     fn parses_compatibility_commands() {
         let api = Cli::try_parse_from(["rozectl", "api", "goctl", "user.api", "--out", "out"])
             .expect("parse api goctl");
@@ -931,6 +1237,30 @@ mod tests {
                 command: OpenApiCommands::Generate { .. }
             }
         ));
+
+        let diff = Cli::try_parse_from(["rozectl", "diff", "api", "user.api", "--out", "out"])
+            .expect("parse diff api");
+        assert!(matches!(
+            diff.command,
+            Commands::Diff {
+                command: DiffCommands::Api { .. }
+            }
+        ));
+
+        let doctor = Cli::try_parse_from([
+            "rozectl",
+            "doctor",
+            "--config",
+            "config.yaml",
+            "--port",
+            "3000",
+            "--tcp",
+            "127.0.0.1:6379",
+            "--tool",
+            "helm",
+        ])
+        .expect("parse doctor");
+        assert!(matches!(doctor.command, Commands::Doctor { .. }));
 
         let client = Cli::try_parse_from([
             "rozectl",

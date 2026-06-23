@@ -27,8 +27,8 @@ The direction is go-zero style microservice ergonomics with Rust-native building
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
 - REST: `axum`, `tower`, and `tower-http` with `roze-result::ApiResponse`, `roze-error::RozeError`, and Roze middleware boundaries.
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
-- ORM: SeaORM is the default generated SQL model scaffold; `--orm toasty`
-  switches model generation to Toasty. Shared ORM request contracts live in
+- ORM: Toasty is the default generated SQL model scaffold; `--orm sea-orm`
+  switches model generation to SeaORM. Shared ORM request contracts live in
   `roze-orm`.
 - DTM: built-in distributed transaction manager defaults to TCC and keeps Saga as an optional workflow.
 - Governance: registry, balancing, middleware, config center, tracing, NATS JetStream, outbox relay, and error handling live across the `roze-*` crates.
@@ -56,6 +56,7 @@ and permission checks.
 ## Usage Documentation
 
 - [Project standards](docs/project-standards.md)
+- [Requirements vs current architecture](docs/requirements-architecture-comparison.md)
 - [Roadmap](docs/roadmap.md)
 - [Module maturity matrix](docs/maturity.md)
 - [Release policy](docs/release.md)
@@ -179,33 +180,38 @@ rozectl api doc -api example/user.api -dir . -o docs/api
 ```
 
 `rozectl model generate example/user.model --out apps/roze-example` writes a
-SeaORM-style model scaffold into an existing service. The model generator
+Toasty model scaffold into an existing service. The model generator
 supports both the existing DSL and SQL DDL via `--format auto|dsl|sql`.
 The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `field` lines.
 
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
-inspects an existing database schema and emits the same SeaORM-based model
-scaffold. SeaORM remains the default ORM for generated database code.
-Pass `--orm toasty` to generate Toasty model structs and repository helpers
-instead:
+inspects an existing database schema and emits the same Toasty-based model
+scaffold. Toasty remains the default ORM for generated database code.
+Pass `--orm sea-orm` to generate SeaORM-style modules instead:
 
 ```bash
 rozectl model generate example/user.sql \
   --out apps/roze-example \
   --format sql \
-  --orm toasty
+  --orm sea-orm
 
 rozectl model mysql ddl \
   -src example/user.sql \
   -dir apps/roze-example \
-  --orm toasty
+  --orm sea-orm
 ```
 
-The Toasty output uses `#[derive(toasty::Model)]`, preserves auto-increment
-primary keys with `#[auto]`, marks generated cache-key lookups as `#[unique]`,
-and adds `toasty` to the target service manifest when a `Cargo.toml` is
-present. It expects application code to pass a configured `toasty::Db`.
+The default Toasty output uses `#[derive(toasty::Model)]`, preserves
+auto-increment primary keys with `#[auto]`, marks generated cache-key lookups as
+`#[unique]`, and adds `toasty` to the target service manifest when a
+`Cargo.toml` is present. It expects application code to pass a configured
+`toasty::Db`. Generated repositories include single-table primary/cache-key
+lookup, `list`, `insert`, `update`, `delete_by_<primary>`, `count`, paginated
+query, equality/IN/range filters, typed sorting, batch insert/delete,
+soft-delete helpers, and tenant-scoped lookup when matching columns are
+configured or inferred. SeaORM output uses the same repository surface with
+set-based batch operations.
 
 Use `--schema` to make the target schema explicit when the table name is
 shared across namespaces:

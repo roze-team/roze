@@ -251,6 +251,29 @@ spec:
           limits:
             cpu: {cpu_limit}
             memory: {memory_limit}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: {port}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: {port}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /startupz
+            port: {port}
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 12
 ---
 apiVersion: v1
 kind: Service
@@ -1036,6 +1059,12 @@ mod tests {
         assert!(rendered.contains("kind: Service"));
         assert!(rendered.contains("kind: HorizontalPodAutoscaler"));
         assert!(rendered.contains("kind: ConfigMap"));
+        assert!(rendered.contains("livenessProbe:"));
+        assert!(rendered.contains("path: /healthz"));
+        assert!(rendered.contains("readinessProbe:"));
+        assert!(rendered.contains("path: /readyz"));
+        assert!(rendered.contains("startupProbe:"));
+        assert!(rendered.contains("path: /startupz"));
         assert!(rendered.contains("DATABASE_URL"));
         assert!(rendered.contains("name: RUST_LOG"));
         assert!(rendered.contains("envFrom:"));

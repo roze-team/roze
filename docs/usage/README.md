@@ -8,6 +8,9 @@ services.
 - [Project standards](../project-standards.md): repository layout, API/RPC
   project boundaries, generated file ownership, runtime contracts, metrics, and
   verification rules.
+- [Requirements vs current architecture](../requirements-architecture-comparison.md):
+  maps the 12 core microservice-framework requirements to Roze's current
+  modules, gaps, and P0/P1/P2 execution plan.
 - [Roadmap](../roadmap.md): prioritized P0/P1/P2 work across release maturity,
   gateway, config center, MQ, governance, generation, docs, and security.
 - [Module maturity matrix](../maturity.md): stable/beta/scaffold/planned status

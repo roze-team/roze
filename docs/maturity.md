@@ -26,7 +26,7 @@ Status legend:
 | Service discovery | beta | memory, DNS, etcd, Consul, watch, and cache primitives exist; needs more failure-mode tests. |
 | Health checks | beta | Probe report types exist; `/healthz`, `/readyz`, dependency details, and K8s templates need standardization. |
 | Lifecycle/bootstrap | scaffold | Several helpers exist, but HTTP/RPC/consumer/job shutdown ordering is not yet one unified lifecycle. |
-| DB/ORM/model generation | beta | SeaORM is the default generated SQL model scaffold; Toasty is optional with `--orm toasty`. Cross-schema ownership and production examples need more polish. |
+| DB/ORM/model generation | beta | Toasty is the default generated SQL model scaffold; SeaORM is optional with `--orm sea-orm`. Cross-schema ownership and production examples need more polish. |
 | Transactions/outbox/DTM | scaffold | TCC/Saga/outbox/inbox primitives exist; needs full HTTP + DB transaction + outbox + MQ + RPC examples. |
 | Auth/JWT/permission/session | beta | JWT, RBAC, tenant, and ABAC primitives exist; needs a unified security model, OpenAPI permission declarations, key rotation, and test templates. |
 | Observability | beta | tracing, metrics, Prometheus, OpenTelemetry, gateway metrics, and queue event metrics exist; needs dashboards, scrape config, and query examples. |

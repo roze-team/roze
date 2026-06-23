@@ -28,9 +28,9 @@ See [usage documentation](./README.md#install-rozectl) for local install,
 upgrade, and PATH troubleshooting.
 
 Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
-instead of inheriting `edition.workspace`. When `--orm toasty` is selected,
-generated Toasty dependencies use MySQL/PostgreSQL features only; sqlite support
-remains available through the Roze SeaORM/sqlx stack.
+instead of inheriting `edition.workspace`. Toasty is the default SQL model ORM,
+and generated Toasty dependencies use MySQL/PostgreSQL features only; sqlite
+support remains available through the Roze SeaORM/sqlx stack.
 
 ## Commands
 
@@ -66,6 +66,37 @@ Generated glue such as route registration, handler adapters, DTOs, OpenAPI,
 RPC server/client adapters, protobuf include modules, `build.rs`, and
 `proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.
 
+Preview regeneration before writing files:
+
+```bash
+rozectl diff api example/user.api --out apps/roze-example --roze-source path
+rozectl diff rpc example/user.api --out services/user-rpc --roze-source path
+rozectl diff model example/user.sql --out services/user-api --format sql
+```
+
+`rozectl diff` writes nothing to the target directory. If the target exists, it
+copies the target to a temporary workspace, runs generation in update mode, and
+prints file-level changes as `A`, `M`, and `D`. This mirrors `--update`
+ownership rules, so business-owned logic files and preserved config are not
+reported as modified unless generation would actually change them.
+
+Check the local development environment:
+
+```bash
+rozectl doctor --config apps/roze-example/config.yaml --port 3000
+rozectl doctor --tcp 127.0.0.1:6379 --tcp 127.0.0.1:9092
+rozectl doctor --tool helm --tool etcdctl
+```
+
+`rozectl doctor` checks the default local tools `rustc`, `cargo`, `docker`, and
+`kubectl`. Extra `--tool` values are checked with `--version`. `--config`
+verifies that a config file exists, and each `--port` verifies that the port is
+available on `127.0.0.1`. Each `--tcp host:port` verifies that a dependency
+endpoint is reachable with a TCP connection, which is enough for local Redis,
+Kafka, NATS, etcd, Consul, or database smoke checks. Missing optional tools are
+reported as `WARN`; missing config files, unavailable ports, or unreachable TCP
+targets are reported as `FAIL` and return a non-zero exit code.
+
 ## Generated REST layout
 
 ```text
@@ -98,6 +129,17 @@ src/
 Generated API crates do not depend on `roze-db`, `roze-mongo`, or Toasty by
 default. API services can still call RPC clients, cache, MQ, NATS, outbox, auth,
 metrics, OpenAPI, validation, and middleware crates.
+
+Generated REST services expose standard operational endpoints:
+
+- `GET /healthz` for process liveness
+- `GET /readyz` for readiness
+- `GET /startupz` for startup state
+- `GET /metrics` for Prometheus metrics
+- `GET /openapi.json` for OpenAPI
+
+The default readiness and startup handlers report OK until dependency-specific
+checks are wired by the application or future lifecycle helpers.
 
 Generate client SDKs:
 
@@ -576,7 +618,7 @@ SQL DDL:
 ```bash
 rozectl model generate example/user.sql --out services/user-api --format sql
 rozectl model mysql ddl -src example/user.sql -dir services/user-api
-rozectl model generate example/user.sql --out services/user-api --format sql --orm toasty
+rozectl model generate example/user.sql --out services/user-api --format sql --orm sea-orm
 ```
 
 Database inspection:
@@ -585,12 +627,35 @@ Database inspection:
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
 rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api
 rozectl model pg datasource -url postgres://postgres:postgres@127.0.0.1:5432/roze -schema public -table users -dir services/user-api
-rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api --orm toasty
+rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api --orm sea-orm
 ```
 
-SeaORM is the default SQL ORM. `--orm toasty` switches SQL/DSL/inspection output
-to Toasty model structs with repository helpers that accept `&mut toasty::Db`.
+Toasty is the default SQL ORM. `--orm sea-orm` switches SQL/DSL/inspection
+output to SeaORM-style modules.
 Mongo generation is separate and is not affected by `--orm`.
+
+Generated SQL repositories include single-table CRUD helpers. Toasty and SeaORM
+outputs both generate primary-key lookup, cache-key lookup, `list`, `insert`,
+`update`, `delete_by_<primary>`, and `count` methods.
+
+SQL repositories additionally generate:
+
+- `{Model}Query`, `{Model}SortField`, and `{Model}Page` structs for paginated
+  single-table queries
+- `query` and `list_page` helpers with equality, `IN`, numeric min/max range,
+  and typed sort fields for non-null columns
+- `insert_many` and `delete_many_by_ids` batch helpers; Toasty uses safe
+  per-row repository calls, SeaORM uses set-based ORM calls
+- soft-delete scopes and `soft_delete_by_<primary>` helpers when a soft-delete
+  column is configured or inferred
+- tenant-scoped `find_by_<primary>_for_<tenant>` helpers when a tenant column is
+  configured or inferred
+
+SQL generation infers soft-delete columns from `deleted`, `is_deleted`,
+`deleted_at`, `delete_time`, or `deleted_at_millis`, and tenant columns from
+`tenant_id`, `org_id`, or `account_id`. DSL models can override this with
+`soft_delete: <field>` and `tenant: <field>`. Transaction templates remain
+application- or extension-owned for now.
 
 Mongo model generation does not require a DSL file:
 
@@ -621,8 +686,9 @@ binary is controlled by `--binary`.
 
 ## Kubernetes generation
 
-`rozectl kube deploy` writes a manifest with Deployment, Service, and HPA
-resources. The default output path is `deploy/kubernetes.yaml`.
+`rozectl kube deploy` writes a manifest with Deployment, Service, HPA, and
+standard liveness/readiness/startup probes. The default output path is
+`deploy/kubernetes.yaml`.
 
 ```bash
 rozectl kube deploy \
@@ -646,6 +712,12 @@ rozectl kube deploy \
 `--config-map` adds an `envFrom.configMapRef` reference. `--env-file` reads a
 dotenv-style file, validates each `KEY=VALUE` line, emits a generated
 `<name>-env` ConfigMap, and wires it through `envFrom`.
+
+Generated probes target the standard service endpoints:
+
+- liveness: `/healthz`
+- readiness: `/readyz`
+- startup: `/startupz`
 
 ## Plugin contract
 

@@ -596,6 +596,7 @@ impl InMemoryKafkaBroker {
         let _ = self.sender_for(&topic).send(self.make_delivery(message));
         self.delivered.fetch_add(1, Ordering::SeqCst);
         record_kafka_event(&topic, group.as_deref(), "delivered");
+        record_kafka_offset(&result);
         result
     }
 
@@ -816,12 +817,14 @@ impl Publisher for RdkafkaProducer {
         {
             Ok((_partition, _offset)) => {
                 record_kafka_event(&metric_topic, message.group.as_deref(), "published");
-                Ok(PublishResult {
+                let result = PublishResult {
                     topic: metric_topic,
                     partition: Some(_partition),
                     offset: Some(_offset),
                     timestamp_millis,
-                })
+                };
+                record_kafka_offset(&result);
+                Ok(result)
             }
             Err((error, _)) => {
                 record_kafka_event(&metric_topic, message.group.as_deref(), "publish_failed");
@@ -1066,6 +1069,15 @@ impl Subscriber for RdkafkaSubscriber {
                                     attempt: parse_attempt(msg.headers()),
                                     dead_letter_topic: cfg.dead_letter_topic.clone(),
                                 };
+                                if let (Some(partition), Some(offset)) = (message.partition, message.offset) {
+                                    roze_metrics::record_queue_offset(
+                                        "kafka",
+                                        &message.topic,
+                                        message.group.as_deref().unwrap_or_default(),
+                                        partition,
+                                        offset,
+                                    );
+                                }
                                 let commit_meta = TopicOffsetMetadata {
                                     topic: msg.topic().to_string(),
                                     partition: msg.partition(),
@@ -1157,6 +1169,12 @@ fn current_millis() -> u64 {
 
 fn record_kafka_event(topic: &str, group: Option<&str>, outcome: &str) {
     roze_metrics::record_queue_event("kafka", topic, group.unwrap_or_default(), outcome);
+}
+
+fn record_kafka_offset(result: &PublishResult) {
+    if let (Some(partition), Some(offset)) = (result.partition, result.offset) {
+        roze_metrics::record_queue_offset("kafka", &result.topic, "", partition, offset);
+    }
 }
 
 pub async fn spawn_consumer<S, F, Fut>(

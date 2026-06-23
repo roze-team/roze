@@ -219,6 +219,21 @@ pub fn record_queue_event(
     queue_metrics_registry().inc_counter("roze_queue_events_total", labels, 1);
 }
 
+pub fn record_queue_offset(
+    system: impl Into<String>,
+    topic: impl Into<String>,
+    group: impl Into<String>,
+    partition: i32,
+    offset: i64,
+) {
+    let labels = MetricLabels::new()
+        .insert("system", system.into())
+        .insert("topic", topic.into())
+        .insert("group", group.into())
+        .insert("partition", partition.to_string());
+    queue_metrics_registry().set_gauge("roze_queue_last_offset", labels, offset as f64);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -389,13 +404,16 @@ mod tests {
     #[test]
     fn renders_queue_metrics_with_labels() {
         record_queue_event("kafka", "orders", "workers", "acked");
+        record_queue_offset("kafka", "orders", "workers", 0, 42);
 
         let metrics = http_metrics();
 
         assert!(metrics.contains("roze_queue_events_total"));
+        assert!(metrics.contains("roze_queue_last_offset"));
         assert!(metrics.contains(r#"system="kafka""#));
         assert!(metrics.contains(r#"topic="orders""#));
         assert!(metrics.contains(r#"group="workers""#));
+        assert!(metrics.contains(r#"partition="0""#));
         assert!(metrics.contains(r#"outcome="acked""#));
     }
 }

@@ -198,6 +198,7 @@ nats:
 - Prometheus 指标
   - `roze_queue_events_total{system="kafka",topic,group,outcome}`：记录 Kafka/MQ 关键路径事件。
   - 当前 outcome 包括 `published`、`publish_failed`、`delivered`、`acked`、`nacked`、`retry_scheduled`、`dead_lettered`、`replayed`、`commit_failed`、`retry_topic_missing`、`dead_letter_missing` 和 `recover_dropped`。
+  - `roze_queue_last_offset{system="kafka",topic,group,partition}`：记录最后观察到的 offset。offset 作为 gauge value，不进入 label，避免高基数。
 
 ### apps/user 观测字段约定（新增）
 - `kafka.pipeline.restarting`
