@@ -437,6 +437,30 @@ pub fn write_ai_context_markdown_doc(api: &Path, out: &Path, force: bool) -> any
     write_api_markdown_doc_with(api, out, force, render_ai_context_markdown_doc)
 }
 
+pub fn write_mock_server_project(api: &Path, out: &Path, force: bool) -> anyhow::Result<()> {
+    if out.exists() && !force {
+        bail!(
+            "{} already exists; pass --force to overwrite mock server files",
+            out.display()
+        );
+    }
+
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)
+        .with_context(|| format!("failed to parse api file {}", api.display()))?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+
+    fs::create_dir_all(out.join("src"))
+        .with_context(|| format!("failed to create {}", out.join("src").display()))?;
+    fs::write(out.join("Cargo.toml"), render_mock_cargo_toml(&spec))
+        .with_context(|| format!("failed to write {}", out.join("Cargo.toml").display()))?;
+    fs::write(out.join("src/main.rs"), render_mock_main(&spec))
+        .with_context(|| format!("failed to write {}", out.join("src/main.rs").display()))?;
+    fs::write(out.join("README.md"), render_mock_readme(&spec, api))
+        .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
+    Ok(())
+}
+
 fn write_api_markdown_doc_with(
     api: &Path,
     out: &Path,
@@ -717,6 +741,226 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     }
 
     out
+}
+
+fn render_mock_cargo_toml(spec: &ApiSpec) -> String {
+    let package = sanitize_package_name(&format!("{}-mock", spec.service));
+    format!(
+        r#"[package]
+name = "{package}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = {{ version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }}
+serde_json = "1"
+tokio = {{ version = "1", features = ["macros", "net", "rt-multi-thread"] }}
+"#
+    )
+}
+
+fn render_mock_main(spec: &ApiSpec) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "use axum::{{routing::{{delete, get, patch, post, put}}, Json, Router}};"
+    )
+    .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "#[tokio::main]").unwrap();
+    writeln!(&mut out, "async fn main() {{").unwrap();
+    if spec.rest_routes.is_empty() {
+        writeln!(&mut out, "    let app = Router::new();").unwrap();
+    } else {
+        writeln!(&mut out, "    let app = Router::new()").unwrap();
+        for (idx, route) in spec.rest_routes.iter().enumerate() {
+            let path = mock_axum_path(&rest::full_route_path_for_route(spec, route));
+            let method = mock_axum_method(&route.method);
+            let handler = mock_handler_ident(route, idx);
+            writeln!(&mut out, "        .route({path:?}, {method}({handler}))").unwrap();
+        }
+        writeln!(&mut out, "        ;").unwrap();
+    }
+    writeln!(
+        &mut out,
+        "    let listener = tokio::net::TcpListener::bind(\"127.0.0.1:3000\")"
+    )
+    .unwrap();
+    writeln!(&mut out, "        .await").unwrap();
+    writeln!(&mut out, "        .expect(\"bind mock server\");").unwrap();
+    writeln!(
+        &mut out,
+        "    println!(\"mock server listening on http://127.0.0.1:3000\");"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    axum::serve(listener, app).await.expect(\"serve mock server\");"
+    )
+    .unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+
+    for (idx, route) in spec.rest_routes.iter().enumerate() {
+        let handler = mock_handler_ident(route, idx);
+        let value = mock_json_for_type(spec, &route.response);
+        let json = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+        writeln!(
+            &mut out,
+            "async fn {handler}() -> Json<serde_json::Value> {{"
+        )
+        .unwrap();
+        writeln!(&mut out, "    Json(serde_json::json!({json}))").unwrap();
+        writeln!(&mut out, "}}").unwrap();
+        writeln!(&mut out).unwrap();
+    }
+
+    out
+}
+
+fn render_mock_readme(spec: &ApiSpec, api: &Path) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(&mut out, "# {} Mock Server", spec.service).unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "Generated from `{}` by `rozectl mock gen`.",
+        api.display()
+    )
+    .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Run").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "```bash").unwrap();
+    writeln!(&mut out, "cargo run").unwrap();
+    writeln!(&mut out, "```").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "The mock server listens on `127.0.0.1:3000`.").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Routes").unwrap();
+    writeln!(&mut out).unwrap();
+    if spec.rest_routes.is_empty() {
+        writeln!(&mut out, "- No REST routes declared.").unwrap();
+    } else {
+        for route in &spec.rest_routes {
+            writeln!(
+                &mut out,
+                "- `{}` `{}` -> `{}`",
+                http_method_name(&route.method),
+                rest::full_route_path_for_route(spec, route),
+                route.response
+            )
+            .unwrap();
+        }
+    }
+    out
+}
+
+fn mock_axum_method(method: &crate::parser::HttpMethod) -> &'static str {
+    match method {
+        crate::parser::HttpMethod::Get => "get",
+        crate::parser::HttpMethod::Post => "post",
+        crate::parser::HttpMethod::Put => "put",
+        crate::parser::HttpMethod::Patch => "patch",
+        crate::parser::HttpMethod::Delete => "delete",
+    }
+}
+
+fn mock_axum_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if let Some(param) = segment.strip_prefix(':') {
+                format!("{{{param}}}")
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn mock_handler_ident(route: &crate::parser::RestRoute, idx: usize) -> String {
+    let base = route
+        .handler
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}_{}", mock_axum_method(&route.method), route.path));
+    format!("{}_{}", sanitize_rust_ident(&base), idx)
+}
+
+fn mock_json_for_type(spec: &ApiSpec, ty: &str) -> serde_json::Value {
+    let Some(type_def) = spec.types.iter().find(|item| item.name == ty) else {
+        return serde_json::json!({});
+    };
+    let mut map = serde_json::Map::new();
+    for field in &type_def.fields {
+        map.insert(
+            field_wire_name(field),
+            mock_json_for_field_type(spec, &field.ty),
+        );
+    }
+    serde_json::Value::Object(map)
+}
+
+fn mock_json_for_field_type(spec: &ApiSpec, ty: &str) -> serde_json::Value {
+    let normalized = ty.trim();
+    if let Some(inner) = normalized.strip_prefix("[]") {
+        return serde_json::Value::Array(vec![mock_json_for_field_type(spec, inner)]);
+    }
+    match normalized {
+        "String" | "string" => serde_json::json!("string"),
+        "bool" | "boolean" => serde_json::json!(true),
+        "i8" | "i16" | "i32" | "i64" | "int" | "int8" | "int16" | "int32" | "int64" | "u8"
+        | "u16" | "u32" | "u64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" => {
+            serde_json::json!(1)
+        }
+        "f32" | "f64" | "float" | "double" => serde_json::json!(1.0),
+        other => mock_json_for_type(spec, other),
+    }
+}
+
+fn sanitize_package_name(input: &str) -> String {
+    let mut out = input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "mock-server".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sanitize_rust_ident(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() || out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        format!("mock_{out}")
+    } else {
+        out.to_string()
+    }
 }
 
 fn http_method_name(method: &HttpMethod) -> &'static str {
@@ -3500,6 +3744,41 @@ mod tests {
         write_service_markdown_doc(&api, &out, true).expect("force service doc");
 
         fs::remove_dir_all(root).expect("remove service doc project");
+    }
+
+    #[test]
+    fn renders_mock_server_from_api_contract() {
+        let spec = parse_api(
+            r#"
+            @server(
+                prefix: /api
+            )
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id string `path:"id"`
+            }
+
+            type UserResp {
+                id string `json:"id"`
+                active bool `json:"active"`
+                score i64 `json:"score"`
+                tags []string `json:"tags"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let main = render_mock_main(&spec);
+
+        assert!(main.contains(r#".route("/api/users/{id}", get(getuser_0))"#));
+        assert!(main.contains(r#""id": "string""#));
+        assert!(main.contains(r#""active": true"#));
+        assert!(main.contains(r#""score": 1"#));
+        assert!(main.contains(r#""tags": ["#));
     }
 
     #[test]

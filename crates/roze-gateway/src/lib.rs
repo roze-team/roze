@@ -1,17 +1,18 @@
 use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
-    sync::Arc,
+    pin::Pin,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{to_bytes, Body, Bytes},
     http::{header, HeaderName, HeaderValue, Method, Request, Response, StatusCode},
     routing::any,
     Router,
 };
-use futures_util::TryStreamExt;
+use futures_util::{Stream, TryStreamExt};
 use hyper::upgrade;
 use hyper_util::rt::TokioIo;
 use reqwest::Response as ReqwestResponse;
@@ -37,6 +38,8 @@ struct GatewayRuntime {
     routes: Vec<CompiledRoute>,
     services: HashMap<String, ServiceEndpoint>,
     global_timeout_ms: Option<u64>,
+    global_stream_idle_timeout_ms: Option<u64>,
+    global_max_stream_connections: Option<u32>,
     global_fallback: Option<GatewayFallbackResponse>,
     request_body_limit_bytes: Option<usize>,
     global_middlewares: Vec<String>,
@@ -49,6 +52,7 @@ struct GatewayRuntime {
     health_states: Arc<Mutex<HashMap<String, HealthState>>>,
     rate_limit_states: Arc<Mutex<HashMap<String, TokenBucketState>>>,
     breaker_states: Arc<Mutex<HashMap<String, CircuitState>>>,
+    stream_connection_states: Arc<StdMutex<HashMap<String, u32>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +62,8 @@ struct ServiceEndpoint {
     registry_name: Option<String>,
     instance_tags: BTreeMap<String, String>,
     timeout_ms: Option<u64>,
+    stream_idle_timeout_ms: Option<u64>,
+    max_stream_connections: Option<u32>,
     outlier: Option<GatewayOutlierConfig>,
     health_check: Option<GatewayHealthCheckConfig>,
 }
@@ -77,6 +83,8 @@ struct CompiledRoute {
     weight: u32,
     instance_tags: BTreeMap<String, String>,
     timeout_ms: Option<u64>,
+    stream_idle_timeout_ms: Option<u64>,
+    max_stream_connections: Option<u32>,
     retries: u32,
     retry_backoff_ms: u64,
     rewrite: Option<String>,
@@ -111,6 +119,15 @@ struct HealthState {
     successes: u32,
 }
 
+struct StreamConnectionPermit {
+    states: Arc<StdMutex<HashMap<String, u32>>>,
+    key: String,
+    service: String,
+    route: String,
+    protocol: &'static str,
+    started: Instant,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum AuthPolicy {
     Jwt,
@@ -128,12 +145,51 @@ impl Default for HealthState {
     }
 }
 
+impl Drop for StreamConnectionPermit {
+    fn drop(&mut self) {
+        let mut current = 0;
+        if let Ok(mut states) = self.states.lock() {
+            if let Some(value) = states.get_mut(&self.key) {
+                *value = value.saturating_sub(1);
+                current = *value;
+                if *value == 0 {
+                    states.remove(&self.key);
+                }
+            }
+        }
+        roze_metrics::record_gateway_stream_connection(
+            self.service.clone(),
+            self.route.clone(),
+            self.protocol,
+            "closed",
+            current,
+        );
+        roze_metrics::record_gateway_stream_connection_duration(
+            self.service.clone(),
+            self.route.clone(),
+            self.protocol,
+            self.started.elapsed(),
+        );
+        tracing::info!(
+            event = "gateway.stream_connection_closed",
+            service = %self.service,
+            route = %self.route,
+            protocol = %self.protocol,
+            active = current,
+            duration_ms = self.started.elapsed().as_millis(),
+            "gateway stream connection closed"
+        );
+    }
+}
+
 impl Default for GatewayRuntime {
     fn default() -> Self {
         Self {
             routes: Vec::new(),
             services: HashMap::new(),
             global_timeout_ms: None,
+            global_stream_idle_timeout_ms: None,
+            global_max_stream_connections: None,
             global_fallback: None,
             request_body_limit_bytes: None,
             global_middlewares: Vec::new(),
@@ -146,6 +202,7 @@ impl Default for GatewayRuntime {
             health_states: Arc::new(Mutex::new(HashMap::new())),
             rate_limit_states: Arc::new(Mutex::new(HashMap::new())),
             breaker_states: Arc::new(Mutex::new(HashMap::new())),
+            stream_connection_states: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
@@ -181,6 +238,8 @@ pub fn build_router_with_registry_governance_and_auth(
     let cors_config = config.cors;
     let mut runtime = GatewayRuntime {
         global_timeout_ms: config.timeout_ms,
+        global_stream_idle_timeout_ms: config.stream_idle_timeout_ms,
+        global_max_stream_connections: config.max_stream_connections,
         global_fallback: config.fallback,
         request_body_limit_bytes: config.request_body_limit_bytes,
         global_middlewares: normalize_middlewares(config.middlewares),
@@ -211,6 +270,8 @@ pub fn build_router_with_registry_governance_and_auth(
                 weight: 100,
                 instance_tags: BTreeMap::new(),
                 timeout_ms: runtime.global_timeout_ms,
+                stream_idle_timeout_ms: runtime.global_stream_idle_timeout_ms,
+                max_stream_connections: runtime.global_max_stream_connections,
                 retries: 0,
                 retry_backoff_ms: 0,
                 rewrite: None,
@@ -396,6 +457,17 @@ impl GatewayRuntime {
                     response
                 }
                 Ok(Err(err)) => {
+                    let limit_exceeded = err.to_string() == "too many stream connections";
+                    let status = if limit_exceeded {
+                        StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    };
+                    let outcome = if limit_exceeded {
+                        "stream_connection_limited"
+                    } else {
+                        "websocket_failed"
+                    };
                     warn!(
                         event = "gateway.websocket_failed",
                         route = %route.path,
@@ -406,13 +478,13 @@ impl GatewayRuntime {
                     self.record_gateway_response(
                         Some(&route),
                         &request_method,
-                        StatusCode::BAD_GATEWAY,
-                        "websocket_failed",
+                        status,
+                        outcome,
                         started,
                     );
                     build_fallback(
                         route.fallback.as_ref().or(self.global_fallback.as_ref()),
-                        StatusCode::BAD_GATEWAY,
+                        status,
                         &err.to_string(),
                     )
                 }
@@ -718,7 +790,30 @@ impl GatewayRuntime {
                 return Err(err.into());
             }
         };
-        let response = build_upstream_response(upstream_response).await?;
+        let stream_permit =
+            if is_sse_response(upstream_response.status(), upstream_response.headers()) {
+                match self.try_acquire_stream_connection(route, "sse") {
+                    Ok(permit) => permit,
+                    Err(()) => {
+                        return Ok(build_fallback(
+                            route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "too many stream connections",
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+        let response = build_upstream_response(
+            upstream_response,
+            route
+                .stream_idle_timeout_ms
+                .or(route.effective_service_stream_idle_timeout(&self.services))
+                .or(self.global_stream_idle_timeout_ms),
+            stream_permit,
+        )
+        .await?;
         if response.status().is_server_error() {
             self.record_outlier_failure(&target).await;
             roze_metrics::record_gateway_upstream(
@@ -749,6 +844,9 @@ impl GatewayRuntime {
             .get(&route.service)
             .ok_or_else(|| anyhow::anyhow!("service '{}' is not registered", route.service))?;
         let target = self.resolve_upstream(service, &route.instance_tags).await?;
+        let stream_permit = self
+            .try_acquire_stream_connection(route, "websocket")
+            .map_err(|()| anyhow::anyhow!("too many stream connections"))?;
         let rewritten_path = rewrite_path(&route.path, route.rewrite.as_deref(), incoming_path);
         let upstream_url = build_upstream_url(
             &target.base,
@@ -786,6 +884,7 @@ impl GatewayRuntime {
         }
 
         tokio::spawn(async move {
+            let _stream_permit = stream_permit;
             match on_upgrade.await {
                 Ok(upgraded) => {
                     let mut client = TokioIo::new(upgraded);
@@ -803,6 +902,71 @@ impl GatewayRuntime {
         });
 
         Ok(response)
+    }
+
+    fn try_acquire_stream_connection(
+        &self,
+        route: &CompiledRoute,
+        protocol: &'static str,
+    ) -> Result<Option<StreamConnectionPermit>, ()> {
+        let Some(max) = route
+            .max_stream_connections
+            .or(route.effective_service_max_stream_connections(&self.services))
+            .or(self.global_max_stream_connections)
+        else {
+            return Ok(None);
+        };
+        let key = format!("{}:{protocol}", route.path);
+        let mut states = self
+            .stream_connection_states
+            .lock()
+            .expect("stream connection state lock poisoned");
+        let current = states.get(&key).copied().unwrap_or_default();
+        if current >= max {
+            roze_metrics::record_gateway_stream_connection(
+                route.service.clone(),
+                route.path.clone(),
+                protocol,
+                "rejected",
+                current,
+            );
+            tracing::warn!(
+                event = "gateway.stream_connection_rejected",
+                service = %route.service,
+                route = %route.path,
+                protocol = %protocol,
+                active = current,
+                max = max,
+                "gateway stream connection rejected"
+            );
+            return Err(());
+        }
+        let next = current.saturating_add(1);
+        states.insert(key.clone(), next);
+        roze_metrics::record_gateway_stream_connection(
+            route.service.clone(),
+            route.path.clone(),
+            protocol,
+            "opened",
+            next,
+        );
+        tracing::info!(
+            event = "gateway.stream_connection_opened",
+            service = %route.service,
+            route = %route.path,
+            protocol = %protocol,
+            active = next,
+            max = max,
+            "gateway stream connection opened"
+        );
+        Ok(Some(StreamConnectionPermit {
+            states: self.stream_connection_states.clone(),
+            key,
+            service: route.service.clone(),
+            route: route.path.clone(),
+            protocol,
+            started: Instant::now(),
+        }))
     }
 
     fn record_outlier_failure_spawn(&self, target: UpstreamTarget) {
@@ -1233,6 +1397,8 @@ fn compile_routes(
                     .timeout_ms
                     .or_else(|| route_governance.and_then(|route| route.timeout_ms))
                     .or_else(|| governance.and_then(|governance| governance.timeout_ms)),
+                stream_idle_timeout_ms: route.stream_idle_timeout_ms,
+                max_stream_connections: route.max_stream_connections,
                 retries: route
                     .retries
                     .unwrap_or_else(|| retry.map(retries_from_max_attempts).unwrap_or_default()),
@@ -1304,6 +1470,24 @@ impl CompiledRoute {
         services
             .get(&self.service)
             .and_then(|service| service.timeout_ms)
+    }
+
+    fn effective_service_stream_idle_timeout(
+        &self,
+        services: &HashMap<String, ServiceEndpoint>,
+    ) -> Option<u64> {
+        services
+            .get(&self.service)
+            .and_then(|service| service.stream_idle_timeout_ms)
+    }
+
+    fn effective_service_max_stream_connections(
+        &self,
+        services: &HashMap<String, ServiceEndpoint>,
+    ) -> Option<u32> {
+        services
+            .get(&self.service)
+            .and_then(|service| service.max_stream_connections)
     }
 }
 
@@ -1681,6 +1865,8 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 
 async fn build_upstream_response(
     upstream_response: ReqwestResponse,
+    stream_idle_timeout_ms: Option<u64>,
+    stream_permit: Option<StreamConnectionPermit>,
 ) -> anyhow::Result<Response<Body>> {
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
@@ -1688,11 +1874,19 @@ async fn build_upstream_response(
         .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
 
     if is_sse_response(status, &headers) {
-        let body = Body::from_stream(
-            upstream_response
-                .bytes_stream()
-                .map_err(std::io::Error::other),
-        );
+        let stream = upstream_response.bytes_stream();
+        let body = match stream_idle_timeout_ms {
+            Some(timeout_ms) => Body::from_stream(sse_stream_with_idle_timeout(
+                stream,
+                Duration::from_millis(timeout_ms.max(1)),
+                stream_permit,
+            )),
+            None => Body::from_stream(sse_stream_with_idle_timeout(
+                stream,
+                Duration::from_millis(0),
+                stream_permit,
+            )),
+        };
         let mut response = response.body(body)?;
         for (name, value) in &headers {
             response.headers_mut().insert(name.clone(), value.clone());
@@ -1708,6 +1902,45 @@ async fn build_upstream_response(
     }
 
     Ok(response)
+}
+
+fn sse_stream_with_idle_timeout<S>(
+    stream: S,
+    idle_timeout: Duration,
+    permit: Option<StreamConnectionPermit>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    futures_util::stream::unfold(
+        (Box::pin(stream), false, permit),
+        move |(mut stream, done, permit): (Pin<Box<S>>, bool, Option<StreamConnectionPermit>)| async move {
+            if done {
+                return None;
+            }
+
+            if idle_timeout.is_zero() {
+                return match stream.as_mut().try_next().await {
+                    Ok(Some(bytes)) => Some((Ok(bytes), (stream, false, permit))),
+                    Ok(None) => None,
+                    Err(err) => Some((Err(std::io::Error::other(err)), (stream, true, permit))),
+                };
+            }
+
+            match tokio::time::timeout(idle_timeout, stream.as_mut().try_next()).await {
+                Ok(Ok(Some(bytes))) => Some((Ok(bytes), (stream, false, permit))),
+                Ok(Ok(None)) => None,
+                Ok(Err(err)) => Some((Err(std::io::Error::other(err)), (stream, true, permit))),
+                Err(_) => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "sse stream idle timeout",
+                    )),
+                    (stream, true, permit),
+                )),
+            }
+        },
+    )
 }
 
 fn is_sse_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
@@ -1815,6 +2048,8 @@ impl From<GatewayService> for ServiceEndpoint {
             registry_name: value.registry_name,
             instance_tags: value.instance_tags,
             timeout_ms: value.timeout_ms,
+            stream_idle_timeout_ms: value.stream_idle_timeout_ms,
+            max_stream_connections: value.max_stream_connections,
             outlier: value.outlier,
             health_check: value.health_check,
         }
@@ -1975,6 +2210,163 @@ mod tests {
             .expect("second SSE chunk")
             .expect("second SSE bytes");
         assert_eq!(&second[..], b"data: second\n\n");
+    }
+
+    #[tokio::test]
+    async fn sse_stream_idle_timeout_fails_stalled_stream_after_first_event() {
+        let upstream = Router::new().route(
+            "/events",
+            get(|| async move {
+                let stream = futures_util::stream::unfold(0, |idx| async move {
+                    match idx {
+                        0 => Some((
+                            Ok::<_, Infallible>(Bytes::from_static(b"data: first\n\n")),
+                            1,
+                        )),
+                        1 => {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            Some((
+                                Ok::<_, Infallible>(Bytes::from_static(b"data: late\n\n")),
+                                2,
+                            ))
+                        }
+                        _ => None,
+                    }
+                });
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .expect("sse response")
+            }),
+        );
+        let upstream_addr = spawn_router(upstream).await;
+        let gateway = build_router(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "events".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/events".to_string(),
+                    service: "events".to_string(),
+                    methods: vec!["GET".to_string()],
+                    stream_idle_timeout_ms: Some(80),
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+        );
+        let gateway_addr = spawn_router(gateway).await;
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway_addr}/events"))
+            .send()
+            .await
+            .expect("gateway sse response");
+
+        let mut stream = response.bytes_stream();
+        let first = tokio::time::timeout(Duration::from_millis(120), stream.try_next())
+            .await
+            .expect("first SSE chunk should arrive")
+            .expect("first SSE chunk")
+            .expect("first SSE bytes");
+        assert_eq!(&first[..], b"data: first\n\n");
+
+        let stalled = tokio::time::timeout(Duration::from_secs(1), stream.try_next())
+            .await
+            .expect("stalled SSE stream should fail after idle timeout");
+        assert!(stalled.is_err());
+    }
+
+    #[tokio::test]
+    async fn max_stream_connections_rejects_extra_sse_connection() {
+        let upstream = Router::new().route(
+            "/events",
+            get(|| async move {
+                let stream = futures_util::stream::unfold(0, |idx| async move {
+                    match idx {
+                        0 => Some((
+                            Ok::<_, Infallible>(Bytes::from_static(b"data: first\n\n")),
+                            1,
+                        )),
+                        1 => {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            Some((
+                                Ok::<_, Infallible>(Bytes::from_static(b"data: late\n\n")),
+                                2,
+                            ))
+                        }
+                        _ => None,
+                    }
+                });
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .expect("sse response")
+            }),
+        );
+        let upstream_addr = spawn_router(upstream).await;
+        let gateway = build_router(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "events".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/events".to_string(),
+                    service: "events".to_string(),
+                    methods: vec!["GET".to_string()],
+                    max_stream_connections: Some(1),
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+        );
+        let gateway_addr = spawn_router(gateway).await;
+        let client = reqwest::Client::new();
+
+        let first_response = client
+            .get(format!("http://{gateway_addr}/events"))
+            .send()
+            .await
+            .expect("first gateway sse response");
+        let mut first_stream = first_response.bytes_stream();
+        let first = tokio::time::timeout(Duration::from_millis(120), first_stream.try_next())
+            .await
+            .expect("first SSE chunk should arrive")
+            .expect("first SSE chunk")
+            .expect("first SSE bytes");
+        assert_eq!(&first[..], b"data: first\n\n");
+
+        let second_response = client
+            .get(format!("http://{gateway_addr}/events"))
+            .send()
+            .await
+            .expect("second gateway response");
+        assert_eq!(
+            second_response.status(),
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        );
+
+        drop(first_stream);
+        let mut metrics = String::new();
+        for _ in 0..20 {
+            metrics = roze_metrics::http_metrics();
+            if metrics.contains("roze_gateway_stream_connection_duration_ms_total") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(metrics.contains("roze_gateway_stream_connection_events_total"));
+        assert!(metrics.contains("roze_gateway_stream_connections_active"));
+        assert!(metrics.contains("roze_gateway_stream_connection_duration_ms_total"));
+        assert!(metrics.contains(r#"protocol="sse""#));
+        assert!(metrics.contains(r#"outcome="rejected""#));
     }
 
     #[tokio::test]
@@ -2385,6 +2777,8 @@ mod tests {
             rate_limit: None,
             breaker: None,
             middlewares: Vec::new(),
+            stream_idle_timeout_ms: None,
+            max_stream_connections: None,
         };
         let high = CompiledRoute {
             service: "v2".to_string(),
@@ -2587,6 +2981,8 @@ mod tests {
             routes: Vec::new(),
             middlewares: Vec::new(),
             timeout_ms: None,
+            stream_idle_timeout_ms: None,
+            max_stream_connections: None,
             request_body_limit_bytes: None,
             fallback: None,
             cors: None,
@@ -2602,6 +2998,8 @@ mod tests {
             instance_tags: BTreeMap::new(),
             middlewares: Vec::new(),
             timeout_ms: None,
+            stream_idle_timeout_ms: None,
+            max_stream_connections: None,
             retries: None,
             retry_backoff_ms: None,
             rewrite: None,
@@ -2618,6 +3016,8 @@ mod tests {
             registry_name: None,
             instance_tags: BTreeMap::new(),
             timeout_ms: None,
+            stream_idle_timeout_ms: None,
+            max_stream_connections: None,
             outlier: None,
             health_check: None,
         }

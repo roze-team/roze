@@ -18,11 +18,15 @@ gateway:
   listen: "127.0.0.1:8081"
   middlewares: [trace, ...]
   timeout_ms: 8000
+  stream_idle_timeout_ms: 60000
+  max_stream_connections: 1000
   request_body_limit_bytes: 1048576
   services:
     - name: user
       upstream: http://127.0.0.1:3000
       timeout_ms: 3000
+      stream_idle_timeout_ms: 60000
+      max_stream_connections: 500
       outlier: { failure_threshold: 3, ejection_ms: 30000 }
       health_check:
         path: /healthz
@@ -41,6 +45,8 @@ gateway:
       methods: [GET, POST]
       weight: 90
       rewrite: /user
+      stream_idle_timeout_ms: 60000
+      max_stream_connections: 100
       fallback: { status: 503, body: { code: 503, message: "..." }, headers: {...} }
       middlewares: [trace, rate, breaker, auth]
       rate_limit: { burst: 20, refill_ms: 200 }
@@ -67,6 +73,8 @@ gateway:
 - `route.fallback` 优先于 `gateway.fallback`，未设置时仅使用 HTTP code + message。
 - Gateway route 显式字段优先于 `governance.routes`，`governance.routes` 优先于全局 `governance`。
 - Gateway 当前继承的统一治理字段包括 `timeout_ms`、`retry`、`rate_limit` 和 `breaker`；`shedding` 与 `fallback` 已进入统一配置模型，网关执行逻辑后续接入。
+- `stream_idle_timeout_ms` 是流式响应空闲超时，按 `route > service > gateway` 覆盖；未配置时不额外限制流式 body。
+- `max_stream_connections` 是 SSE/WebSocket 活跃连接数上限，按 `route > service > gateway` 覆盖；未配置时不额外限制长连接数，超限返回 429。
 
 ## 3. 鉴权
 
@@ -122,6 +130,19 @@ auth:
 - 自动透传请求头、body 与 query-string，保留 `x-request-id`、`x-trace-id`（若未提供则自动补齐）。
 - 默认请求体上限：2MB（可配置 `request_body_limit_bytes`）。
 
+### HTTP、WebSocket、SSE
+
+- 普通 HTTP：网关按 route/service 转发请求并透传上游响应。
+- WebSocket：客户端发送 `Upgrade: websocket` 时，网关会对上游发起 WebSocket 握手，并在握手成功后做双向字节流转发。
+- SSE：上游响应 `Content-Type: text/event-stream` 时，网关使用流式响应透传事件，不等待完整 body 结束。
+- SSE 启用不需要额外配置。建议上游定期发送 heartbeat，例如 `: ping\n\n`。
+- `timeout_ms` 约束普通请求和上游响应头等待时间；`stream_idle_timeout_ms` 只约束 SSE 等流式响应在两次 chunk 之间允许空闲的最长时间。
+- `max_stream_connections` 同时约束 SSE 和 WebSocket 的活跃连接数，按 route + protocol 分开计数。
+- 长连接观测指标：
+  - `roze_gateway_stream_connection_events_total{service,route,protocol,outcome}`：SSE/WS opened、closed、rejected 事件数。
+  - `roze_gateway_stream_connections_active{service,route,protocol}`：当前活跃 SSE/WS 连接数。
+  - `roze_gateway_stream_connection_duration_ms_total{service,route,protocol}`：已关闭 SSE/WS 连接累计持续时间。
+
 ## 5. 熔断与限流
 
 - `rate_limit` 使用令牌桶模型：
@@ -139,6 +160,11 @@ auth:
 - `gateway.request_body_invalid`
 - `gateway.upstream_failed`
 - `gateway.upstream_timeout`
+- `gateway.websocket_failed`
+- `gateway.websocket_timeout`
+- `gateway.stream_connection_opened`
+- `gateway.stream_connection_closed`
+- `gateway.stream_connection_rejected`
 - `gateway.upstream_retry_succeeded`
 - `gateway.upstream_ejected`
 - `gateway.upstream_unhealthy`

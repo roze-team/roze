@@ -52,6 +52,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
+    pub stream_idle_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_stream_connections: Option<u32>,
+    #[serde(default)]
     pub request_body_limit_bytes: Option<usize>,
     #[serde(default)]
     pub fallback: Option<GatewayFallbackResponse>,
@@ -71,6 +75,10 @@ pub struct GatewayService {
     pub instance_tags: BTreeMap<String, String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub stream_idle_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_stream_connections: Option<u32>,
     #[serde(default)]
     pub outlier: Option<GatewayOutlierConfig>,
     #[serde(default)]
@@ -115,6 +123,10 @@ pub struct GatewayRoute {
     pub middlewares: Vec<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub stream_idle_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_stream_connections: Option<u32>,
     #[serde(default)]
     pub retries: Option<u32>,
     #[serde(default)]

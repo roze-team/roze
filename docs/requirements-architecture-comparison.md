@@ -26,12 +26,12 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | # | 需求能力 | Roze 当前覆盖 | 主要入口 | 缺口/风险 |
 | --- | --- | --- | --- | --- |
-| 1 | API/RPC 契约优先 | 高 | `apps/rozectl`, `.api`, proto, REST/RPC generator, OpenAPI, TS/JS/Dart SDK | 缺 mock 生成、接口测试生成、契约兼容性检查；OpenAPI validator 投影仍有缺口；SDK 缺 error/interceptor/retry/timeout。 |
+| 1 | API/RPC 契约优先 | 高 | `apps/rozectl`, `.api`, proto, REST/RPC generator, OpenAPI, TS/JS/Dart SDK | 已具备 `rozectl contract check` 和 `rozectl mock gen` MVP；仍缺接口测试生成；OpenAPI validator 投影仍有缺口；SDK 缺 error/interceptor/retry/timeout。 |
 | 2 | Gateway 网关 | 中高 | `crates/roze-gateway`, `apps/roze-gateway`, `docs/contracts/gateway.md` | 已有路由、rewrite、auth、rate/breaker、retry、fallback、registry upstream、canary、health/outlier、hot reload、WebSocket upgrade 代理、SSE 流式代理；缺更完整 app 级示例、deploy smoke test、A/B、流量镜像。 |
 | 3 | 服务注册与发现 | 中高 | `roze-rpc::registry`, cached resolver, etcd/consul/dns/memory | 代码层已具备；还需要失败模式测试、生产配置示例、Gateway/RPC/Job/MQ consumer 复用边界文档化。 |
 | 4 | 统一治理模型 | 中 | `roze-config`, `roze-middleware`, `roze-rpc`, `roze-gateway` | Gateway 已继承 timeout/retry/rate/breaker；HTTP/RPC/MQ/Job 还需要同一 schema、同一指标标签、可选持久化 breaker/rate limiter。 |
 | 5 | 配置中心 | 中高 | `crates/roze-config`, `docs/contracts/config-center.md` | Etcd watch、Env/File fallback、diff/version、section event、失败回滚已具备；仍需 listener timeout/failure isolation、灰度、签名、审计操作者模型。 |
-| 6 | 可观测性 | 中 | `roze-log`, `roze-metrics`, `roze-prometheus`, `roze-opentelemetry` | tracing/metrics/Prometheus/OTel 已有；缺 Grafana dashboard、Prometheus alert rules、trace 示例、日志查询示例、SLO 模板。 |
+| 6 | 可观测性 | 中 | `roze-log`, `roze-metrics`, `roze-prometheus`, `roze-opentelemetry`, `deploy/observability` | tracing/metrics/Prometheus/OTel 已有；已提供 Gateway Prometheus scrape 示例、recording rules、alert rules、Grafana dashboard 和 SLO 模板；仍缺 trace 示例、日志查询示例和更完整 dashboard pack。 |
 | 7 | 健康检查和生命周期 | 中 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report 和 REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；依赖 readiness、Gateway/RPC 标准入口、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
 | 8 | 安全能力 | 中 | `roze-jwt`, `roze-auth`, `roze-permission`, Gateway auth | JWT/RBAC/tenant/ABAC primitives 已有；缺统一安全模型、OIDC/OAuth2、mTLS、permission 注解到 OpenAPI/SDK/test、key rotation、审计日志模板。 |
 | 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
@@ -51,10 +51,10 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | proto/RPC 生成 | server/client/pb/logic/config/svc 固定结构 | streaming、metadata 策略、proto compatibility fixtures | `apps/rozectl`, `roze-rpc` | RPC 生成项目可编译，Context metadata 可透传。 |
 | OpenAPI 生成 | paths、schemas、parameters、request/response、security | validator 约束完整投影、examples、error schema | `apps/rozectl`, `roze-openapi` | Swagger UI/主流 client generator 可消费。 |
 | SDK 生成 | TS/JS/Dart baseUrl、headers、path/query/body | typed error、interceptor、retry、timeout、auth injection | `apps/rozectl/src/generator/client.rs` | SDK 能调用 mock server 并处理错误响应。 |
-| mock 生成 | 从 `.api` 生成 mock handler/server | 示例数据、延迟/错误注入、OpenAPI example 驱动 | `rozectl mock gen` | 本地无需业务实现即可返回契约响应。 |
+| mock 生成 | 已支持从 `.api` 生成独立 Axum mock server，并按 response type 返回默认 JSON | 示例数据、延迟/错误注入、OpenAPI example 驱动 | `rozectl mock gen` | 本地无需业务实现即可返回契约响应。 |
 | 接口测试生成 | HTTP smoke test、RPC smoke test、OpenAPI schema validation | 契约回归、鉴权场景、错误码场景 | `rozectl test gen` | 生成测试能在空逻辑或 mock 上运行。 |
 | 生成预览 | 文件级 `A/M/D` diff，按 update 规则保护业务文件 | ownership-aware diff、语义 diff | `rozectl diff` | 默认不写盘，输出清晰。 |
-| 契约兼容检查 | 检查 route/method/path/字段删除和必填新增 | semver 建议、SDK breaking report | `rozectl contract check` | breaking changes 明确失败并给出原因。 |
+| 契约兼容检查 | 已支持检查 route/method/path 删除或变更、RPC 方法删除、request/response 类型变更、字段删除、字段类型/source 变更、必填字段新增 | semver 建议、SDK breaking report、响应字段兼容策略细化 | `rozectl contract check` | breaking changes 明确失败并给出原因。 |
 
 ### 2. Gateway 网关
 
@@ -64,7 +64,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 鉴权 | JWT、API Key、CORS、body/header limit | OIDC、mTLS、请求签名、防重放 | `roze-gateway`, `roze-auth` | 未授权返回统一 401/403，成功注入 auth context header。 |
 | 治理 | timeout、rate limit、breaker、retry、fallback | retry budget、adaptive shedding、bulkhead | `roze-gateway`, governance schema | 每项治理有 smoke test 和 metrics。 |
 | 灰度路由 | weight、instance_tags、registry upstream | header/cookie/tenant/user 分流、A/B、流量镜像 | `roze-gateway` | 相同路由可按权重或标签命中不同上游。 |
-| 协议形态 | HTTP request/response、WebSocket upgrade 双向转发、SSE `text/event-stream` 流式转发 | gRPC-Web、长连接配额、连接级观测 | `roze-gateway` | HTTP、WS、SSE 可共用同一套 route/service/governance 配置，SSE 首个事件不等待完整响应结束。 |
+| 协议形态 | HTTP request/response、WebSocket upgrade 双向转发、SSE `text/event-stream` 流式转发、流式响应空闲超时 `stream_idle_timeout_ms`、长连接上限 `max_stream_connections`、连接级 opened/closed/rejected/duration/active 指标、连接级 dashboard/alert | gRPC-Web、更多连接级 runbook | `roze-gateway`, `deploy/observability` | HTTP、WS、SSE 可共用同一套 route/service/governance 配置，SSE 首个事件不等待完整响应结束，空闲流和活跃连接数可按 route/service/gateway 配置治理，并可按 route/protocol 观测连接生命周期。 |
 | 上游健康 | 主动 health check、outlier ejection | 异常实例自动摘除、慢实例降权 | `roze-gateway` | 失败实例不参与路由，恢复后重新加入。 |
 | 热更新 | 配置中心 reload 后重建路由 | 灰度配置、回滚、签名校验 | `apps/roze-gateway`, `roze-config` | invalid config 不替换旧路由。 |
 | 观测 | request_id/trace_id、upstream metrics、retry metrics | dashboard、alert、route SLO | `roze-metrics`, `roze-prometheus` | 可按 route/upstream 查看延迟、错误、重试、熔断。 |
@@ -111,8 +111,8 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | Metrics | HTTP/RPC/Gateway/MQ/DB/Redis 基础指标 | 统一 labels、直方图 buckets、SLO recording rules | `roze-metrics`, `roze-prometheus` | Prometheus scrape 后能画 p95/error rate。 |
 | Tracing | OpenTelemetry trace context | baggage、sampling、Jaeger/OTLP 示例 | `roze-opentelemetry` | HTTP -> RPC -> MQ trace 可串联。 |
 | 事件观测 | config reload、retry、breaker、rate limit、DLQ | audit event stream | metrics/log/admin | 治理事件有结构化字段。 |
-| Dashboard | 最小 Grafana dashboard | 服务、网关、MQ、配置中心 dashboard pack | `deploy/observability` | 本地示例能导入 dashboard。 |
-| Alert | Prometheus alert rules | SLO burn rate、DLQ、breaker state | `deploy/observability` | 关键故障有默认告警规则。 |
+| Dashboard | 已提供 Gateway 最小 Grafana dashboard | 服务、MQ、配置中心 dashboard pack | `deploy/observability` | 本地示例能导入 dashboard。 |
+| Alert | 已提供 Gateway Prometheus alert rules 和 recording rules | DLQ、breaker state、更多 burn-rate 窗口 | `deploy/observability` | 关键故障有默认告警规则。 |
 
 ### 7. 健康检查和生命周期
 
@@ -358,7 +358,7 @@ P0 不应该继续扩模块，而应该补“可信闭环”。
 1. 统一治理 schema 横跨 HTTP/RPC/Gateway/MQ/Job：timeout、retry、rate limit、breaker、shedding、bulkhead、fallback、deadline/cancel propagation。
 2. 安全模型进入契约层：`.api` 支持 jwt、permission、tenant、audit、idempotent、rate_limit、body_limit、timeout，并投影到 OpenAPI、middleware、测试骨架和 SDK。
 3. 配置中心补生产语义：签名、灰度、审计、操作者、回滚命令、listener timeout/failure isolation。
-4. 可观测资产交付：Grafana dashboard、Prometheus scrape/alert rules、trace 示例、日志查询示例、SLO 模板。
+4. 可观测资产交付：已提供 Gateway Grafana dashboard、Prometheus scrape/recording/alert rules 和 SLO 模板；继续补 trace 示例、日志查询示例。
 5. MQ 可靠事件标准化：统一 envelope、schema version、idempotency key、outbox/inbox、DLQ 查看/重投/丢弃、consumer lag 指标。
 6. 生产部署模板：Helm Chart、HPA、PDB、ServiceAccount、NetworkPolicy、ConfigMap/Secret、Gateway API/Ingress。
 
@@ -379,6 +379,7 @@ P0 不应该继续扩模块，而应该补“可信闭环”。
 1. `rozectl diff`：对 API/RPC/model 生成结果做文件级预览。（已具备 MVP）
 2. generated project compile tests：REST、RPC、model、OpenAPI、SDK 主路径。
 3. ownership preservation tests：确认 `src/logic/**`、自定义 middleware、`config.yaml` 不被 `--update` 覆盖。
+4. `rozectl contract check`：对 `.api` 前后版本做 breaking change 检查。（已具备 MVP）
 
 验收：
 
@@ -496,8 +497,9 @@ AI Collaboration Layer
 | `rozectl diff` | P0 | 已支持生成到临时目录，对比目标目录，显示新增/修改/删除文件；默认不写盘。 |
 | `rozectl doctor` | P0 | 已支持检查 Rust/Cargo、Docker、kubectl、额外工具、端口、配置文件和 TCP 依赖地址；协议级依赖检查待补。 |
 | `rozectl dev` | P1 | 启动本地依赖或提示 docker compose 命令；输出服务端口和健康检查地址。 |
+| `rozectl contract check` | P0 | 已支持 `.api` 前后版本 breaking change 检查，覆盖 route/RPC/type/field 基础兼容性。 |
 | `rozectl test gen` | P1 | 从 `.api` 生成 HTTP/RPC smoke tests 和最小断言。 |
-| `rozectl mock gen` | P1 | 从 `.api`/OpenAPI 生成 mock server 或 mock handler。 |
+| `rozectl mock gen` | P1 | 已支持从 `.api` 生成独立 Axum mock server，按 response type 返回默认 JSON。 |
 | `rozectl doc service` | P1 | 已支持从 `.api` 生成 `SERVICE.md`，包含接口清单、生成器所有权边界、常用命令和 AI editing notes。 |
 | `rozectl stream gen` | P2 | 从事件契约生成 producer/consumer skeleton、DLQ 配置和 envelope 类型。 |
 | `rozectl bench` | P2 | 生成或运行基础压测脚本，输出延迟、错误率和吞吐。 |

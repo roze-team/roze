@@ -80,6 +80,31 @@ prints file-level changes as `A`, `M`, and `D`. This mirrors `--update`
 ownership rules, so business-owned logic files and preserved config are not
 reported as modified unless generation would actually change them.
 
+Check contract compatibility before regenerating or releasing:
+
+```bash
+rozectl contract check --old example/user.v1.api --new example/user.v2.api
+```
+
+`contract check` is read-only and exits with a non-zero status when it detects
+breaking changes. The MVP checks removed or changed REST routes, removed RPC
+methods, request/response type changes, removed fields, field type/source
+changes, and newly added required fields. Additive optional fields with
+`validate:"optional"` or `validate:"omitempty"` are allowed.
+
+Generate a mock server from the API contract:
+
+```bash
+rozectl mock gen --api example/user.api --out mock-server
+cd mock-server
+cargo run
+```
+
+The generated mock server is a standalone Axum project. It registers the REST
+routes declared in `.api` and returns default JSON values derived from each
+route response type. Pass `--force` to overwrite mock server files in an
+existing output directory.
+
 Check the local development environment:
 
 ```bash

@@ -9,6 +9,8 @@ gateway:
   middlewares:
     - trace
   timeout_ms: 8000
+  stream_idle_timeout_ms: 60000
+  max_stream_connections: 1000
   request_body_limit_bytes: 1048576
   services:
     - name: user

@@ -2,7 +2,9 @@ mod generator;
 mod parser;
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
+    fs,
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -117,6 +119,14 @@ enum Commands {
     Diff {
         #[command(subcommand)]
         command: DiffCommands,
+    },
+    Contract {
+        #[command(subcommand)]
+        command: ContractCommands,
+    },
+    Mock {
+        #[command(subcommand)]
+        command: MockCommands,
     },
     Doctor {
         #[arg(long)]
@@ -409,6 +419,28 @@ enum DiffCommands {
         format: ModelFormat,
         #[arg(long, value_enum, default_value_t)]
         orm: ModelOrm,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContractCommands {
+    Check {
+        #[arg(long)]
+        old: PathBuf,
+        #[arg(long)]
+        new: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MockCommands {
+    Gen {
+        #[arg(short = 'a', long = "api")]
+        api: PathBuf,
+        #[arg(long, default_value = "mock-server")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -831,6 +863,12 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Diff { command } => run_diff(command, &registry)?,
+        Commands::Contract { command } => run_contract(command)?,
+        Commands::Mock { command } => match command {
+            MockCommands::Gen { api, out, force } => {
+                generator::write_mock_server_project(&api, &out, force)?;
+            }
+        },
         Commands::Doctor {
             config,
             port,
@@ -904,6 +942,229 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContractIssue {
+    kind: ContractIssueKind,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContractIssueKind {
+    Breaking,
+}
+
+fn run_contract(command: ContractCommands) -> anyhow::Result<()> {
+    match command {
+        ContractCommands::Check { old, new } => {
+            let old_spec = read_api_spec(&old)?;
+            let new_spec = read_api_spec(&new)?;
+            let issues = check_contract_compatibility(&old_spec, &new_spec);
+            if issues.is_empty() {
+                println!("contract check passed: no breaking changes detected");
+                return Ok(());
+            }
+
+            eprintln!("contract check failed: {} breaking change(s)", issues.len());
+            for issue in issues {
+                eprintln!("- {}", issue.detail);
+            }
+            anyhow::bail!("contract check failed")
+        }
+    }
+}
+
+fn read_api_spec(path: &Path) -> anyhow::Result<parser::ApiSpec> {
+    let source = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    parser::parse_api(&source)
+        .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))
+}
+
+fn check_contract_compatibility(
+    old_spec: &parser::ApiSpec,
+    new_spec: &parser::ApiSpec,
+) -> Vec<ContractIssue> {
+    let mut issues = Vec::new();
+    check_rest_routes(old_spec, new_spec, &mut issues);
+    check_rpc_methods(old_spec, new_spec, &mut issues);
+    check_types(old_spec, new_spec, &mut issues);
+    issues
+}
+
+fn check_rest_routes(
+    old_spec: &parser::ApiSpec,
+    new_spec: &parser::ApiSpec,
+    issues: &mut Vec<ContractIssue>,
+) {
+    let new_routes = new_spec
+        .rest_routes
+        .iter()
+        .map(|route| (rest_route_key(new_spec, route), route))
+        .collect::<BTreeMap<_, _>>();
+
+    for old_route in &old_spec.rest_routes {
+        let key = rest_route_key(old_spec, old_route);
+        let Some(new_route) = new_routes.get(&key) else {
+            issues.push(breaking(format!("REST route removed or changed: {key}")));
+            continue;
+        };
+        if old_route.request != new_route.request {
+            issues.push(breaking(format!(
+                "REST route {key} request type changed: {} -> {}",
+                old_route.request, new_route.request
+            )));
+        }
+        if old_route.response != new_route.response {
+            issues.push(breaking(format!(
+                "REST route {key} response type changed: {} -> {}",
+                old_route.response, new_route.response
+            )));
+        }
+    }
+}
+
+fn check_rpc_methods(
+    old_spec: &parser::ApiSpec,
+    new_spec: &parser::ApiSpec,
+    issues: &mut Vec<ContractIssue>,
+) {
+    let new_methods = new_spec
+        .rpc_methods
+        .iter()
+        .map(|method| (method.name.as_str(), method))
+        .collect::<BTreeMap<_, _>>();
+
+    for old_method in &old_spec.rpc_methods {
+        let Some(new_method) = new_methods.get(old_method.name.as_str()) else {
+            issues.push(breaking(format!("RPC method removed: {}", old_method.name)));
+            continue;
+        };
+        if old_method.request != new_method.request {
+            issues.push(breaking(format!(
+                "RPC method {} request type changed: {} -> {}",
+                old_method.name, old_method.request, new_method.request
+            )));
+        }
+        if old_method.response != new_method.response {
+            issues.push(breaking(format!(
+                "RPC method {} response type changed: {} -> {}",
+                old_method.name, old_method.response, new_method.response
+            )));
+        }
+    }
+}
+
+fn check_types(
+    old_spec: &parser::ApiSpec,
+    new_spec: &parser::ApiSpec,
+    issues: &mut Vec<ContractIssue>,
+) {
+    let new_types = new_spec
+        .types
+        .iter()
+        .map(|ty| (ty.name.as_str(), ty))
+        .collect::<BTreeMap<_, _>>();
+
+    for old_ty in &old_spec.types {
+        let Some(new_ty) = new_types.get(old_ty.name.as_str()) else {
+            issues.push(breaking(format!("type removed: {}", old_ty.name)));
+            continue;
+        };
+        let new_fields = new_ty
+            .fields
+            .iter()
+            .map(|field| (contract_field_key(field), field))
+            .collect::<BTreeMap<_, _>>();
+        let old_fields = old_ty
+            .fields
+            .iter()
+            .map(|field| (contract_field_key(field), field))
+            .collect::<BTreeMap<_, _>>();
+
+        for old_field in &old_ty.fields {
+            let key = contract_field_key(old_field);
+            let Some(new_field) = new_fields.get(&key) else {
+                issues.push(breaking(format!(
+                    "field removed: {}.{}",
+                    old_ty.name, old_field.name
+                )));
+                continue;
+            };
+            if old_field.ty != new_field.ty {
+                issues.push(breaking(format!(
+                    "field type changed: {}.{} {} -> {}",
+                    old_ty.name, old_field.name, old_field.ty, new_field.ty
+                )));
+            }
+            if old_field.source != new_field.source {
+                issues.push(breaking(format!(
+                    "field source changed: {}.{} {:?} -> {:?}",
+                    old_ty.name, old_field.name, old_field.source, new_field.source
+                )));
+            }
+        }
+
+        for new_field in &new_ty.fields {
+            let key = contract_field_key(new_field);
+            if !old_fields.contains_key(&key) && !is_optional_field(new_field) {
+                issues.push(breaking(format!(
+                    "required field added: {}.{}",
+                    new_ty.name, new_field.name
+                )));
+            }
+        }
+    }
+}
+
+fn rest_route_key(spec: &parser::ApiSpec, route: &parser::RestRoute) -> String {
+    format!(
+        "{} {}",
+        http_method_name(&route.method),
+        generator::rest::full_route_path_for_route(spec, route)
+    )
+}
+
+fn http_method_name(method: &parser::HttpMethod) -> &'static str {
+    match method {
+        parser::HttpMethod::Get => "GET",
+        parser::HttpMethod::Post => "POST",
+        parser::HttpMethod::Put => "PUT",
+        parser::HttpMethod::Patch => "PATCH",
+        parser::HttpMethod::Delete => "DELETE",
+    }
+}
+
+fn contract_field_key(field: &parser::Field) -> String {
+    field
+        .wire_name
+        .as_deref()
+        .or(field.json_name.as_deref())
+        .unwrap_or(&field.name)
+        .to_string()
+}
+
+fn is_optional_field(field: &parser::Field) -> bool {
+    field.validate.as_deref().is_some_and(|rules| {
+        has_contract_rule(rules, "optional") || has_contract_rule(rules, "omitempty")
+    })
+}
+
+fn has_contract_rule(rules: &str, name: &str) -> bool {
+    rules.split(',').map(str::trim).any(|rule| {
+        rule == name
+            || rule
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('='))
+    })
+}
+
+fn breaking(detail: impl Into<String>) -> ContractIssue {
+    ContractIssue {
+        kind: ContractIssueKind::Breaking,
+        detail: detail.into(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1265,6 +1526,35 @@ mod tests {
             diff.command,
             Commands::Diff {
                 command: DiffCommands::Api { .. }
+            }
+        ));
+
+        let contract = Cli::try_parse_from([
+            "rozectl", "contract", "check", "--old", "old.api", "--new", "new.api",
+        ])
+        .expect("parse contract check");
+        assert!(matches!(
+            contract.command,
+            Commands::Contract {
+                command: ContractCommands::Check { .. }
+            }
+        ));
+
+        let mock = Cli::try_parse_from([
+            "rozectl",
+            "mock",
+            "gen",
+            "--api",
+            "user.api",
+            "--out",
+            "mock-server",
+            "--force",
+        ])
+        .expect("parse mock gen");
+        assert!(matches!(
+            mock.command,
+            Commands::Mock {
+                command: MockCommands::Gen { force: true, .. }
             }
         ));
 
@@ -1701,5 +1991,124 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn contract_check_allows_optional_field_addition() {
+        let old_spec = parser::parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (GetUserResp)
+                rpc Ping (PingReq) returns (PingResp)
+            }
+            type GetUserReq {
+                id string `path:"id"`
+            }
+            type GetUserResp {
+                id string `json:"id"`
+            }
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse old spec");
+        let new_spec = parser::parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (GetUserResp)
+                rpc Ping (PingReq) returns (PingResp)
+            }
+            type GetUserReq {
+                id string `path:"id"`
+                traceId string `json:"traceId,optional" validate:"optional"`
+            }
+            type GetUserResp {
+                id string `json:"id"`
+                nickname string `json:"nickname,optional" validate:"omitempty"`
+            }
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse new spec");
+
+        let issues = check_contract_compatibility(&old_spec, &new_spec);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn contract_check_reports_breaking_changes() {
+        let old_spec = parser::parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (GetUserResp)
+                delete /users/:id (DeleteUserReq) returns (DeleteUserResp)
+                rpc Ping (PingReq) returns (PingResp)
+            }
+            type GetUserReq {
+                id string `path:"id"`
+            }
+            type GetUserResp {
+                id string `json:"id"`
+                name string `json:"name"`
+            }
+            type DeleteUserReq {
+                id string `path:"id"`
+            }
+            type DeleteUserResp {
+                ok bool `json:"ok"`
+            }
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse old spec");
+        let new_spec = parser::parse_api(
+            r#"
+            service user {
+                get /members/:id (GetUserReq) returns (GetUserResp)
+                rpc Ping (PingReqV2) returns (PingResp)
+            }
+            type GetUserReq {
+                id uint64 `path:"id"`
+                tenantId string `json:"tenantId"`
+            }
+            type GetUserResp {
+                id string `json:"id"`
+            }
+            type PingReqV2 {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse new spec");
+
+        let issues = check_contract_compatibility(&old_spec, &new_spec);
+        let report = issues
+            .iter()
+            .map(|issue| issue.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(report.contains("REST route removed or changed: GET /users/:id"));
+        assert!(report.contains("REST route removed or changed: DELETE /users/:id"));
+        assert!(report.contains("RPC method Ping request type changed"));
+        assert!(report.contains("field type changed: GetUserReq.id string -> uint64"));
+        assert!(report.contains("field removed: GetUserResp.name"));
+        assert!(report.contains("required field added: GetUserReq.tenantId"));
     }
 }

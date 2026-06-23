@@ -1,0 +1,48 @@
+groups:
+  - name: roze-gateway
+    rules:
+      - alert: RozeGatewayHighErrorRate
+        expr: |
+          sum by (service, route) (rate(roze_gateway_route_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum by (service, route) (rate(roze_gateway_route_requests_total[5m])), 1)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Roze gateway route error rate is high"
+          description: "service={{ $labels.service }} route={{ $labels.route }} has more than 5% 5xx responses for 10 minutes."
+
+      - alert: RozeGatewayStreamConnectionsRejected
+        expr: |
+          sum by (service, route, protocol) (increase(roze_gateway_stream_connection_events_total{outcome="rejected"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Roze gateway stream connections are being rejected"
+          description: "service={{ $labels.service }} route={{ $labels.route }} protocol={{ $labels.protocol }} rejected SSE/WebSocket connections in the last 5 minutes."
+
+      - alert: RozeGatewayStreamConnectionsStuck
+        expr: |
+          max by (service, route, protocol) (roze_gateway_stream_connections_active) > 0
+          and
+          sum by (service, route, protocol) (increase(roze_gateway_stream_connection_events_total{outcome="closed"}[30m])) == 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Roze gateway stream connections have not closed recently"
+          description: "service={{ $labels.service }} route={{ $labels.route }} protocol={{ $labels.protocol }} has active connections but no closes for 30 minutes. Verify this is expected for long-lived SSE/WebSocket traffic."
+
+      - alert: RozeGatewayRetrySpike
+        expr: |
+          sum by (service, route, reason) (increase(roze_gateway_route_retries_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Roze gateway retry volume increased"
+          description: "service={{ $labels.service }} route={{ $labels.route }} reason={{ $labels.reason }} retried more than 10 times in 5 minutes."
+

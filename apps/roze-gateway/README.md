@@ -32,6 +32,10 @@ gateway:
   listen: "127.0.0.1:8081"
   middlewares:
     - trace
+  # Optional. Applies to streaming responses such as SSE when no chunk is received.
+  stream_idle_timeout_ms: 60000
+  # Optional. Limits active SSE/WebSocket connections per route/protocol.
+  max_stream_connections: 1000
   services:
     - name: user
       upstream: "http://127.0.0.1:3000"
@@ -89,7 +93,7 @@ auth:
 - WebSocket：客户端带 `Upgrade: websocket` 时，网关完成上游握手并做双向流量转发。
 - SSE：上游返回 `Content-Type: text/event-stream` 时，网关自动启用流式响应，不会等待完整 body 结束。
 
-三者共用同一套路由、鉴权、限流、熔断、超时、fallback、registry upstream 和 trace header 机制。SSE 不需要额外配置；只要上游按标准返回 `text/event-stream` 即可。
+三者共用同一套路由、鉴权、限流、熔断、超时、fallback、registry upstream 和 trace header 机制。SSE 不需要额外配置；只要上游按标准返回 `text/event-stream` 即可。长连接可选配置 `stream_idle_timeout_ms`，当 SSE 长时间没有任何事件或 heartbeat 时由网关主动结束空闲流；也可配置 `max_stream_connections` 限制 SSE/WebSocket 活跃连接数，超限返回 429。
 
 ## 配置中心（可选）
 

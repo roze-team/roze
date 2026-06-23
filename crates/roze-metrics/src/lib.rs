@@ -205,6 +205,51 @@ pub fn record_gateway_upstream(
     gateway_metrics_registry().inc_counter("roze_gateway_upstream_events_total", labels, 1);
 }
 
+pub fn record_gateway_stream_connection(
+    service: impl Into<String>,
+    route: impl Into<String>,
+    protocol: impl Into<String>,
+    outcome: impl Into<String>,
+    active: u32,
+) {
+    let service = service.into();
+    let route = route.into();
+    let protocol = protocol.into();
+    let labels = MetricLabels::new()
+        .insert("service", service.clone())
+        .insert("route", route.clone())
+        .insert("protocol", protocol.clone())
+        .insert("outcome", outcome.into());
+    let active_labels = MetricLabels::new()
+        .insert("service", service)
+        .insert("route", route)
+        .insert("protocol", protocol);
+    let registry = gateway_metrics_registry();
+    registry.inc_counter("roze_gateway_stream_connection_events_total", labels, 1);
+    registry.set_gauge(
+        "roze_gateway_stream_connections_active",
+        active_labels,
+        active as f64,
+    );
+}
+
+pub fn record_gateway_stream_connection_duration(
+    service: impl Into<String>,
+    route: impl Into<String>,
+    protocol: impl Into<String>,
+    duration: Duration,
+) {
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("route", route.into())
+        .insert("protocol", protocol.into());
+    gateway_metrics_registry().inc_counter(
+        "roze_gateway_stream_connection_duration_ms_total",
+        labels,
+        duration.as_millis() as u64,
+    );
+}
+
 pub fn record_queue_event(
     system: impl Into<String>,
     topic: impl Into<String>,
