@@ -3378,6 +3378,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
+ "hyper",
+ "hyper-util",
  "reqwest 0.13.4",
  "roze-auth",
  "roze-config",

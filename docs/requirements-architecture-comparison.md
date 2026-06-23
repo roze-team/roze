@@ -27,7 +27,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | # | 需求能力 | Roze 当前覆盖 | 主要入口 | 缺口/风险 |
 | --- | --- | --- | --- | --- |
 | 1 | API/RPC 契约优先 | 高 | `apps/rozectl`, `.api`, proto, REST/RPC generator, OpenAPI, TS/JS/Dart SDK | 缺 mock 生成、接口测试生成、契约兼容性检查；OpenAPI validator 投影仍有缺口；SDK 缺 error/interceptor/retry/timeout。 |
-| 2 | Gateway 网关 | 中高 | `crates/roze-gateway`, `apps/roze-gateway`, `docs/contracts/gateway.md` | 已有路由、rewrite、auth、rate/breaker、retry、fallback、registry upstream、canary、health/outlier、hot reload；缺更完整 app 级示例、deploy smoke test、A/B、流量镜像。 |
+| 2 | Gateway 网关 | 中高 | `crates/roze-gateway`, `apps/roze-gateway`, `docs/contracts/gateway.md` | 已有路由、rewrite、auth、rate/breaker、retry、fallback、registry upstream、canary、health/outlier、hot reload、WebSocket upgrade 代理、SSE 流式代理；缺更完整 app 级示例、deploy smoke test、A/B、流量镜像。 |
 | 3 | 服务注册与发现 | 中高 | `roze-rpc::registry`, cached resolver, etcd/consul/dns/memory | 代码层已具备；还需要失败模式测试、生产配置示例、Gateway/RPC/Job/MQ consumer 复用边界文档化。 |
 | 4 | 统一治理模型 | 中 | `roze-config`, `roze-middleware`, `roze-rpc`, `roze-gateway` | Gateway 已继承 timeout/retry/rate/breaker；HTTP/RPC/MQ/Job 还需要同一 schema、同一指标标签、可选持久化 breaker/rate limiter。 |
 | 5 | 配置中心 | 中高 | `crates/roze-config`, `docs/contracts/config-center.md` | Etcd watch、Env/File fallback、diff/version、section event、失败回滚已具备；仍需 listener timeout/failure isolation、灰度、签名、审计操作者模型。 |
@@ -64,6 +64,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 鉴权 | JWT、API Key、CORS、body/header limit | OIDC、mTLS、请求签名、防重放 | `roze-gateway`, `roze-auth` | 未授权返回统一 401/403，成功注入 auth context header。 |
 | 治理 | timeout、rate limit、breaker、retry、fallback | retry budget、adaptive shedding、bulkhead | `roze-gateway`, governance schema | 每项治理有 smoke test 和 metrics。 |
 | 灰度路由 | weight、instance_tags、registry upstream | header/cookie/tenant/user 分流、A/B、流量镜像 | `roze-gateway` | 相同路由可按权重或标签命中不同上游。 |
+| 协议形态 | HTTP request/response、WebSocket upgrade 双向转发、SSE `text/event-stream` 流式转发 | gRPC-Web、长连接配额、连接级观测 | `roze-gateway` | HTTP、WS、SSE 可共用同一套 route/service/governance 配置，SSE 首个事件不等待完整响应结束。 |
 | 上游健康 | 主动 health check、outlier ejection | 异常实例自动摘除、慢实例降权 | `roze-gateway` | 失败实例不参与路由，恢复后重新加入。 |
 | 热更新 | 配置中心 reload 后重建路由 | 灰度配置、回滚、签名校验 | `apps/roze-gateway`, `roze-config` | invalid config 不替换旧路由。 |
 | 观测 | request_id/trace_id、upstream metrics、retry metrics | dashboard、alert、route SLO | `roze-metrics`, `roze-prometheus` | 可按 route/upstream 查看延迟、错误、重试、熔断。 |

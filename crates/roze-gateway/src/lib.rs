@@ -11,9 +11,16 @@ use axum::{
     routing::any,
     Router,
 };
+use futures_util::TryStreamExt;
+use hyper::upgrade;
+use hyper_util::rt::TokioIo;
 use reqwest::Response as ReqwestResponse;
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::Mutex,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 
@@ -363,6 +370,76 @@ impl GatewayRuntime {
             );
         }
 
+        if is_websocket_upgrade(&req) {
+            let timeout_ms = route
+                .timeout_ms
+                .or(route.effective_service_timeout(&self.services))
+                .or(self.global_timeout_ms)
+                .unwrap_or(5_000);
+            let incoming_query = req.uri().query().map(str::to_string);
+            let result = tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                self.proxy_websocket(&route, &mut req, &request_path, incoming_query),
+            )
+            .await;
+
+            return match result {
+                Ok(Ok(response)) => {
+                    self.record_breaker_success(&route).await;
+                    self.record_gateway_response(
+                        Some(&route),
+                        &request_method,
+                        StatusCode::SWITCHING_PROTOCOLS,
+                        "websocket",
+                        started,
+                    );
+                    response
+                }
+                Ok(Err(err)) => {
+                    warn!(
+                        event = "gateway.websocket_failed",
+                        route = %route.path,
+                        error = %err,
+                        "websocket proxy failed"
+                    );
+                    self.record_breaker_failure(&route).await;
+                    self.record_gateway_response(
+                        Some(&route),
+                        &request_method,
+                        StatusCode::BAD_GATEWAY,
+                        "websocket_failed",
+                        started,
+                    );
+                    build_fallback(
+                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                        StatusCode::BAD_GATEWAY,
+                        &err.to_string(),
+                    )
+                }
+                Err(_) => {
+                    warn!(
+                        event = "gateway.websocket_timeout",
+                        route = %route.path,
+                        timeout_ms = timeout_ms,
+                        "websocket handshake timeout"
+                    );
+                    self.record_breaker_failure(&route).await;
+                    self.record_gateway_response(
+                        Some(&route),
+                        &request_method,
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "websocket_timeout",
+                        started,
+                    );
+                    build_fallback(
+                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "websocket upstream timeout",
+                    )
+                }
+            };
+        }
+
         let upstream_method = request_method.clone();
         let upstream_path = request_path.clone();
         let upstream_query = req.uri().query().map(str::to_string);
@@ -658,6 +735,89 @@ impl GatewayRuntime {
             );
         }
         Ok(response)
+    }
+
+    async fn proxy_websocket(
+        self: &Arc<Self>,
+        route: &CompiledRoute,
+        req: &mut Request<Body>,
+        incoming_path: &str,
+        incoming_query: Option<String>,
+    ) -> anyhow::Result<Response<Body>> {
+        let service = self
+            .services
+            .get(&route.service)
+            .ok_or_else(|| anyhow::anyhow!("service '{}' is not registered", route.service))?;
+        let target = self.resolve_upstream(service, &route.instance_tags).await?;
+        let rewritten_path = rewrite_path(&route.path, route.rewrite.as_deref(), incoming_path);
+        let upstream_url = build_upstream_url(
+            &target.base,
+            &rewritten_path,
+            incoming_query.as_deref().filter(|query| !query.is_empty()),
+        );
+        let upstream_target = websocket_target(&upstream_url)?;
+        let mut upstream = TcpStream::connect(&upstream_target.addr)
+            .await
+            .map_err(|err| {
+                self.record_outlier_failure_spawn(target.clone());
+                err
+            })?;
+
+        let request = build_websocket_handshake_request(req, &upstream_target)?;
+        upstream.write_all(request.as_bytes()).await?;
+        let handshake = read_websocket_handshake_response(&mut upstream).await?;
+        if handshake.status != StatusCode::SWITCHING_PROTOCOLS {
+            self.record_outlier_failure(&target).await;
+            anyhow::bail!("upstream websocket handshake returned {}", handshake.status);
+        }
+        self.record_outlier_success(&target).await;
+        roze_metrics::record_gateway_upstream(
+            route.service.clone(),
+            target.instance_key.clone(),
+            "websocket",
+        );
+
+        let on_upgrade = upgrade::on(req);
+        let mut response = Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .body(Body::empty())?;
+        for (name, value) in handshake.headers {
+            response.headers_mut().insert(name, value);
+        }
+
+        tokio::spawn(async move {
+            match on_upgrade.await {
+                Ok(upgraded) => {
+                    let mut client = TokioIo::new(upgraded);
+                    if !handshake.remaining.is_empty()
+                        && client.write_all(&handshake.remaining).await.is_err()
+                    {
+                        return;
+                    }
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                }
+                Err(err) => {
+                    tracing::warn!(event = "gateway.websocket_upgrade_failed", error = %err);
+                }
+            }
+        });
+
+        Ok(response)
+    }
+
+    fn record_outlier_failure_spawn(&self, target: UpstreamTarget) {
+        let outlier_states = self.outlier_states.clone();
+        tokio::spawn(async move {
+            let Some(cfg) = target.outlier else {
+                return;
+            };
+            let mut states = outlier_states.lock().await;
+            let state = states.entry(target.instance_key).or_default();
+            state.failures = state.failures.saturating_add(1);
+            if state.failures >= cfg.failure_threshold {
+                state.ejected_until = Some(Instant::now() + Duration::from_millis(cfg.ejection_ms));
+            }
+        });
     }
 
     async fn resolve_upstream(
@@ -1353,9 +1513,152 @@ fn normalize_upstream_base(base: &str) -> String {
     let base = base.trim();
     if base.starts_with("http://") || base.starts_with("https://") {
         base.to_string()
+    } else if let Some(rest) = base.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = base.strip_prefix("wss://") {
+        format!("https://{rest}")
     } else {
         format!("http://{base}")
     }
+}
+
+#[derive(Debug)]
+struct WebSocketTarget {
+    addr: String,
+    authority: String,
+    path_and_query: String,
+}
+
+#[derive(Debug)]
+struct WebSocketHandshakeResponse {
+    status: StatusCode,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    remaining: Vec<u8>,
+}
+
+fn is_websocket_upgrade(req: &Request<Body>) -> bool {
+    req.method() == Method::GET
+        && req
+            .headers()
+            .get(header::UPGRADE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        && req
+            .headers()
+            .get(header::CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+            })
+}
+
+fn websocket_target(upstream_url: &str) -> anyhow::Result<WebSocketTarget> {
+    let url = reqwest::Url::parse(upstream_url)?;
+    if !matches!(url.scheme(), "http" | "ws") {
+        anyhow::bail!(
+            "websocket proxy currently supports ws/http upstreams, got {}",
+            url.scheme()
+        );
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("websocket upstream has no host"))?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let authority = if url.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.to_string()
+    };
+    let path = if url.path().is_empty() {
+        "/"
+    } else {
+        url.path()
+    };
+    let path_and_query = match url.query() {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path.to_string(),
+    };
+    Ok(WebSocketTarget {
+        addr: format!("{host}:{port}"),
+        authority,
+        path_and_query,
+    })
+}
+
+fn build_websocket_handshake_request(
+    req: &Request<Body>,
+    target: &WebSocketTarget,
+) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    write!(&mut out, "GET {} HTTP/1.1\r\n", target.path_and_query).unwrap();
+    write!(&mut out, "Host: {}\r\n", target.authority).unwrap();
+    for (name, value) in req.headers() {
+        if name == header::HOST || name == header::CONTENT_LENGTH {
+            continue;
+        }
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        write!(&mut out, "{}: {}\r\n", name.as_str(), value).unwrap();
+    }
+    out.push_str("\r\n");
+    Ok(out)
+}
+
+async fn read_websocket_handshake_response(
+    upstream: &mut TcpStream,
+) -> anyhow::Result<WebSocketHandshakeResponse> {
+    const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let header_end = loop {
+        if buf.len() > MAX_HANDSHAKE_BYTES {
+            anyhow::bail!("websocket upstream handshake exceeded {MAX_HANDSHAKE_BYTES} bytes");
+        }
+        let n = upstream.read(&mut chunk).await?;
+        if n == 0 {
+            anyhow::bail!("websocket upstream closed before handshake completed");
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = find_header_end(&buf) {
+            break pos;
+        }
+    };
+
+    let remaining = buf[header_end + 4..].to_vec();
+    let headers = &buf[..header_end];
+    let header_text = std::str::from_utf8(headers)?;
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("websocket upstream response has no status line"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("websocket upstream response status is invalid"))?
+        .parse::<u16>()?;
+    let mut parsed_headers = Vec::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = HeaderName::from_bytes(name.trim().as_bytes())?;
+        let value = HeaderValue::from_str(value.trim())?;
+        parsed_headers.push((name, value));
+    }
+
+    Ok(WebSocketHandshakeResponse {
+        status: StatusCode::from_u16(status)?,
+        headers: parsed_headers,
+        remaining,
+    })
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 fn upstream_instance_key(service: &str, upstream: &str) -> String {
@@ -1381,16 +1684,46 @@ async fn build_upstream_response(
 ) -> anyhow::Result<Response<Body>> {
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
-    let body = upstream_response.bytes().await?;
     let mut response = Response::builder()
-        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .body(Body::from(body))?;
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+
+    if is_sse_response(status, &headers) {
+        let body = Body::from_stream(
+            upstream_response
+                .bytes_stream()
+                .map_err(std::io::Error::other),
+        );
+        let mut response = response.body(body)?;
+        for (name, value) in &headers {
+            response.headers_mut().insert(name.clone(), value.clone());
+        }
+        return Ok(response);
+    }
+
+    let body = upstream_response.bytes().await?;
+    let mut response = response.body(Body::from(body))?;
 
     for (name, value) in &headers {
         response.headers_mut().insert(name.clone(), value.clone());
     }
 
     Ok(response)
+}
+
+fn is_sse_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    status.is_success()
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case("text/event-stream")
+            })
+            .unwrap_or(false)
 }
 
 fn build_cors(
@@ -1491,8 +1824,10 @@ impl From<GatewayService> for ServiceEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, response::IntoResponse, routing::get, Router};
+    use axum::{body::Bytes, extract::State, response::IntoResponse, routing::get, Router};
+    use futures_util::{StreamExt, TryStreamExt};
     use roze_rpc::registry::{MemoryRegistry, Registry, ServiceInstance};
+    use std::convert::Infallible;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1562,6 +1897,84 @@ mod tests {
         assert!(metrics.contains(r#"service="user""#));
         assert!(metrics.contains(r#"route="/user""#));
         assert!(metrics.contains(r#"reason="status_503""#));
+    }
+
+    #[tokio::test]
+    async fn streams_sse_without_buffering_full_response() {
+        let upstream = Router::new().route(
+            "/events",
+            get(|| async move {
+                let stream = futures_util::stream::unfold(0, |idx| async move {
+                    match idx {
+                        0 => Some((
+                            Ok::<_, Infallible>(Bytes::from_static(b"data: first\n\n")),
+                            1,
+                        )),
+                        1 => {
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            Some((
+                                Ok::<_, Infallible>(Bytes::from_static(b"data: second\n\n")),
+                                2,
+                            ))
+                        }
+                        _ => None,
+                    }
+                });
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .expect("sse response")
+            }),
+        );
+        let upstream_addr = spawn_router(upstream).await;
+        let gateway = build_router(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "events".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/events".to_string(),
+                    service: "events".to_string(),
+                    methods: vec!["GET".to_string()],
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+        );
+        let gateway_addr = spawn_router(gateway).await;
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{gateway_addr}/events"))
+            .send()
+            .await
+            .expect("gateway sse response");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+
+        let mut stream = response.bytes_stream();
+        let first = tokio::time::timeout(Duration::from_millis(120), stream.try_next())
+            .await
+            .expect("first SSE chunk should arrive before upstream completes")
+            .expect("first SSE chunk")
+            .expect("first SSE bytes");
+        assert_eq!(&first[..], b"data: first\n\n");
+
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.try_next())
+            .await
+            .expect("second SSE chunk should arrive")
+            .expect("second SSE chunk")
+            .expect("second SSE bytes");
+        assert_eq!(&second[..], b"data: second\n\n");
     }
 
     #[tokio::test]
@@ -2103,6 +2516,17 @@ mod tests {
             let _ = axum::serve(listener, upstream).await;
         });
         upstream_addr
+    }
+
+    async fn spawn_router(router: Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind router");
+        let addr = listener.local_addr().expect("router addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
     }
 
     async fn spawn_status_upstream(

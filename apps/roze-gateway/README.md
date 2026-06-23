@@ -8,6 +8,7 @@
 - 路由级限流与熔断
 - trace/request-id 透传
 - 统一 fallback 与超时控制
+- HTTP / WebSocket / SSE 同一路由模型
 - CORS
 
 ## 运行
@@ -79,6 +80,16 @@ auth:
 ```
 
 路由中间件 `jwt` 只接受 `Authorization: Bearer <token>`，`api_key`/`apikey` 只接受 API key header，`auth` 接受 JWT 或 API key 任一方式。
+
+## HTTP、WebSocket、SSE
+
+网关可以同时承载普通 HTTP、WebSocket 和 SSE：
+
+- 普通 HTTP：按 route/service 配置转发 request/response。
+- WebSocket：客户端带 `Upgrade: websocket` 时，网关完成上游握手并做双向流量转发。
+- SSE：上游返回 `Content-Type: text/event-stream` 时，网关自动启用流式响应，不会等待完整 body 结束。
+
+三者共用同一套路由、鉴权、限流、熔断、超时、fallback、registry upstream 和 trace header 机制。SSE 不需要额外配置；只要上游按标准返回 `text/event-stream` 即可。
 
 ## 配置中心（可选）
 
