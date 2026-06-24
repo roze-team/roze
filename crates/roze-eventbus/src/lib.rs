@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -83,35 +84,34 @@ pub trait EventSubscriber: Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct InMemoryEventBus {
-    topics: Arc<Mutex<HashMap<String, broadcast::Sender<EventEnvelope>>>>,
+    topics: Arc<DashMap<String, broadcast::Sender<EventEnvelope>>>,
     capacity: usize,
 }
 
 impl InMemoryEventBus {
     pub fn new() -> Self {
         Self {
-            topics: Arc::new(Mutex::new(HashMap::new())),
+            topics: Arc::new(DashMap::new()),
             capacity: 256,
         }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            topics: Arc::new(Mutex::new(HashMap::new())),
+            topics: Arc::new(DashMap::new()),
             capacity: capacity.max(1),
         }
     }
 
     fn sender_for(&self, topic: &str) -> broadcast::Sender<EventEnvelope> {
-        let mut topics = self.topics.lock().expect("eventbus lock poisoned");
-        topics
+        self.topics
             .entry(topic.to_string())
             .or_insert_with(|| broadcast::channel(self.capacity).0)
             .clone()
     }
 
     pub fn topic_count(&self) -> usize {
-        self.topics.lock().expect("eventbus lock poisoned").len()
+        self.topics.len()
     }
 }
 

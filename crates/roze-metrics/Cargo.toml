@@ -5,3 +5,11 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+dashmap.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "metrics_registry"
+harness = false

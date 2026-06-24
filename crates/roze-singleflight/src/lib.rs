@@ -1,14 +1,14 @@
 use std::{
     any::Any,
-    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
+use dashmap::DashMap;
 use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Default)]
 pub struct SingleFlightGroup {
-    entries: Arc<Mutex<HashMap<String, Arc<FlightEntry>>>>,
+    entries: Arc<DashMap<String, Arc<FlightEntry>>>,
 }
 
 #[derive(Debug)]
@@ -35,14 +35,12 @@ impl FlightEntry {
 impl SingleFlightGroup {
     pub fn new() -> Self {
         Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            entries: Arc::new(DashMap::new()),
         }
     }
 
     fn entry_for(&self, key: &str) -> Arc<FlightEntry> {
-        // single map lock to locate the shared entry
-        let mut guard = self.entries.lock().expect("singleflight map lock poisoned");
-        guard
+        self.entries
             .entry(key.to_string())
             .or_insert_with(|| Arc::new(FlightEntry::new()))
             .clone()
@@ -109,8 +107,7 @@ impl SingleFlightGroup {
     }
 
     pub async fn reset(&self, key: impl AsRef<str>) {
-        let mut guard = self.entries.lock().expect("singleflight map lock poisoned");
-        guard.remove(key.as_ref());
+        self.entries.remove(key.as_ref());
     }
 }
 

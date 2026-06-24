@@ -1,8 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
+
+use dashmap::DashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WsFrame {
@@ -36,41 +34,28 @@ impl WsSession {
 
 #[derive(Debug, Clone, Default)]
 pub struct WsHub {
-    sessions: Arc<Mutex<HashMap<String, WsSession>>>,
+    sessions: Arc<DashMap<String, WsSession>>,
 }
 
 impl WsHub {
     pub fn register(&self, session: WsSession) {
-        self.sessions
-            .lock()
-            .expect("ws hub lock poisoned")
-            .insert(session.id.clone(), session);
+        self.sessions.insert(session.id.clone(), session);
     }
 
     pub fn disconnect(&self, id: &str) -> Option<WsSession> {
-        self.sessions
-            .lock()
-            .expect("ws hub lock poisoned")
-            .remove(id)
+        self.sessions.remove(id).map(|(_, session)| session)
     }
 
     pub fn get(&self, id: &str) -> Option<WsSession> {
-        self.sessions
-            .lock()
-            .expect("ws hub lock poisoned")
-            .get(id)
-            .cloned()
+        self.sessions.get(id).map(|session| session.clone())
     }
 
     pub fn len(&self) -> usize {
-        self.sessions.lock().expect("ws hub lock poisoned").len()
+        self.sessions.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sessions
-            .lock()
-            .expect("ws hub lock poisoned")
-            .is_empty()
+        self.sessions.is_empty()
     }
 }
 

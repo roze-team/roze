@@ -32,6 +32,8 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 - 已实现：`roze-rpc::MemoryRegistry` 使用 DashMap 优化并发注册和发现路径。
 - 已实现：HTTP route rate-limit/breaker 与 RPC method rate-limit/breaker 状态使用 DashMap，降低治理热路径全局锁竞争。
 - 已实现：`roze-metrics::MetricRegistry` 使用 DashMap 存储带 label 的指标状态，降低请求/队列指标记录的全局锁竞争。
+- 已实现：`roze-session`、`roze-ws`、`roze-eventbus`、`roze-mq` 内存态高频索引使用 DashMap/DashSet；MQ DLQ 顺序队列保留显式锁。
+- 已实现：Criterion 性能基线，覆盖 `roze-metrics` registry、`roze-local-cache` async cache、`roze-singleflight` request coalescing、`roze-rpc` memory registry、session/WebSocket/eventbus/MQ 内存态热路径。
 - 已处理：README、usage 文档、项目规范、成熟度矩阵和本文件已同步搜索/模型能力。
 
 ## 覆盖度口径
@@ -57,11 +59,11 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 3 | 服务注册与发现 | 中高 | `roze-rpc::registry`, cached resolver, etcd/consul/dns/memory | memory registry、DNS、etcd、Consul、watch、cached resolver 已具备；memory registry 已使用 DashMap 优化并发注册/发现路径；增强方向是失败模式测试、生产配置示例、Gateway/RPC/Job/MQ consumer 复用边界文档化。 |
 | 4 | 统一治理模型 | 中 | `roze-config`, `roze-middleware`, `roze-rpc`, `roze-gateway` | Gateway 已继承 timeout/retry/rate/breaker；HTTP route 和 RPC method 的 rate-limit/breaker 状态已使用 DashMap 优化热路径并发；MQ/Job 还需要同一 schema、同一指标标签、可选持久化 breaker/rate limiter。 |
 | 5 | 配置中心 | 中高 | `crates/roze-config`, `docs/contracts/config-center.md` | Etcd watch、Env/File fallback、diff/version、section event、失败回滚已具备；仍需 listener timeout/failure isolation、灰度、签名、审计操作者模型。 |
-| 6 | 可观测性 | 中 | `roze-log`, `roze-metrics`, `roze-prometheus`, `roze-opentelemetry`, `deploy/observability` | tracing/metrics/Prometheus/OTel 已有；带 label 的 metric registry 已使用 DashMap 优化并发记录；已提供 Gateway Prometheus scrape 示例、recording rules、alert rules、Grafana dashboard 和 SLO 模板；增强方向是 trace 示例、日志查询示例和更完整 dashboard pack。 |
+| 6 | 可观测性 | 中 | `roze-log`, `roze-metrics`, `roze-prometheus`, `roze-opentelemetry`, `deploy/observability` | tracing/metrics/Prometheus/OTel 已有；带 label 的 metric registry 已使用 DashMap 优化并发记录，并有 Criterion 基准覆盖写入和 render；已提供 Gateway Prometheus scrape 示例、recording rules、alert rules、Grafana dashboard 和 SLO 模板；增强方向是 trace 示例、日志查询示例和更完整 dashboard pack。 |
 | 7 | 健康检查和生命周期 | 中 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report 和 REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；依赖 readiness、Gateway/RPC 标准入口、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
 | 8 | 安全能力 | 中 | `roze-jwt`, `roze-auth`, `roze-permission`, Gateway auth | JWT/RBAC/tenant/ABAC primitives 已有；缺统一安全模型、OIDC/OAuth2、mTLS、permission 注解到 OpenAPI/SDK/test、key rotation、审计日志模板。 |
-| 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
-| 10 | 数据库、缓存、事务、搜索 | 中高 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-local-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm`, `roze-search`, `rozectl model`, `rozectl search` | SQL/Mongo model generate/inspect、Redis cache-aside、Moka 本地缓存、singleflight、TCC/Saga/outbox/inbox primitives、Elasticsearch/OpenSearch/Meilisearch search generate/inspect 已有；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
+| 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；in-memory topic/offset/idempotency/eventbus topic 索引已使用 DashMap/DashSet 并有 Criterion 基线；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
+| 10 | 数据库、缓存、事务、搜索 | 中高 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-local-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm`, `roze-search`, `rozectl model`, `rozectl search` | SQL/Mongo model generate/inspect、Redis cache-aside、Moka 本地缓存、singleflight、TCC/Saga/outbox/inbox primitives、Elasticsearch/OpenSearch/Meilisearch search generate/inspect 已有；本地缓存和 singleflight 已有 Criterion 基准覆盖；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
 | 11 | 部署和运维 | 中高 | `rozectl docker`, `rozectl kube`, `rozectl helm`, `rozectl dev`, `rozectl doctor`, `docker-compose.integration.yml` | 已实现 Dockerfile、Kubernetes、Helm chart 生成与 validate，已实现本机 doctor 和 docker compose dev up/down/status；增强方向是更多生产验收脚本和平台级发布集成。 |
 | 12 | CLI/生成器/AI 友好 | 中高 | `rozectl api/rpc/model/search/openapi/client/docker/kube/helm/diff/doctor/dev/doc`, 稳定生成目录 | 已实现文件级 `diff` 预览、本机 `doctor` 检查、`SERVICE.md`/`AI_CONTEXT.md` 生成、SQL/Mongo model inspect 和 Elasticsearch/OpenSearch/Meilisearch search inspect；增强方向是 `stream gen`、`ARCHITECTURE.md`/`DEPENDENCIES.md` 自动生成。 |
 
@@ -182,7 +184,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | Migration | migration scaffold | rollback、dry-run、status | `roze-migration`, `rozectl migrate` | 本地示例能执行 migration。 |
 | 事务上下文 | 本地事务 helper | Unit of Work、nested boundary guard | `roze-transaction` | 业务 logic 能显式控制事务。 |
 | 缓存 | 已实现：Redis client、cache-aside、negative cache、TTL jitter、singleflight loading；本地缓存基于 Moka，支持 TTL、容量淘汰、time-to-idle 和命中/未命中统计 | read/write through、Bloom filter | `roze-cache`, `roze-redis`, `roze-local-cache` | 缓存击穿/雪崩有模板策略。 |
-| singleflight/lock | singleflight、防击穿 | distributed lock、fencing token | `roze-singleflight`, `roze-redis` | 并发 miss 只回源一次。 |
+| singleflight/lock | 已实现：singleflight 防击穿，key lookup 使用 DashMap，Criterion 覆盖 unique-key/cached-key/reset 热路径 | distributed lock、fencing token | `roze-singleflight`, `roze-redis` | 并发 miss 只回源一次。 |
 | 分布式事务 | TCC/Saga primitives | 状态查询、补偿任务、admin UI | `roze-dtm` | 示例覆盖 try/confirm/cancel 或 saga compensation。 |
 
 ### 11. 部署和运维
@@ -534,7 +536,7 @@ AI Collaboration Layer
 | `rozectl doc service` | P1 | 已实现：从 `.api` 生成 `SERVICE.md`，包含接口清单、生成器所有权边界、常用命令和 AI editing notes。 |
 | `rozectl doc ai-context` | P1 | 已实现：从 `.api` 生成 `AI_CONTEXT.md`，包含允许/禁止修改路径、生成器命令、测试命令和契约变更流程。 |
 | `rozectl stream gen` | P2 | 从事件契约生成 producer/consumer skeleton、DLQ 配置和 envelope 类型。 |
-| `rozectl bench` | P2 | 生成或运行基础压测脚本，输出延迟、错误率和吞吐。 |
+| `rozectl bench` | P2 | 外部服务压测命令方向，输出延迟、错误率和吞吐；当前已先落地 crate 级 Criterion 性能基线，不等同于压测 CLI。 |
 
 `diff` 和 `doctor` 的 MVP 已落地。增强重点是让它们更懂 Roze 项目语义：`diff` 补 breaking change report，`doctor` 补协议级依赖检查和可执行修复建议。
 

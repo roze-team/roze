@@ -1,9 +1,8 @@
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -15,6 +14,7 @@ use crate::{
         ServiceInstance,
     },
 };
+use dashmap::DashMap;
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_grpc::transport::{
@@ -26,8 +26,8 @@ use roze_trace::generate_trace_id;
 use tokio::time::sleep;
 use tracing::info;
 
-static METHOD_RATE_LIMITS: OnceLock<Mutex<HashMap<String, MethodRateLimitState>>> = OnceLock::new();
-static METHOD_BREAKERS: OnceLock<Mutex<HashMap<String, MethodBreakerState>>> = OnceLock::new();
+static METHOD_RATE_LIMITS: OnceLock<DashMap<String, MethodRateLimitState>> = OnceLock::new();
+static METHOD_BREAKERS: OnceLock<DashMap<String, MethodBreakerState>> = OnceLock::new();
 static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 pub const ERROR_CODE_METADATA: &str = "x-roze-error-code";
@@ -747,18 +747,15 @@ fn retry_delay(base: Duration, attempt: usize) -> Duration {
 #[allow(clippy::result_large_err)]
 fn enforce_method_rate_limit(key: &str, config: &MethodRateLimitConfig) -> Result<(), Status> {
     let mut states = METHOD_RATE_LIMITS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("method rate limit lock poisoned");
-    let state = states
+        .get_or_init(DashMap::new)
         .entry(key.to_string())
         .or_insert_with(|| MethodRateLimitState {
             tokens: config.burst as f64,
             last_refill: Instant::now(),
         });
-    refill_method_tokens(state, config);
-    if state.tokens >= 1.0 {
-        state.tokens -= 1.0;
+    refill_method_tokens(&mut states, config);
+    if states.tokens >= 1.0 {
+        states.tokens -= 1.0;
         Ok(())
     } else {
         Err(Status::resource_exhausted("rate limited"))
@@ -783,45 +780,39 @@ fn refill_method_tokens(state: &mut MethodRateLimitState, config: &MethodRateLim
 
 fn method_breaker_is_open(key: &str) -> bool {
     let mut states = METHOD_BREAKERS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("method breaker lock poisoned");
-    let state = states
+        .get_or_init(DashMap::new)
         .entry(key.to_string())
         .or_insert_with(|| MethodBreakerState {
             failures: 0,
             open_until: None,
         });
-    if let Some(open_until) = state.open_until {
+    if let Some(open_until) = states.open_until {
         if Instant::now() < open_until {
             return true;
         }
-        state.open_until = None;
-        state.failures = 0;
+        states.open_until = None;
+        states.failures = 0;
     }
     false
 }
 
 fn method_breaker_record(key: &str, success: bool, config: &MethodBreakerConfig) {
     let mut states = METHOD_BREAKERS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("method breaker lock poisoned");
-    let state = states
+        .get_or_init(DashMap::new)
         .entry(key.to_string())
         .or_insert_with(|| MethodBreakerState {
             failures: 0,
             open_until: None,
         });
     if success {
-        state.failures = 0;
-        state.open_until = None;
+        states.failures = 0;
+        states.open_until = None;
         return;
     }
-    state.failures = state.failures.saturating_add(1);
-    if state.failures >= config.failure_threshold.max(1) {
-        state.failures = 0;
-        state.open_until = Some(Instant::now() + config.reset_timeout);
+    states.failures = states.failures.saturating_add(1);
+    if states.failures >= config.failure_threshold.max(1) {
+        states.failures = 0;
+        states.open_until = Some(Instant::now() + config.reset_timeout);
     }
 }
 

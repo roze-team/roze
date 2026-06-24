@@ -4,20 +4,35 @@ Roze is a small Rust service framework scaffold with:
 
 - `crates/roze-core`: base types, errors, results, and shared response helpers.
 - `crates/roze-http`: Axum server helpers and graceful shutdown wrappers.
+- `crates/roze-middleware`: HTTP middleware helpers; route rate-limit and breaker state use DashMap for concurrent hot paths.
 - `crates/roze-validation`: request parameter validation helpers.
 - `crates/roze-config`: YAML/TOML/env configuration loading.
 - `crates/roze-log`: tracing and `trace_id` plumbing.
+- `crates/roze-metrics`: in-process metrics registry; labeled metric state uses DashMap for concurrent hot paths.
 - `crates/roze-auth`: JWT and auth helpers.
 - `crates/roze-db`: database connection helpers.
 - `crates/roze-orm`: common ORM contracts for pagination, filters, tenant scope, audit fields, and soft delete.
-- `crates/roze-cache`: Redis helpers.
+- `crates/roze-cache`: Redis cache helpers with cache-aside, negative cache, TTL jitter, and singleflight loading.
+- `crates/roze-local-cache`: Moka-backed in-process cache with TTL, capacity eviction, and hit/miss statistics.
+- `crates/roze-singleflight`: request coalescing for cache miss protection; key lookup uses DashMap for concurrent hot paths.
 - `crates/roze-openapi`: Swagger/OpenAPI support.
-- `crates/roze-rpc`: tonic gRPC helpers.
+- `crates/roze-rpc`: tonic gRPC helpers and registry primitives; in-memory registry plus method governance state use DashMap for concurrent hot paths.
 - `crates/roze-job`: scheduled job scaffolding.
-- `crates/roze-mq`: messaging scaffolding.
+- `crates/roze-mq`: messaging scaffolding; in-memory topic, offset, and idempotency indexes use DashMap/DashSet.
+- `crates/roze-eventbus`: event envelope and in-memory pub/sub; topic sender lookup uses DashMap.
+- `crates/roze-session`: in-memory session store; session lookup uses DashMap.
+- `crates/roze-ws`: WebSocket session hub; session lookup uses DashMap.
 - `crates/roze-storage`: object storage contracts for local/S3 API/Qiniu/Alibaba/Tencent providers.
+- `crates/roze-search`: unified search client for Elasticsearch, OpenSearch, and Meilisearch.
+
+Hot-path crates keep Criterion benchmarks under `benches/` for regression baselines:
+`roze-metrics` covers labeled writes and Prometheus rendering, `roze-local-cache`
+covers async insert/get/get-or-insert, `roze-singleflight` covers unique-key,
+cached-key, and reset paths, `roze-rpc` covers memory registry
+register/discover/deregister, and session/WebSocket/eventbus/MQ in-memory
+stores cover their lookup and publish/register hot paths.
 - `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
-- `apps/rozectl`: code generation for `.api` service definitions.
+- `apps/rozectl`: code generation for API, RPC, model, search, OpenAPI, SDK, Docker, and Kubernetes assets.
 - `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.
 - `apps/roze-example`: a generated example service from `example/user.api`.
 
@@ -48,10 +63,10 @@ so reliable event publishing follows the same convention in API and RPC
 projects.
 
 `rozectl` generates the scaffold and glue code: API projects, RPC projects,
-model modules, documentation, client SDKs, Dockerfiles, and Kubernetes
-manifests. Real business behavior still belongs in application code, including
-logic handlers, complex SQL, domain validation, transactions, authorization,
-and permission checks.
+model modules, search repositories, documentation, client SDKs, Dockerfiles,
+and Kubernetes manifests. Real business behavior still belongs in application
+code, including logic handlers, complex SQL, domain validation, transactions,
+authorization, permission checks, and search ranking rules.
 
 ## Usage Documentation
 
@@ -64,7 +79,7 @@ and permission checks.
 - [Production checklist](docs/production-checklist.md)
 - [Usage documentation](docs/usage/README.md)
 - [Middleware contract](docs/contracts/middleware.md)
-- [rozectl API generator guide](docs/usage/rozectl-api.md)
+- [rozectl generator guide](docs/usage/rozectl-api.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
@@ -262,11 +277,17 @@ The generated SeaORM model keeps the schema name in the entity attributes.
 For Toasty, choose the schema/database through the Toasty driver configuration.
 
 `rozectl search generate example/user.search --engine elasticsearch --out apps/roze-example`
-generates search document and repository modules for Elasticsearch,
-OpenSearch, or Meilisearch. `rozectl search inspect users --engine opensearch
---url http://127.0.0.1:9200 --out apps/roze-example` reads an existing index
-mapping/settings and emits the same Roze search scaffold. Meilisearch inspect
-uses settings plus document sampling to infer field types.
+generates `src/search/mod.rs` and `src/search/users.rs` for Elasticsearch,
+OpenSearch, or Meilisearch. Generated repositories use `roze-search` for
+health checks, document indexing, document deletion, and text search. The DSL
+declares the index name, primary field, field types, and searchable/filterable/
+sortable flags.
+
+`rozectl search inspect users --engine opensearch --url http://127.0.0.1:9200 --out apps/roze-example`
+reads an existing Elasticsearch/OpenSearch index mapping and emits the same
+Roze search scaffold. Meilisearch inspection reads index settings and samples
+documents to infer field types. Use `--api-key` for secured engines and
+`--sample-size` to control Meilisearch sampling.
 
 Example SQL input:
 

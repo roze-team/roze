@@ -3,7 +3,10 @@ use std::{fs, path::Path};
 use anyhow::{bail, Context};
 use serde_json::Value;
 
-use super::{to_pascal_case, to_snake_case, DependencySource, GenerateMode, GenerateOptions};
+use super::{
+    find_workspace_root, local_crates_prefix, to_pascal_case, to_snake_case, DependencySource,
+    GenerateMode, GenerateOptions,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEngine {
@@ -22,6 +25,7 @@ pub struct SearchIndexSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchFieldSpec {
     pub name: String,
+    pub source_name: Option<String>,
     pub ty: SearchFieldType,
     pub searchable: bool,
     pub filterable: bool,
@@ -33,7 +37,9 @@ pub struct SearchFieldSpec {
 pub enum SearchFieldType {
     Keyword,
     Text,
+    I32,
     I64,
+    U64,
     F64,
     Bool,
     DateTime,
@@ -44,7 +50,9 @@ impl SearchFieldType {
     fn rust_type(self) -> &'static str {
         match self {
             Self::Keyword | Self::Text | Self::DateTime => "String",
+            Self::I32 => "i32",
             Self::I64 => "i64",
+            Self::U64 => "u64",
             Self::F64 => "f64",
             Self::Bool => "bool",
             Self::Json => "serde_json::Value",
@@ -105,6 +113,7 @@ fn parse_json_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
         .and_then(Value::as_str)
         .unwrap_or("id")
         .to_string();
+    let primary_rust = to_snake_case(&primary);
     let fields = value
         .get("fields")
         .and_then(Value::as_array)
@@ -117,12 +126,14 @@ fn parse_json_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
                 .ok_or_else(|| anyhow::anyhow!("search field requires `name`"))?;
             let ty = field
                 .get("type")
+                .or_else(|| field.get("kind"))
                 .and_then(Value::as_str)
                 .map(parse_search_type)
                 .transpose()?
                 .unwrap_or(SearchFieldType::Json);
             Ok(SearchFieldSpec {
                 name: to_snake_case(name),
+                source_name: search_source_name(name),
                 ty,
                 searchable: field
                     .get("searchable")
@@ -139,13 +150,13 @@ fn parse_json_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
                 primary: field
                     .get("primary")
                     .and_then(Value::as_bool)
-                    .unwrap_or(name == primary),
+                    .unwrap_or(to_snake_case(name) == primary_rust),
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     normalize_search_spec(SearchIndexSpec {
         name,
-        primary,
+        primary: primary_rust,
         fields,
     })
 }
@@ -184,6 +195,7 @@ fn parse_dsl_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
                 let flags = parts.collect::<Vec<_>>();
                 fields.push(SearchFieldSpec {
                     name: to_snake_case(field_name),
+                    source_name: search_source_name(field_name),
                     ty,
                     searchable: flags.contains(&"searchable")
                         || matches!(ty, SearchFieldType::Text),
@@ -227,7 +239,9 @@ fn parse_search_type(value: &str) -> anyhow::Result<SearchFieldType> {
     match value {
         "keyword" | "string" => Ok(SearchFieldType::Keyword),
         "text" => Ok(SearchFieldType::Text),
-        "i64" | "int" | "integer" | "long" => Ok(SearchFieldType::I64),
+        "i32" | "int" | "integer" => Ok(SearchFieldType::I32),
+        "i64" | "long" => Ok(SearchFieldType::I64),
+        "u64" | "uint64" | "unsigned_long" => Ok(SearchFieldType::U64),
         "f64" | "float" | "double" | "number" => Ok(SearchFieldType::F64),
         "bool" | "boolean" => Ok(SearchFieldType::Bool),
         "datetime" | "date" => Ok(SearchFieldType::DateTime),
@@ -269,6 +283,7 @@ async fn inspect_elastic_mapping(
                 .unwrap_or(SearchFieldType::Json);
             Ok(SearchFieldSpec {
                 name: to_snake_case(name),
+                source_name: search_source_name(name),
                 ty,
                 searchable: matches!(ty, SearchFieldType::Text),
                 filterable: !matches!(ty, SearchFieldType::Text | SearchFieldType::Json),
@@ -288,7 +303,9 @@ fn elastic_type(value: &str) -> SearchFieldType {
     match value {
         "keyword" => SearchFieldType::Keyword,
         "text" => SearchFieldType::Text,
-        "byte" | "short" | "integer" | "long" => SearchFieldType::I64,
+        "byte" | "short" | "integer" => SearchFieldType::I32,
+        "long" => SearchFieldType::I64,
+        "unsigned_long" => SearchFieldType::U64,
         "float" | "half_float" | "scaled_float" | "double" => SearchFieldType::F64,
         "boolean" => SearchFieldType::Bool,
         "date" | "date_nanos" => SearchFieldType::DateTime,
@@ -361,6 +378,7 @@ async fn inspect_meilisearch_index(
             let ty = infer_json_field_type(&results, &name);
             SearchFieldSpec {
                 name: rust_name.clone(),
+                source_name: Some(name.clone()).filter(|source| source != &rust_name),
                 ty,
                 searchable: searchable.contains(&name) || searchable.contains(&"*".to_string()),
                 filterable: filterable.contains(&name),
@@ -399,7 +417,8 @@ fn infer_json_field_type(documents: &[Value], field: &str) -> SearchFieldType {
     {
         let next = match value {
             Value::Bool(_) => SearchFieldType::Bool,
-            Value::Number(number) if number.is_i64() || number.is_u64() => SearchFieldType::I64,
+            Value::Number(number) if number.as_i64().is_some() => SearchFieldType::I64,
+            Value::Number(number) if number.as_u64().is_some() => SearchFieldType::U64,
             Value::Number(_) => SearchFieldType::F64,
             Value::String(_) => SearchFieldType::Text,
             _ => SearchFieldType::Json,
@@ -407,8 +426,18 @@ fn infer_json_field_type(documents: &[Value], field: &str) -> SearchFieldType {
         out = Some(match (out, next) {
             (None, next) => next,
             (Some(left), right) if left == right => left,
+            (Some(SearchFieldType::I32), SearchFieldType::I64)
+            | (Some(SearchFieldType::I64), SearchFieldType::I32) => SearchFieldType::I64,
+            (Some(SearchFieldType::I32), SearchFieldType::U64)
+            | (Some(SearchFieldType::U64), SearchFieldType::I32)
+            | (Some(SearchFieldType::I64), SearchFieldType::U64)
+            | (Some(SearchFieldType::U64), SearchFieldType::I64) => SearchFieldType::Json,
             (Some(SearchFieldType::I64), SearchFieldType::F64)
-            | (Some(SearchFieldType::F64), SearchFieldType::I64) => SearchFieldType::F64,
+            | (Some(SearchFieldType::F64), SearchFieldType::I64)
+            | (Some(SearchFieldType::I32), SearchFieldType::F64)
+            | (Some(SearchFieldType::F64), SearchFieldType::I32)
+            | (Some(SearchFieldType::U64), SearchFieldType::F64)
+            | (Some(SearchFieldType::F64), SearchFieldType::U64) => SearchFieldType::F64,
             _ => SearchFieldType::Json,
         });
     }
@@ -454,6 +483,7 @@ fn write_search_project(
         render_search_index(spec, engine),
     )?;
     update_search_dependencies(out, options.dependency_source)?;
+    update_main_rs(out)?;
     Ok(())
 }
 
@@ -487,6 +517,9 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
     writeln!(&mut out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
     writeln!(&mut out, "pub struct {pascal}Document {{").unwrap();
     for field in &spec.fields {
+        if let Some(source_name) = &field.source_name {
+            writeln!(&mut out, "    #[serde(rename = \"{source_name}\")]").unwrap();
+        }
         writeln!(
             &mut out,
             "    pub {}: {},",
@@ -514,9 +547,15 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
         "    pub fn new(url: impl Into<String>, api_key: Option<String>) -> Self {{"
     )
     .unwrap();
+    writeln!(&mut out, "        Self {{").unwrap();
     writeln!(
         &mut out,
-        "        Self {{ client: SearchClient::new(SearchConfig {{ engine: SearchEngine::{}, url: url.into(), api_key }}) }}",
+        "            client: SearchClient::new(SearchConfig {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "                engine: SearchEngine::{},",
         match engine {
             SearchEngine::Elasticsearch => "Elasticsearch",
             SearchEngine::Opensearch => "Opensearch",
@@ -524,6 +563,18 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
         }
     )
     .unwrap();
+    writeln!(&mut out, "                url: url.into(),").unwrap();
+    writeln!(&mut out, "                api_key,").unwrap();
+    writeln!(&mut out, "            }}),").unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn health(&self) -> anyhow::Result<serde_json::Value> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        self.client.health().await").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -531,12 +582,14 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
         "    pub async fn index(&self, document: &{pascal}Document) -> anyhow::Result<serde_json::Value> {{"
     )
     .unwrap();
+    writeln!(&mut out, "        self.client").unwrap();
     writeln!(
         &mut out,
-        "        self.client.index_document(Self::INDEX, &document.{}.to_string(), document).await",
+        "            .index_document(Self::INDEX, &document.{}.to_string(), document)",
         primary.name
     )
     .unwrap();
+    writeln!(&mut out, "            .await").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -562,26 +615,42 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
                 .fields
                 .iter()
                 .filter(|field| field.searchable)
-                .map(|field| field.name.as_str())
+                .map(search_field_name)
                 .collect::<Vec<_>>();
+            writeln!(&mut out, "        self.client").unwrap();
+            writeln!(&mut out, "            .search(").unwrap();
+            writeln!(&mut out, "                Self::INDEX,").unwrap();
             writeln!(
                 &mut out,
-                "        self.client.search(Self::INDEX, json!({{ \"query\": {{ \"multi_match\": {{ \"query\": query, \"fields\": {:?} }} }} }})).await",
+                "                json!({{ \"query\": {{ \"multi_match\": {{ \"query\": query, \"fields\": {:?} }} }} }}),",
                 fields
             )
             .unwrap();
+            writeln!(&mut out, "            )").unwrap();
+            writeln!(&mut out, "            .await").unwrap();
         }
         SearchEngine::Meilisearch => {
+            writeln!(&mut out, "        self.client").unwrap();
             writeln!(
                 &mut out,
-                "        self.client.search(Self::INDEX, json!({{ \"q\": query }})).await"
+                "            .search(Self::INDEX, json!({{ \"q\": query }}))"
             )
             .unwrap();
+            writeln!(&mut out, "            .await").unwrap();
         }
     }
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out, "}}").unwrap();
     out
+}
+
+fn search_source_name(name: &str) -> Option<String> {
+    let rust_name = to_snake_case(name);
+    Some(name.to_string()).filter(|source| source != &rust_name)
+}
+
+fn search_field_name(field: &SearchFieldSpec) -> &str {
+    field.source_name.as_deref().unwrap_or(&field.name)
 }
 
 fn update_search_dependencies(out: &Path, source: DependencySource) -> anyhow::Result<()> {
@@ -613,7 +682,13 @@ fn update_search_dependencies(out: &Path, source: DependencySource) -> anyhow::R
                 r#"{ git = "https://github.com/roze-team/roze.git" }"#.parse::<toml_edit::Item>()?
             }
             DependencySource::Path => {
-                r#"{ path = "../../crates/roze-search" }"#.parse::<toml_edit::Item>()?
+                let workspace_root = find_workspace_root(out)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--roze-source path requires output inside a Cargo workspace containing Roze crates"
+                    )
+                })?;
+                let prefix = local_crates_prefix(out, &workspace_root)?;
+                format!(r#"{{ path = "{prefix}/roze-search" }}"#).parse::<toml_edit::Item>()?
             }
         };
         dependencies.insert("roze-search", item);
@@ -642,6 +717,37 @@ fn insert_dependency(
             .expect("valid dependency")
     };
     dependencies.insert(name, item);
+}
+
+fn update_main_rs(out: &Path) -> anyhow::Result<()> {
+    let main_path = out.join("src/main.rs");
+    if !main_path.is_file() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&main_path)
+        .with_context(|| format!("failed to read {}", main_path.display()))?;
+    if content.contains("mod search;") {
+        return Ok(());
+    }
+    let updated = if let Some(index) = content.find("mod model;\n") {
+        let insert_at = index + "mod model;\n".len();
+        format!(
+            "{}mod search;\n{}",
+            &content[..insert_at],
+            &content[insert_at..]
+        )
+    } else if let Some(index) = content.find("mod types;\n") {
+        let insert_at = index + "mod types;\n".len();
+        format!(
+            "{}mod search;\n{}",
+            &content[..insert_at],
+            &content[insert_at..]
+        )
+    } else {
+        format!("mod search;\n{content}")
+    };
+    fs::write(&main_path, updated)
+        .with_context(|| format!("failed to write {}", main_path.display()))
 }
 
 fn has_entries(path: &Path) -> anyhow::Result<bool> {
@@ -678,14 +784,39 @@ mod tests {
             index users
             primary id
             field id keyword primary filterable sortable
-            field name text searchable
+            field display-name text searchable
             "#,
         )
         .expect("parse");
         let rendered = render_search_index(&spec, SearchEngine::Elasticsearch);
         assert!(rendered.contains("SearchEngine::Elasticsearch"));
         assert!(rendered.contains("pub struct UsersDocument"));
+        assert!(rendered.contains("#[serde(rename = \"display-name\")]"));
         assert!(rendered.contains("multi_match"));
+        assert!(rendered.contains("\"display-name\""));
+        assert!(rendered.contains("pub async fn health"));
+    }
+
+    #[test]
+    fn parses_json_search_schema_with_kind() {
+        let spec = parse_search_schema(
+            r#"
+            {
+              "index": "users",
+              "primary": "display-id",
+              "fields": [
+                { "name": "display-id", "kind": "keyword", "primary": true, "filterable": true, "sortable": true },
+                { "name": "view_count", "kind": "u64", "sortable": true },
+                { "name": "name", "kind": "text", "searchable": true }
+              ]
+            }
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(spec.primary, "display_id");
+        assert_eq!(spec.fields[0].name, "display_id");
+        assert_eq!(spec.fields[0].source_name.as_deref(), Some("display-id"));
+        assert_eq!(spec.fields[1].ty, SearchFieldType::U64);
     }
 
     #[test]

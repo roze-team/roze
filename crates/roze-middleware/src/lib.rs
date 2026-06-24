@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ use tower_http::{
 };
 use tracing::Instrument;
 
+use dashmap::DashMap;
 use roze_auth::AuthPrincipal;
 use roze_config::{GovernanceConfig, RouteGovernanceConfig};
 use roze_context::{AuthContext, Context};
@@ -27,8 +28,8 @@ use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_metrics::{record_http_request, record_http_route};
 use roze_trace::{generate_trace_id, request_span};
 
-static ROUTE_RATE_LIMITS: OnceLock<Mutex<HashMap<String, RateLimitState>>> = OnceLock::new();
-static ROUTE_BREAKERS: OnceLock<Mutex<HashMap<String, BreakerState>>> = OnceLock::new();
+static ROUTE_RATE_LIMITS: OnceLock<DashMap<String, RateLimitState>> = OnceLock::new();
+static ROUTE_BREAKERS: OnceLock<DashMap<String, BreakerState>> = OnceLock::new();
 
 pub fn apply_common<S>(router: Router<S>) -> Router<S>
 where
@@ -1056,18 +1057,15 @@ fn effective_breaker(
 
 fn enforce_rate_limit(key: &str, config: &RateLimitConfig) -> std::result::Result<(), RozeError> {
     let mut states = ROUTE_RATE_LIMITS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("route rate limit lock poisoned");
-    let state = states
+        .get_or_init(DashMap::new)
         .entry(key.to_string())
         .or_insert_with(|| RateLimitState {
             tokens: config.burst as f64,
             last_refill: Instant::now(),
         });
-    refill_tokens(state, config);
-    if state.tokens >= 1.0 {
-        state.tokens -= 1.0;
+    refill_tokens(&mut states, config);
+    if states.tokens >= 1.0 {
+        states.tokens -= 1.0;
         Ok(())
     } else {
         Err(RozeError::Internal("rate limited".to_string()))
@@ -1076,33 +1074,27 @@ fn enforce_rate_limit(key: &str, config: &RateLimitConfig) -> std::result::Resul
 
 fn route_breaker_is_open(key: &str) -> bool {
     let mut states = ROUTE_BREAKERS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("route breaker lock poisoned");
-    let state = states
+        .get_or_init(DashMap::new)
         .entry(key.to_string())
         .or_insert_with(|| BreakerState {
             failures: 0,
             open_until: None,
         });
-    breaker_is_open(state)
+    breaker_is_open(&mut states)
 }
 
 fn route_breaker_record(key: &str, success: bool, config: &BreakerConfig) {
     let mut states = ROUTE_BREAKERS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("route breaker lock poisoned");
-    let state = states
+        .get_or_init(DashMap::new)
         .entry(key.to_string())
         .or_insert_with(|| BreakerState {
             failures: 0,
             open_until: None,
         });
     if success {
-        breaker_record_success(state);
+        breaker_record_success(&mut states);
     } else {
-        breaker_record_failure(state, config);
+        breaker_record_failure(&mut states, config);
     }
 }
 

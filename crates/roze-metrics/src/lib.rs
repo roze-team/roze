@@ -2,10 +2,12 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
     },
     time::Duration,
 };
+
+use dashmap::{mapref::entry::Entry, DashMap};
 
 static REQUEST_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REQUEST_FAILED: AtomicU64 = AtomicU64::new(0);
@@ -36,9 +38,15 @@ pub enum MetricValue {
     Duration(Duration),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct MetricKey {
+    name: String,
+    labels: MetricLabels,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MetricRegistry {
-    inner: Arc<Mutex<BTreeMap<String, BTreeMap<MetricLabels, MetricValue>>>>,
+    inner: Arc<DashMap<MetricKey, MetricValue>>,
 }
 
 impl MetricRegistry {
@@ -62,37 +70,47 @@ impl MetricRegistry {
     }
 
     pub fn render(&self) -> String {
-        let inner = self.inner.lock().expect("metric registry lock poisoned");
+        let mut entries = self
+            .inner
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+
         let mut out = String::new();
-        for (name, entries) in inner.iter() {
-            for (labels, value) in entries {
-                let labels_text = if labels.0.is_empty() {
-                    String::new()
-                } else {
-                    let joined = labels
-                        .0
-                        .iter()
-                        .map(|(key, value)| {
-                            format!(
-                                r#"{}="{}""#,
-                                normalize_label_key(key),
-                                escape_label_value(value)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("{{{joined}}}")
-                };
-                match value {
-                    MetricValue::Counter(value) => {
-                        out.push_str(&format!("{name}{labels_text} {value}\n"));
-                    }
-                    MetricValue::Gauge(value) => {
-                        out.push_str(&format!("{name}{labels_text} {value}\n"));
-                    }
-                    MetricValue::Duration(value) => {
-                        out.push_str(&format!("{name}{labels_text} {}\n", value.as_millis()));
-                    }
+        for (key, value) in entries {
+            let labels_text = if key.labels.0.is_empty() {
+                String::new()
+            } else {
+                let joined = key
+                    .labels
+                    .0
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            r#"{}="{}""#,
+                            normalize_label_key(key),
+                            escape_label_value(value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{{{joined}}}")
+            };
+            match value {
+                MetricValue::Counter(value) => {
+                    out.push_str(&format!("{}{} {}\n", key.name, labels_text, value));
+                }
+                MetricValue::Gauge(value) => {
+                    out.push_str(&format!("{}{} {}\n", key.name, labels_text, value));
+                }
+                MetricValue::Duration(value) => {
+                    out.push_str(&format!(
+                        "{}{} {}\n",
+                        key.name,
+                        labels_text,
+                        value.as_millis()
+                    ));
                 }
             }
         }
@@ -103,10 +121,16 @@ impl MetricRegistry {
     where
         F: FnOnce(Option<MetricValue>) -> MetricValue,
     {
-        let mut inner = self.inner.lock().expect("metric registry lock poisoned");
-        let entry = inner.entry(name).or_default();
-        let current = entry.remove(&labels);
-        entry.insert(labels, f(current));
+        let key = MetricKey { name, labels };
+        match self.inner.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let current = entry.get().clone();
+                entry.insert(f(Some(current)));
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(f(None));
+            }
+        }
     }
 }
 

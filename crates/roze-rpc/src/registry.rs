@@ -2,12 +2,13 @@ use std::{
     collections::HashMap,
     net::ToSocketAddrs,
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::{sync::mpsc, time::interval};
@@ -61,30 +62,37 @@ pub trait Registry: Send + Sync + 'static {
 
 #[derive(Debug, Default, Clone)]
 pub struct MemoryRegistry {
-    instances: Arc<RwLock<HashMap<String, Vec<ServiceInstance>>>>,
+    instances: Arc<DashMap<String, Vec<ServiceInstance>>>,
 }
 
 #[async_trait]
 impl Registry for MemoryRegistry {
     async fn register(&self, instance: ServiceInstance) -> anyhow::Result<()> {
-        let mut instances = self.instances.write().expect("registry lock poisoned");
-        let entry = instances.entry(instance.name.clone()).or_default();
+        let mut entry = self.instances.entry(instance.name.clone()).or_default();
         entry.retain(|existing| existing.addr != instance.addr);
         entry.push(instance);
         Ok(())
     }
 
     async fn deregister(&self, name: &str, addr: &str) -> anyhow::Result<()> {
-        let mut instances = self.instances.write().expect("registry lock poisoned");
-        if let Some(service_instances) = instances.get_mut(name) {
+        let should_remove = if let Some(mut service_instances) = self.instances.get_mut(name) {
             service_instances.retain(|instance| instance.addr != addr);
+            service_instances.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            self.instances.remove(name);
         }
         Ok(())
     }
 
     async fn discover(&self, name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
-        let instances = self.instances.read().expect("registry lock poisoned");
-        Ok(instances.get(name).cloned().unwrap_or_default())
+        Ok(self
+            .instances
+            .get(name)
+            .map(|instances| instances.clone())
+            .unwrap_or_default())
     }
 }
 
@@ -932,6 +940,8 @@ pub fn pick_with_strategy(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::RwLock;
+
     use super::*;
 
     #[tokio::test]

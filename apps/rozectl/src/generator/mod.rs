@@ -2461,7 +2461,7 @@ fn dependency_item(
     toml_edit::Item::Value(toml_edit::Value::InlineTable(dependency))
 }
 
-fn local_crates_prefix(out: &Path, workspace_root: &Path) -> anyhow::Result<String> {
+pub(super) fn local_crates_prefix(out: &Path, workspace_root: &Path) -> anyhow::Result<String> {
     let absolute_out = if out.is_absolute() {
         out.to_path_buf()
     } else {
@@ -2833,7 +2833,7 @@ fn register_workspace_member(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn find_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>> {
+pub(super) fn find_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>> {
     let absolute_out = if out.is_absolute() {
         out.to_path_buf()
     } else {

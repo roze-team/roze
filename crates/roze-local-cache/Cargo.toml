@@ -5,4 +5,12 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+moka.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "local_cache"
+harness = false

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::{
@@ -10,6 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
 
@@ -275,10 +276,10 @@ pub trait MqAdmin: Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct InMemoryBroker {
-    topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>>,
-    topic_offsets: Arc<Mutex<HashMap<String, i64>>>,
+    topics: Arc<DashMap<String, broadcast::Sender<Delivery>>>,
+    topic_offsets: Arc<DashMap<String, i64>>,
     dead_letters: Arc<Mutex<VecDeque<DeadLetterRecord>>>,
-    seen_idempotency_keys: Arc<Mutex<HashSet<String>>>,
+    seen_idempotency_keys: Arc<DashSet<String>>,
     dead_letter_topic: Option<String>,
     max_attempts: u32,
     next_dead_letter_id: Arc<AtomicU64>,
@@ -294,10 +295,10 @@ pub struct InMemoryBroker {
 impl InMemoryBroker {
     pub fn new() -> Self {
         Self {
-            topics: Arc::new(Mutex::new(HashMap::new())),
-            topic_offsets: Arc::new(Mutex::new(HashMap::new())),
+            topics: Arc::new(DashMap::new()),
+            topic_offsets: Arc::new(DashMap::new()),
             dead_letters: Arc::new(Mutex::new(VecDeque::new())),
-            seen_idempotency_keys: Arc::new(Mutex::new(HashSet::new())),
+            seen_idempotency_keys: Arc::new(DashSet::new()),
             dead_letter_topic: None,
             max_attempts: 3,
             next_dead_letter_id: Arc::new(AtomicU64::new(1)),
@@ -338,8 +339,7 @@ impl InMemoryBroker {
     }
 
     fn sender_for(&self, topic: &str) -> broadcast::Sender<Delivery> {
-        let mut topics = self.topics.lock().expect("broker lock poisoned");
-        topics
+        self.topics
             .entry(topic.to_string())
             .or_insert_with(|| {
                 let (sender, _receiver) = broadcast::channel(128);
@@ -390,11 +390,7 @@ impl InMemoryBroker {
         let Some(key) = message.idempotency_key.as_deref() else {
             return false;
         };
-        let mut seen = self
-            .seen_idempotency_keys
-            .lock()
-            .expect("broker lock poisoned");
-        let duplicate = !seen.insert(key.to_string());
+        let duplicate = !self.seen_idempotency_keys.insert(key.to_string());
         if duplicate {
             self.duplicated.fetch_add(1, Ordering::SeqCst);
         }
@@ -409,8 +405,7 @@ impl InMemoryBroker {
             message.partition = Some(0);
         }
         if message.offset.is_none() {
-            let mut offsets = self.topic_offsets.lock().expect("broker lock poisoned");
-            let offset = offsets.entry(message.topic.clone()).or_insert(0);
+            let mut offset = self.topic_offsets.entry(message.topic.clone()).or_insert(0);
             message.offset = Some(*offset);
             *offset = offset.saturating_add(1);
         }

@@ -1,10 +1,7 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -66,7 +63,7 @@ pub trait SessionStore: Send + Sync {
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemorySessionStore {
-    sessions: Arc<RwLock<HashMap<String, Session>>>,
+    sessions: Arc<DashMap<String, Session>>,
 }
 
 impl InMemorySessionStore {
@@ -78,10 +75,10 @@ impl InMemorySessionStore {
 #[async_trait]
 impl SessionStore for InMemorySessionStore {
     async fn get(&self, session_id: &str) -> anyhow::Result<Option<Session>> {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get(session_id) {
+        if let Some(session) = self.sessions.get(session_id) {
             if session.is_expired() {
-                sessions.remove(session_id);
+                drop(session);
+                self.sessions.remove(session_id);
                 return Ok(None);
             }
             return Ok(Some(session.clone()));
@@ -90,15 +87,12 @@ impl SessionStore for InMemorySessionStore {
     }
 
     async fn upsert(&self, session: Session) -> anyhow::Result<()> {
-        self.sessions
-            .write()
-            .await
-            .insert(session.id.clone(), session);
+        self.sessions.insert(session.id.clone(), session);
         Ok(())
     }
 
     async fn delete(&self, session_id: &str) -> anyhow::Result<()> {
-        self.sessions.write().await.remove(session_id);
+        self.sessions.remove(session_id);
         Ok(())
     }
 }

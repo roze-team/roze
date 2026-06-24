@@ -1870,7 +1870,7 @@ async fn build_upstream_response(
 ) -> anyhow::Result<Response<Body>> {
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
-    let mut response = Response::builder()
+    let response = Response::builder()
         .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
 
     if is_sse_response(status, &headers) {
