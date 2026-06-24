@@ -21,8 +21,10 @@ services.
   governance, MQ, observability, and security checklist.
 - [Middleware contract](../contracts/middleware.md): REST middleware config,
   Roze built-in names, adaptive shedding, and generated file ownership.
-- [rozectl API generator](./rozectl-api.md): `.api` syntax, REST generation,
-  client SDKs, OpenAPI output, type mapping, and validator tag support.
+- [rozectl generator](./rozectl-api.md): `.api` syntax, REST/RPC generation,
+  SQL/Mongo model generation and inspection, Elasticsearch/OpenSearch/
+  Meilisearch search generation and inspection, client SDKs, OpenAPI output,
+  Docker/Kubernetes manifests, type mapping, and validator tag support.
 
 ## Install rozectl
 
@@ -67,6 +69,8 @@ Verify the binary:
 rozectl --help
 rozectl api --help
 rozectl rpc --help
+rozectl model --help
+rozectl search --help
 ```
 
 If `rozectl` is not found after installation, make sure Cargo's bin directory is

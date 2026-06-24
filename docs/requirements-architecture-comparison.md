@@ -8,6 +8,20 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 当前主要问题不是“没有模块”，而是“模块成熟度和生产闭环不足”。多数核心模块处于 `beta`，生命周期、分布式事务、部署生成仍是 `scaffold`。下一阶段应该优先把已有能力做成可验证、可升级、可观测、可恢复的生产框架，而不是继续横向铺新 crate。
 
+## 本轮处理标记
+
+处理日期：2026-06-24
+
+以下需求已完成实现、文档同步和本地验证：
+
+- 已处理：移除兼容入口口径，CLI 和文档只保留 Roze 原生命令。
+- 已处理：`rozectl model generate <schema> --out <dir>` 原生模型生成。
+- 已处理：`rozectl model inspect <table> --db-kind <sqlite|postgres|mysql|mongo> --db-url <url> --out <dir>`，覆盖 sqlite、Postgres、MySQL、MongoDB。
+- 已处理：`rozectl search generate <schema> --engine <elasticsearch|opensearch|meilisearch> --out <dir>`。
+- 已处理：`rozectl search inspect <index> --engine <elasticsearch|opensearch|meilisearch> --url <url> --out <dir>`。
+- 已处理：`roze-search` 运行时 health、index document、delete document、search 调用封装。
+- 已处理：README、usage 文档、项目规范、成熟度矩阵和本文件已同步搜索/模型能力。
+
 ## 覆盖度口径
 
 本文里的覆盖度不是按“有没有 crate”判断，而是按可交付程度判断。
@@ -35,9 +49,9 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 7 | 健康检查和生命周期 | 中 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report 和 REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；依赖 readiness、Gateway/RPC 标准入口、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
 | 8 | 安全能力 | 中 | `roze-jwt`, `roze-auth`, `roze-permission`, Gateway auth | JWT/RBAC/tenant/ABAC primitives 已有；缺统一安全模型、OIDC/OAuth2、mTLS、permission 注解到 OpenAPI/SDK/test、key rotation、审计日志模板。 |
 | 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
-| 10 | 数据库、缓存、事务 | 中 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm` | 连接、ORM、cache、singleflight、TCC/Saga/outbox/inbox primitives 已有；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
+| 10 | 数据库、缓存、事务、搜索 | 中高 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm`, `roze-search`, `rozectl model`, `rozectl search` | SQL/Mongo model generate/inspect、cache、singleflight、TCC/Saga/outbox/inbox primitives、Elasticsearch/OpenSearch/Meilisearch search generate/inspect 已有；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
 | 11 | 部署和运维 | 中低 | `rozectl docker`, `rozectl kube`, `docker-compose.integration.yml` | Docker/K8s 生成已有；缺 Helm、doctor、manifest validation、NetworkPolicy/ServiceAccount/PDB/HPA 更完整模板和生产验收脚本。 |
-| 12 | CLI/生成器/AI 友好 | 中 | `rozectl api/rpc/model/openapi/client/docker/kube/diff/doctor/doc`, 稳定生成目录 | 生成主干很强；已具备文件级 `diff` 预览、本机 `doctor` 检查和 `SERVICE.md` 生成；仍缺 `dev`、`stream gen`、`test gen`、`mock gen`、`AI_CONTEXT.md`/`ARCHITECTURE.md`/`DEPENDENCIES.md` 自动生成。 |
+| 12 | CLI/生成器/AI 友好 | 中高 | `rozectl api/rpc/model/search/openapi/client/docker/kube/diff/doctor/doc`, 稳定生成目录 | 生成主干很强；已具备文件级 `diff` 预览、本机 `doctor` 检查、`SERVICE.md` 生成、SQL/Mongo model inspect 和 Elasticsearch/OpenSearch/Meilisearch search inspect；仍缺 `dev`、`stream gen`、`AI_CONTEXT.md`/`ARCHITECTURE.md`/`DEPENDENCIES.md` 自动生成。 |
 
 ## 功能规格清单
 
@@ -150,7 +164,8 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | 功能 | MVP | 增强项 | 推荐落点 | 验收 |
 | --- | --- | --- | --- | --- |
-| Model 生成 | Toasty 默认、SeaORM 可选，生成单表 CRUD、`count`、分页、等值/IN/范围条件、可空字段等值/IS NULL、排序、批量、软删、租户限定方法、独立字段文件、extension 保留文件、复合索引查询方法、Toasty/SeaORM 本地事务 helper | schema namespace、关系、跨字段复杂条件、Unit of Work 示例、事务边界守卫 | `apps/rozectl`, `roze-orm` | 默认生成 Toasty，`--orm sea-orm` 切换；字段元数据独立，`<model>_ext.rs` 在 `--update` 保留，基础增删改查和增强查询可直接调用，Toasty/SeaORM 可显式开启本地事务边界。 |
+| Model 生成 | 已处理：Toasty 默认、SeaORM 可选，生成单表 CRUD、`count`、分页、等值/IN/范围条件、可空字段等值/IS NULL、排序、批量、软删、租户限定方法、独立字段文件、extension 保留文件、复合索引查询方法、Toasty/SeaORM 本地事务 helper；`model inspect` 覆盖 sqlite、Postgres、MySQL、MongoDB | schema namespace、关系、跨字段复杂条件、Unit of Work 示例、事务边界守卫 | `apps/rozectl`, `roze-orm` | 默认生成 Toasty，`--orm sea-orm` 切换；字段元数据独立，`<model>_ext.rs` 在 `--update` 保留，基础增删改查和增强查询可直接调用，Toasty/SeaORM 可显式开启本地事务边界。 |
+| Search 生成 | 已处理：`rozectl search generate/inspect` 支持 Elasticsearch、OpenSearch、Meilisearch，生成 `src/search/mod.rs` 和 `src/search/<index>.rs`，保留原始字段名，提供 health/index/delete/search repository | ranking/boosting query builder、搜索结果高亮、facets 聚合 helpers | `apps/rozectl`, `roze-search` | `.search` DSL、JSON schema 和已有 index inspect 都能生成同一 repository 形态；Elasticsearch/OpenSearch 读取 mapping，Meilisearch 读取 settings/index metadata 并采样 documents。 |
 | DB 连接 | pool config、timeout | read/write split、多数据源 | `roze-db`, `roze-sqlx` | 连接失败影响 readiness。 |
 | Migration | migration scaffold | rollback、dry-run、status | `roze-migration`, `rozectl migrate` | 本地示例能执行 migration。 |
 | 事务上下文 | 本地事务 helper | Unit of Work、nested boundary guard | `roze-transaction` | 业务 logic 能显式控制事务。 |
@@ -173,9 +188,9 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | 功能 | MVP | 增强项 | 推荐落点 | 验收 |
 | --- | --- | --- | --- | --- |
-| new/generate/update | api/rpc/model 主路径 | template customization、plugin hooks | `apps/rozectl` | 重复生成稳定、可预测。 |
+| new/generate/update | api/rpc/model/search 主路径 | template customization、plugin hooks | `apps/rozectl` | 重复生成稳定、可预测。 |
 | diff | 文件级 diff | ownership-aware diff、breaking change report | `rozectl diff` | 默认不写盘，输出清晰。 |
-| doctor/dev | `doctor` 已有本机工具、端口、配置和 TCP live probe；`dev` 待补 | 自动修复建议、profile 管理、协议级 probe | `rozectl doctor/dev` | 本地 onboarding 时间可控。 |
+| doctor/dev | `doctor` 已有本机工具、端口、配置和 TCP live probe；本地依赖启动以 `docker compose` 和生成部署资产为入口 | 自动修复建议、profile 管理、协议级 probe | `rozectl doctor`, `docker-compose.integration.yml` | 本地 onboarding 时间可控。 |
 | doc/sdk/test/mock | 文档、SDK、测试、mock 生成 | multi-language SDK、contract tests | `apps/rozectl` | 从契约能生成可运行辅助资产。 |
 | AI_CONTEXT | `rozectl doc service` 已可从 `.api` 生成 `SERVICE.md`，包含接口、所有权边界、常用命令和 AI notes | AI_CONTEXT/ARCHITECTURE/DEPENDENCIES、依赖图、topic/cache key 提取 | `rozectl doc service` / `rozectl doc gen` | AI 能知道哪些文件能改、哪些不能改。 |
 | upgrade | update/diff/breaking-change check | migration guide automation | `rozectl update` | 框架升级能预览影响并保护业务代码。 |
@@ -478,24 +493,28 @@ AI Collaboration Layer
 | Lifecycle/runtime | `roze-bootstrap`, `roze-shutdown`, `roze-health` | 服务启动、健康和关闭应统一。 |
 | Generated templates | `apps/rozectl` | 生成器只消费公共 crate，不复制运行时逻辑。 |
 
-## 近期可执行任务清单
+## 已落地能力和增强方向
 
-按收益和风险排序：
+按收益和风险排序记录当前能力边界：
 
 1. 防止 ORM 默认值回归：Toasty 保持默认，`--orm sea-orm` 才切换到 SeaORM，并用 CLI 解析测试覆盖。
-2. 完善 `rozectl doctor`：TCP live probe 已具备；继续补协议级依赖检查和修复建议。
-3. 完善 `rozectl diff`：文件级预览已具备；继续补语义 diff、breaking change report 和更详细的 ownership 说明。
-4. 完善健康接口模板：REST 已输出 `/healthz`、`/readyz`、`/startupz`、`/metrics`；继续补 RPC/Gateway 和依赖 readiness。
+2. `rozectl doctor`：Rust/Cargo、Docker、kubectl、额外工具、端口、配置文件和 TCP live probe 已具备；协议级依赖检查属于增强方向。
+3. `rozectl diff`：文件级预览已具备；语义 diff、breaking change report 和更详细的 ownership 说明属于增强方向。
+4. 健康接口模板：REST 已输出 `/healthz`、`/readyz`、`/startupz`、`/metrics`；RPC/Gateway 和依赖 readiness 标准化属于增强方向。
 5. 给 Gateway 增加 app 级 smoke script：一键起 mock upstream + gateway，覆盖 rewrite/auth/rate/breaker/retry/fallback。
 6. 给 MQ 增加真实 Kafka/NATS integration profile：默认跳过，显式 env 开启。
-7. 生成 `SERVICE.md`：已支持从 `.api` 服务名、REST/RPC 接口和所有权边界生成；下一步从依赖配置、MQ topic、DB/Redis 配置推导更完整 AI 上下文。
+7. 生成 `SERVICE.md`：已支持从 `.api` 服务名、REST/RPC 接口和所有权边界生成；依赖配置、MQ topic、DB/Redis 配置推导属于增强方向。
 
 ## 建议新增 CLI 命令契约
 
 | 命令 | P 阶段 | 最小行为 |
 | --- | --- | --- |
 | `rozectl diff` | P0 | 已支持生成到临时目录，对比目标目录，显示新增/修改/删除文件；默认不写盘。 |
-| `rozectl doctor` | P0 | 已支持检查 Rust/Cargo、Docker、kubectl、额外工具、端口、配置文件和 TCP 依赖地址；协议级依赖检查待补。 |
+| `rozectl doctor` | P0 | 已支持检查 Rust/Cargo、Docker、kubectl、额外工具、端口、配置文件和 TCP 依赖地址；协议级依赖检查属于增强方向。 |
+| `rozectl model generate` | P0 | 已处理：从 DSL/SQL/Mongo schema 生成 `src/model`，默认 Toasty，支持 `--orm sea-orm`，支持 `--update`/`--force`。 |
+| `rozectl model inspect` | P0 | 已处理：支持 sqlite、Postgres、MySQL、MongoDB schema/collection inspect，并生成同一模型 scaffold。 |
+| `rozectl search generate` | P0 | 已处理：支持 Elasticsearch、OpenSearch、Meilisearch，从 `.search` DSL 或 JSON schema 生成 `src/search`。 |
+| `rozectl search inspect` | P0 | 已处理：Elasticsearch/OpenSearch 读取 mapping，Meilisearch 读取 settings/index metadata 并采样 documents。 |
 | `rozectl dev` | P1 | 启动本地依赖或提示 docker compose 命令；输出服务端口和健康检查地址。 |
 | `rozectl contract check` | P0 | 已支持 `.api` 前后版本 breaking change 检查，覆盖 route/RPC/type/field 基础破坏性变更。 |
 | `rozectl test gen` | P1 | 从 `.api` 生成 HTTP/RPC smoke tests 和最小断言。 |

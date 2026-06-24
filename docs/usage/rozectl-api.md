@@ -1,4 +1,4 @@
-# rozectl API generator
+# rozectl generator
 
 `rozectl api generate` reads a Roze `.api` contract and generates a
 Rust-native Axum REST service. The generated project keeps framework-owned files
@@ -771,13 +771,28 @@ existing MongoDB collections.
 ## Search generation
 
 Search support is separate from database model generation. Use `rozectl search`
-for Elasticsearch, OpenSearch, and Meilisearch indexes:
+for Elasticsearch, OpenSearch, and Meilisearch indexes. The generated code uses
+the same repository shape across engines and delegates HTTP calls to
+`roze-search`:
 
 ```bash
 rozectl search generate example/user.search --engine elasticsearch --out services/user-api
 rozectl search generate example/user.search --engine opensearch --out services/user-api
 rozectl search generate example/user.search --engine meilisearch --out services/user-api
 ```
+
+Supported engine names are `elasticsearch`, `opensearch`, and `meilisearch`.
+Each command writes:
+
+```text
+src/search/mod.rs
+src/search/<index>.rs
+```
+
+The generated index module contains a document struct, a repository struct,
+`new`, `health`, `index`, `delete`, and `search_text` helpers. The repository
+keeps the original index field names with `serde(rename = "...")`, so Rust
+field names can stay idiomatic without changing the search engine contract.
 
 The search schema DSL is intentionally small:
 
@@ -786,7 +801,30 @@ index users
 primary id
 field id keyword primary filterable sortable
 field name text searchable
+field email keyword filterable
 field age i64 filterable sortable
+field created_at datetime filterable sortable
+```
+
+Supported field kinds are `keyword`, `text`, `i32`, `i64`, `u64`, `f64`,
+`bool`, `datetime`, and `json`. The parser also accepts common engine aliases
+such as `integer`, `long`, `unsigned_long`, `float`, `double`, `boolean`,
+`date`, and `object`.
+
+The same schema can be written as JSON when a pipeline already owns structured
+metadata:
+
+```json
+{
+  "index": "users",
+  "primary": "id",
+  "fields": [
+    { "name": "id", "kind": "keyword", "primary": true, "filterable": true, "sortable": true },
+    { "name": "name", "kind": "text", "searchable": true },
+    { "name": "email", "kind": "keyword", "filterable": true },
+    { "name": "age", "kind": "i64", "filterable": true, "sortable": true }
+  ]
+}
 ```
 
 Existing indexes can be inspected directly:
@@ -797,10 +835,17 @@ rozectl search inspect users --engine opensearch --url http://127.0.0.1:9200 --o
 rozectl search inspect users --engine meilisearch --url http://127.0.0.1:7700 --sample-size 100 --out services/user-api
 ```
 
-Elasticsearch and OpenSearch inspection reads index mappings. Meilisearch
-inspection reads index settings and samples documents to infer field types.
-Generated modules use `roze-search` for health checks, document indexing,
-delete, and search calls.
+Elasticsearch and OpenSearch inspection reads `/<index>/_mapping`.
+Meilisearch inspection reads `/indexes/<index>/settings`,
+`/indexes/<index>`, and `/indexes/<index>/documents?limit=<sample-size>`.
+Pass `--api-key` when the engine requires authentication. For Meilisearch,
+`--sample-size` controls document sampling for field type inference.
+
+Use `--update` to refresh generated search files in an existing service and
+`--force` for a full rewrite. `src/search/mod.rs` and `src/search/<index>.rs`
+are schema-owned generated files. Put handwritten ranking, boosting,
+post-processing, or application-specific query composition in separate
+application modules that call the generated repository.
 
 ## Dockerfile generation
 

@@ -194,6 +194,41 @@ RPC 测试要求：
 - MQ 消费必须明确 ack/nack、retry、dead letter 和 idempotency 行为。
 - DTM 默认使用 TCC；Saga 作为可选工作流，不应破坏默认 TCC 状态机。
 
+## 搜索项目规范
+
+搜索索引由 `rozectl search generate` 或 `rozectl search inspect` 生成，
+面向 Elasticsearch、OpenSearch 和 Meilisearch。
+
+固定结构：
+
+```text
+src/
+  search/
+    mod.rs
+    <index>.rs
+```
+
+文件归属：
+
+- `src/search/mod.rs`：搜索模块聚合入口，由生成器维护。
+- `src/search/<index>.rs`：搜索文档结构和 repository，由生成器维护。
+- 手写 ranking、boosting、过滤组合、召回策略、结果重排和业务级查询编排必须放在应用模块中，再调用生成 repository。
+
+搜索生成策略：
+
+- 搜索生成和数据库模型生成分离；数据库表/集合进入 `src/model`，搜索索引进入 `src/search`。
+- `rozectl search generate <schema> --engine <engine>` 从 `.search` DSL 或 JSON schema 生成索引模块。
+- `rozectl search inspect <index> --engine elasticsearch|opensearch` 读取 `/<index>/_mapping`。
+- `rozectl search inspect <index> --engine meilisearch` 读取 settings、index metadata，并按 `--sample-size` 采样 documents 推断字段类型。
+- 生成代码必须通过 `serde(rename = "...")` 保留原始索引字段名。
+- 运行时调用统一走 `roze-search`，包括 health、index document、delete document 和 search。
+- `--update` 刷新生成文件；`--force` 全量重写生成文件。手写扩展不写入生成文件。
+
+搜索验收要求：
+
+- 新增搜索引擎行为或 schema 字段时，必须覆盖 DSL/JSON 解析、inspect 结果转换和生成代码断言。
+- 改动 `roze-search` 时至少运行 `cargo check -p roze-search` 和 `cargo test -p rozectl`。
+
 ## 测试和验收
 
 提交前至少运行相关 crate 测试；涉及生成器时运行：

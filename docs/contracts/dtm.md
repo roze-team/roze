@@ -141,7 +141,7 @@ Roze DTM 内置分支屏障：
 - SQLite store 提供事务、barrier、recovery lease 持久表。
 - 控制面支持按 gid 查询、按状态/类型过滤、分页、统计和人工恢复。
 
-生产待补：
+生产增强方向：
 
 - PostgreSQL/MySQL/Redis 后端。
 - 基于 etcd/Redis 的跨进程租约后端。

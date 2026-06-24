@@ -27,7 +27,7 @@ Status legend:
 | Health checks | beta | Probe report types exist; `/healthz`, `/readyz`, dependency details, and K8s templates need standardization. |
 | Lifecycle/bootstrap | scaffold | Several helpers exist, but HTTP/RPC/consumer/job shutdown ordering is not yet one unified lifecycle. |
 | DB/ORM/model generation | beta | Toasty is the default generated SQL model scaffold; SeaORM is optional with `--orm sea-orm`. `model inspect` supports sqlite, postgres, mysql, and mongo; Mongo inspection samples documents, maps `_id`, captures index metadata, and emits single-field plus compound-index helpers. |
-| Search generation | beta | `rozectl search generate/inspect` supports Elasticsearch, OpenSearch, and Meilisearch with generated document/repository modules backed by `roze-search`. |
+| Search generation | beta | `rozectl search generate/inspect` supports Elasticsearch, OpenSearch, and Meilisearch with generated `src/search` document/repository modules backed by `roze-search` health/index/delete/search calls. Elasticsearch/OpenSearch inspect reads mappings; Meilisearch inspect reads settings/index metadata and samples documents for field inference. |
 | Transactions/outbox/DTM | scaffold | TCC/Saga/outbox/inbox primitives exist; needs full HTTP + DB transaction + outbox + MQ + RPC examples. |
 | Auth/JWT/permission/session | beta | JWT, RBAC, tenant, and ABAC primitives exist; needs a unified security model, OpenAPI permission declarations, key rotation, and test templates. |
 | Observability | beta | tracing, metrics, Prometheus, OpenTelemetry, gateway metrics, and queue event metrics exist; needs dashboards, scrape config, and query examples. |
