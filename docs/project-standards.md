@@ -190,6 +190,8 @@ RPC 测试要求：
 
 - ORM 生成默认保持稳定 page/sort/filter/tenant/audit/soft-delete 契约。
 - 复杂 SQL、事务边界、领域校验、授权校验属于业务逻辑，不由生成器自动实现。
+- 本地进程缓存统一使用 `roze-local-cache`；该 crate 基于 Moka，提供 TTL、容量淘汰、time-to-idle、命中/未命中统计和 async API。
+- 分布式缓存统一使用 `roze-cache`/`roze-redis`；缓存回源必须优先使用 singleflight，避免热点 miss 击穿。
 - 可靠事件发布优先走 outbox relay；可发布到任意 `roze_mq::Publisher`。
 - MQ 消费必须明确 ack/nack、retry、dead letter 和 idempotency 行为。
 - DTM 默认使用 TCC；Saga 作为可选工作流，不应破坏默认 TCC 状态机。
