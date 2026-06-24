@@ -1,6 +1,6 @@
 # rozectl API generator
 
-`rozectl api generate` reads a go-zero/goctl-style `.api` file and generates a
+`rozectl api generate` reads a Roze `.api` contract and generates a
 Rust-native Axum REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
 method-level logic, custom middleware, and `config.yaml` when `--update` is
@@ -38,12 +38,6 @@ Generate a REST service:
 
 ```bash
 cargo run -p rozectl -- api generate example/user.api --out apps/roze-example --roze-source path
-```
-
-The goctl-compatible alias is also supported:
-
-```bash
-rozectl api go -api example/user.api -dir apps/roze-example --roze-source path
 ```
 
 Regenerate framework-owned files while preserving user logic and config:
@@ -200,31 +194,24 @@ rozectl api client js example/user.api --out sdk/user.js
 rozectl api client dart example/user.api --out sdk/user.dart
 ```
 
-goctl-compatible client aliases:
-
-```bash
-rozectl api ts -api example/user.api -dir sdk
-rozectl api dart -api example/user.api -dir sdk
-```
-
 Generate an OpenAPI 3 document:
 
 ```bash
 rozectl openapi generate example/user.api --out openapi.json
-rozectl api swagger -api example/user.api -dir docs/openapi --format json
-rozectl api swagger -api example/user.api -dir docs/openapi --format yaml
+rozectl api swagger --api example/user.api --dir docs/openapi --format json
+rozectl api swagger --api example/user.api --dir docs/openapi --format yaml
 ```
 
 Generate Markdown API documentation:
 
 ```bash
-rozectl api doc -api example/user.api -dir . -o docs/api
+rozectl api doc --api example/user.api --dir . --o docs/api
 ```
 
 Run a custom API plugin:
 
 ```bash
-rozectl api plugin -p ./tools/rozectl-plugin.sh -api example/user.api -dir generated
+rozectl api plugin --p ./tools/rozectl-plugin.sh --api example/user.api --dir generated
 ```
 
 Generate an RPC service from a real `.proto` file:
@@ -236,25 +223,22 @@ rozectl rpc protoc example/user.proto --zrpc_out services/user-rpc
 Generate models:
 
 ```bash
-rozectl model mysql ddl -src example/user.sql -dir services/user-api
-rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api
-rozectl model pg datasource -url postgres://postgres:postgres@127.0.0.1:5432/roze -schema public -table users -dir services/user-api
-rozectl model mongo --type User -dir services/user-api
+rozectl model generate example/user.sql --out services/user-api --format sql
+rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
+rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
+rozectl model generate example/user.model --out services/user-api --format mongo
 ```
 
 Generate deployment files:
 
 ```bash
-rozectl docker -go main.go --port 8080 --binary user-api
+rozectl docker --port 8080 --binary user-api
 rozectl kube deploy --name user-api --image registry.example.com/user-api:latest --port 8080
 ```
 
-See [goctl compatibility](./rozectl-goctl-compat.md) for a direct command
-mapping table.
-
 ## Supported `.api` syntax
 
-The parser accepts these goctl-compatible forms:
+The parser accepts these Roze contract forms:
 
 - `syntax = "v1"` declarations.
 - `info (...)` blocks.
@@ -385,8 +369,8 @@ Business logic should not pass or construct `trace_id` values. Use
 `trace_id`. Use `ServiceContext` for global resources and Axum `Extension<T>`
 for per-request user/session objects injected by custom middleware.
 
-`cors: true` enables CORS. Without `cors_config`, generated services keep the
-compatibility default of permissive CORS. Add `cors_config` to restrict browser
+`cors: true` enables CORS. Without `cors_config`, generated services use a
+permissive development default. Add `cors_config` to restrict browser
 origins, methods, request headers, exposed response headers, credentials, and
 preflight max age.
 
@@ -676,14 +660,12 @@ generated normalized proto keeps `repeated` and `map` field shapes.
 
 ## Model generation
 
-The model generator supports the original Roze commands and goctl-compatible
-aliases.
+The model generator uses Roze-native `generate` and `inspect` commands.
 
 SQL DDL:
 
 ```bash
 rozectl model generate example/user.sql --out services/user-api --format sql
-rozectl model mysql ddl -src example/user.sql -dir services/user-api
 rozectl model generate example/user.sql --out services/user-api --format sql --orm sea-orm
 ```
 
@@ -691,9 +673,8 @@ Database inspection:
 
 ```bash
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
-rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api
-rozectl model pg datasource -url postgres://postgres:postgres@127.0.0.1:5432/roze -schema public -table users -dir services/user-api
-rozectl model mysql datasource -url mysql://root:root@127.0.0.1:3306/roze -table users -dir services/user-api --orm sea-orm
+rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
+rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api --orm sea-orm
 ```
 
 Toasty is the default SQL ORM. `--orm sea-orm` switches SQL/DSL/inspection
@@ -774,10 +755,10 @@ create temporary crates and run `cargo check --offline`:
 cargo test -p rozectl -- --ignored --skip postgres --skip mysql
 ```
 
-Mongo model generation does not require a DSL file:
+Mongo model generation uses the standard model generator:
 
 ```bash
-rozectl model mongo --type User -dir services/user-api
+rozectl model generate example/user.model --out services/user-api --format mongo
 ```
 
 The Mongo output creates a Rust module with a model type, repository, typed CRUD
@@ -785,11 +766,11 @@ helpers, cache helper stubs, and common error helpers.
 
 ## Dockerfile generation
 
-`rozectl docker -go main.go` is a compatibility command. Roze services are
-Rust-native, so the generated file is a multi-stage Rust build:
+`rozectl docker --binary <name>` writes a production-oriented multi-stage Rust
+Dockerfile and validates it before returning success:
 
 ```bash
-rozectl docker -go main.go \
+rozectl docker \
   --builder-image rust:1.87-bookworm \
   --base-image debian:bookworm-slim \
   --binary user-api \
@@ -798,8 +779,10 @@ rozectl docker -go main.go \
   --out Dockerfile
 ```
 
-The `-go` value is accepted for goctl command shape compatibility; the runtime
-binary is controlled by `--binary`.
+The generated Dockerfile builds the release binary in a builder stage, copies
+the binary and `config.yaml` with non-root ownership, sets OCI image labels,
+exposes the service port, and runs as `roze:roze`. The runtime binary is
+controlled by `--binary`.
 
 ## Kubernetes generation
 
@@ -822,13 +805,17 @@ rozectl kube deploy \
   --max-replicas 5 \
   --target-cpu 70 \
   --env-file .env \
-  --config-map user-api-config
+  --config-map user-api-config \
+  --min-available 1
 ```
 
 `--env KEY=VALUE` entries are validated before writing the manifest.
 `--config-map` adds an `envFrom.configMapRef` reference. `--env-file` reads a
 dotenv-style file, validates each `KEY=VALUE` line, emits a generated
 `<name>-env` ConfigMap, and wires it through `envFrom`.
+The manifest always includes a ServiceAccount, PodDisruptionBudget, and
+namespace-wide ingress NetworkPolicy for the service port. `--min-available`
+controls the PodDisruptionBudget `minAvailable` value.
 
 Generated probes target the standard service endpoints:
 
@@ -836,10 +823,23 @@ Generated probes target the standard service endpoints:
 - readiness: `/readyz`
 - startup: `/startupz`
 
+`rozectl kube deploy` validates the generated manifest before returning
+success. Re-run the same offline validation without requiring a Kubernetes
+cluster:
+
+```bash
+rozectl kube validate --file deploy/kubernetes.yaml
+```
+
+The validator checks for Deployment, Service, HPA, ServiceAccount,
+PodDisruptionBudget, NetworkPolicy, standard probes, resource requests/limits,
+service account wiring, and service/HPA/PDB/NetworkPolicy key fields.
+
 ## Helm chart generation
 
-`rozectl helm chart` writes a minimal application chart with `Chart.yaml`,
-`values.yaml`, and Deployment/Service/HPA templates. It uses the same resource,
+`rozectl helm chart` writes a production-oriented application chart with
+`Chart.yaml`, `values.yaml`, and Deployment, Service, HPA, ServiceAccount,
+PodDisruptionBudget, and NetworkPolicy templates. It uses the same resource,
 probe, autoscaling, image, env, and ConfigMap settings as `kube deploy`.
 
 ```bash
@@ -853,16 +853,27 @@ rozectl helm chart \
   --target-cpu 70 \
   --env RUST_LOG=info \
   --config-map user-api-config \
+  --min-available 1 \
   --chart-version 0.1.0 \
   --app-version 1.2.3 \
   --out deploy/user-api-chart
 ```
 
-Validate the generated chart before shipping:
+The Helm chart always includes ServiceAccount, PodDisruptionBudget, and
+NetworkPolicy templates. `values.yaml` exposes `serviceAccount.name` and
+`podDisruptionBudget.minAvailable` for chart-level customization.
+
+`rozectl helm chart` validates the chart directory before returning success.
+Re-run the same offline validation, then optionally render with Helm:
 
 ```bash
+rozectl helm validate --chart deploy/user-api-chart
 helm template user-api deploy/user-api-chart
 ```
+
+`rozectl helm validate` checks the chart structure without requiring Helm. It
+verifies `Chart.yaml`, `values.yaml`, Deployment, Service, HPA, ServiceAccount,
+PodDisruptionBudget, NetworkPolicy, and helper templates.
 
 ## Plugin contract
 
@@ -870,7 +881,7 @@ helm template user-api deploy/user-api-chart
 JSON, then runs the plugin command.
 
 ```bash
-rozectl api plugin -p ./tools/api-plugin.sh -api example/user.api -dir generated
+rozectl api plugin --p ./tools/api-plugin.sh --api example/user.api --dir generated
 ```
 
 The plugin receives the same JSON payload through stdin and environment:
@@ -879,7 +890,7 @@ The plugin receives the same JSON payload through stdin and environment:
 | --- | --- |
 | `ROZECTL_API_SPEC_JSON` | normalized API spec JSON |
 | `ROZECTL_API_FILE` | source `.api` path |
-| `ROZECTL_OUT_DIR` | output directory passed by `-dir` |
+| `ROZECTL_OUT_DIR` | output directory passed by `--dir` |
 
 The plugin owns any files it writes under `ROZECTL_OUT_DIR`.
 

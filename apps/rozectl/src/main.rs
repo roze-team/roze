@@ -155,8 +155,6 @@ enum Commands {
         command: OpenApiCommands,
     },
     Docker {
-        #[arg(short = 'g', long = "go")]
-        go: PathBuf,
         #[arg(long, default_value = "Dockerfile")]
         out: PathBuf,
         #[arg(long, default_value = "rust:1-bookworm")]
@@ -168,7 +166,7 @@ enum Commands {
         #[arg(long, default_value = "UTC")]
         timezone: String,
         #[arg(long)]
-        binary: Option<String>,
+        binary: String,
     },
     Kube {
         #[command(subcommand)]
@@ -177,18 +175,6 @@ enum Commands {
     Helm {
         #[command(subcommand)]
         command: HelmCommands,
-    },
-    #[command(hide = true)]
-    Generate {
-        api: PathBuf,
-        #[arg(long, default_value = ".")]
-        out: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
     },
 }
 
@@ -205,35 +191,12 @@ enum ApiCommands {
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
     },
-    Go {
-        #[arg(short = 'a', long = "api")]
-        api: PathBuf,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
-    },
     New {
         name: String,
         #[arg(long)]
         out: Option<PathBuf>,
         #[arg(long)]
         force: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
-    },
-    Goctl {
-        api: PathBuf,
-        #[arg(long, default_value = ".")]
-        out: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
     },
@@ -388,16 +351,14 @@ enum KubeCommands {
         env_file: Option<PathBuf>,
         #[arg(long)]
         config_map: Option<String>,
-        #[arg(long)]
-        service_account: bool,
-        #[arg(long)]
-        pdb: bool,
         #[arg(long, default_value = "1")]
         min_available: String,
-        #[arg(long)]
-        network_policy: bool,
         #[arg(long, default_value = "deploy/kubernetes.yaml")]
         out: PathBuf,
+    },
+    Validate {
+        #[arg(long, default_value = "deploy/kubernetes.yaml")]
+        file: PathBuf,
     },
 }
 
@@ -430,12 +391,18 @@ enum HelmCommands {
         env: Vec<String>,
         #[arg(long)]
         config_map: Option<String>,
+        #[arg(long, default_value = "1")]
+        min_available: String,
         #[arg(long, default_value = "0.1.0")]
         chart_version: String,
         #[arg(long, default_value = "0.1.0")]
         app_version: String,
         #[arg(long, default_value = "deploy/chart")]
         out: PathBuf,
+    },
+    Validate {
+        #[arg(long, default_value = "deploy/chart")]
+        chart: PathBuf,
     },
 }
 
@@ -619,100 +586,13 @@ enum ModelCommands {
         #[arg(long, value_enum, default_value_t)]
         orm: ModelOrm,
     },
-    Mysql {
-        #[command(subcommand)]
-        command: MysqlModelCommands,
-    },
-    Pg {
-        #[command(subcommand)]
-        command: PgModelCommands,
-    },
-    Mongo {
-        #[arg(long = "type")]
-        ty: String,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum MysqlModelCommands {
-    Ddl {
-        #[arg(short = 's', long = "src")]
-        src: PathBuf,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
-    },
-    Datasource {
-        #[arg(short = 'u', long = "url")]
-        url: String,
-        #[arg(short = 't', long = "table")]
-        table: String,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum PgModelCommands {
-    Datasource {
-        #[arg(short = 'u', long = "url")]
-        url: String,
-        #[arg(short = 't', long = "table")]
-        table: String,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-        #[arg(long)]
-        schema: Option<String>,
-        #[arg(long)]
-        force: bool,
-        #[arg(long, conflicts_with = "force")]
-        update: bool,
-        #[arg(long, value_enum, default_value_t)]
-        roze_source: RozeSource,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
-    },
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse_from(normalize_goctl_args(std::env::args_os()));
+    let cli = Cli::parse();
     let registry = generator::registry();
 
     match cli.command {
-        Commands::Generate {
-            api,
-            out,
-            force,
-            update,
-            roze_source,
-        } => registry.dispatch(GeneratorCommand::ApiGenerate {
-            api,
-            out,
-            options: options(force, update, roze_source),
-        })?,
         Commands::Api { command } => match command {
             ApiCommands::Generate {
                 api,
@@ -723,17 +603,6 @@ fn main() -> anyhow::Result<()> {
             } => registry.dispatch(GeneratorCommand::ApiGenerate {
                 api,
                 out,
-                options: options(force, update, roze_source),
-            })?,
-            ApiCommands::Go {
-                api,
-                dir,
-                force,
-                update,
-                roze_source,
-            } => registry.dispatch(GeneratorCommand::ApiGenerate {
-                api,
-                out: dir,
                 options: options(force, update, roze_source),
             })?,
             ApiCommands::New {
@@ -756,17 +625,6 @@ fn main() -> anyhow::Result<()> {
                     ),
                 })?;
             }
-            ApiCommands::Goctl {
-                api,
-                out,
-                force,
-                update,
-                roze_source,
-            } => registry.dispatch(GeneratorCommand::ApiGenerate {
-                api,
-                out,
-                options: options(force, update, roze_source),
-            })?,
             ApiCommands::Client { command } => match command {
                 ClientCommands::Ts { api, out } => {
                     generator::write_ts_client(&api, &out)?;
@@ -902,72 +760,6 @@ fn main() -> anyhow::Result<()> {
                 ),
                 orm: orm.into(),
             })?,
-            ModelCommands::Mysql { command } => match command {
-                MysqlModelCommands::Ddl {
-                    src,
-                    dir,
-                    force,
-                    update,
-                    roze_source,
-                    orm,
-                } => registry.dispatch(GeneratorCommand::ModelGenerate {
-                    schema: src,
-                    out: dir,
-                    options: options(force, update, roze_source),
-                    format: generator::model::ModelFormat::Sql,
-                    orm: orm.into(),
-                })?,
-                MysqlModelCommands::Datasource {
-                    url,
-                    table,
-                    dir,
-                    force,
-                    update,
-                    roze_source,
-                    orm,
-                } => registry.dispatch(GeneratorCommand::ModelInspect {
-                    table,
-                    schema: None,
-                    db_url: url,
-                    db_kind: SqlxDatabaseKind::MySql,
-                    out: dir,
-                    options: options(force, update, roze_source),
-                    orm: orm.into(),
-                })?,
-            },
-            ModelCommands::Pg { command } => match command {
-                PgModelCommands::Datasource {
-                    url,
-                    table,
-                    dir,
-                    schema,
-                    force,
-                    update,
-                    roze_source,
-                    orm,
-                } => registry.dispatch(GeneratorCommand::ModelInspect {
-                    table,
-                    schema,
-                    db_url: url,
-                    db_kind: SqlxDatabaseKind::Postgres,
-                    out: dir,
-                    options: options(force, update, roze_source),
-                    orm: orm.into(),
-                })?,
-            },
-            ModelCommands::Mongo {
-                ty,
-                dir,
-                force,
-                update,
-                roze_source,
-            } => {
-                generator::goctl::generate_mongo_model_type(
-                    &ty,
-                    &dir,
-                    options(force, update, roze_source),
-                )?;
-            }
         },
         Commands::Template { command } => match command {
             TemplateCommands::List => {
@@ -1018,22 +810,24 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Docker {
-            go,
             out,
             builder_image,
             base_image,
             port,
             timezone,
             binary,
-        } => generator::goctl::write_dockerfile(DockerOptions {
-            main: go,
-            out,
-            builder_image,
-            base_image,
-            port,
-            timezone,
-            binary,
-        })?,
+        } => {
+            let validate_file = out.clone();
+            generator::goctl::write_dockerfile(DockerOptions {
+                out,
+                builder_image,
+                base_image,
+                port,
+                timezone,
+                binary,
+            })?;
+            run_dockerfile_validate(&validate_file)?;
+        }
         Commands::Kube { command } => match command {
             KubeCommands::Deploy {
                 name,
@@ -1051,25 +845,32 @@ fn main() -> anyhow::Result<()> {
                 env,
                 env_file,
                 config_map,
+                min_available,
                 out,
-            } => generator::goctl::write_kube_deploy(KubeDeployOptions {
-                name,
-                image,
-                namespace,
-                replicas,
-                port,
-                cpu_request,
-                cpu_limit,
-                memory_request,
-                memory_limit,
-                min_replicas,
-                max_replicas,
-                target_cpu,
-                env,
-                env_file,
-                config_map,
-                out,
-            })?,
+            } => {
+                let validate_file = out.clone();
+                generator::goctl::write_kube_deploy(KubeDeployOptions {
+                    name,
+                    image,
+                    namespace,
+                    replicas,
+                    port,
+                    cpu_request,
+                    cpu_limit,
+                    memory_request,
+                    memory_limit,
+                    min_replicas,
+                    max_replicas,
+                    target_cpu,
+                    env,
+                    env_file,
+                    config_map,
+                    min_available,
+                    out,
+                })?;
+                run_kube_validate(&validate_file)?;
+            }
+            KubeCommands::Validate { file } => run_kube_validate(&file)?,
         },
         Commands::Helm { command } => match command {
             HelmCommands::Chart {
@@ -1086,31 +887,38 @@ fn main() -> anyhow::Result<()> {
                 target_cpu,
                 env,
                 config_map,
+                min_available,
                 chart_version,
                 app_version,
                 out,
-            } => generator::goctl::write_helm_chart(HelmOptions {
-                deploy: KubeDeployOptions {
-                    name,
-                    image,
-                    namespace: "default".to_string(),
-                    replicas,
-                    port,
-                    cpu_request,
-                    cpu_limit,
-                    memory_request,
-                    memory_limit,
-                    min_replicas,
-                    max_replicas,
-                    target_cpu,
-                    env,
-                    env_file: None,
-                    config_map,
-                    out,
-                },
-                chart_version,
-                app_version,
-            })?,
+            } => {
+                let validate_chart = out.clone();
+                generator::goctl::write_helm_chart(HelmOptions {
+                    deploy: KubeDeployOptions {
+                        name,
+                        image,
+                        namespace: "default".to_string(),
+                        replicas,
+                        port,
+                        cpu_request,
+                        cpu_limit,
+                        memory_request,
+                        memory_limit,
+                        min_replicas,
+                        max_replicas,
+                        target_cpu,
+                        env,
+                        env_file: None,
+                        config_map,
+                        min_available,
+                        out,
+                    },
+                    chart_version,
+                    app_version,
+                })?;
+                run_helm_validate(&validate_chart)?;
+            }
+            HelmCommands::Validate { chart } => run_helm_validate(&chart)?,
         },
     }
 
@@ -1518,6 +1326,286 @@ fn check_tcp(target: &str) -> DoctorCheck {
     }
 }
 
+fn run_dockerfile_validate(file: &Path) -> anyhow::Result<()> {
+    let content = fs::read_to_string(file)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", file.display()))?;
+    let issues = validate_dockerfile_content(&content);
+    if issues.is_empty() {
+        println!("Dockerfile validation passed: {}", file.display());
+        return Ok(());
+    }
+
+    eprintln!("Dockerfile validation failed: {} issue(s)", issues.len());
+    for issue in issues {
+        eprintln!("- {issue}");
+    }
+    anyhow::bail!("Dockerfile validation failed")
+}
+
+fn validate_dockerfile_content(content: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+    let required = [
+        "FROM ",
+        " AS builder",
+        "cargo build --release --bin",
+        "LABEL org.opencontainers.image.title=",
+        "ENV TZ=",
+        "WORKDIR /app",
+        "groupadd --system roze",
+        "useradd --system --gid roze",
+        "COPY --from=builder --chown=roze:roze",
+        "COPY --chown=roze:roze config.yaml",
+        "EXPOSE ",
+        "USER roze:roze",
+        "CMD [\"/usr/local/bin/",
+    ];
+    for fragment in required {
+        if !content.contains(fragment) {
+            issues.push(format!("Dockerfile is missing `{fragment}`"));
+        }
+    }
+
+    let from_count = content
+        .lines()
+        .filter(|line| line.trim_start().starts_with("FROM "))
+        .count();
+    if from_count < 2 {
+        issues.push("Dockerfile must use a multi-stage build".to_string());
+    }
+
+    issues
+}
+
+fn run_kube_validate(file: &Path) -> anyhow::Result<()> {
+    let content = fs::read_to_string(file)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", file.display()))?;
+    let issues = validate_kube_manifest_content(&content);
+    if issues.is_empty() {
+        println!("kube manifest validation passed: {}", file.display());
+        return Ok(());
+    }
+
+    eprintln!("kube manifest validation failed: {} issue(s)", issues.len());
+    for issue in issues {
+        eprintln!("- {issue}");
+    }
+    anyhow::bail!("kube manifest validation failed")
+}
+
+fn validate_kube_manifest_content(content: &str) -> Vec<String> {
+    let documents = kube_documents_by_kind(content);
+    let mut issues = Vec::new();
+    let required_kinds = [
+        "ServiceAccount",
+        "Deployment",
+        "Service",
+        "HorizontalPodAutoscaler",
+        "PodDisruptionBudget",
+        "NetworkPolicy",
+    ];
+    for kind in required_kinds {
+        if !documents.contains_key(kind) {
+            issues.push(format!(
+                "missing required Kubernetes resource kind `{kind}`"
+            ));
+        }
+    }
+
+    if let Some(deployment) = documents.get("Deployment") {
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "serviceAccountName:");
+        require_manifest_fragment(
+            &mut issues,
+            "Deployment",
+            deployment,
+            "terminationGracePeriodSeconds:",
+        );
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "resources:");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "requests:");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "limits:");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "livenessProbe:");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "path: /healthz");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "readinessProbe:");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "path: /readyz");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "startupProbe:");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "path: /startupz");
+    }
+    if let Some(service) = documents.get("Service") {
+        require_manifest_fragment(&mut issues, "Service", service, "targetPort:");
+    }
+    if let Some(hpa) = documents.get("HorizontalPodAutoscaler") {
+        require_manifest_fragment(&mut issues, "HorizontalPodAutoscaler", hpa, "minReplicas:");
+        require_manifest_fragment(&mut issues, "HorizontalPodAutoscaler", hpa, "maxReplicas:");
+        require_manifest_fragment(
+            &mut issues,
+            "HorizontalPodAutoscaler",
+            hpa,
+            "averageUtilization:",
+        );
+    }
+    if let Some(pdb) = documents.get("PodDisruptionBudget") {
+        require_manifest_fragment(&mut issues, "PodDisruptionBudget", pdb, "minAvailable:");
+        require_manifest_fragment(&mut issues, "PodDisruptionBudget", pdb, "selector:");
+    }
+    if let Some(policy) = documents.get("NetworkPolicy") {
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "policyTypes:");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "- Ingress");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "podSelector:");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "port:");
+    }
+
+    issues
+}
+
+fn kube_documents_by_kind(content: &str) -> BTreeMap<String, String> {
+    let mut documents = BTreeMap::new();
+    for document in content.split("\n---") {
+        let document = document.trim();
+        if document.is_empty() {
+            continue;
+        }
+        if let Some(kind) = kube_document_kind(document) {
+            documents.insert(kind.to_string(), document.to_string());
+        }
+    }
+    documents
+}
+
+fn kube_document_kind(document: &str) -> Option<&str> {
+    document.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("kind:").map(str::trim)
+    })
+}
+
+fn require_manifest_fragment(issues: &mut Vec<String>, kind: &str, document: &str, fragment: &str) {
+    if !document.contains(fragment) {
+        issues.push(format!("`{kind}` is missing `{fragment}`"));
+    }
+}
+
+fn run_helm_validate(chart: &Path) -> anyhow::Result<()> {
+    let issues = validate_helm_chart_dir(chart);
+    if issues.is_empty() {
+        println!("helm chart validation passed: {}", chart.display());
+        return Ok(());
+    }
+
+    eprintln!("helm chart validation failed: {} issue(s)", issues.len());
+    for issue in issues {
+        eprintln!("- {issue}");
+    }
+    anyhow::bail!("helm chart validation failed")
+}
+
+fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
+    let mut issues = Vec::new();
+    if !chart.is_dir() {
+        issues.push(format!("{} is not a chart directory", chart.display()));
+        return issues;
+    }
+
+    let required_files = [
+        "Chart.yaml",
+        "values.yaml",
+        "templates/deployment.yaml",
+        "templates/service.yaml",
+        "templates/hpa.yaml",
+        "templates/serviceaccount.yaml",
+        "templates/pdb.yaml",
+        "templates/networkpolicy.yaml",
+        "templates/_helpers.tpl",
+    ];
+    for file in required_files {
+        if !chart.join(file).is_file() {
+            issues.push(format!("missing chart file `{file}`"));
+        }
+    }
+
+    check_helm_file(
+        &mut issues,
+        chart,
+        "Chart.yaml",
+        &["apiVersion: v2", "type: application", "appVersion:"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "values.yaml",
+        &[
+            "image:",
+            "service:",
+            "resources:",
+            "autoscaling:",
+            "serviceAccount:",
+            "podDisruptionBudget:",
+            "envFrom:",
+        ],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/deployment.yaml",
+        &[
+            "kind: Deployment",
+            "serviceAccountName:",
+            "terminationGracePeriodSeconds:",
+            "livenessProbe:",
+            "readinessProbe:",
+            "startupProbe:",
+        ],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/service.yaml",
+        &["kind: Service", "targetPort:"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/hpa.yaml",
+        &["kind: HorizontalPodAutoscaler", "averageUtilization:"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/serviceaccount.yaml",
+        &["kind: ServiceAccount"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/pdb.yaml",
+        &["kind: PodDisruptionBudget", "minAvailable:"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/networkpolicy.yaml",
+        &["kind: NetworkPolicy", "policyTypes:", "Ingress"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/_helpers.tpl",
+        &["roze.fullname", "roze.labels", "roze.selectorLabels"],
+    );
+
+    issues
+}
+
+fn check_helm_file(issues: &mut Vec<String>, chart: &Path, file: &str, fragments: &[&str]) {
+    let path = chart.join(file);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return;
+    };
+    for fragment in fragments {
+        if !content.contains(fragment) {
+            issues.push(format!("`{file}` is missing `{fragment}`"));
+        }
+    }
+}
+
 fn run_dev(command: DevCommands) -> anyhow::Result<()> {
     let args = dev_compose_args(&command)?;
     let status = Command::new("docker")
@@ -1642,27 +1730,6 @@ fn diff_mode(out: &Path) -> GenerateMode {
     }
 }
 
-fn normalize_goctl_args<I>(args: I) -> Vec<OsString>
-where
-    I: IntoIterator,
-    I::Item: Into<OsString>,
-{
-    args.into_iter()
-        .map(Into::into)
-        .map(|arg| match arg.to_str() {
-            Some("-api") => OsString::from("--api"),
-            Some("-dir") => OsString::from("--dir"),
-            Some("-src") => OsString::from("--src"),
-            Some("-url") => OsString::from("--url"),
-            Some("-table") => OsString::from("--table"),
-            Some("-schema") => OsString::from("--schema"),
-            Some("-go") => OsString::from("--go"),
-            Some("-o") => OsString::from("--o"),
-            _ => arg,
-        })
-        .collect()
-}
-
 fn options(force: bool, update: bool, roze_source: RozeSource) -> GenerateOptions {
     let mode = if force {
         GenerateMode::Force
@@ -1684,7 +1751,7 @@ mod tests {
     use clap::Parser;
 
     fn parse(args: impl IntoIterator<Item = &'static str>) -> Cli {
-        Cli::try_parse_from(normalize_goctl_args(args)).expect("parse cli")
+        Cli::try_parse_from(args).expect("parse cli")
     }
 
     #[test]
@@ -1709,13 +1776,225 @@ mod tests {
     }
 
     #[test]
-    fn parses_compatibility_commands() {
-        let api = Cli::try_parse_from(["rozectl", "api", "goctl", "user.api", "--out", "out"])
-            .expect("parse api goctl");
+    fn dockerfile_validator_accepts_production_dockerfile() {
+        let dockerfile = r#"
+FROM rust:1-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin user-api
+
+FROM debian:bookworm-slim
+LABEL org.opencontainers.image.title="user-api"
+ENV TZ=UTC
+WORKDIR /app
+RUN groupadd --system roze \
+    && useradd --system --gid roze --home-dir /app --shell /usr/sbin/nologin roze
+COPY --from=builder --chown=roze:roze /app/target/release/user-api /usr/local/bin/user-api
+COPY --chown=roze:roze config.yaml ./config.yaml
+EXPOSE 8080
+USER roze:roze
+CMD ["/usr/local/bin/user-api"]
+"#;
+        assert!(validate_dockerfile_content(dockerfile).is_empty());
+    }
+
+    #[test]
+    fn dockerfile_validator_reports_missing_non_root_user() {
+        let dockerfile = r#"
+FROM rust:1-bookworm AS builder
+RUN cargo build --release --bin user-api
+FROM debian:bookworm-slim
+LABEL org.opencontainers.image.title="user-api"
+ENV TZ=UTC
+WORKDIR /app
+COPY --from=builder --chown=roze:roze /app/target/release/user-api /usr/local/bin/user-api
+COPY --chown=roze:roze config.yaml ./config.yaml
+EXPOSE 8080
+CMD ["/usr/local/bin/user-api"]
+"#;
+        let issues = validate_dockerfile_content(dockerfile);
+        assert!(issues.iter().any(|issue| issue.contains("USER roze:roze")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("groupadd --system roze")));
+    }
+
+    #[test]
+    fn kube_manifest_validator_accepts_complete_manifest() {
+        let manifest = r#"
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: user
+---
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      serviceAccountName: user
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: user
+        resources:
+          requests:
+            cpu: 100m
+          limits:
+            cpu: 500m
+        livenessProbe:
+          httpGet:
+            path: /healthz
+        readinessProbe:
+          httpGet:
+            path: /readyz
+        startupProbe:
+          httpGet:
+            path: /startupz
+---
+apiVersion: v1
+kind: Service
+spec:
+  ports:
+  - targetPort: 3000
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - resource:
+      target:
+        averageUtilization: 70
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+spec:
+  minAvailable: 1
+  selector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - port: 3000
+"#;
+        assert!(validate_kube_manifest_content(manifest).is_empty());
+    }
+
+    #[test]
+    fn kube_manifest_validator_reports_missing_production_resources() {
+        let manifest = r#"
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers: []
+"#;
+        let issues = validate_kube_manifest_content(manifest);
+        assert!(issues.iter().any(|issue| issue.contains("ServiceAccount")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("serviceAccountName")));
+        assert!(issues.iter().any(|issue| issue.contains("NetworkPolicy")));
+    }
+
+    #[test]
+    fn helm_chart_validator_accepts_complete_chart() {
+        let root = std::env::temp_dir().join(format!(
+            "rozectl-helm-validate-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let templates = root.join("templates");
+        fs::create_dir_all(&templates).expect("create chart templates");
+        fs::write(
+            root.join("Chart.yaml"),
+            "apiVersion: v2\ntype: application\nappVersion: \"0.1.0\"\n",
+        )
+        .expect("write chart");
+        fs::write(
+            root.join("values.yaml"),
+            "image:\nservice:\nresources:\nautoscaling:\nserviceAccount:\npodDisruptionBudget:\nenvFrom:\n",
+        )
+        .expect("write values");
+        fs::write(
+            templates.join("deployment.yaml"),
+            "kind: Deployment\nserviceAccountName:\nterminationGracePeriodSeconds:\nlivenessProbe:\nreadinessProbe:\nstartupProbe:\n",
+        )
+        .expect("write deployment");
+        fs::write(
+            templates.join("service.yaml"),
+            "kind: Service\ntargetPort:\n",
+        )
+        .expect("write service");
+        fs::write(
+            templates.join("hpa.yaml"),
+            "kind: HorizontalPodAutoscaler\naverageUtilization:\n",
+        )
+        .expect("write hpa");
+        fs::write(
+            templates.join("serviceaccount.yaml"),
+            "kind: ServiceAccount\n",
+        )
+        .expect("write service account");
+        fs::write(
+            templates.join("pdb.yaml"),
+            "kind: PodDisruptionBudget\nminAvailable:\n",
+        )
+        .expect("write pdb");
+        fs::write(
+            templates.join("networkpolicy.yaml"),
+            "kind: NetworkPolicy\npolicyTypes:\nIngress\n",
+        )
+        .expect("write network policy");
+        fs::write(
+            templates.join("_helpers.tpl"),
+            "roze.fullname\nroze.labels\nroze.selectorLabels\n",
+        )
+        .expect("write helpers");
+
+        assert!(validate_helm_chart_dir(&root).is_empty());
+
+        fs::remove_dir_all(root).expect("remove helm validate chart");
+    }
+
+    #[test]
+    fn helm_chart_validator_reports_missing_files() {
+        let root = std::env::temp_dir().join(format!(
+            "rozectl-helm-validate-missing-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create chart root");
+        fs::write(root.join("Chart.yaml"), "apiVersion: v2\n").expect("write chart");
+
+        let issues = validate_helm_chart_dir(&root);
+        assert!(issues.iter().any(|issue| issue.contains("values.yaml")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("templates/deployment.yaml")));
+
+        fs::remove_dir_all(root).expect("remove incomplete chart");
+    }
+
+    #[test]
+    fn parses_native_commands() {
+        let api = Cli::try_parse_from(["rozectl", "api", "generate", "user.api", "--out", "out"])
+            .expect("parse api generate");
         assert!(matches!(
             api.command,
             Commands::Api {
-                command: ApiCommands::Goctl { .. }
+                command: ApiCommands::Generate { .. }
             }
         ));
 
@@ -1983,11 +2262,11 @@ mod tests {
             }
         ));
 
-        let api_go = parse(["rozectl", "api", "go", "-api", "user.api", "-dir", "out"]);
+        let api_generate = parse(["rozectl", "api", "generate", "user.api", "--out", "out"]);
         assert!(matches!(
-            api_go.command,
+            api_generate.command,
             Commands::Api {
-                command: ApiCommands::Go { .. }
+                command: ApiCommands::Generate { .. }
             }
         ));
 
@@ -2045,7 +2324,7 @@ mod tests {
             }
         ));
 
-        let docker = parse(["rozectl", "docker", "-go", "main.go"]);
+        let docker = parse(["rozectl", "docker", "--binary", "user-api"]);
         assert!(matches!(docker.command, Commands::Docker { .. }));
 
         let kube = Cli::try_parse_from([
@@ -2060,12 +2339,29 @@ mod tests {
             ".env",
             "--config-map",
             "user-config",
+            "--min-available",
+            "1",
         ])
         .expect("parse kube deploy");
         assert!(matches!(
             kube.command,
             Commands::Kube {
                 command: KubeCommands::Deploy { .. }
+            }
+        ));
+
+        let kube_validate = Cli::try_parse_from([
+            "rozectl",
+            "kube",
+            "validate",
+            "--file",
+            "deploy/kubernetes.yaml",
+        ])
+        .expect("parse kube validate");
+        assert!(matches!(
+            kube_validate.command,
+            Commands::Kube {
+                command: KubeCommands::Validate { .. }
             }
         ));
 
@@ -2081,6 +2377,8 @@ mod tests {
             "RUST_LOG=info",
             "--config-map",
             "user-config",
+            "--min-available",
+            "1",
             "--out",
             "deploy/user-chart",
         ])
@@ -2092,86 +2390,18 @@ mod tests {
             }
         ));
 
-        let mysql_ddl = parse([
-            "rozectl", "model", "mysql", "ddl", "-src", "user.sql", "-dir", "out",
-        ]);
-        assert!(matches!(
-            mysql_ddl.command,
-            Commands::Model {
-                command: ModelCommands::Mysql {
-                    command: MysqlModelCommands::Ddl { .. }
-                }
-            }
-        ));
-
-        let mysql_ddl_toasty = parse([
-            "rozectl", "model", "mysql", "ddl", "-src", "user.sql", "-dir", "out", "--orm",
-            "toasty",
-        ]);
-        assert!(matches!(
-            mysql_ddl_toasty.command,
-            Commands::Model {
-                command: ModelCommands::Mysql {
-                    command: MysqlModelCommands::Ddl {
-                        orm: ModelOrm::Toasty,
-                        ..
-                    }
-                }
-            }
-        ));
-
-        let mysql_datasource = parse([
+        let helm_validate = Cli::try_parse_from([
             "rozectl",
-            "model",
-            "mysql",
-            "datasource",
-            "-url",
-            "mysql://root@localhost/db",
-            "-table",
-            "users",
-            "-dir",
-            "out",
-        ]);
-        assert!(matches!(
-            mysql_datasource.command,
-            Commands::Model {
-                command: ModelCommands::Mysql {
-                    command: MysqlModelCommands::Datasource { .. }
-                }
-            }
-        ));
-
-        let pg_datasource = parse([
-            "rozectl",
-            "model",
-            "pg",
-            "datasource",
-            "-url",
-            "postgres://postgres@localhost/db",
-            "-table",
-            "users",
-            "--schema",
-            "public",
-            "-dir",
-            "out",
-        ]);
-        assert!(matches!(
-            pg_datasource.command,
-            Commands::Model {
-                command: ModelCommands::Pg {
-                    command: PgModelCommands::Datasource { .. }
-                }
-            }
-        ));
-
-        let mongo_type = Cli::try_parse_from([
-            "rozectl", "model", "mongo", "--type", "User", "--dir", "out",
+            "helm",
+            "validate",
+            "--chart",
+            "deploy/user-chart",
         ])
-        .expect("parse mongo type");
+        .expect("parse helm validate");
         assert!(matches!(
-            mongo_type.command,
-            Commands::Model {
-                command: ModelCommands::Mongo { .. }
+            helm_validate.command,
+            Commands::Helm {
+                command: HelmCommands::Validate { .. }
             }
         ));
     }

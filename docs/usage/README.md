@@ -22,12 +22,9 @@ services.
 - [Roze vs go-zero comparison](../go-zero-comparison.md): current parity
   matrix, intentional differences, and remaining gaps.
 - [Middleware contract](../contracts/middleware.md): REST middleware config,
-  go-zero-compatible built-in names, adaptive shedding, and generated file
-  ownership.
+  Roze built-in names, adaptive shedding, and generated file ownership.
 - [rozectl API generator](./rozectl-api.md): `.api` syntax, REST generation,
   client SDKs, OpenAPI output, type mapping, and validator tag support.
-- [rozectl goctl compatibility](./rozectl-goctl-compat.md): direct mapping from
-  common `goctl` commands to Rust-native `rozectl` commands.
 
 ## Install rozectl
 

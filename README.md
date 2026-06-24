@@ -66,7 +66,6 @@ and permission checks.
 - [Roze vs go-zero comparison](docs/go-zero-comparison.md)
 - [Middleware contract](docs/contracts/middleware.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
-- [rozectl goctl compatibility guide](docs/usage/rozectl-goctl-compat.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
@@ -166,17 +165,17 @@ parameters, query parameters, headers, and JSON bodies.
 OpenAPI 3 document with component schemas, route parameters, JSON/form request
 bodies, response schemas, tags, and bearer security when JWT is declared.
 
-goctl-compatible aliases are available for the common generator flow:
+Roze-native commands are available for the common generator flow:
 
 ```bash
-rozectl api go -api example/user.api -dir apps/roze-example
+rozectl api generate example/user.api --out apps/roze-example
 rozectl rpc protoc example/user.proto --zrpc_out apps/user-rpc
-rozectl model mysql ddl -src example/user.sql -dir apps/roze-example
-rozectl model mongo --type User -dir apps/roze-example
-rozectl docker -go main.go --binary user-api --port 8080
+rozectl model generate example/user.sql --out apps/roze-example --format sql
+rozectl model generate example/user.model --out apps/roze-example --format mongo
+rozectl docker --binary user-api --port 8080
 rozectl kube deploy --name user-api --image registry.example.com/user-api:latest
-rozectl api swagger -api example/user.api -dir docs/openapi --format yaml
-rozectl api doc -api example/user.api -dir . -o docs/api
+rozectl api swagger --api example/user.api --dir docs/openapi --format yaml
+rozectl api doc --api example/user.api --dir . --o docs/api
 rozectl doc service --api example/user.api --out SERVICE.md
 ```
 
@@ -195,11 +194,6 @@ Pass `--orm sea-orm` to generate SeaORM-style modules instead:
 rozectl model generate example/user.sql \
   --out apps/roze-example \
   --format sql \
-  --orm sea-orm
-
-rozectl model mysql ddl \
-  -src example/user.sql \
-  -dir apps/roze-example \
   --orm sea-orm
 ```
 
