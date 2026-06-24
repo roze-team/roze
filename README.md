@@ -15,13 +15,13 @@ Roze is a small Rust service framework scaffold with:
 - `crates/roze-rpc`: tonic gRPC helpers.
 - `crates/roze-job`: scheduled job scaffolding.
 - `crates/roze-mq`: messaging scaffolding.
-- `crates/roze-storage`: object storage contracts for local/S3-compatible/Qiniu/Alibaba/Tencent providers.
+- `crates/roze-storage`: object storage contracts for local/S3 API/Qiniu/Alibaba/Tencent providers.
 - `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
 - `apps/rozectl`: code generation for `.api` service definitions.
 - `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.
 - `apps/roze-example`: a generated example service from `example/user.api`.
 
-The direction is go-zero style microservice ergonomics with Rust-native building blocks:
+The direction is Rust-native microservice ergonomics with explicit generated boundaries:
 
 - IDL first: `.api` files define request/response types and routes.
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
@@ -63,7 +63,6 @@ and permission checks.
 - [Upgrade guide](docs/upgrade.md)
 - [Production checklist](docs/production-checklist.md)
 - [Usage documentation](docs/usage/README.md)
-- [Roze vs go-zero comparison](docs/go-zero-comparison.md)
 - [Middleware contract](docs/contracts/middleware.md)
 - [rozectl API generator guide](docs/usage/rozectl-api.md)
 - [Changelog](CHANGELOG.md)
@@ -108,8 +107,8 @@ rozectl --help
 
 Generated REST/RPC services pin their package edition to Rust 2021, including
 when they are created inside a workspace. This keeps generated `build.rs`
-compatible with current Roze templates even if the parent workspace moves to
-Rust 2024.
+aligned with current Roze templates even if the parent workspace moves to Rust
+2024.
 
 Roze keeps SeaORM/sqlx sqlite support in the framework, but generated Toasty
 dependencies default to MySQL/PostgreSQL only. This avoids duplicate
@@ -169,13 +168,15 @@ Roze-native commands are available for the common generator flow:
 
 ```bash
 rozectl api generate example/user.api --out apps/roze-example
-rozectl rpc protoc example/user.proto --zrpc_out apps/user-rpc
+rozectl rpc protoc example/user.proto --out apps/user-rpc
 rozectl model generate example/user.sql --out apps/roze-example --format sql
 rozectl model generate example/user.model --out apps/roze-example --format mongo
 rozectl docker --binary user-api --port 8080
 rozectl kube deploy --name user-api --image registry.example.com/user-api:latest
-rozectl api swagger --api example/user.api --dir docs/openapi --format yaml
-rozectl api doc --api example/user.api --dir . --o docs/api
+rozectl openapi generate example/user.api --out docs/openapi.json
+rozectl search generate example/user.search --engine elasticsearch --out apps/roze-example
+rozectl search inspect users --engine meilisearch --url http://127.0.0.1:7700 --out apps/roze-example
+rozectl api doc --api example/user.api --dir . --out docs/api
 rozectl doc service --api example/user.api --out SERVICE.md
 ```
 
@@ -186,9 +187,10 @@ The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `field` lines.
 
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
-inspects an existing database schema and emits the same Toasty-based model
-scaffold. Toasty remains the default ORM for generated database code.
-Pass `--orm sea-orm` to generate SeaORM-style modules instead:
+inspects an existing SQL table and emits the same Toasty-based model scaffold.
+Postgres, MySQL, and MongoDB are also supported through `--db-kind`. Toasty
+remains the default SQL ORM for generated database code. Pass `--orm sea-orm`
+to generate SeaORM-style SQL modules instead:
 
 ```bash
 rozectl model generate example/user.sql \
@@ -229,6 +231,12 @@ rozectl model inspect users \
 
 Schema-qualified table names are supported for inspection, for example:
 `public.users` on Postgres and `db.users` on MySQL.
+For MongoDB, `--schema` is the database name when the database is not included
+in `--db-url`; `--sample-size` controls how many collection documents are
+sampled for field/type inference. Mongo inspection also maps `_id` to `id`,
+keeps unique/index metadata, emits find helpers for single-field unique indexes,
+emits compound-index find/list helpers, and generates an `id: ObjectId` model
+for empty collections.
 
 Examples:
 
@@ -242,10 +250,23 @@ rozectl model inspect db.users \
   --db-kind mysql \
   --db-url mysql://root:root@localhost:3306/roze \
   --out apps/roze-example
+
+rozectl model inspect users \
+  --db-kind mongo \
+  --db-url mongodb://127.0.0.1:27017/roze \
+  --sample-size 100 \
+  --out apps/roze-example
 ```
 
 The generated SeaORM model keeps the schema name in the entity attributes.
 For Toasty, choose the schema/database through the Toasty driver configuration.
+
+`rozectl search generate example/user.search --engine elasticsearch --out apps/roze-example`
+generates search document and repository modules for Elasticsearch,
+OpenSearch, or Meilisearch. `rozectl search inspect users --engine opensearch
+--url http://127.0.0.1:9200 --out apps/roze-example` reads an existing index
+mapping/settings and emits the same Roze search scaffold. Meilisearch inspect
+uses settings plus document sampling to infer field types.
 
 Example SQL input:
 

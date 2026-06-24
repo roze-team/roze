@@ -3712,6 +3712,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "roze-service"
 version = "0.1.0"
 
@@ -3829,6 +3839,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
+ "mongodb",
+ "reqwest 0.13.4",
  "roze-middleware",
  "roze-sqlx",
  "serde_json",

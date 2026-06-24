@@ -34,8 +34,8 @@ Recommended for evaluation and internal pilots:
 Roze should use Semantic Versioning after the first public release:
 
 - `MAJOR`: breaking changes in public crate APIs, generated project layout,
-  generated config schema, `.api` compatibility, CLI flags, or runtime behavior.
-- `MINOR`: backward-compatible framework features, new generator targets,
+  generated config schema, `.api` breaking-change policy, CLI flags, or runtime behavior.
+- `MINOR`: additive framework features, new generator targets,
   additional middleware, new client SDKs, or new optional integrations.
 - `PATCH`: bug fixes, documentation fixes, non-breaking generated code fixes,
   and test hardening.

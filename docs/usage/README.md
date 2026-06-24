@@ -19,8 +19,6 @@ services.
   expectations, and breaking-change rules.
 - [Production checklist](../production-checklist.md): deployment, config,
   governance, MQ, observability, and security checklist.
-- [Roze vs go-zero comparison](../go-zero-comparison.md): current parity
-  matrix, intentional differences, and remaining gaps.
 - [Middleware contract](../contracts/middleware.md): REST middleware config,
   Roze built-in names, adaptive shedding, and generated file ownership.
 - [rozectl API generator](./rozectl-api.md): `.api` syntax, REST generation,

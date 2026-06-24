@@ -11,11 +11,11 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use roze_sqlx::SqlxDatabaseKind;
 
 use generator::{
-    goctl::{DockerOptions, HelmOptions, KubeDeployOptions, OpenApiOutputFormat},
+    native::{DockerOptions, HelmOptions, KubeDeployOptions},
     DependencySource, GenerateMode, GenerateOptions, GeneratorCommand,
 };
 
@@ -55,8 +55,17 @@ enum DbKind {
     #[default]
     Sqlite,
     Postgres,
-    #[value(alias = "mysql")]
+    #[value(name = "mysql")]
     MySql,
+    Mongo,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum SearchEngine {
+    #[default]
+    Elasticsearch,
+    Opensearch,
+    Meilisearch,
 }
 
 impl From<RozeSource> for DependencySource {
@@ -88,12 +97,23 @@ impl From<ModelOrm> for generator::model::ModelOrm {
     }
 }
 
-impl From<DbKind> for SqlxDatabaseKind {
+impl From<DbKind> for generator::model::InspectDatabaseKind {
     fn from(value: DbKind) -> Self {
         match value {
             DbKind::Sqlite => Self::Sqlite,
             DbKind::Postgres => Self::Postgres,
             DbKind::MySql => Self::MySql,
+            DbKind::Mongo => Self::Mongo,
+        }
+    }
+}
+
+impl From<SearchEngine> for generator::search::SearchEngine {
+    fn from(value: SearchEngine) -> Self {
+        match value {
+            SearchEngine::Elasticsearch => Self::Elasticsearch,
+            SearchEngine::Opensearch => Self::Opensearch,
+            SearchEngine::Meilisearch => Self::Meilisearch,
         }
     }
 }
@@ -111,6 +131,10 @@ enum Commands {
     Model {
         #[command(subcommand)]
         command: ModelCommands,
+    },
+    Search {
+        #[command(subcommand)]
+        command: SearchCommands,
     },
     Template {
         #[command(subcommand)]
@@ -204,40 +228,20 @@ enum ApiCommands {
         #[command(subcommand)]
         command: ClientCommands,
     },
-    Swagger {
-        #[arg(short = 'a', long = "api")]
-        api: PathBuf,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-        #[arg(long, value_enum, default_value_t)]
-        format: SwaggerFormat,
-    },
     Doc {
-        #[arg(short = 'd', long = "dir", default_value = ".")]
+        #[arg(long, default_value = ".")]
         dir: PathBuf,
-        #[arg(short = 'o', long = "o", default_value = "doc")]
+        #[arg(long = "out", default_value = "doc")]
         out: PathBuf,
-        #[arg(short = 'a', long = "api")]
+        #[arg(long)]
         api: Option<PathBuf>,
     },
-    Ts {
-        #[arg(short = 'a', long = "api")]
-        api: PathBuf,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-    },
-    Dart {
-        #[arg(short = 'a', long = "api")]
-        api: PathBuf,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
-        dir: PathBuf,
-    },
     Plugin {
-        #[arg(short = 'p', long = "p")]
+        #[arg(long)]
         plugin: String,
-        #[arg(short = 'a', long = "api")]
+        #[arg(long)]
         api: PathBuf,
-        #[arg(short = 'd', long = "dir", default_value = ".")]
+        #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
 }
@@ -287,12 +291,6 @@ enum RpcCommands {
         proto: PathBuf,
         #[arg(long, default_value = ".")]
         out: PathBuf,
-        #[arg(long = "zrpc_out")]
-        zrpc_out: Option<PathBuf>,
-        #[arg(long = "go_out")]
-        go_out: Option<PathBuf>,
-        #[arg(long = "go-grpc_out")]
-        go_grpc_out: Option<PathBuf>,
         #[arg(long)]
         force: bool,
         #[arg(long, conflicts_with = "force")]
@@ -300,22 +298,6 @@ enum RpcCommands {
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
     },
-}
-
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-enum SwaggerFormat {
-    #[default]
-    Json,
-    Yaml,
-}
-
-impl From<SwaggerFormat> for OpenApiOutputFormat {
-    fn from(value: SwaggerFormat) -> Self {
-        match value {
-            SwaggerFormat::Json => Self::Json,
-            SwaggerFormat::Yaml => Self::Yaml,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -575,6 +557,8 @@ enum ModelCommands {
         db_url: String,
         #[arg(long, value_enum, default_value_t)]
         db_kind: DbKind,
+        #[arg(long, default_value_t = 100)]
+        sample_size: u64,
         #[arg(long, default_value = ".")]
         out: PathBuf,
         #[arg(long)]
@@ -585,6 +569,42 @@ enum ModelCommands {
         roze_source: RozeSource,
         #[arg(long, value_enum, default_value_t)]
         orm: ModelOrm,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SearchCommands {
+    Generate {
+        schema: PathBuf,
+        #[arg(long, value_enum, default_value_t)]
+        engine: SearchEngine,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
+    Inspect {
+        index: String,
+        #[arg(long, value_enum)]
+        engine: SearchEngine,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        sample_size: u64,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
     },
 }
 
@@ -636,25 +656,16 @@ fn main() -> anyhow::Result<()> {
                     generator::write_dart_client(&api, &out)?;
                 }
             },
-            ApiCommands::Swagger { api, dir, format } => {
-                generator::goctl::write_swagger(&api, &dir, format.into())?;
-            }
             ApiCommands::Doc { dir, out, api } => {
                 let out = if out.is_absolute() {
                     out
                 } else {
                     dir.join(out)
                 };
-                generator::goctl::write_api_markdown_doc(api.as_deref(), &dir, &out)?;
-            }
-            ApiCommands::Ts { api, dir } => {
-                generator::write_ts_client(&api, &dir.join("client.ts"))?;
-            }
-            ApiCommands::Dart { api, dir } => {
-                generator::write_dart_client(&api, &dir.join("client.dart"))?;
+                generator::native::write_api_markdown_doc(api.as_deref(), &dir, &out)?;
             }
             ApiCommands::Plugin { plugin, api, dir } => {
-                generator::goctl::run_api_plugin(&plugin, &api, &dir)?;
+                generator::native::run_api_plugin(&plugin, &api, &dir)?;
             }
         },
         Commands::Rpc { command } => match command {
@@ -692,15 +703,11 @@ fn main() -> anyhow::Result<()> {
             RpcCommands::Protoc {
                 proto,
                 out,
-                zrpc_out,
-                go_out: _,
-                go_grpc_out: _,
                 force,
                 update,
                 roze_source,
             } => {
-                let out = zrpc_out.unwrap_or(out);
-                generator::goctl::generate_rpc_from_proto(
+                generator::native::generate_rpc_from_proto(
                     &proto,
                     &out,
                     options(force, update, roze_source),
@@ -737,6 +744,7 @@ fn main() -> anyhow::Result<()> {
                 schema,
                 db_url,
                 db_kind,
+                sample_size,
                 out,
                 force,
                 update,
@@ -747,6 +755,7 @@ fn main() -> anyhow::Result<()> {
                 schema,
                 db_url,
                 db_kind: db_kind.into(),
+                sample_size,
                 out,
                 options: GenerateOptions::new(
                     if force {
@@ -760,6 +769,46 @@ fn main() -> anyhow::Result<()> {
                 ),
                 orm: orm.into(),
             })?,
+        },
+        Commands::Search { command } => match command {
+            SearchCommands::Generate {
+                schema,
+                engine,
+                out,
+                force,
+                update,
+                roze_source,
+            } => generator::search::generate_search_project(
+                &schema,
+                engine.into(),
+                &out,
+                options(force, update, roze_source),
+            )?,
+            SearchCommands::Inspect {
+                index,
+                engine,
+                url,
+                api_key,
+                sample_size,
+                out,
+                force,
+                update,
+                roze_source,
+            } => {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .context("failed to create async runtime for search inspection")?;
+                rt.block_on(generator::search::inspect_search_index(
+                    &index,
+                    engine.into(),
+                    &url,
+                    api_key.as_deref(),
+                    sample_size,
+                    &out,
+                    options(force, update, roze_source),
+                ))?;
+            }
         },
         Commands::Template { command } => match command {
             TemplateCommands::List => {
@@ -818,7 +867,7 @@ fn main() -> anyhow::Result<()> {
             binary,
         } => {
             let validate_file = out.clone();
-            generator::goctl::write_dockerfile(DockerOptions {
+            generator::native::write_dockerfile(DockerOptions {
                 out,
                 builder_image,
                 base_image,
@@ -849,7 +898,7 @@ fn main() -> anyhow::Result<()> {
                 out,
             } => {
                 let validate_file = out.clone();
-                generator::goctl::write_kube_deploy(KubeDeployOptions {
+                generator::native::write_kube_deploy(KubeDeployOptions {
                     name,
                     image,
                     namespace,
@@ -893,7 +942,7 @@ fn main() -> anyhow::Result<()> {
                 out,
             } => {
                 let validate_chart = out.clone();
-                generator::goctl::write_helm_chart(HelmOptions {
+                generator::native::write_helm_chart(HelmOptions {
                     deploy: KubeDeployOptions {
                         name,
                         image,
@@ -941,7 +990,7 @@ fn run_contract(command: ContractCommands) -> anyhow::Result<()> {
         ContractCommands::Check { old, new } => {
             let old_spec = read_api_spec(&old)?;
             let new_spec = read_api_spec(&new)?;
-            let issues = check_contract_compatibility(&old_spec, &new_spec);
+            let issues = check_contract_breaking_changes(&old_spec, &new_spec);
             if issues.is_empty() {
                 println!("contract check passed: no breaking changes detected");
                 return Ok(());
@@ -963,7 +1012,7 @@ fn read_api_spec(path: &Path) -> anyhow::Result<parser::ApiSpec> {
         .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))
 }
 
-fn check_contract_compatibility(
+fn check_contract_breaking_changes(
     old_spec: &parser::ApiSpec,
     new_spec: &parser::ApiSpec,
 ) -> Vec<ContractIssue> {
@@ -2041,6 +2090,53 @@ spec:
             }
         ));
 
+        let search_generate = Cli::try_parse_from([
+            "rozectl",
+            "search",
+            "generate",
+            "search.schema",
+            "--engine",
+            "opensearch",
+            "--out",
+            "out",
+        ])
+        .expect("parse search generate");
+        assert!(matches!(
+            search_generate.command,
+            Commands::Search {
+                command: SearchCommands::Generate {
+                    engine: SearchEngine::Opensearch,
+                    ..
+                }
+            }
+        ));
+
+        let search_inspect = Cli::try_parse_from([
+            "rozectl",
+            "search",
+            "inspect",
+            "users",
+            "--engine",
+            "meilisearch",
+            "--url",
+            "http://127.0.0.1:7700",
+            "--api-key",
+            "master",
+            "--sample-size",
+            "25",
+        ])
+        .expect("parse search inspect");
+        assert!(matches!(
+            search_inspect.command,
+            Commands::Search {
+                command: SearchCommands::Inspect {
+                    engine: SearchEngine::Meilisearch,
+                    sample_size: 25,
+                    ..
+                }
+            }
+        ));
+
         let contract = Cli::try_parse_from([
             "rozectl", "contract", "check", "--old", "old.api", "--new", "new.api",
         ])
@@ -2270,21 +2366,23 @@ spec:
             }
         ));
 
-        let swagger = Cli::try_parse_from([
-            "rozectl", "api", "swagger", "--api", "user.api", "--dir", "docs", "--format", "yaml",
+        let openapi = Cli::try_parse_from([
+            "rozectl",
+            "openapi",
+            "generate",
+            "user.api",
+            "--out",
+            "docs/openapi.json",
         ])
-        .expect("parse api swagger");
+        .expect("parse openapi generate");
         assert!(matches!(
-            swagger.command,
-            Commands::Api {
-                command: ApiCommands::Swagger {
-                    format: SwaggerFormat::Yaml,
-                    ..
-                }
+            openapi.command,
+            Commands::Openapi {
+                command: OpenApiCommands::Generate { .. }
             }
         ));
 
-        let doc = Cli::try_parse_from(["rozectl", "api", "doc", "--dir", ".", "--o", "doc"])
+        let doc = Cli::try_parse_from(["rozectl", "api", "doc", "--dir", ".", "--out", "doc"])
             .expect("parse api doc");
         assert!(matches!(
             doc.command,
@@ -2293,28 +2391,8 @@ spec:
             }
         ));
 
-        let ts = Cli::try_parse_from(["rozectl", "api", "ts", "--api", "user.api", "--dir", "sdk"])
-            .expect("parse api ts");
-        assert!(matches!(
-            ts.command,
-            Commands::Api {
-                command: ApiCommands::Ts { .. }
-            }
-        ));
-
-        let dart = Cli::try_parse_from([
-            "rozectl", "api", "dart", "--api", "user.api", "--dir", "sdk",
-        ])
-        .expect("parse api dart");
-        assert!(matches!(
-            dart.command,
-            Commands::Api {
-                command: ApiCommands::Dart { .. }
-            }
-        ));
-
         let plugin = Cli::try_parse_from([
-            "rozectl", "api", "plugin", "-p", "cat", "--api", "user.api", "--dir", "out",
+            "rozectl", "api", "plugin", "--plugin", "cat", "--api", "user.api", "--dir", "out",
         ])
         .expect("parse api plugin");
         assert!(matches!(
@@ -2571,6 +2649,43 @@ spec:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+
+        let cli = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "inspect",
+            "users",
+            "--schema",
+            "roze",
+            "--db-kind",
+            "mongo",
+            "--db-url",
+            "mongodb://127.0.0.1:27017",
+            "--sample-size",
+            "25",
+        ])
+        .expect("parse mongo inspect");
+
+        match cli.command {
+            Commands::Model {
+                command:
+                    ModelCommands::Inspect {
+                        table,
+                        schema,
+                        db_url,
+                        db_kind,
+                        sample_size,
+                        ..
+                    },
+            } => {
+                assert_eq!(table, "users");
+                assert_eq!(schema.as_deref(), Some("roze"));
+                assert_eq!(db_url, "mongodb://127.0.0.1:27017");
+                assert!(matches!(db_kind, DbKind::Mongo));
+                assert_eq!(sample_size, 25);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -2620,7 +2735,7 @@ spec:
         )
         .expect("parse new spec");
 
-        let issues = check_contract_compatibility(&old_spec, &new_spec);
+        let issues = check_contract_breaking_changes(&old_spec, &new_spec);
         assert!(issues.is_empty(), "{issues:?}");
     }
 
@@ -2678,7 +2793,7 @@ spec:
         )
         .expect("parse new spec");
 
-        let issues = check_contract_compatibility(&old_spec, &new_spec);
+        let issues = check_contract_breaking_changes(&old_spec, &new_spec);
         let report = issues
             .iter()
             .map(|issue| issue.detail.as_str())

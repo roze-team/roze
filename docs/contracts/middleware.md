@@ -64,8 +64,8 @@ is still served by generated route glue.
 ## CORS
 
 `cors: true` keeps CORS enabled. If `cors_config` is omitted, Roze uses a
-permissive policy for compatibility with newly generated services. Set
-`cors_config` to restrict origins and preflight behavior:
+permissive policy for newly generated services. Set `cors_config` to restrict
+origins and preflight behavior:
 
 ```yaml
 rest:

@@ -1,0 +1,7 @@
+index users
+primary id
+field id keyword primary filterable sortable
+field name text searchable
+field email keyword filterable
+field age i64 filterable sortable
+field created_at datetime filterable sortable

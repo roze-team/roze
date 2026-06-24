@@ -47,14 +47,14 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | 功能 | MVP | 增强项 | 推荐落点 | 验收 |
 | --- | --- | --- | --- | --- |
-| `.api` REST 生成 | route/handler/logic/types/config/openapi/svc 固定结构 | 更完整 goctl 语法、注释、import、validator tag | `apps/rozectl` | 生成项目可编译，`--update` 不覆盖 `logic`。 |
-| proto/RPC 生成 | server/client/pb/logic/config/svc 固定结构 | streaming、metadata 策略、proto compatibility fixtures | `apps/rozectl`, `roze-rpc` | RPC 生成项目可编译，Context metadata 可透传。 |
+| `.api` REST 生成 | route/handler/logic/types/config/openapi/svc 固定结构 | 更完整 Roze `.api` 语法、注释、import、validator tag | `apps/rozectl` | 生成项目可编译，`--update` 不覆盖 `logic`。 |
+| proto/RPC 生成 | server/client/pb/logic/config/svc 固定结构 | streaming、metadata 策略、proto fixture 覆盖 | `apps/rozectl`, `roze-rpc` | RPC 生成项目可编译，Context metadata 可透传。 |
 | OpenAPI 生成 | paths、schemas、parameters、request/response、security | validator 约束完整投影、examples、error schema | `apps/rozectl`, `roze-openapi` | Swagger UI/主流 client generator 可消费。 |
 | SDK 生成 | TS/JS/Dart baseUrl、headers、path/query/body | typed error、interceptor、retry、timeout、auth injection | `apps/rozectl/src/generator/client.rs` | SDK 能调用 mock server 并处理错误响应。 |
 | mock 生成 | 已支持从 `.api` 生成独立 Axum mock server，并按 response type 返回默认 JSON | 示例数据、延迟/错误注入、OpenAPI example 驱动 | `rozectl mock gen` | 本地无需业务实现即可返回契约响应。 |
 | 接口测试生成 | HTTP smoke test、RPC smoke test、OpenAPI schema validation | 契约回归、鉴权场景、错误码场景 | `rozectl test gen` | 生成测试能在空逻辑或 mock 上运行。 |
 | 生成预览 | 文件级 `A/M/D` diff，按 update 规则保护业务文件 | ownership-aware diff、语义 diff | `rozectl diff` | 默认不写盘，输出清晰。 |
-| 契约兼容检查 | 已支持检查 route/method/path 删除或变更、RPC 方法删除、request/response 类型变更、字段删除、字段类型/source 变更、必填字段新增 | semver 建议、SDK breaking report、响应字段兼容策略细化 | `rozectl contract check` | breaking changes 明确失败并给出原因。 |
+| 契约破坏性变更检查 | 已支持检查 route/method/path 删除或变更、RPC 方法删除、request/response 类型变更、字段删除、字段类型/source 变更、必填字段新增 | semver 建议、SDK breaking report、响应字段变更策略细化 | `rozectl contract check` | breaking changes 明确失败并给出原因。 |
 
 ### 2. Gateway 网关
 
@@ -76,7 +76,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 静态 upstream | 支持固定 URL/address | 多 upstream 加权 | `roze-rpc::registry`, `roze-gateway` | 无注册中心也能运行。 |
 | DNS discovery | 解析 DNS/service name | TTL cache、失败回退 | `roze-rpc::registry` | DNS 变更后 resolver 可刷新。 |
 | etcd/Consul | 注册、续约、下线、watch、discover | lease 续约失败处理、watch 断线恢复 | `roze-rpc::registry` | 实例上下线能被 Gateway/RPC client 感知。 |
-| Kubernetes discovery | 兼容 Service DNS 或 API discovery | namespace/label selector | registry adapter | K8s 内无需手写 IP。 |
+| Kubernetes discovery | 支持 Service DNS 或 API discovery | namespace/label selector | registry adapter | K8s 内无需手写 IP。 |
 | 本地缓存 | Cached resolver、周期 refresh | watch 优先 + refresh 兜底 | `CachedRegistryResolver` | 注册中心短暂不可用时继续使用旧快照。 |
 | 路由策略 | round_robin、weight、tag filter | latency-aware、zone-aware | registry/gateway shared policy | 标签不匹配时不会误回退到错误实例。 |
 
@@ -139,7 +139,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | 功能 | MVP | 增强项 | 推荐落点 | 验收 |
 | --- | --- | --- | --- | --- |
-| Event envelope | event_id/type/version/trace/idempotency/occurred_at | schema registry、compat check | `roze-mq`, `roze-eventbus` | Kafka/NATS/in-memory metadata 一致。 |
+| Event envelope | event_id/type/version/trace/idempotency/occurred_at | schema registry、breaking-change check | `roze-mq`, `roze-eventbus` | Kafka/NATS/in-memory metadata 一致。 |
 | Producer | publish result、headers、trace carrier | transaction-aware publish | `roze-mq`, adapters | publish 返回 topic/partition/offset 或等价 metadata。 |
 | Consumer | ack/nack/retry/DLQ | delayed retry、retry storm protection | `roze-mq`, `roze-kafka`, `roze-nats` | 失败超过上限进入 DLQ。 |
 | Admin | DLQ list/replay/purge | UI、权限、审计 | `roze-admin`, adapters | 可重投指定死信并记录结果。 |
@@ -165,7 +165,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | Dockerfile | multi-stage build、port、timezone | distroless、SBOM、non-root | `rozectl docker` | 生成镜像可运行 healthz。 |
 | Kubernetes YAML | Deployment/Service/resources/HPA 和标准 liveness/readiness/startup probes | PDB、NetworkPolicy、ServiceAccount、Gateway API | `rozectl kube` | `kubectl apply --dry-run=client` 可通过。 |
 | Helm | values、templates、probes、resources | chart tests、schema validation | `rozectl helm` | helm template 输出可部署 YAML。 |
-| doctor | 本机工具、端口、配置、TCP 依赖地址 live probe | 权限、版本兼容、协议级 probe | `rozectl doctor` | 缺依赖时给出明确修复建议。 |
+| doctor | 本机工具、端口、配置、TCP 依赖地址 live probe | 权限、版本检查、协议级 probe | `rozectl doctor` | 缺依赖时给出明确修复建议。 |
 | dev | docker compose up/down、依赖状态 | profiles、seed data、logs | `rozectl dev` | 新用户一条命令启动本地依赖。 |
 | 观测部署 | scrape config、dashboard、alerts | canary checks、runbook | `deploy/observability` | 示例环境可直接导入。 |
 
@@ -178,7 +178,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | doctor/dev | `doctor` 已有本机工具、端口、配置和 TCP live probe；`dev` 待补 | 自动修复建议、profile 管理、协议级 probe | `rozectl doctor/dev` | 本地 onboarding 时间可控。 |
 | doc/sdk/test/mock | 文档、SDK、测试、mock 生成 | multi-language SDK、contract tests | `apps/rozectl` | 从契约能生成可运行辅助资产。 |
 | AI_CONTEXT | `rozectl doc service` 已可从 `.api` 生成 `SERVICE.md`，包含接口、所有权边界、常用命令和 AI notes | AI_CONTEXT/ARCHITECTURE/DEPENDENCIES、依赖图、topic/cache key 提取 | `rozectl doc service` / `rozectl doc gen` | AI 能知道哪些文件能改、哪些不能改。 |
-| upgrade | update/diff/compat check | migration guide automation | `rozectl update` | 框架升级能预览影响并保护业务代码。 |
+| upgrade | update/diff/breaking-change check | migration guide automation | `rozectl update` | 框架升级能预览影响并保护业务代码。 |
 
 ## 当前架构资产盘点
 
@@ -186,7 +186,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 1. 生成器边界清晰：REST/RPC 生成项目已经区分框架拥有文件和业务拥有文件，`logic` 保留策略对人和 AI 都友好。
 2. crate 拆分方向正确：HTTP、RPC、Context、Error、Metrics、Config、Gateway、MQ、Registry、DTM、Storage 等能力已经不是散落在示例应用里。
-3. go-zero 迁移心智成本低：CLI 兼容了常见 `goctl` 入口，同时输出 Rust-native 项目结构。
+3. 生成器入口单一：CLI 只保留 Roze 原生命令，同时输出 Rust-native 项目结构。
 4. Gateway 和配置中心已经有运行契约文档，不只是 README 级描述。
 5. MQ/Kafka/NATS 已经开始明确 ack/nack/retry/DLQ/admin replay 等语义，方向比“简单 publish/subscribe”更接近生产。
 
@@ -212,13 +212,13 @@ Roze 现状：
 
 - REST/RPC/OpenAPI/TS/JS/Dart SDK 主链路已具备。
 - `--update` 已保留业务逻辑和自定义 middleware。
-- 已具备文件级 `rozectl diff`；仍缺 mock/test gen、契约兼容性检查和语义 diff。
+- 已具备文件级 `rozectl diff`、`rozectl mock gen`、`rozectl test gen` 和 `rozectl contract check`；语义 diff 继续作为增强项。
 
 建议下一步：
 
 - `rozectl diff` 已先落地文件级 diff；下一步再补语义 diff 和 breaking change report。
 - `rozectl test gen` 先生成 HTTP smoke cases 和 OpenAPI schema validation cases。
-- 契约兼容性检查先覆盖 breaking changes：删除 route、改 method、改 path、删除字段、必填字段新增、响应类型变化。
+- `rozectl contract check` 已覆盖 breaking changes：删除 route、改 method、改 path、删除字段、必填字段新增、响应类型变化。
 
 ### 2. 统一治理
 
@@ -351,7 +351,7 @@ P0 不应该继续扩模块，而应该补“可信闭环”。
 4. 收口 lifecycle：统一 SIGINT/SIGTERM、shutdown timeout、background task manager、HTTP/RPC/MQ/Job 关闭顺序。
 5. 补 Gateway/Config/MQ smoke tests：rewrite、timeout、auth、rate、breaker、retry、fallback、hot reload、DLQ replay。
 6. 完善 `rozectl doctor`：当前已检查 Rust/Cargo、Docker、kubectl、额外工具、端口、配置文件和 TCP 依赖地址；下一步补数据库、Redis、Kafka/NATS、etcd/Consul 协议级 probe。
-7. 完善 `rozectl diff`：当前已能预览文件级变化；下一步补语义兼容检查和更细的 ownership-aware report。
+7. 完善 `rozectl diff`：当前已能预览文件级变化；下一步补语义 diff 和更细的 ownership-aware report。
 
 ### P1：让框架可上生产
 
@@ -497,7 +497,7 @@ AI Collaboration Layer
 | `rozectl diff` | P0 | 已支持生成到临时目录，对比目标目录，显示新增/修改/删除文件；默认不写盘。 |
 | `rozectl doctor` | P0 | 已支持检查 Rust/Cargo、Docker、kubectl、额外工具、端口、配置文件和 TCP 依赖地址；协议级依赖检查待补。 |
 | `rozectl dev` | P1 | 启动本地依赖或提示 docker compose 命令；输出服务端口和健康检查地址。 |
-| `rozectl contract check` | P0 | 已支持 `.api` 前后版本 breaking change 检查，覆盖 route/RPC/type/field 基础兼容性。 |
+| `rozectl contract check` | P0 | 已支持 `.api` 前后版本 breaking change 检查，覆盖 route/RPC/type/field 基础破坏性变更。 |
 | `rozectl test gen` | P1 | 从 `.api` 生成 HTTP/RPC smoke tests 和最小断言。 |
 | `rozectl mock gen` | P1 | 已支持从 `.api` 生成独立 Axum mock server，按 response type 返回默认 JSON。 |
 | `rozectl doc service` | P1 | 已支持从 `.api` 生成 `SERVICE.md`，包含接口清单、生成器所有权边界、常用命令和 AI editing notes。 |

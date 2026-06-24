@@ -15,8 +15,8 @@ Status legend:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned files on `--update`; needs more generated-project compile tests and goctl edge fixtures. |
-| RPC generation | beta | Generates split server/client/pb/logic layout; needs more proto compatibility and generated-project compile tests. |
+| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned files on `--update`; needs more generated-project compile tests and Roze `.api` edge fixtures. |
+| RPC generation | beta | Generates split server/client/pb/logic layout; needs more proto fixture coverage and generated-project compile tests. |
 | OpenAPI generation | beta | Produces OpenAPI 3 documents; validator constraint projection still has known gaps. |
 | TS/JS/Dart SDK generation | beta | Covers route/path/query/header/body generation; needs richer error/interceptor/retry/timeout support. |
 | HTTP middleware | beta | Covers trace, recover, metrics, CORS, timeout, max connections, shedding, gunzip, and body limit; needs more end-to-end service tests. |
@@ -26,11 +26,12 @@ Status legend:
 | Service discovery | beta | memory, DNS, etcd, Consul, watch, and cache primitives exist; needs more failure-mode tests. |
 | Health checks | beta | Probe report types exist; `/healthz`, `/readyz`, dependency details, and K8s templates need standardization. |
 | Lifecycle/bootstrap | scaffold | Several helpers exist, but HTTP/RPC/consumer/job shutdown ordering is not yet one unified lifecycle. |
-| DB/ORM/model generation | beta | Toasty is the default generated SQL model scaffold; SeaORM is optional with `--orm sea-orm`. Cross-schema ownership and production examples need more polish. |
+| DB/ORM/model generation | beta | Toasty is the default generated SQL model scaffold; SeaORM is optional with `--orm sea-orm`. `model inspect` supports sqlite, postgres, mysql, and mongo; Mongo inspection samples documents, maps `_id`, captures index metadata, and emits single-field plus compound-index helpers. |
+| Search generation | beta | `rozectl search generate/inspect` supports Elasticsearch, OpenSearch, and Meilisearch with generated document/repository modules backed by `roze-search`. |
 | Transactions/outbox/DTM | scaffold | TCC/Saga/outbox/inbox primitives exist; needs full HTTP + DB transaction + outbox + MQ + RPC examples. |
 | Auth/JWT/permission/session | beta | JWT, RBAC, tenant, and ABAC primitives exist; needs a unified security model, OpenAPI permission declarations, key rotation, and test templates. |
 | Observability | beta | tracing, metrics, Prometheus, OpenTelemetry, gateway metrics, and queue event metrics exist; needs dashboards, scrape config, and query examples. |
-| Docker/Kubernetes generation | scaffold | Generator commands exist; production checklist and manifest validation need to be added. |
+| Docker/Kubernetes generation | beta | Generator commands emit production-oriented Dockerfiles, Kubernetes manifests, and Helm charts with offline validation. |
 
 ## Production-Ready Criteria
 

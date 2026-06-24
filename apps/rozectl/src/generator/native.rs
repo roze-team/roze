@@ -13,12 +13,6 @@ use crate::parser::{
 
 use super::{read_api_source, GenerateMode, GenerateOptions};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenApiOutputFormat {
-    Json,
-    Yaml,
-}
-
 #[derive(Debug, Clone)]
 pub struct DockerOptions {
     pub out: PathBuf,
@@ -55,18 +49,6 @@ pub struct HelmOptions {
     pub deploy: KubeDeployOptions,
     pub chart_version: String,
     pub app_version: String,
-}
-
-pub fn write_swagger(api: &Path, dir: &Path, format: OpenApiOutputFormat) -> anyhow::Result<()> {
-    let source = read_api_source(api)?;
-    let spec = crate::parser::parse_api(&source)?;
-    let document = super::openapi_document(&spec);
-    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let (name, content) = match format {
-        OpenApiOutputFormat::Json => ("swagger.json", serde_json::to_string_pretty(&document)?),
-        OpenApiOutputFormat::Yaml => ("swagger.yaml", json_to_yaml(&document)),
-    };
-    fs::write(dir.join(name), content).with_context(|| format!("failed to write {name}"))
 }
 
 pub fn write_api_markdown_doc(api: Option<&Path>, dir: &Path, out: &Path) -> anyhow::Result<()> {
@@ -1251,72 +1233,13 @@ fn normalize_proto_rpc_type(ty: &str) -> String {
     .to_string()
 }
 
-fn json_to_yaml(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    write_yaml_value(value, 0, &mut out);
-    out
-}
-
-fn write_yaml_value(value: &serde_json::Value, indent: usize, out: &mut String) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, value) in map {
-                out.push_str(&" ".repeat(indent));
-                out.push_str(key);
-                match value {
-                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        out.push_str(":\n");
-                        write_yaml_value(value, indent + 2, out);
-                    }
-                    _ => {
-                        out.push_str(": ");
-                        write_yaml_scalar(value, out);
-                        out.push('\n');
-                    }
-                }
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                out.push_str(&" ".repeat(indent));
-                out.push_str("- ");
-                match value {
-                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        out.push('\n');
-                        write_yaml_value(value, indent + 2, out);
-                    }
-                    _ => {
-                        write_yaml_scalar(value, out);
-                        out.push('\n');
-                    }
-                }
-            }
-        }
-        _ => {
-            out.push_str(&" ".repeat(indent));
-            write_yaml_scalar(value, out);
-            out.push('\n');
-        }
-    }
-}
-
-fn write_yaml_scalar(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-        serde_json::Value::Number(value) => out.push_str(&value.to_string()),
-        serde_json::Value::String(value) => out.push_str(&format!("{value:?}")),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => unreachable!(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "rozectl-goctl-{name}-{}-{}",
+            "rozectl-native-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1599,24 +1522,6 @@ mod tests {
         })
         .expect_err("reject invalid kube options");
         assert!(err.to_string().contains("--min-replicas"));
-    }
-
-    #[test]
-    fn writes_swagger_json_and_yaml() {
-        let root = temp_root("swagger");
-        fs::create_dir_all(&root).expect("create temp");
-        let api = root.join("user.api");
-        fs::write(&api, sample_api()).expect("write api");
-
-        write_swagger(&api, &root, OpenApiOutputFormat::Json).expect("write json");
-        write_swagger(&api, &root, OpenApiOutputFormat::Yaml).expect("write yaml");
-
-        let json = fs::read_to_string(root.join("swagger.json")).expect("read json");
-        let yaml = fs::read_to_string(root.join("swagger.yaml")).expect("read yaml");
-        assert!(json.contains("\"openapi\""));
-        assert!(json.contains("/api/v1/users/{id}"));
-        assert!(yaml.contains("openapi:"));
-        assert!(yaml.contains("/api/v1/users/{id}:"));
     }
 
     #[test]

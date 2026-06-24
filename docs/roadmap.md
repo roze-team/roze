@@ -75,7 +75,7 @@ upgradeable, and recoverable.
 
 ## P1: Generator and Contract Completeness
 
-- More goctl parser edge fixtures: comments, imports, nested types, duplicate
+- More Roze `.api` parser edge fixtures: comments, imports, nested types, duplicate
   names, reserved words, mixed annotations, and compact syntax.
 
 ## P1: Admin API
@@ -89,7 +89,7 @@ upgradeable, and recoverable.
   `oneof`, map `additionalProperties`, nested struct validation, UUID, and
   custom validator boundaries.
 - SDK error types, interceptors, retry/timeout config, auth injection, and
-  compatibility tests.
+  regression tests.
 
 ## P1: Data Boundary
 

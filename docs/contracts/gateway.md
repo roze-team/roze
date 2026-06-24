@@ -1,6 +1,6 @@
 # Roze 网关（gateway/http）契约（v1）
 
-本文档定义 `apps/roze-gateway` 与 `crates/roze-gateway` 的最小运行契约，目标对齐 go-zero gateway/http 可用行为集。
+本文档定义 `apps/roze-gateway` 与 `crates/roze-gateway` 的最小运行契约，目标是提供 Roze 原生的 gateway/http 可用行为集。
 
 ## 1. 入口约定
 

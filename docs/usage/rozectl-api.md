@@ -74,7 +74,7 @@ prints file-level changes as `A`, `M`, and `D`. This mirrors `--update`
 ownership rules, so business-owned logic files and preserved config are not
 reported as modified unless generation would actually change them.
 
-Check contract compatibility before regenerating or releasing:
+Check contract breaking changes before regenerating or releasing:
 
 ```bash
 rozectl contract check --old example/user.v1.api --new example/user.v2.api
@@ -198,26 +198,24 @@ Generate an OpenAPI 3 document:
 
 ```bash
 rozectl openapi generate example/user.api --out openapi.json
-rozectl api swagger --api example/user.api --dir docs/openapi --format json
-rozectl api swagger --api example/user.api --dir docs/openapi --format yaml
 ```
 
 Generate Markdown API documentation:
 
 ```bash
-rozectl api doc --api example/user.api --dir . --o docs/api
+rozectl api doc --api example/user.api --dir . --out docs/api
 ```
 
 Run a custom API plugin:
 
 ```bash
-rozectl api plugin --p ./tools/rozectl-plugin.sh --api example/user.api --dir generated
+rozectl api plugin --plugin ./tools/rozectl-plugin.sh --api example/user.api --dir generated
 ```
 
 Generate an RPC service from a real `.proto` file:
 
 ```bash
-rozectl rpc protoc example/user.proto --zrpc_out services/user-rpc
+rozectl rpc protoc example/user.proto --out services/user-rpc
 ```
 
 Generate models:
@@ -227,6 +225,9 @@ rozectl model generate example/user.sql --out services/user-api --format sql
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
 rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
 rozectl model generate example/user.model --out services/user-api --format mongo
+rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/roze --out services/user-api
+rozectl search generate example/user.search --engine elasticsearch --out services/user-api
+rozectl search inspect users --engine meilisearch --url http://127.0.0.1:7700 --out services/user-api
 ```
 
 Generate deployment files:
@@ -598,8 +599,7 @@ contracts consistent across services.
 
 ## OpenAPI output
 
-`rozectl openapi generate`, `rozectl api swagger`, and generated REST services
-expose OpenAPI data with:
+`rozectl openapi generate` and generated REST services expose OpenAPI data with:
 
 - component schemas for `.api` types
 - route parameters for path/query/header/form fields
@@ -612,9 +612,6 @@ expose OpenAPI data with:
 
 The generated service also serves the document at `/openapi.json`, including
 route-scoped prefixes.
-
-`rozectl api swagger` writes `swagger.json` by default and `swagger.yaml` when
-`--format yaml` is used.
 
 ## Service document generation
 
@@ -675,11 +672,16 @@ Database inspection:
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
 rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api --orm sea-orm
+rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/roze --sample-size 100 --out services/user-api
 ```
 
 Toasty is the default SQL ORM. `--orm sea-orm` switches SQL/DSL/inspection
 output to SeaORM-style modules.
-Mongo generation is separate and is not affected by `--orm`.
+Mongo inspection samples collection documents, maps `_id` to `id`, and emits
+Mongo repository modules. It preserves Mongo index metadata, emits find helpers
+for single-field unique indexes, emits compound-index find/list helpers, and
+still emits an `id: ObjectId` model for empty collections. `--orm` does not
+affect Mongo output.
 
 Generated SQL repositories include single-table CRUD helpers. Toasty and SeaORM
 outputs both generate primary-key lookup, cache-key lookup, `list`, `insert`,
@@ -762,7 +764,43 @@ rozectl model generate example/user.model --out services/user-api --format mongo
 ```
 
 The Mongo output creates a Rust module with a model type, repository, typed CRUD
-helpers, cache helper stubs, and common error helpers.
+helpers, cache helper stubs, and common error helpers. Use `model generate
+--format mongo` for DSL-owned schemas and `model inspect --db-kind mongo` for
+existing MongoDB collections.
+
+## Search generation
+
+Search support is separate from database model generation. Use `rozectl search`
+for Elasticsearch, OpenSearch, and Meilisearch indexes:
+
+```bash
+rozectl search generate example/user.search --engine elasticsearch --out services/user-api
+rozectl search generate example/user.search --engine opensearch --out services/user-api
+rozectl search generate example/user.search --engine meilisearch --out services/user-api
+```
+
+The search schema DSL is intentionally small:
+
+```text
+index users
+primary id
+field id keyword primary filterable sortable
+field name text searchable
+field age i64 filterable sortable
+```
+
+Existing indexes can be inspected directly:
+
+```bash
+rozectl search inspect users --engine elasticsearch --url http://127.0.0.1:9200 --out services/user-api
+rozectl search inspect users --engine opensearch --url http://127.0.0.1:9200 --out services/user-api
+rozectl search inspect users --engine meilisearch --url http://127.0.0.1:7700 --sample-size 100 --out services/user-api
+```
+
+Elasticsearch and OpenSearch inspection reads index mappings. Meilisearch
+inspection reads index settings and samples documents to infer field types.
+Generated modules use `roze-search` for health checks, document indexing,
+delete, and search calls.
 
 ## Dockerfile generation
 
@@ -881,7 +919,7 @@ PodDisruptionBudget, NetworkPolicy, and helper templates.
 JSON, then runs the plugin command.
 
 ```bash
-rozectl api plugin --p ./tools/api-plugin.sh --api example/user.api --dir generated
+rozectl api plugin --plugin ./tools/api-plugin.sh --api example/user.api --dir generated
 ```
 
 The plugin receives the same JSON payload through stdin and environment:

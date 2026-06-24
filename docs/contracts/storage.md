@@ -21,7 +21,7 @@
 - 七牛 Kodo
 - 阿里云 OSS
 - 腾讯云 COS
-- S3 compatible
+- S3 API providers
 
 云厂商真实签名上传需要继续接具体 SDK 或签名协议；业务代码先依赖 `ObjectStorage` trait，不直接依赖厂商 SDK。
 

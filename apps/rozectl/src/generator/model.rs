@@ -5,6 +5,12 @@ use std::{
 };
 
 use anyhow::{bail, Context};
+use futures_util::TryStreamExt;
+use mongodb::{
+    bson::{doc, Bson, Document},
+    options::ClientOptions,
+    Client,
+};
 use roze_sqlx::{SqlxConfig, SqlxDatabaseKind, SqlxPool};
 use sqlx::{AssertSqlSafe, Row};
 
@@ -24,6 +30,25 @@ pub enum ModelFormat {
 pub enum ModelOrm {
     SeaOrm,
     Toasty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectDatabaseKind {
+    Sqlite,
+    Postgres,
+    MySql,
+    Mongo,
+}
+
+impl InspectDatabaseKind {
+    fn as_sqlx_kind(self) -> Option<SqlxDatabaseKind> {
+        match self {
+            Self::Sqlite => Some(SqlxDatabaseKind::Sqlite),
+            Self::Postgres => Some(SqlxDatabaseKind::Postgres),
+            Self::MySql => Some(SqlxDatabaseKind::MySql),
+            Self::Mongo => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +78,7 @@ pub struct ModelIndex {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelField {
     pub name: String,
+    pub source_name: Option<String>,
     pub ty: String,
     pub auto_increment: bool,
     pub default_value: Option<String>,
@@ -77,11 +103,20 @@ pub async fn inspect_model_project(
     table: &str,
     schema_name: Option<&str>,
     db_url: &str,
-    db_kind: SqlxDatabaseKind,
+    db_kind: InspectDatabaseKind,
+    sample_size: u64,
     out: &Path,
     options: GenerateOptions,
     orm: ModelOrm,
 ) -> anyhow::Result<()> {
+    if db_kind == InspectDatabaseKind::Mongo {
+        let model = inspect_mongo_collection(table, schema_name, db_url, sample_size).await?;
+        return write_mongo_model_project(&[model], out, options);
+    }
+
+    let db_kind = db_kind
+        .as_sqlx_kind()
+        .expect("SQL inspect kind already checked");
     let pool = roze_sqlx::connect(&SqlxConfig {
         kind: db_kind,
         url: db_url.to_string(),
@@ -96,6 +131,260 @@ pub async fn inspect_model_project(
     };
 
     write_model_project(&[model], out, options, orm)
+}
+
+async fn inspect_mongo_collection(
+    collection_name: &str,
+    database_name: Option<&str>,
+    db_url: &str,
+    sample_size: u64,
+) -> anyhow::Result<ModelSpec> {
+    let mut options = ClientOptions::parse(db_url)
+        .await
+        .with_context(|| format!("failed to parse MongoDB URL `{db_url}`"))?;
+    options
+        .app_name
+        .get_or_insert_with(|| "rozectl-inspect".to_string());
+    let client = Client::with_options(options).context("failed to create MongoDB client")?;
+    let database = if let Some(database_name) = database_name {
+        client.database(database_name)
+    } else {
+        client.default_database().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MongoDB inspect requires a database in --db-url or an explicit --schema <database>"
+            )
+        })?
+    };
+    let collection = database.collection::<Document>(collection_name);
+    let indexes = inspect_mongo_indexes(&collection).await?;
+    let limit = i64::try_from(sample_size.max(1)).unwrap_or(i64::MAX);
+    let mut cursor = collection
+        .find(doc! {})
+        .limit(limit)
+        .await
+        .with_context(|| format!("failed to query MongoDB collection `{collection_name}`"))?;
+    let mut documents = Vec::new();
+    while let Some(document) = cursor
+        .try_next()
+        .await
+        .with_context(|| format!("failed to read MongoDB collection `{collection_name}`"))?
+    {
+        documents.push(document);
+    }
+    Ok(model_from_mongo_documents(
+        collection_name,
+        &documents,
+        indexes,
+    ))
+}
+
+async fn inspect_mongo_indexes(
+    collection: &mongodb::Collection<Document>,
+) -> anyhow::Result<Vec<ModelIndex>> {
+    let mut cursor = collection
+        .list_indexes()
+        .await
+        .with_context(|| format!("failed to list MongoDB indexes for `{}`", collection.name()))?;
+    let mut indexes = Vec::new();
+    while let Some(index) = cursor
+        .try_next()
+        .await
+        .with_context(|| format!("failed to read MongoDB indexes for `{}`", collection.name()))?
+    {
+        let fields = index
+            .keys
+            .keys()
+            .map(|key| mongo_rust_field_name(key))
+            .collect::<Vec<_>>();
+        if fields.is_empty() || fields == ["id"] {
+            continue;
+        }
+        let name = index
+            .options
+            .as_ref()
+            .and_then(|options| options.name.clone())
+            .unwrap_or_else(|| fields.join("_"));
+        let unique = index
+            .options
+            .as_ref()
+            .and_then(|options| options.unique)
+            .unwrap_or(false);
+        indexes.push(ModelIndex {
+            name,
+            fields,
+            unique,
+        });
+    }
+    Ok(indexes)
+}
+
+fn model_from_mongo_documents(
+    collection_name: &str,
+    documents: &[Document],
+    indexes: Vec<ModelIndex>,
+) -> ModelSpec {
+    let mut fields = Vec::new();
+    let mut seen = HashSet::new();
+
+    if documents.is_empty()
+        || documents
+            .iter()
+            .any(|document| document.contains_key("_id"))
+    {
+        fields.push(mongo_field_from_samples("_id", documents));
+        seen.insert("_id".to_string());
+    }
+
+    let mut keys = documents
+        .iter()
+        .flat_map(|document| document.keys().cloned())
+        .filter(|key| key != "_id")
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        if seen.insert(key.clone()) {
+            fields.push(mongo_field_from_samples(&key, documents));
+        }
+    }
+
+    let primary = fields
+        .iter()
+        .find(|field| field.name == "id")
+        .or_else(|| fields.first())
+        .map(|field| field.name.clone())
+        .unwrap_or_else(|| "id".to_string());
+    let cache_keys = indexes
+        .iter()
+        .filter(|index| index.unique && index.fields.len() == 1)
+        .filter_map(|index| index.fields.first())
+        .filter(|field| *field != &primary)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    ModelSpec {
+        name: to_pascal_case(collection_name),
+        schema_name: None,
+        table: collection_name.to_string(),
+        primary,
+        soft_delete: None,
+        tenant: None,
+        cache: false,
+        cache_ttl_secs: None,
+        negative_cache_ttl_secs: None,
+        cache_keys,
+        cache_prefix: None,
+        indexes,
+        fields,
+    }
+}
+
+fn mongo_field_from_samples(key: &str, documents: &[Document]) -> ModelField {
+    let mut observed_ty: Option<String> = None;
+    let mut observed_count = 0usize;
+    let mut saw_null = false;
+
+    for document in documents {
+        match document.get(key) {
+            Some(Bson::Null) | Some(Bson::Undefined) => {
+                saw_null = true;
+                observed_count += 1;
+            }
+            Some(value) => {
+                observed_count += 1;
+                let ty = mongo_bson_type(value);
+                observed_ty = Some(match observed_ty {
+                    Some(existing) => merge_mongo_types(&existing, &ty),
+                    None => ty,
+                });
+            }
+            None => {}
+        }
+    }
+
+    let mut ty = observed_ty.unwrap_or_else(|| {
+        if key == "_id" {
+            "ObjectId".to_string()
+        } else {
+            "bson::Bson".to_string()
+        }
+    });
+    if key != "_id" && (saw_null || observed_count < documents.len()) && !is_optional_type(&ty) {
+        ty = format!("Option<{ty}>");
+    }
+
+    ModelField {
+        name: mongo_rust_field_name(key),
+        source_name: Some(key.to_string()).filter(|source| source != "_id"),
+        ty,
+        auto_increment: false,
+        default_value: None,
+        comment: None,
+    }
+}
+
+fn mongo_bson_type(value: &Bson) -> String {
+    match value {
+        Bson::Double(_) => "f64".to_string(),
+        Bson::String(_) => "String".to_string(),
+        Bson::Array(values) => {
+            let inner = values
+                .iter()
+                .map(mongo_bson_type)
+                .reduce(|left, right| merge_mongo_types(&left, &right))
+                .unwrap_or_else(|| "bson::Bson".to_string());
+            format!("Vec<{inner}>")
+        }
+        Bson::Document(_) => "Document".to_string(),
+        Bson::Boolean(_) => "bool".to_string(),
+        Bson::ObjectId(_) => "ObjectId".to_string(),
+        Bson::DateTime(_) => "DateTime".to_string(),
+        Bson::Int32(_) => "i32".to_string(),
+        Bson::Int64(_) => "i64".to_string(),
+        Bson::Decimal128(_) => "bson::Decimal128".to_string(),
+        Bson::Binary(_) => "bson::Binary".to_string(),
+        Bson::Timestamp(_) => "bson::Timestamp".to_string(),
+        Bson::RegularExpression(_) => "bson::Regex".to_string(),
+        Bson::JavaScriptCode(_) | Bson::JavaScriptCodeWithScope(_) => "String".to_string(),
+        Bson::Symbol(_) => "String".to_string(),
+        Bson::Null | Bson::Undefined | Bson::DbPointer(_) | Bson::MaxKey | Bson::MinKey => {
+            "bson::Bson".to_string()
+        }
+    }
+}
+
+fn merge_mongo_types(left: &str, right: &str) -> String {
+    if left == right {
+        left.to_string()
+    } else if matches!((left, right), ("i32", "i64") | ("i64", "i32")) {
+        "i64".to_string()
+    } else if matches!(
+        (left, right),
+        ("i32", "f64") | ("f64", "i32") | ("i64", "f64") | ("f64", "i64")
+    ) {
+        "f64".to_string()
+    } else {
+        "bson::Bson".to_string()
+    }
+}
+
+fn mongo_rust_field_name(key: &str) -> String {
+    if key == "_id" {
+        "id".to_string()
+    } else if is_valid_rust_identifier(key) {
+        key.to_string()
+    } else {
+        to_snake_case(key)
+    }
+}
+
+fn is_valid_rust_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn write_model_project(
@@ -481,12 +770,12 @@ fn render_mongo_model_mod(models: &[ModelSpec]) -> String {
 fn render_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
-    let primary_ty = model
+    let primary_field = model
         .fields
         .iter()
         .find(|field| field.name == *primary)
-        .map(|field| field.ty.clone())
         .expect("primary field present");
+    let primary_ty = primary_field.ty.clone();
     let table_name = &model.table;
     let cache_ttl_secs = model.cache_ttl_secs.unwrap_or(300);
     let negative_cache_ttl_secs = model
@@ -1505,12 +1794,12 @@ fn index_method_suffix(index: &ModelIndex) -> String {
 fn render_toasty_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
-    let primary_ty = model
+    let primary_field = model
         .fields
         .iter()
         .find(|field| field.name == *primary)
-        .map(|field| field.ty.clone())
         .expect("primary field present");
+    let primary_ty = primary_field.ty.clone();
     let table_name = &model.table;
     let cache_fields = cache_lookup_fields(model);
     let mut out = String::new();
@@ -2102,12 +2391,12 @@ fn optional_inner_type(ty: &str) -> Option<&str> {
 fn render_mongo_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
-    let primary_ty = model
+    let primary_field = model
         .fields
         .iter()
         .find(|field| field.name == *primary)
-        .map(|field| field.ty.clone())
         .expect("primary field present");
+    let primary_ty = primary_field.ty.clone();
     let collection_name = &model.table;
     let cache_prefix = model.cache_prefix.as_deref().unwrap_or(collection_name);
     let cache_fields = cache_lookup_fields(model);
@@ -2134,8 +2423,9 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
     .unwrap();
     writeln!(&mut out, "pub struct Model {{").unwrap();
     for field in &model.fields {
-        if field.name == "id" && model.primary == "id" {
-            writeln!(&mut out, "    #[serde(rename = \"_id\")]").unwrap();
+        let source_name = mongo_field_name(field);
+        if source_name != field.name {
+            writeln!(&mut out, "    #[serde(rename = \"{source_name}\")]").unwrap();
         }
         if let Some(comment) = &field.comment {
             writeln!(&mut out, "    /// {}", comment.replace('\n', " ")).unwrap();
@@ -2193,10 +2483,11 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "        \"{}\"", collection_name).unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
-    render_mongo_find_methods(&mut out, model, primary, &primary_ty, true);
+    render_mongo_find_methods(&mut out, model, primary_field, true);
     for field in cache_fields.iter().filter(|field| field.name != *primary) {
-        render_mongo_find_methods(&mut out, model, &field.name, &field.ty, false);
+        render_mongo_find_methods(&mut out, model, field, false);
     }
+    render_mongo_index_methods(&mut out, model);
     writeln!(
         &mut out,
         "    pub async fn list(&self) -> anyhow::Result<Vec<Model>> {{"
@@ -2246,7 +2537,7 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
     writeln!(
         &mut out,
         "        let filter = Self::filter_by(\"{}\", &model.{})?;",
-        mongo_field_name(primary),
+        mongo_field_name(primary_field),
         primary
     )
     .unwrap();
@@ -2282,7 +2573,7 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
     writeln!(
         &mut out,
         "        let filter = Self::filter_by(\"{}\", &{})?;",
-        mongo_field_name(primary),
+        mongo_field_name(primary_field),
         primary
     )
     .unwrap();
@@ -2378,12 +2669,13 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
 fn render_mongo_find_methods(
     out: &mut String,
     model: &ModelSpec,
-    field_name: &str,
-    field_ty: &str,
+    field: &ModelField,
     is_primary: bool,
 ) {
     use std::fmt::Write as _;
-    let mongo_name = mongo_field_name(field_name);
+    let field_name = &field.name;
+    let field_ty = &field.ty;
+    let mongo_name = mongo_field_name(field);
     writeln!(
         out,
         "    pub async fn find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
@@ -2481,11 +2773,75 @@ fn render_mongo_find_methods(
     }
 }
 
-fn mongo_field_name(field_name: &str) -> &str {
-    if field_name == "id" {
+fn render_mongo_index_methods(out: &mut String, model: &ModelSpec) {
+    use std::fmt::Write as _;
+    for index in model.indexes.iter().filter(|index| index.fields.len() > 1) {
+        let Some(fields) = index_fields(model, index) else {
+            continue;
+        };
+        let suffix = index_method_suffix(index);
+        let args = fields
+            .iter()
+            .map(|field| format!("{}: {}", field.name, field.ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(out).unwrap();
+        if index.unique {
+            writeln!(
+                out,
+                "    pub async fn find_by_{suffix}(&self, {args}) -> anyhow::Result<Option<Model>> {{"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "    pub async fn list_by_{suffix}(&self, {args}) -> anyhow::Result<Vec<Model>> {{"
+            )
+            .unwrap();
+        }
+        writeln!(out, "        let mut filter = Document::new();").unwrap();
+        for field in fields {
+            writeln!(
+                out,
+                "        filter.insert(\"{}\", bson::to_bson(&{})?);",
+                mongo_field_name(field),
+                field.name
+            )
+            .unwrap();
+        }
+        if index.unique {
+            writeln!(
+                out,
+                "        Ok(self.collection()?.find_one(filter).await?)"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "        let mut cursor = self.collection()?.find(filter).await?;"
+            )
+            .unwrap();
+            writeln!(out, "        let mut items = Vec::new();").unwrap();
+            writeln!(out, "        while cursor.advance().await? {{").unwrap();
+            writeln!(
+                out,
+                "            items.push(cursor.deserialize_current()?);"
+            )
+            .unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "        Ok(items)").unwrap();
+        }
+        writeln!(out, "    }}").unwrap();
+    }
+}
+
+fn mongo_field_name(field: &ModelField) -> &str {
+    if let Some(source_name) = field.source_name.as_deref() {
+        source_name
+    } else if field.name == "id" {
         "_id"
     } else {
-        field_name
+        &field.name
     }
 }
 
@@ -2881,6 +3237,7 @@ fn build_inspected_model(
         };
         fields.push(ModelField {
             name: column.name,
+            source_name: None,
             ty,
             auto_increment: column.auto_increment,
             default_value: column.default_value,
@@ -3284,6 +3641,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 })?;
                 fields.push(ModelField {
                     name: field_name.to_string(),
+                    source_name: None,
                     ty: field_ty.to_string(),
                     auto_increment: false,
                     default_value: None,
@@ -3590,6 +3948,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
             };
             ModelField {
                 name: field.name,
+                source_name: None,
                 ty,
                 auto_increment: field.auto_increment,
                 default_value: field.default_value,
@@ -4373,6 +4732,7 @@ mod tests {
             fields: vec![
                 ModelField {
                     name: "id".to_string(),
+                    source_name: None,
                     ty: "i64".to_string(),
                     auto_increment: true,
                     default_value: None,
@@ -4380,6 +4740,7 @@ mod tests {
                 },
                 ModelField {
                     name: "name".to_string(),
+                    source_name: None,
                     ty: "String".to_string(),
                     auto_increment: false,
                     default_value: None,
@@ -4387,6 +4748,7 @@ mod tests {
                 },
                 ModelField {
                     name: "tenant_id".to_string(),
+                    source_name: None,
                     ty: "String".to_string(),
                     auto_increment: false,
                     default_value: None,
@@ -4394,6 +4756,7 @@ mod tests {
                 },
                 ModelField {
                     name: "nickname".to_string(),
+                    source_name: None,
                     ty: "Option<String>".to_string(),
                     auto_increment: false,
                     default_value: None,
@@ -4401,6 +4764,7 @@ mod tests {
                 },
                 ModelField {
                     name: "deleted".to_string(),
+                    source_name: None,
                     ty: "bool".to_string(),
                     auto_increment: false,
                     default_value: None,
@@ -4718,6 +5082,120 @@ toasty.workspace = true
         assert!(rendered.contains("cache.del(&self.cache_key(\"username\", &model.username))"));
     }
 
+    #[test]
+    fn infers_mongo_model_from_sample_documents() {
+        let documents = vec![
+            doc! {
+                "_id": Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
+                "username": "alice",
+                "score": 7_i32,
+                "active": true,
+                "tags": Bson::Array(vec![Bson::String("vip".to_string())]),
+                "display-name": "Alice",
+            },
+            doc! {
+                "_id": Bson::ObjectId(mongodb::bson::oid::ObjectId::new()),
+                "username": "bob",
+                "score": 9_i64,
+                "display-name": "Bob",
+            },
+        ];
+
+        let model = model_from_mongo_documents(
+            "users",
+            &documents,
+            vec![
+                ModelIndex {
+                    name: "display_name_1".to_string(),
+                    fields: vec!["display_name".to_string()],
+                    unique: true,
+                },
+                ModelIndex {
+                    name: "username_display_name_1".to_string(),
+                    fields: vec!["username".to_string(), "display_name".to_string()],
+                    unique: true,
+                },
+            ],
+        );
+        assert_eq!(model.name, "Users");
+        assert_eq!(model.table, "users");
+        assert_eq!(model.primary, "id");
+        assert_eq!(
+            model.indexes,
+            vec![
+                ModelIndex {
+                    name: "display_name_1".to_string(),
+                    fields: vec!["display_name".to_string()],
+                    unique: true,
+                },
+                ModelIndex {
+                    name: "username_display_name_1".to_string(),
+                    fields: vec!["username".to_string(), "display_name".to_string()],
+                    unique: true,
+                }
+            ]
+        );
+        assert_eq!(model.cache_keys, vec!["display_name"]);
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "id")
+                .map(|field| field.ty.as_str()),
+            Some("ObjectId")
+        );
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "score")
+                .map(|field| field.ty.as_str()),
+            Some("i64")
+        );
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "active")
+                .map(|field| field.ty.as_str()),
+            Some("Option<bool>")
+        );
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "tags")
+                .map(|field| field.ty.as_str()),
+            Some("Option<Vec<String>>")
+        );
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "display_name")
+                .and_then(|field| field.source_name.as_deref()),
+            Some("display-name")
+        );
+
+        let rendered = render_mongo_model_module(&model);
+        assert!(rendered.contains("#[serde(rename = \"display-name\")]"));
+        assert!(rendered.contains("Self::filter_by(\"display-name\", &display_name)?"));
+        assert!(rendered.contains("pub async fn find_by_username_and_display_name"));
+        assert!(
+            rendered.contains("filter.insert(\"display-name\", bson::to_bson(&display_name)?);")
+        );
+    }
+
+    #[test]
+    fn infers_mongo_empty_collection_as_id_only_model() {
+        let model = model_from_mongo_documents("events", &[], Vec::new());
+        assert_eq!(model.name, "Events");
+        assert_eq!(model.primary, "id");
+        assert_eq!(model.fields.len(), 1);
+        assert_eq!(model.fields[0].name, "id");
+        assert_eq!(model.fields[0].ty, "ObjectId");
+    }
+
     #[tokio::test]
     async fn inspects_sqlite_and_writes_model_project() {
         let unique = SystemTime::now()
@@ -4763,7 +5241,8 @@ mod types;
             "users",
             Some("audit"),
             &db_url,
-            SqlxDatabaseKind::Sqlite,
+            InspectDatabaseKind::Sqlite,
+            100,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelOrm::SeaOrm,
@@ -4821,7 +5300,8 @@ mod types;
             &format!("{schema}.rozectl_users"),
             Some(&schema),
             &db_url,
-            SqlxDatabaseKind::Postgres,
+            InspectDatabaseKind::Postgres,
+            100,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelOrm::SeaOrm,
@@ -4882,7 +5362,8 @@ mod types;
             &format!("{db_name}.rozectl_users"),
             Some(&db_name),
             &db_url,
-            SqlxDatabaseKind::MySql,
+            InspectDatabaseKind::MySql,
+            100,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelOrm::SeaOrm,
@@ -4948,7 +5429,8 @@ mod types;
             "users",
             None,
             &db_url,
-            SqlxDatabaseKind::Sqlite,
+            InspectDatabaseKind::Sqlite,
+            100,
             &inspect_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelOrm::SeaOrm,
@@ -5030,7 +5512,8 @@ mod types;
             "rozectl_users",
             Some(&schema),
             &db_url,
-            SqlxDatabaseKind::Postgres,
+            InspectDatabaseKind::Postgres,
+            100,
             &inspect_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelOrm::SeaOrm,
@@ -5103,7 +5586,8 @@ mod types;
             "rozectl_users",
             Some(&db_name),
             &db_url,
-            SqlxDatabaseKind::MySql,
+            InspectDatabaseKind::MySql,
+            100,
             &inspect_out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             ModelOrm::SeaOrm,

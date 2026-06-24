@@ -6,23 +6,22 @@
 
 - IDL 优先：REST 路由、RPC 方法、请求/响应 DTO 优先由 `.api` 或 `.proto` 描述，再由 `rozectl` 生成边界代码。
 - 约定优于配置：生成项目保持稳定目录结构，业务代码只进入明确的扩展点。
-- Rust 原生优先：兼容 goctl 命令形态，但输出保持 Axum、Tower、tonic、prost、Toasty/SeaORM 等 Rust 技术栈。
+- Rust 原生优先：命令、模板和运行时都以 Roze 原生能力为唯一入口，输出保持 Axum、Tower、tonic、prost、Toasty/SeaORM 等 Rust 技术栈。
 - 框架边界统一：HTTP、RPC、MQ、Gateway 都必须使用统一 Context、错误、日志、指标和配置模型。
 - 可重复生成：生成器必须支持重复运行，默认保护业务逻辑和本地配置。
 
 ## 仓库结构
 
 - `crates/roze-*`：可复用框架能力。新增通用能力优先进入 crate，而不是写死在示例应用。
-- `apps/rozectl`：代码生成器和 goctl 兼容入口。生成逻辑、模板、解析规则和生成器测试放在这里。
+- `apps/rozectl`：Roze 原生代码生成器。生成逻辑、模板、解析规则和生成器测试放在这里。
 - `apps/roze-example`、`apps/user`、`apps/roze-sample`：示例和验收应用，只承载真实使用方式，不承载框架专用逻辑。
 - `apps/roze-gateway`、`apps/roze-dtm`：可独立运行的基础设施服务。
 - `docs/contracts`：运行时契约。Context、Gateway、Queue、Config Center、DTM、Storage 等跨模块行为在这里固化。
-- `docs/usage`：用户指南。命令、生成结果、兼容行为、SDK/OpenAPI 使用方式在这里说明。
-- `docs/go-zero-alignment-action-plan.md`：go-zero 对齐计划和剩余任务清单。
+- `docs/usage`：用户指南。命令、生成结果、SDK/OpenAPI 使用方式在这里说明。
 
 ## API 项目规范
 
-API 项目由 `rozectl api generate` 或 goctl 兼容入口 `rozectl api go` 生成，面向 HTTP REST 服务。
+API 项目由 `rozectl api generate` 生成，面向 HTTP REST 服务。
 
 固定结构：
 
@@ -72,7 +71,7 @@ API 运行边界：
 - 请求入口必须注入和传播 `roze-context` 标准 header。
 - REST route 级别治理包括 timeout、JWT、middleware、rate limit、breaker 和 OpenAPI 安全声明。
 - REST 服务级 middleware 由 `rest.middlewares` 配置，包括 recover、trace、stat、prometheus、cors、timeout、max_conns、shedding、gunzip 和 request body limit。详细行为见 [Middleware Contract](contracts/middleware.md)。
-- `rozectl openapi generate`、`rozectl api swagger` 和生成服务的 `/openapi.json` 必须保持同一 schema 语义。
+- `rozectl openapi generate` 和生成服务的 `/openapi.json` 必须保持同一 schema 语义。
 
 API 生成策略：
 
@@ -80,7 +79,7 @@ API 生成策略：
 - 使用 `--force` 只适合全量重建或一次性脚手架验证。
 - API 定义不能包含 RPC method；如果 `.api` 中存在 `rpc`，应使用 `rozectl rpc generate`。
 - 无 request 的 REST 路由生成 `EmptyReq`，无 response 的 REST 路由生成 `EmptyResp`。
-- `.api` 中声明的 go-zero 常见 middleware 名称会先解析为内建项；只有未知名称才会生成自定义 middleware 文件。
+- `.api` 中声明的 Roze 内建 middleware 名称会先解析为内建项；只有未知名称才会生成自定义 middleware 文件。
 
 API 测试要求：
 
@@ -136,7 +135,7 @@ RPC 运行边界：
 RPC 生成策略：
 
 - `rozectl rpc generate` 从 `.api` 的 `rpc` method 生成 Rust-native RPC 项目。
-- `rozectl rpc protoc` 接受 proto3 源文件，`--go_out` 和 `--go-grpc_out` 只用于命令兼容，Rust RPC 项目文件生成到 `--zrpc_out`。
+- `rozectl rpc protoc` 接受 proto3 源文件，Rust RPC 项目文件生成到 `--out`。
 - RPC 定义不能包含 REST route；如果 `.api` 中存在 REST route，应使用 `rozectl api generate`。
 - proto parser 遇到不支持的字段类型必须 fail fast。
 
@@ -228,6 +227,6 @@ docker compose -f docker-compose.integration.yml up -d
 
 - 新增或修改公开命令时，同步 `docs/usage` 和 README。
 - 新增运行时契约时，同步 `docs/contracts`。
-- 新增 go-zero 对齐能力时，同步 `docs/go-zero-alignment-action-plan.md`。
+- 新增生成器、SDK、部署或运维能力时，同步对应使用文档和能力矩阵。
 - 新增配置字段时，同步示例 `config.yaml`、契约文档和测试。
 - 文档中的能力状态必须以代码和测试为准，不以计划项为准。

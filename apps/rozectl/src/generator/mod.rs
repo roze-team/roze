@@ -1,8 +1,9 @@
 pub mod client;
-pub mod goctl;
 pub mod model;
+pub mod native;
 pub mod rest;
 pub mod rpc;
+pub mod search;
 pub mod types;
 
 use std::{
@@ -122,7 +123,8 @@ pub enum GeneratorCommand {
         table: String,
         schema: Option<String>,
         db_url: String,
-        db_kind: roze_sqlx::SqlxDatabaseKind,
+        db_kind: model::InspectDatabaseKind,
+        sample_size: u64,
         out: PathBuf,
         options: GenerateOptions,
         orm: model::ModelOrm,
@@ -1793,6 +1795,7 @@ fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
             schema,
             db_url,
             db_kind,
+            sample_size,
             out,
             options,
             orm,
@@ -1807,6 +1810,7 @@ fn model_inspect_handler(command: GeneratorCommand) -> anyhow::Result<()> {
                     schema.as_deref(),
                     &db_url,
                     db_kind,
+                    sample_size,
                     &out,
                     options,
                     orm,

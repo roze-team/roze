@@ -1,8 +1,8 @@
 # Roze 队列收口（Kafka，阶段1+2）
 
-## 兼容前提
-- `Publisher`/`Subscriber` 接口不变。
-- `KafkaConfig` 保留兼容字段，优先级：新字段优先。
+## 原生配置前提
+- `Publisher`/`Subscriber` 接口保持稳定。
+- `KafkaConfig` 使用 Roze 原生字段；配置解析统一走标准字段归一化。
 
 ## rdkafka Producer 映射
 - `bootstrap` / `bootstrap_servers` / `brokers`
@@ -56,7 +56,7 @@
 
 ## Producer 返回值
 
-`roze_kafka::Publisher` 保留兼容方法：
+`roze_kafka::Publisher` 提供两种发布方法：
 
 - `publish(record) -> Result<()>`：只表达发布成功/失败。
 - `publish_with_result(record) -> Result<PublishResult>`：返回 broker 元数据。
