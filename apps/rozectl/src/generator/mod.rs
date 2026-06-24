@@ -3213,6 +3213,60 @@ mod tests {
         ))
     }
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("apps directory")
+            .parent()
+            .expect("repo root")
+            .to_path_buf()
+    }
+
+    fn generated_compile_workspace(prefix: &str) -> PathBuf {
+        let root = temp_test_root(prefix);
+        fs::create_dir_all(root.join("apps")).expect("create apps dir");
+        let repo_manifest =
+            fs::read_to_string(repo_root().join("Cargo.toml")).expect("read repo manifest");
+        let workspace_tail = repo_manifest
+            .find("[workspace.package]")
+            .map(|idx| &repo_manifest[idx..])
+            .expect("workspace package section");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!("[workspace]\nmembers = [\n]\nresolver = \"2\"\n\n{workspace_tail}"),
+        )
+        .expect("write temp workspace manifest");
+        link_or_copy_crates(&repo_root().join("crates"), &root.join("crates"));
+        root
+    }
+
+    #[cfg(unix)]
+    fn link_or_copy_crates(src: &Path, dst: &Path) {
+        std::os::unix::fs::symlink(src, dst).expect("symlink crates");
+    }
+
+    #[cfg(not(unix))]
+    fn link_or_copy_crates(src: &Path, dst: &Path) {
+        copy_dir_recursive(src, dst).expect("copy crates");
+    }
+
+    fn cargo_check_generated(manifest: &Path) {
+        let output = std::process::Command::new("cargo")
+            .arg("check")
+            .arg("--manifest-path")
+            .arg(manifest)
+            .arg("--quiet")
+            .output()
+            .expect("run cargo check");
+        assert!(
+            output.status.success(),
+            "cargo check failed for {}\nstdout:\n{}\nstderr:\n{}",
+            manifest.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn read_api_source_expands_import_blocks() {
         let root = temp_test_root("roze-import-block");
@@ -3692,6 +3746,153 @@ mod tests {
         assert!(!config.contains("sqlite://"));
 
         fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    #[ignore = "compile-smoke: generates a REST project and runs cargo check"]
+    fn generated_rest_project_compiles_with_model_and_search() {
+        let root = generated_compile_workspace("rozectl-rest-compile-smoke");
+        let api = root.join("user.api");
+        let model = root.join("user.model");
+        let search = root.join("user.search");
+        let out = root.join("apps/user-api");
+        fs::write(
+            &api,
+            r#"
+            @server (
+                prefix: /api
+            )
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+                @handler createUser
+                post /users (CreateUserReq) returns (UserResp)
+            }
+
+            type (
+                GetUserReq {
+                    id u64 `path:"id"`
+                }
+
+                CreateUserReq {
+                    name string `json:"name"`
+                    email string `json:"email"`
+                }
+
+                UserResp {
+                    id u64 `json:"id"`
+                    name string `json:"name"`
+                    email string `json:"email"`
+                }
+            )
+            "#,
+        )
+        .expect("write api");
+        fs::write(
+            &model,
+            r#"
+            model User {
+                table: users
+                primary: id
+                cache: true
+                field id u64
+                field name string
+                field email string
+                field created_at datetime
+                unique_index: email
+            }
+            "#,
+        )
+        .expect("write model");
+        fs::write(
+            &search,
+            r#"
+            index users
+            primary id
+            field id u64 primary filterable sortable
+            field name text searchable
+            field email keyword filterable
+            field created_at datetime sortable
+            "#,
+        )
+        .expect("write search");
+
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api,
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            })
+            .expect("generate rest project");
+        register_workspace_member(&out).expect("register rest smoke workspace member");
+        model::generate_model_project(
+            &fs::read_to_string(&model).expect("read model"),
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            model::ModelFormat::Dsl,
+            model::ModelOrm::Toasty,
+        )
+        .expect("generate model");
+        search::generate_search_project(
+            &search,
+            search::SearchEngine::Elasticsearch,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+        )
+        .expect("generate search");
+
+        cargo_check_generated(&out.join("Cargo.toml"));
+        fs::remove_dir_all(root).expect("remove compile workspace");
+    }
+
+    #[test]
+    #[ignore = "compile-smoke: generates an RPC project and runs cargo check"]
+    fn generated_rpc_project_compiles() {
+        let root = generated_compile_workspace("rozectl-rpc-compile-smoke");
+        let api = root.join("user-rpc.api");
+        let out = root.join("apps/user-rpc");
+        fs::write(
+            &api,
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (GetUserResp)
+                rpc CreateUser (CreateUserReq) returns (CreateUserResp)
+            }
+
+            type (
+                GetUserReq {
+                    id: u64
+                }
+
+                GetUserResp {
+                    id: u64
+                    name: string
+                }
+
+                CreateUserReq {
+                    name: string
+                    email: string
+                }
+
+                CreateUserResp {
+                    id: u64
+                }
+            )
+            "#,
+        )
+        .expect("write rpc api");
+
+        registry()
+            .dispatch(GeneratorCommand::RpcGenerate {
+                api,
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            })
+            .expect("generate rpc project");
+        register_workspace_member(&out).expect("register rpc smoke workspace member");
+
+        cargo_check_generated(&out.join("Cargo.toml"));
+        fs::remove_dir_all(root).expect("remove compile workspace");
     }
 
     #[test]

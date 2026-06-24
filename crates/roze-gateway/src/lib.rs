@@ -2060,7 +2060,7 @@ impl From<GatewayService> for ServiceEndpoint {
 mod tests {
     use super::*;
     use axum::{body::Bytes, extract::State, response::IntoResponse, routing::get, Router};
-    use futures_util::{StreamExt, TryStreamExt};
+    use futures_util::TryStreamExt;
     use roze_rpc::registry::{MemoryRegistry, Registry, ServiceInstance};
     use std::convert::Infallible;
     use std::sync::{

@@ -100,8 +100,9 @@ Before cutting a release:
 - `cargo check --workspace`
 - `cargo check -p roze-kafka --features rdkafka`
 - `cargo test -p rozectl -- --skip postgres --skip mysql`
-- Generated REST project compiles.
-- Generated RPC project compiles.
+- `bash scripts/production-smoke.sh`
+- `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
+- `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
 - `--update` ownership tests pass and prove user logic is preserved.
 - Gateway smoke tests cover rewrite, timeout, auth, rate limit, breaker, retry,
   fallback, and hot reload.

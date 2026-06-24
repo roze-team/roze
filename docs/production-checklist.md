@@ -6,6 +6,10 @@ This checklist is the baseline for considering a Roze service production-ready.
 
 - Service is built from a tagged Roze release or a pinned Git revision.
 - `CHANGELOG.md` and upgrade notes have been reviewed.
+- `bash scripts/production-smoke.sh` passes.
+- Generated REST and RPC compile smoke tests pass:
+  - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
+  - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
 - Generated-code changes were applied with `--update` and reviewed as a diff.
 - User-owned files under `src/logic/**`, custom middleware, and `config.yaml`
   were not overwritten.
@@ -48,6 +52,7 @@ This checklist is the baseline for considering a Roze service production-ready.
 
 - `/healthz` reports process liveness.
 - `/readyz` reports dependency readiness.
+- `/startupz` reports startup probe state where generated HTTP services are used.
 - `/metrics` is scraped by Prometheus.
 - Kubernetes liveness/readiness/startup probes are configured.
 - HPA/PDB behavior is known for rolling deploys.

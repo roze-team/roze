@@ -15,8 +15,8 @@ Status legend:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned files on `--update`; needs more generated-project compile tests and Roze `.api` edge fixtures. |
-| RPC generation | beta | Generates split server/client/pb/logic layout. Method rate-limit and breaker state use DashMap for concurrent hot paths; memory registry has Criterion hot-path baselines; needs more proto fixture coverage and generated-project compile tests. |
+| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned files on `--update`; generated REST + model + search compile smoke exists as an ignored `rozectl` test; needs more Roze `.api` edge fixtures. |
+| RPC generation | beta | Generates split server/client/pb/logic layout. Method rate-limit and breaker state use DashMap for concurrent hot paths; memory registry has Criterion hot-path baselines; generated RPC compile smoke exists as an ignored `rozectl` test; needs more proto fixture coverage. |
 | OpenAPI generation | beta | Produces OpenAPI 3 documents; validator constraint projection still has known gaps. |
 | TS/JS/Dart SDK generation | beta | Covers route/path/query/header/body generation; needs richer error/interceptor/retry/timeout support. |
 | HTTP middleware | beta | Covers trace, recover, metrics, CORS, timeout, max connections, shedding, gunzip, and body limit. Route rate-limit and breaker state use DashMap for concurrent hot paths; needs more end-to-end service tests. |
@@ -29,12 +29,13 @@ Status legend:
 | Lifecycle/bootstrap | scaffold | Several helpers exist, but HTTP/RPC/consumer/job shutdown ordering is not yet one unified lifecycle. |
 | DB/ORM/model generation | beta | Toasty is the default generated SQL model scaffold; SeaORM is optional with `--orm sea-orm`. `model inspect` supports sqlite, postgres, mysql, and mongo; Mongo inspection samples documents, maps `_id`, captures index metadata, and emits single-field plus compound-index helpers. |
 | Cache | beta | Redis cache helpers cover cache-aside, negative cache, TTL jitter, and singleflight loading. `roze-local-cache` uses Moka for in-process TTL/capacity eviction and hit/miss statistics, with Criterion baselines for async insert/get/get-or-insert. `roze-singleflight` uses DashMap for key lookup and has Criterion baselines for unique-key, cached-key, and reset paths. |
-| Search generation | beta | `rozectl search generate/inspect` supports Elasticsearch, OpenSearch, and Meilisearch with generated `src/search` document/repository modules backed by `roze-search` health/index/delete/search calls. Elasticsearch/OpenSearch inspect reads mappings; Meilisearch inspect reads settings/index metadata and samples documents for field inference. |
+| Search generation | beta | `rozectl search generate/inspect` supports Elasticsearch, OpenSearch, and Meilisearch with generated `src/search` document/repository modules backed by `roze-search` health/index/delete/search calls. Elasticsearch/OpenSearch inspect reads mappings; Meilisearch inspect reads settings/index metadata and samples documents for field inference. Generated search modules are included in REST compile smoke. |
 | Transactions/outbox/DTM | scaffold | TCC/Saga/outbox/inbox primitives exist; needs full HTTP + DB transaction + outbox + MQ + RPC examples. |
 | Auth/JWT/permission/session | beta | JWT, RBAC, tenant, ABAC, and in-memory session primitives exist. Session lookup uses DashMap and has Criterion baselines for upsert/get paths; needs a unified security model, OpenAPI permission declarations, key rotation, and test templates. |
 | WebSocket | beta | In-memory WebSocket hub primitives exist. Session lookup uses DashMap and has Criterion baselines for register/get/disconnect paths; needs broader gateway/app integration coverage. |
 | Observability | beta | tracing, metrics, Prometheus, OpenTelemetry, gateway metrics, and queue event metrics exist. Labeled metric state uses DashMap for concurrent hot paths, with Criterion baselines for write/render paths; needs broader dashboards and query examples. |
 | Docker/Kubernetes generation | beta | Generator commands emit production-oriented Dockerfiles, Kubernetes manifests, and Helm charts with offline validation. |
+| Production smoke | beta | `scripts/production-smoke.sh` runs formatting checks, `rozectl` tests, generated REST/RPC compile smoke, core runtime tests, and app checks. `--with-compose` starts the real dependency profile for Etcd, Consul, Kafka, NATS, Redis, Postgres, MySQL, Elasticsearch, OpenSearch, and Meilisearch. |
 
 ## Production-Ready Criteria
 

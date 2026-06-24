@@ -3642,7 +3642,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 fields.push(ModelField {
                     name: field_name.to_string(),
                     source_name: None,
-                    ty: field_ty.to_string(),
+                    ty: normalize_dsl_model_type(field_ty),
                     auto_increment: false,
                     default_value: None,
                     comment: None,
@@ -3715,6 +3715,39 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
     }
 
     Ok(models)
+}
+
+fn normalize_dsl_model_type(ty: &str) -> String {
+    let trimmed = ty.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("Option<")
+        .and_then(|value| value.strip_suffix('>'))
+    {
+        return format!("Option<{}>", normalize_dsl_model_type(inner));
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix("Vec<")
+        .and_then(|value| value.strip_suffix('>'))
+    {
+        return format!("Vec<{}>", normalize_dsl_model_type(inner));
+    }
+    if let Some(inner) = trimmed.strip_prefix("[]") {
+        return format!("Vec<{}>", normalize_dsl_model_type(inner));
+    }
+
+    match trimmed.to_ascii_lowercase().as_str() {
+        "string" | "str" | "text" | "varchar" | "char" | "uuid" | "datetime" | "timestamp"
+        | "date" | "time" => "String".to_string(),
+        "bool" | "boolean" => "bool".to_string(),
+        "int" | "integer" => "i32".to_string(),
+        "bigint" => "i64".to_string(),
+        "uint" | "unsigned" => "u32".to_string(),
+        "ulong" => "u64".to_string(),
+        "float" => "f32".to_string(),
+        "double" | "decimal" | "numeric" => "f64".to_string(),
+        "json" | "jsonb" | "value" => "serde_json::Value".to_string(),
+        _ => trimmed.to_string(),
+    }
 }
 
 fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {

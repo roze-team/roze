@@ -22,7 +22,7 @@
 | 认证授权 | 已完成基础版 | JWT, RBAC, tenant, ABAC attribute rule |
 | ORM 默认契约 | 已完成基础版 | Toasty 默认生成；`--orm sea-orm` 可切换 SeaORM，通用 page/sort/filter/tenant/audit/soft-delete |
 | 健康探针 | 已完成基础版 | liveness/readiness/startup probe report |
-| 集成测试环境 | 已完成骨架 | `docker-compose.integration.yml` |
+| 集成测试环境 | 已完成生产闭环入口 | `docker-compose.integration.yml`, `scripts/production-smoke.sh` |
 
 ## RPC 错误 metadata
 
@@ -71,6 +71,16 @@ docker compose -f docker-compose.integration.yml up -d
 - Kafka/NATS: MQ adapter smoke test
 - Redis: 缓存/限流/幂等状态
 - Postgres/MySQL: Toasty/SQL adapter smoke test
+- Elasticsearch/OpenSearch/Meilisearch: search runtime 与 `rozectl search inspect/generate` 验收
+
+生产闭环 smoke：
+
+```bash
+bash scripts/production-smoke.sh
+bash scripts/production-smoke.sh --with-compose
+```
+
+`--with-compose` 会先启动真实依赖；默认只运行本地编译、生成器、crate 级测试和 generated project compile smoke。
 
 ## 后续验收要求
 

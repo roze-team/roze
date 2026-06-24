@@ -306,6 +306,7 @@ pub fn render_handler_files(spec: &ApiSpec) -> Vec<(String, String, String)> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn render_middleware(spec: &ApiSpec) -> String {
     let custom = custom_middlewares(spec);
     let mut out = String::from("#![allow(dead_code, unused_imports, unused_variables)]\n\n");
@@ -683,7 +684,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
 
     out.push_str(&format!(
-        "pub(super) async fn {handler}({params}) -> Result<ApiResponse<{response}>, RozeError> {{\n",
+        "pub(crate) async fn {handler}({params}) -> Result<ApiResponse<{response}>, RozeError> {{\n",
         handler = handler,
         params = params.join(", "),
         response = route.response
@@ -840,7 +841,7 @@ fn render_default_impls(spec: &ApiSpec) -> String {
 fn render_partial_struct(name: &str, fields: &[&Field]) -> String {
     let mut out = String::new();
     out.push_str("#[derive(Debug, Clone, Deserialize, Validate)]\n");
-    out.push_str(&format!("struct {} {{\n", name));
+    out.push_str(&format!("pub(crate) struct {} {{\n", name));
     for field in fields {
         if let Some(rename) = serde_rename(field) {
             out.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));

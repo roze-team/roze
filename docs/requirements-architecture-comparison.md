@@ -34,6 +34,9 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 - 已实现：`roze-metrics::MetricRegistry` 使用 DashMap 存储带 label 的指标状态，降低请求/队列指标记录的全局锁竞争。
 - 已实现：`roze-session`、`roze-ws`、`roze-eventbus`、`roze-mq` 内存态高频索引使用 DashMap/DashSet；MQ DLQ 顺序队列保留显式锁。
 - 已实现：Criterion 性能基线，覆盖 `roze-metrics` registry、`roze-local-cache` async cache、`roze-singleflight` request coalescing、`roze-rpc` memory registry、session/WebSocket/eventbus/MQ 内存态热路径。
+- 已实现：generated REST/RPC project compile smoke ignored tests，覆盖 REST + model + search 组合项目和 RPC 生成项目。
+- 已实现：真实依赖 integration compose 覆盖 Kafka、NATS、Redis、Postgres、MySQL、Elasticsearch、OpenSearch、Meilisearch、Etcd、Consul。
+- 已实现：`scripts/production-smoke.sh` 作为 production example/smoke 入口，串起格式化、生成器、generated compile smoke、核心 crate 和 app check。
 - 已处理：README、usage 文档、项目规范、成熟度矩阵和本文件已同步搜索/模型能力。
 
 ## 覆盖度口径
@@ -60,11 +63,11 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | 4 | 统一治理模型 | 中 | `roze-config`, `roze-middleware`, `roze-rpc`, `roze-gateway` | Gateway 已继承 timeout/retry/rate/breaker；HTTP route 和 RPC method 的 rate-limit/breaker 状态已使用 DashMap 优化热路径并发；MQ/Job 还需要同一 schema、同一指标标签、可选持久化 breaker/rate limiter。 |
 | 5 | 配置中心 | 中高 | `crates/roze-config`, `docs/contracts/config-center.md` | Etcd watch、Env/File fallback、diff/version、section event、失败回滚已具备；仍需 listener timeout/failure isolation、灰度、签名、审计操作者模型。 |
 | 6 | 可观测性 | 中 | `roze-log`, `roze-metrics`, `roze-prometheus`, `roze-opentelemetry`, `deploy/observability` | tracing/metrics/Prometheus/OTel 已有；带 label 的 metric registry 已使用 DashMap 优化并发记录，并有 Criterion 基准覆盖写入和 render；已提供 Gateway Prometheus scrape 示例、recording rules、alert rules、Grafana dashboard 和 SLO 模板；增强方向是 trace 示例、日志查询示例和更完整 dashboard pack。 |
-| 7 | 健康检查和生命周期 | 中 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report 和 REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；依赖 readiness、Gateway/RPC 标准入口、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
+| 7 | 健康检查和生命周期 | 中 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report 和 REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；`production-smoke.sh` 已纳入 health/bootstrap/shutdown crate 验收；依赖 readiness、Gateway/RPC 标准入口、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
 | 8 | 安全能力 | 中 | `roze-jwt`, `roze-auth`, `roze-permission`, Gateway auth | JWT/RBAC/tenant/ABAC primitives 已有；缺统一安全模型、OIDC/OAuth2、mTLS、permission 注解到 OpenAPI/SDK/test、key rotation、审计日志模板。 |
 | 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；in-memory topic/offset/idempotency/eventbus topic 索引已使用 DashMap/DashSet 并有 Criterion 基线；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
 | 10 | 数据库、缓存、事务、搜索 | 中高 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-local-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm`, `roze-search`, `rozectl model`, `rozectl search` | SQL/Mongo model generate/inspect、Redis cache-aside、Moka 本地缓存、singleflight、TCC/Saga/outbox/inbox primitives、Elasticsearch/OpenSearch/Meilisearch search generate/inspect 已有；本地缓存和 singleflight 已有 Criterion 基准覆盖；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
-| 11 | 部署和运维 | 中高 | `rozectl docker`, `rozectl kube`, `rozectl helm`, `rozectl dev`, `rozectl doctor`, `docker-compose.integration.yml` | 已实现 Dockerfile、Kubernetes、Helm chart 生成与 validate，已实现本机 doctor 和 docker compose dev up/down/status；增强方向是更多生产验收脚本和平台级发布集成。 |
+| 11 | 部署和运维 | 中高 | `rozectl docker`, `rozectl kube`, `rozectl helm`, `rozectl dev`, `rozectl doctor`, `docker-compose.integration.yml`, `scripts/production-smoke.sh` | 已实现 Dockerfile、Kubernetes、Helm chart 生成与 validate，本机 doctor、docker compose dev up/down/status、真实依赖 integration compose 和 production smoke 入口；增强方向是平台级发布集成。 |
 | 12 | CLI/生成器/AI 友好 | 中高 | `rozectl api/rpc/model/search/openapi/client/docker/kube/helm/diff/doctor/dev/doc`, 稳定生成目录 | 已实现文件级 `diff` 预览、本机 `doctor` 检查、`SERVICE.md`/`AI_CONTEXT.md` 生成、SQL/Mongo model inspect 和 Elasticsearch/OpenSearch/Meilisearch search inspect；增强方向是 `stream gen`、`ARCHITECTURE.md`/`DEPENDENCIES.md` 自动生成。 |
 
 ## 功能规格清单
@@ -222,7 +225,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 ### 当前最容易误判的部分
 
 1. “已有 crate”不等于“生产稳定”：生命周期、部署、DTM、事务链路示例仍需要按 scaffold 看待。
-2. “生成器能生成”不等于“可安全升级”：文件级 `diff` 已实现；语义 diff、更多 repeated generation tests、generated-project compile tests 属于增强方向。
+2. “生成器能生成”不等于“可安全升级”：文件级 `diff` 和 REST/RPC generated compile smoke 已实现；语义 diff、更多 repeated generation tests 和更多边界 fixture 属于增强方向。
 3. “有 metrics/tracing crate”不等于“可观测闭环”：还缺 dashboard、alert、SLO、trace/log 查询示例和标签一致性验证。
 4. “有 JWT/RBAC primitives”不等于“安全模型完整”：还缺契约注解、OpenAPI 投影、测试骨架、key rotation、审计日志和对象级授权模板。
 
@@ -375,7 +378,7 @@ AI 友好的重点不是“给 AI 写提示词”，而是让工程边界机器�
 P0 不应该继续扩模块，而应该补“可信闭环”。
 
 1. 锁定文档和 CLI 行为一致性：README/成熟度矩阵承诺 Toasty 是默认 ORM，CLI 默认值和测试必须持续覆盖这一契约。
-2. 已实现多条生成器主路径测试：REST、RPC、model、search、OpenAPI、SDK、Docker/Kube/Helm 命令解析和核心生成逻辑已有覆盖；增强方向是更多 generated-project compile tests。
+2. 已实现多条生成器主路径测试：REST、RPC、model、search、OpenAPI、SDK、Docker/Kube/Helm 命令解析、核心生成逻辑、REST+model+search 组合 compile smoke 和 RPC compile smoke 已有覆盖；增强方向是更多边界 fixture。
 3. 健康接口：REST 生成服务已默认暴露 `/healthz`、`/readyz`、`/startupz`、`/metrics`；Gateway/RPC 和依赖 readiness 属于增强方向。
 4. 收口 lifecycle：统一 SIGINT/SIGTERM、shutdown timeout、background task manager、HTTP/RPC/MQ/Job 关闭顺序。
 5. 补 Gateway/Config/MQ smoke tests：rewrite、timeout、auth、rate、breaker、retry、fallback、hot reload、DLQ replay。
@@ -406,7 +409,7 @@ P0 不应该继续扩模块，而应该补“可信闭环”。
 交付物：
 
 1. `rozectl diff`：对 API/RPC/model 生成结果做文件级预览。（已实现 MVP）
-2. generated project tests：REST、RPC、model、search、OpenAPI、SDK、Docker/Kube/Helm 主路径已有生成器覆盖；完整临时项目 compile tests 属于增强方向。
+2. generated project tests：REST、RPC、model、search、OpenAPI、SDK、Docker/Kube/Helm 主路径已有生成器覆盖；REST+model+search 组合临时项目和 RPC 临时项目 compile smoke 已落地。
 3. ownership preservation tests：确认 `src/logic/**`、自定义 middleware、`config.yaml` 不被 `--update` 覆盖。
 4. `rozectl contract check`：对 `.api` 前后版本做 breaking change 检查。（已实现 MVP）
 
@@ -568,7 +571,7 @@ AI Collaboration Layer
 
 1. 已实现：`rozectl diff`、`rozectl doctor`、`SERVICE.md`/`AI_CONTEXT.md` 生成。
 2. 已实现：REST/RPC/model/search/OpenAPI/SDK/Docker/Kube/Helm 生成器主路径覆盖。
-3. 增强方向：更完整 generated-project compile tests。
+3. 增强方向：更多 generated-project 边界 fixture 和重复生成组合用例。
 4. 增强方向：Gateway/RPC probes、依赖 readiness 和 lifecycle runtime。
 5. 增强方向：Gateway/Config/MQ smoke tests。
 

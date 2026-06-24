@@ -31,6 +31,18 @@ covers async insert/get/get-or-insert, `roze-singleflight` covers unique-key,
 cached-key, and reset paths, `roze-rpc` covers memory registry
 register/discover/deregister, and session/WebSocket/eventbus/MQ in-memory
 stores cover their lookup and publish/register hot paths.
+
+Production smoke starts from one command:
+
+```bash
+bash scripts/production-smoke.sh
+bash scripts/production-smoke.sh --with-compose
+```
+
+The smoke path includes generated REST/RPC compile tests, core runtime crate
+tests, and app-level checks. `--with-compose` starts the integration profile for
+Etcd, Consul, Kafka, NATS, Redis, Postgres, MySQL, Elasticsearch, OpenSearch,
+and Meilisearch.
 - `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
 - `apps/rozectl`: code generation for API, RPC, model, search, OpenAPI, SDK, Docker, and Kubernetes assets.
 - `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.
