@@ -383,13 +383,16 @@ impl Registry for ConsulRegistry {
         let (address, port) = split_addr(&instance.addr)?;
         let service_id = consul_instance_id(&instance.name, &instance.addr);
         let endpoint = first_registry_endpoint(self.endpoints(), "http://127.0.0.1:8500");
+        let weight = instance.weight.max(1);
+        let mut metadata = instance.metadata;
+        metadata.insert("weight".to_string(), weight.to_string());
         let body = serde_json::json!({
             "ID": service_id,
             "Name": instance.name,
             "Address": address,
             "Port": port,
-            "Meta": instance.metadata,
-            "Tags": [format!("weight={}", instance.weight.max(1))],
+            "Meta": metadata,
+            "Tags": [format!("weight={weight}")],
             "Check": {
                 "TTL": format!("{}s", self.ttl_seconds),
                 "DeregisterCriticalServiceAfter": format!("{}s", self.ttl_seconds.saturating_mul(3)),
@@ -1220,5 +1223,81 @@ mod tests {
         let watched = resolver.discover("user").await.expect("discover");
         assert_eq!(watched[0].addr, "127.0.0.1:8081");
         resolver.invalidate("user");
+    }
+
+    fn external_registry_config(kind: RegistryKind, endpoint: String) -> RegistryConfig {
+        RegistryConfig {
+            kind,
+            endpoints: vec![endpoint],
+            ttl_seconds: 10,
+            renew_interval_secs: 2,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_ETCD_ENDPOINT, for example http://127.0.0.1:12379"]
+    async fn etcd_registry_registers_discovers_and_deregisters_against_real_service() {
+        let endpoint =
+            std::env::var("ROZE_TEST_ETCD_ENDPOINT").expect("ROZE_TEST_ETCD_ENDPOINT is required");
+        let config = external_registry_config(RegistryKind::Etcd, endpoint);
+        let registry = EtcdRegistry::new(&config);
+        let name = format!("roze-test-etcd-{}", std::process::id());
+        let addr = "127.0.0.1:18080";
+        let mut instance = ServiceInstance::new(&name, addr);
+        instance.weight = 3;
+        instance
+            .metadata
+            .insert("version".to_string(), "integration".to_string());
+
+        registry.register(instance).await.expect("register");
+        let instances = registry.discover(&name).await.expect("discover");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].addr, addr);
+        assert_eq!(instances[0].weight, 3);
+        assert_eq!(
+            instances[0].metadata.get("version").map(String::as_str),
+            Some("integration")
+        );
+
+        registry.deregister(&name, addr).await.expect("deregister");
+        let instances = registry
+            .discover(&name)
+            .await
+            .expect("discover after deregister");
+        assert!(instances.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_CONSUL_ENDPOINT, for example http://127.0.0.1:18500"]
+    async fn consul_registry_registers_discovers_and_deregisters_against_real_service() {
+        let endpoint = std::env::var("ROZE_TEST_CONSUL_ENDPOINT")
+            .expect("ROZE_TEST_CONSUL_ENDPOINT is required");
+        let config = external_registry_config(RegistryKind::Consul, endpoint);
+        let registry = ConsulRegistry::new(&config);
+        let name = format!("roze-test-consul-{}", std::process::id());
+        let addr = "127.0.0.1:18081";
+        let mut instance = ServiceInstance::new(&name, addr);
+        instance.weight = 5;
+        instance
+            .metadata
+            .insert("version".to_string(), "integration".to_string());
+
+        registry.register(instance).await.expect("register");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let instances = registry.discover(&name).await.expect("discover");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].addr, addr);
+        assert_eq!(instances[0].weight, 5);
+        assert_eq!(
+            instances[0].metadata.get("version").map(String::as_str),
+            Some("integration")
+        );
+
+        registry.deregister(&name, addr).await.expect("deregister");
+        let instances = registry
+            .discover(&name)
+            .await
+            .expect("discover after deregister");
+        assert!(instances.is_empty());
     }
 }

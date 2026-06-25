@@ -19,8 +19,12 @@ roze-cache = { path = "../../crates/roze-cache" }
 roze-context = { path = "../../crates/roze-context" }
 roze-db = { path = "../../crates/roze-db" }
 roze-mongo = { path = "../../crates/roze-mongo" }
+roze-kafka = { path = "../../crates/roze-kafka", features = ["rdkafka"] }
+roze-mq = { path = "../../crates/roze-mq" }
+roze-nats = { path = "../../crates/roze-nats" }
 roze-openapi = { path = "../../crates/roze-openapi" }
 roze-result = { path = "../../crates/roze-result" }
+roze-search = { path = "../../crates/roze-search" }
 roze-validation = { path = "../../crates/roze-validation" }
 roze-rpc = { path = "../../crates/roze-rpc" }
 serde.workspace = true

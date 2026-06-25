@@ -36,7 +36,9 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 - 已实现：Criterion 性能基线，覆盖 `roze-metrics` registry、`roze-local-cache` async cache、`roze-singleflight` request coalescing、`roze-rpc` memory registry、session/WebSocket/eventbus/MQ 内存态热路径。
 - 已实现：generated REST/RPC project compile smoke ignored tests，覆盖 REST + model + search 组合项目和 RPC 生成项目。
 - 已实现：真实依赖 integration compose 覆盖 Kafka、NATS、Redis、Postgres、MySQL、Elasticsearch、OpenSearch、Meilisearch、Etcd、Consul。
+- 已实现：`apps/roze-example` 项目级 `external_verify` 使用 Roze 运行时组件真实连接 Postgres、MySQL、Redis、Kafka、NATS、MongoDB、Elasticsearch、OpenSearch、Meilisearch、Etcd、Consul，并由 `scripts/roze-project-external-smoke.sh` 一键启动、验证、清理。
 - 已实现：`scripts/production-smoke.sh` 作为 production example/smoke 入口，串起格式化、生成器、generated compile smoke、核心 crate 和 app check。
+- 已实现：`scripts/rozectl-smoke.sh` 覆盖 `rozectl` 命令面，包含 API/RPC/model/search/template/diff/contract/mock/test/doc/openapi/docker/kube/helm/doctor/dev。
 - 已处理：README、usage 文档、项目规范、成熟度矩阵和本文件已同步搜索/模型能力。
 
 ## 覆盖度口径
@@ -59,15 +61,15 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | --- | --- | --- | --- | --- |
 | 1 | API/RPC 契约优先 | 高 | `apps/rozectl`, `.api`, proto, REST/RPC generator, OpenAPI, TS/JS/Dart SDK | 已实现 REST/RPC/OpenAPI/TS/JS/Dart SDK、`rozectl contract check`、`rozectl mock gen`、`rozectl test gen`；增强方向是 OpenAPI validator 完整投影、SDK error/interceptor/retry/timeout。 |
 | 2 | Gateway 网关 | 中高 | `crates/roze-gateway`, `apps/roze-gateway`, `docs/contracts/gateway.md` | 已有路由、rewrite、auth、rate/breaker、retry、fallback、registry upstream、canary、health/outlier、hot reload、WebSocket upgrade 代理、SSE 流式代理；缺更完整 app 级示例、deploy smoke test、A/B、流量镜像。 |
-| 3 | 服务注册与发现 | 中高 | `roze-rpc::registry`, cached resolver, etcd/consul/dns/memory | memory registry、DNS、etcd、Consul、watch、cached resolver 已具备；memory registry 已使用 DashMap 优化并发注册/发现路径；增强方向是失败模式测试、生产配置示例、Gateway/RPC/Job/MQ consumer 复用边界文档化。 |
+| 3 | 服务注册与发现 | 中高 | `roze-rpc::registry`, cached resolver, etcd/consul/dns/memory | memory registry、DNS、etcd、Consul、watch、cached resolver 已具备；memory registry 已使用 DashMap 优化并发注册/发现路径；etcd/Consul 注册、发现、注销已有真实服务 ignored integration test，并纳入 `roze-example external_verify` 项目级验收；增强方向是 watch 断线/续约失败故障注入、Gateway/RPC/Job/MQ consumer 复用边界文档化。 |
 | 4 | 统一治理模型 | 中 | `roze-config`, `roze-middleware`, `roze-rpc`, `roze-gateway` | Gateway 已继承 timeout/retry/rate/breaker；HTTP route 和 RPC method 的 rate-limit/breaker 状态已使用 DashMap 优化热路径并发；MQ/Job 还需要同一 schema、同一指标标签、可选持久化 breaker/rate limiter。 |
 | 5 | 配置中心 | 中高 | `crates/roze-config`, `docs/contracts/config-center.md` | Etcd watch、Env/File fallback、diff/version、section event、失败回滚已具备；仍需 listener timeout/failure isolation、灰度、签名、审计操作者模型。 |
 | 6 | 可观测性 | 中 | `roze-log`, `roze-metrics`, `roze-prometheus`, `roze-opentelemetry`, `deploy/observability` | tracing/metrics/Prometheus/OTel 已有；带 label 的 metric registry 已使用 DashMap 优化并发记录，并有 Criterion 基准覆盖写入和 render；已提供 Gateway Prometheus scrape 示例、recording rules、alert rules、Grafana dashboard 和 SLO 模板；增强方向是 trace 示例、日志查询示例和更完整 dashboard pack。 |
-| 7 | 健康检查和生命周期 | 中 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report 和 REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；`production-smoke.sh` 已纳入 health/bootstrap/shutdown crate 验收；依赖 readiness、Gateway/RPC 标准入口、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
+| 7 | 健康检查和生命周期 | 中高 | `roze-health`, `roze-bootstrap`, `roze-shutdown`, REST templates | probe report、`HealthRegistry`、startup/ready/draining phase、REST 标准 `/healthz`、`/readyz`、`/startupz`、`/metrics` 入口已有；生成 REST/RPC 项目会把已连接依赖注册进 readiness；`production-smoke.sh` 已纳入 health/bootstrap/shutdown crate 验收；Gateway/RPC 标准入口、协议级依赖 ping、HTTP/RPC/MQ/Job 统一启动关闭顺序还没收口。 |
 | 8 | 安全能力 | 中 | `roze-jwt`, `roze-auth`, `roze-permission`, Gateway auth | JWT/RBAC/tenant/ABAC primitives 已有；缺统一安全模型、OIDC/OAuth2、mTLS、permission 注解到 OpenAPI/SDK/test、key rotation、审计日志模板。 |
-| 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；in-memory topic/offset/idempotency/eventbus topic 索引已使用 DashMap/DashSet 并有 Criterion 基线；缺真实 broker 集成覆盖、生产 replay/purge 示例、标准事件 envelope 完整化。 |
-| 10 | 数据库、缓存、事务、搜索 | 中高 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-local-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm`, `roze-search`, `rozectl model`, `rozectl search` | SQL/Mongo model generate/inspect、Redis cache-aside、Moka 本地缓存、singleflight、TCC/Saga/outbox/inbox primitives、Elasticsearch/OpenSearch/Meilisearch search generate/inspect 已有；本地缓存和 singleflight 已有 Criterion 基准覆盖；缺 DB transaction + outbox + MQ + RPC 完整示例和边界测试。 |
-| 11 | 部署和运维 | 中高 | `rozectl docker`, `rozectl kube`, `rozectl helm`, `rozectl dev`, `rozectl doctor`, `docker-compose.integration.yml`, `scripts/production-smoke.sh` | 已实现 Dockerfile、Kubernetes、Helm chart 生成与 validate，本机 doctor、docker compose dev up/down/status、真实依赖 integration compose 和 production smoke 入口；增强方向是平台级发布集成。 |
+| 9 | MQ/EventBus/可靠事件 | 中高 | `roze-mq`, `roze-kafka`, `roze-nats`, `roze-eventbus`, outbox/inbox primitives | publish/subscribe、retry、DLQ、stats、NATS JetStream、Kafka ack/nack 已有；in-memory topic/offset/idempotency/eventbus topic 索引已使用 DashMap/DashSet 并有 Criterion 基线；`roze-example external_verify` 已用真实 Kafka/NATS 发布消息；增强方向是生产 replay/purge 示例、标准事件 envelope 完整化。 |
+| 10 | 数据库、缓存、事务、搜索 | 中高 | `roze-db`, `roze-orm`, `roze-sqlx`, `roze-cache`, `roze-local-cache`, `roze-redis`, `roze-singleflight`, `roze-transaction`, `roze-dtm`, `roze-search`, `rozectl model`, `rozectl search` | SQL/Mongo model generate/inspect、Redis cache-aside、Moka 本地缓存、singleflight、TCC/Saga/outbox/inbox primitives、Elasticsearch/OpenSearch/Meilisearch search generate/inspect 已有；`roze-example external_verify` 已用 Roze 组件真实连接 Postgres/MySQL/Mongo/Redis/search 并执行最小读写；增强方向是 DB transaction + outbox + MQ + RPC 完整业务示例和边界测试。 |
+| 11 | 部署和运维 | 中高 | `rozectl docker`, `rozectl kube`, `rozectl helm`, `rozectl dev`, `rozectl doctor`, `docker-compose.integration.yml`, `docker/docker-compose.yml`, `scripts/production-smoke.sh`, `scripts/roze-project-external-smoke.sh` | 已实现 Dockerfile、Kubernetes、Helm chart 生成与 validate，本机 doctor、docker compose dev up/down/status、真实依赖 compose、production smoke 和 Roze 项目级外部依赖 smoke；增强方向是平台级发布集成。 |
 | 12 | CLI/生成器/AI 友好 | 中高 | `rozectl api/rpc/model/search/openapi/client/docker/kube/helm/diff/doctor/dev/doc`, 稳定生成目录 | 已实现文件级 `diff` 预览、本机 `doctor` 检查、`SERVICE.md`/`AI_CONTEXT.md` 生成、SQL/Mongo model inspect 和 Elasticsearch/OpenSearch/Meilisearch search inspect；增强方向是 `stream gen`、`ARCHITECTURE.md`/`DEPENDENCIES.md` 自动生成。 |
 
 ## 功能规格清单
@@ -149,8 +151,8 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | 功能 | MVP | 增强项 | 推荐落点 | 验收 |
 | --- | --- | --- | --- | --- |
-| 标准 probes | REST 生成服务已有 `/healthz`、`/readyz`、`/startupz`、`/metrics` | dependency details、JSON report、Gateway/RPC 模板统一 | `roze-health`, templates | K8s probe 可直接使用。 |
-| readiness | DB/Redis/MQ/RPC/config/background tasks | 权重 readiness、drain 状态 | `roze-health` | 依赖不可用时实例不接流量。 |
+| 标准 probes | 已实现：REST 生成服务已有 `/healthz`、`/readyz`、`/startupz`、`/metrics`，并返回结构化 `ProbeReport` | Gateway/RPC 模板统一、协议级依赖 ping | `roze-health`, templates | K8s probe 可直接使用。 |
+| readiness | 已实现基础版：`HealthRegistry` 支持动态检查、startup/ready/draining phase，生成 `ServiceContext` 会注册已连接 DB/Mongo/Redis/NATS 依赖 | 权重 readiness、RPC/config/background tasks、协议级 ping | `roze-health` | 依赖不可用时实例不接流量。 |
 | bootstrap | 统一启动 HTTP/RPC/MQ/Job | component dependency graph | `roze-bootstrap` | 各 component 按顺序启动。 |
 | shutdown | SIGINT/SIGTERM、deadline、graceful shutdown | drain mode、preStop hook、shutdown phases | `roze-shutdown` | 终止后不接新请求并在 deadline 内退出。 |
 | background tasks | task manager、cancel token | restart policy、task health | `roze-bootstrap` | 后台任务失败会影响 readiness 或报警。 |
@@ -325,10 +327,10 @@ Roze 现状：
 
 当前状态和差距：
 
-- probe report 有基础。
-- REST 生成服务已有 `/healthz`、`/readyz`、`/startupz`、`/metrics` 默认入口。
-- readiness/startup 当前是进程级 OK，依赖检查还需要接入 DB、Redis、MQ、RPC 下游、配置加载和后台任务状态。
-- Gateway/RPC 的标准接口、依赖检查、K8s probe 模板还需要统一。
+- `roze-health` 已有 `ProbeReport` 和 `HealthRegistry`，支持 startup/ready/draining phase、静态检查和动态 dependency check。
+- REST 生成服务已有 `/healthz`、`/readyz`、`/startupz`、`/metrics` 默认入口，并返回结构化 probe report。
+- 生成 `ServiceContext` 会把启动时已连接的 DB、Mongo、Redis、NATS 注册进 readiness。
+- 协议级 ping、RPC/Gateway 标准 probe 入口、配置加载/后台任务状态和 HTTP/RPC/MQ/Job 统一关闭顺序还需要继续收口。
 
 ### 5. 可靠事件
 

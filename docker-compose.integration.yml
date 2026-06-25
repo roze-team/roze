@@ -70,7 +70,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: roze
     ports:
-      - "5432:5432"
+      - "${ROZE_POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d roze"]
       interval: 5s
@@ -83,9 +83,19 @@ services:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: roze
     ports:
-      - "3306:3306"
+      - "${ROZE_MYSQL_PORT:-3306}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "${ROZE_MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -97,7 +107,7 @@ services:
       xpack.security.enabled: "false"
       ES_JAVA_OPTS: "-Xms512m -Xmx512m"
     ports:
-      - "9200:9200"
+      - "${ROZE_ELASTICSEARCH_PORT:-9200}:9200"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
       interval: 10s
@@ -112,7 +122,7 @@ services:
       OPENSEARCH_INITIAL_ADMIN_PASSWORD: "RozeAdmin123!"
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
     ports:
-      - "9201:9200"
+      - "${ROZE_OPENSEARCH_PORT:-9201}:9200"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
       interval: 10s
@@ -126,7 +136,7 @@ services:
       MEILI_ENV: development
       MEILI_MASTER_KEY: roze_meili_master_key
     ports:
-      - "7700:7700"
+      - "${ROZE_MEILISEARCH_PORT:-7700}:7700"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7700/health >/dev/null"]
       interval: 5s

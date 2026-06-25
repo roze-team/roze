@@ -102,6 +102,6 @@ generated services that also depend on `roze-db`.
 The documentation in this folder should stay aligned with the generator tests:
 
 ```bash
-cargo test -p rozectl -- --skip postgres --skip mysql
+cargo test -p rozectl -- --skip postgres --skip mysql --skip mongo
 cargo test --workspace
 ```

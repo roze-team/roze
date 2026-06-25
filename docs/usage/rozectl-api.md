@@ -142,6 +142,20 @@ Kafka, NATS, etcd, Consul, or database smoke checks. Missing optional tools are
 reported as `WARN`; missing config files, unavailable ports, or unreachable TCP
 targets are reported as `FAIL` and return a non-zero exit code.
 
+For a project-level external dependency check, run the Roze example verifier:
+
+```bash
+scripts/roze-project-external-smoke.sh
+```
+
+That script starts `docker/docker-compose.yml`, waits for Postgres, MySQL,
+Redis, Kafka, NATS, MongoDB, Elasticsearch, OpenSearch, Meilisearch, Etcd, and
+Consul to become healthy, then runs `cargo run -p roze-example --bin
+external_verify`. The verifier uses Roze runtime components instead of raw
+container probes: `roze-db`, `roze-cache`, `roze-kafka`, `roze-nats`,
+`roze-mongo`, `roze-search`, and `roze-rpc::registry`. On success it prints one
+`PASS` line for each dependency and cleans up the Docker stack.
+
 ## Generated REST layout
 
 ```text
@@ -183,8 +197,12 @@ Generated REST services expose standard operational endpoints:
 - `GET /metrics` for Prometheus metrics
 - `GET /openapi.json` for OpenAPI
 
-The default readiness and startup handlers report OK until dependency-specific
-checks are wired by the application or future lifecycle helpers.
+The default health handlers return `roze_health::ProbeReport` inside the
+standard `ApiResponse` wrapper. Generated `ServiceContext` owns a
+`roze_health::HealthRegistry`; dependency clients that are created during
+startup are registered as readiness checks, and the registry tracks startup,
+ready, and draining phases. Applications can add more dynamic checks with
+`HealthRegistry::register_dependency` or `HealthRegistry::register_check`.
 
 Generate client SDKs:
 
@@ -754,7 +772,7 @@ Generated Toasty and SeaORM templates have ignored compile-smoke tests that
 create temporary crates and run `cargo check --offline`:
 
 ```bash
-cargo test -p rozectl -- --ignored --skip postgres --skip mysql
+cargo test -p rozectl -- --ignored --skip postgres --skip mysql --skip mongo
 ```
 
 Mongo model generation uses the standard model generator:

@@ -3105,13 +3105,13 @@ async fn inspect_mysql_table(
     let columns = sqlx::query(
         r#"
         SELECT
-            column_name,
-            data_type,
-            column_type,
-            is_nullable,
-            column_default,
-            extra,
-            column_comment
+            column_name AS column_name,
+            data_type AS data_type,
+            column_type AS column_type,
+            is_nullable AS is_nullable,
+            column_default AS column_default,
+            extra AS extra,
+            column_comment AS column_comment
         FROM information_schema.columns
         WHERE table_schema = ? AND table_name = ?
         ORDER BY ordinal_position
@@ -3128,7 +3128,7 @@ async fn inspect_mysql_table(
 
     let primary_rows = sqlx::query(
         r#"
-        SELECT column_name
+        SELECT column_name AS column_name
         FROM information_schema.key_column_usage
         WHERE table_schema = ? AND table_name = ? AND constraint_name = 'PRIMARY'
         ORDER BY ordinal_position
@@ -3151,13 +3151,13 @@ async fn inspect_mysql_table(
 
     let mut inspected = Vec::new();
     for row in columns {
-        let name: String = row.try_get("column_name")?;
-        let data_type: String = row.try_get("data_type")?;
-        let column_type: String = row.try_get("column_type")?;
-        let nullable: String = row.try_get("is_nullable")?;
-        let default_value: Option<String> = row.try_get("column_default")?;
-        let extra: String = row.try_get("extra")?;
-        let comment: Option<String> = row.try_get("column_comment")?;
+        let name = mysql_string(&row, "column_name")?;
+        let data_type = mysql_string(&row, "data_type")?;
+        let column_type = mysql_string(&row, "column_type")?;
+        let nullable = mysql_string(&row, "is_nullable")?;
+        let default_value = mysql_optional_string(&row, "column_default")?;
+        let extra = mysql_string(&row, "extra")?;
+        let comment = mysql_optional_string(&row, "column_comment")?;
         let auto_increment = extra.to_ascii_lowercase().contains("auto_increment");
         let ty = map_sql_type(&format!("{data_type} {column_type}"), auto_increment);
         inspected.push(InspectedColumn {
@@ -3186,7 +3186,10 @@ async fn inspect_mysql_unique_cache_keys(
 ) -> anyhow::Result<Vec<String>> {
     let rows = sqlx::query(
         r#"
-        SELECT index_name, MIN(column_name) AS column_name, COUNT(*) AS column_count
+        SELECT
+            index_name AS index_name,
+            MIN(column_name) AS column_name,
+            COUNT(*) AS column_count
         FROM information_schema.statistics
         WHERE table_schema = ?
           AND table_name = ?
@@ -3203,9 +3206,26 @@ async fn inspect_mysql_unique_cache_keys(
     .await?;
 
     rows.into_iter()
-        .map(|row| row.try_get::<String, _>("column_name"))
+        .map(|row| mysql_string(&row, "column_name"))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn mysql_string(row: &sqlx::mysql::MySqlRow, name: &str) -> Result<String, sqlx::Error> {
+    row.try_get::<String, _>(name).or_else(|_| {
+        let upper = name.to_ascii_uppercase();
+        row.try_get::<String, _>(upper.as_str())
+    })
+}
+
+fn mysql_optional_string(
+    row: &sqlx::mysql::MySqlRow,
+    name: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    row.try_get::<Option<String>, _>(name).or_else(|_| {
+        let upper = name.to_ascii_uppercase();
+        row.try_get::<Option<String>, _>(upper.as_str())
+    })
 }
 
 fn build_inspected_model(

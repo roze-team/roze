@@ -37,12 +37,16 @@ Production smoke starts from one command:
 ```bash
 bash scripts/production-smoke.sh
 bash scripts/production-smoke.sh --with-compose
+bash scripts/rozectl-smoke.sh
 ```
 
 The smoke path includes generated REST/RPC compile tests, core runtime crate
 tests, and app-level checks. `--with-compose` starts the integration profile for
-Etcd, Consul, Kafka, NATS, Redis, Postgres, MySQL, Elasticsearch, OpenSearch,
-and Meilisearch.
+Etcd, Consul, Kafka, NATS, Redis, Postgres, MySQL, MongoDB, Elasticsearch,
+OpenSearch, and Meilisearch.
+`scripts/rozectl-smoke.sh` verifies the `rozectl` CLI command surface with
+temporary files, fake Docker for `dev`, and a fake local search server for
+search inspect.
 - `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
 - `apps/rozectl`: code generation for API, RPC, model, search, OpenAPI, SDK, Docker, and Kubernetes assets.
 - `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.

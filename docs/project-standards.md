@@ -237,7 +237,7 @@ src/
 提交前至少运行相关 crate 测试；涉及生成器时运行：
 
 ```bash
-cargo test -p rozectl -- --skip postgres --skip mysql
+cargo test -p rozectl -- --skip postgres --skip mysql --skip mongo
 ```
 
 涉及网关、RPC、配置、MQ 时运行对应测试：

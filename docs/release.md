@@ -99,8 +99,9 @@ Before cutting a release:
 - `cargo test --workspace`
 - `cargo check --workspace`
 - `cargo check -p roze-kafka --features rdkafka`
-- `cargo test -p rozectl -- --skip postgres --skip mysql`
+- `cargo test -p rozectl -- --skip postgres --skip mysql --skip mongo`
 - `bash scripts/production-smoke.sh`
+- `bash scripts/rozectl-smoke.sh`
 - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
 - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
 - `--update` ownership tests pass and prove user logic is preserved.

@@ -111,15 +111,15 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
     out.push_str("}\n\n");
 
     out.push_str(
-        "async fn health() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ok\"))\n}\n\n",
+        "async fn health(State(ctx): State<ServiceContext>) -> Result<ApiResponse<roze_health::ProbeReport>, RozeError> {\n    Ok(ApiResponse::ok(ctx.health.liveness_report().await.probe(roze_health::ProbeKind::Liveness)))\n}\n\n",
     );
 
     out.push_str(
-        "async fn readiness() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ready\"))\n}\n\n",
+        "async fn readiness(State(ctx): State<ServiceContext>) -> Result<ApiResponse<roze_health::ProbeReport>, RozeError> {\n    Ok(ApiResponse::ok(ctx.health.readiness_report().await.probe(roze_health::ProbeKind::Readiness)))\n}\n\n",
     );
 
     out.push_str(
-        "async fn startup() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"started\"))\n}\n\n",
+        "async fn startup(State(ctx): State<ServiceContext>) -> Result<ApiResponse<roze_health::ProbeReport>, RozeError> {\n    Ok(ApiResponse::ok(ctx.health.startup_report().await.probe(roze_health::ProbeKind::Startup)))\n}\n\n",
     );
 
     out.push_str("async fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n");
@@ -194,7 +194,7 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use std::time::Duration;\n\nuse axum::{routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+        "use std::time::Duration;\n\nuse axum::{extract::State, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and_then(|_| ctx.config.governance.timeout_ms)\n        .map(Duration::from_millis);\n    let router = Router::new()\n");
@@ -231,13 +231,13 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
     out.push_str("}\n\n");
 
     out.push_str(
-        "async fn health() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ok\"))\n}\n\n",
+        "async fn health(State(ctx): State<ServiceContext>) -> Result<ApiResponse<roze_health::ProbeReport>, RozeError> {\n    Ok(ApiResponse::ok(ctx.health.liveness_report().await.probe(roze_health::ProbeKind::Liveness)))\n}\n\n",
     );
     out.push_str(
-        "async fn readiness() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"ready\"))\n}\n\n",
+        "async fn readiness(State(ctx): State<ServiceContext>) -> Result<ApiResponse<roze_health::ProbeReport>, RozeError> {\n    Ok(ApiResponse::ok(ctx.health.readiness_report().await.probe(roze_health::ProbeKind::Readiness)))\n}\n\n",
     );
     out.push_str(
-        "async fn startup() -> Result<ApiResponse<&'static str>, RozeError> {\n    Ok(ApiResponse::ok(\"started\"))\n}\n\n",
+        "async fn startup(State(ctx): State<ServiceContext>) -> Result<ApiResponse<roze_health::ProbeReport>, RozeError> {\n    Ok(ApiResponse::ok(ctx.health.startup_report().await.probe(roze_health::ProbeKind::Startup)))\n}\n\n",
     );
     out.push_str("async fn metrics() -> String {\n    roze_metrics::http_metrics()\n}\n\n");
     out.push_str(

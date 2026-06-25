@@ -18,9 +18,10 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 16] = [
+const REST_ROZE_CRATES: [&str; 17] = [
     "roze-config",
     "roze-error",
+    "roze-health",
     "roze-http",
     "roze-log",
     "roze-metrics",
@@ -37,13 +38,14 @@ const REST_ROZE_CRATES: [&str; 16] = [
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 16] = [
+const RPC_ROZE_CRATES: [&str; 17] = [
     "roze-config",
     "roze-context",
     "roze-db",
     "roze-mongo",
     "roze-error",
     "roze-grpc",
+    "roze-health",
     "roze-jwt",
     "roze-log",
     "roze-cache",
@@ -2882,6 +2884,7 @@ use crate::config::Config;
 #[derive(Clone, Debug)]
 pub struct ServiceContext {
     pub config: Config,
+    pub health: roze_health::HealthRegistry,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub outbox: roze_transaction::InMemoryOutbox,
@@ -2889,6 +2892,7 @@ pub struct ServiceContext {
 
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
+        let health = roze_health::HealthRegistry::new();
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
@@ -2904,8 +2908,16 @@ impl ServiceContext {
             Some(nats) => Some(Arc::new(roze_nats::NatsJetStream::connect(nats.clone()).await?)),
             None => None,
         };
+        if cache.is_some() {
+            health.register_static(roze_health::HealthCheck::healthy("redis"));
+        }
+        if mq.is_some() {
+            health.register_static(roze_health::HealthCheck::healthy("nats"));
+        }
+        health.mark_ready();
         Ok(Self {
             config,
+            health,
             cache,
             mq,
             outbox: roze_transaction::InMemoryOutbox::new(),
@@ -2936,6 +2948,7 @@ use crate::config::Config;
 #[derive(Clone, Debug)]
 pub struct ServiceContext {
     pub config: Config,
+    pub health: roze_health::HealthRegistry,
     pub db_connections: Option<roze_db::DatabaseConnections>,
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
@@ -2945,6 +2958,7 @@ pub struct ServiceContext {
 
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
+        let health = roze_health::HealthRegistry::new();
         let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
         let mongo = roze_mongo::connect_optional(config.mongo.as_ref()).await?;
         let cache = match config.cache.as_ref() {
@@ -2962,8 +2976,22 @@ impl ServiceContext {
             Some(nats) => Some(Arc::new(roze_nats::NatsJetStream::connect(nats.clone()).await?)),
             None => None,
         };
+        if db_connections.is_some() {
+            health.register_static(roze_health::HealthCheck::healthy("database"));
+        }
+        if mongo.is_some() {
+            health.register_static(roze_health::HealthCheck::healthy("mongo"));
+        }
+        if cache.is_some() {
+            health.register_static(roze_health::HealthCheck::healthy("redis"));
+        }
+        if mq.is_some() {
+            health.register_static(roze_health::HealthCheck::healthy("nats"));
+        }
+        health.mark_ready();
         Ok(Self {
             config,
+            health,
             db_connections,
             mongo,
             cache,

@@ -33,7 +33,7 @@ use rdkafka::message::OwnedHeaders;
 type DeliveryActionFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 type DeliveryAction = Arc<dyn Fn() -> DeliveryActionFuture + Send + Sync + 'static>;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaConfig {
     #[serde(default)]
     pub brokers: Vec<String>,
@@ -81,6 +81,36 @@ pub struct KafkaConfig {
     pub topic_regex: Option<String>,
     #[serde(default = "default_consumer_workers")]
     pub consumer_workers: u32,
+}
+
+impl Default for KafkaConfig {
+    fn default() -> Self {
+        Self {
+            brokers: Vec::new(),
+            bootstrap: None,
+            bootstrap_servers: None,
+            client_id: None,
+            group_id: None,
+            group: None,
+            topic_prefix: String::new(),
+            acks: default_acks(),
+            auto_offset_reset: default_auto_offset_reset(),
+            enable_manual_ack: default_enable_manual_ack(),
+            enable_auto_commit: default_enable_auto_commit(),
+            session_timeout_ms: default_session_timeout_ms(),
+            heartbeat_interval_ms: default_heartbeat_interval_ms(),
+            max_poll_interval_ms: default_max_poll_interval_ms(),
+            flush_timeout_ms: default_flush_timeout_ms(),
+            linger_ms: default_linger_ms(),
+            batch_size: default_batch_size(),
+            retry_backoff_ms: default_retry_backoff_ms(),
+            max_retries: default_max_retries(),
+            retry_topic: None,
+            dead_letter_topic: None,
+            topic_regex: None,
+            consumer_workers: default_consumer_workers(),
+        }
+    }
 }
 
 fn default_acks() -> String {

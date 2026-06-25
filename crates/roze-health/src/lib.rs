@@ -1,4 +1,12 @@
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +42,190 @@ pub struct HealthCheck {
     pub name: String,
     pub status: HealthStatus,
     pub message: Option<String>,
+}
+
+type CheckFuture = Pin<Box<dyn Future<Output = HealthCheck> + Send>>;
+type CheckFn = Arc<dyn Fn() -> CheckFuture + Send + Sync>;
+
+#[derive(Clone)]
+struct RegisteredCheck {
+    name: String,
+    check: CheckFn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServicePhase {
+    Starting,
+    Ready,
+    Draining,
+}
+
+impl Display for ServicePhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServicePhase::Starting => f.write_str("starting"),
+            ServicePhase::Ready => f.write_str("ready"),
+            ServicePhase::Draining => f.write_str("draining"),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct HealthRegistry {
+    checks: Arc<RwLock<Vec<RegisteredCheck>>>,
+    startup_complete: Arc<AtomicBool>,
+    draining: Arc<AtomicBool>,
+}
+
+impl fmt::Debug for HealthRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HealthRegistry")
+            .field("phase", &self.phase())
+            .field(
+                "checks",
+                &self
+                    .checks
+                    .read()
+                    .map(|checks| checks.len())
+                    .unwrap_or_default(),
+            )
+            .finish()
+    }
+}
+
+impl HealthRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn mark_started(&self) {
+        self.startup_complete.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_draining(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_ready(&self) {
+        self.startup_complete.store(true, Ordering::SeqCst);
+        self.draining.store(false, Ordering::SeqCst);
+    }
+
+    pub fn phase(&self) -> ServicePhase {
+        if self.draining.load(Ordering::SeqCst) {
+            ServicePhase::Draining
+        } else if self.startup_complete.load(Ordering::SeqCst) {
+            ServicePhase::Ready
+        } else {
+            ServicePhase::Starting
+        }
+    }
+
+    pub fn register_static(&self, check: HealthCheck) {
+        self.register_check(check.name.clone(), move || {
+            let check = check.clone();
+            async move { check }
+        });
+    }
+
+    pub fn register_dependency<F, Fut>(&self, name: impl Into<String>, check: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let name = name.into();
+        let report_name = name.clone();
+        self.register_check(name, move || {
+            let fut = check();
+            let report_name = report_name.clone();
+            async move {
+                match fut.await {
+                    Ok(()) => HealthCheck::healthy(report_name),
+                    Err(err) => HealthCheck::unhealthy(report_name, err.to_string()),
+                }
+            }
+        });
+    }
+
+    pub fn register_check<F, Fut>(&self, name: impl Into<String>, check: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HealthCheck> + Send + 'static,
+    {
+        let registered = RegisteredCheck {
+            name: name.into(),
+            check: Arc::new(move || Box::pin(check())),
+        };
+        self.checks
+            .write()
+            .expect("health registry lock poisoned")
+            .push(registered);
+    }
+
+    pub async fn liveness_report(&self) -> HealthReport {
+        let mut checks = Vec::new();
+        checks.push(HealthCheck::healthy("process"));
+        if self.draining.load(Ordering::SeqCst) {
+            checks.push(HealthCheck::degraded(
+                "phase",
+                ServicePhase::Draining.to_string(),
+            ));
+        }
+        HealthReport::new(checks)
+    }
+
+    pub async fn readiness_report(&self) -> HealthReport {
+        let mut checks = self.phase_checks();
+        checks.extend(self.run_registered_checks().await);
+        HealthReport::new(checks)
+    }
+
+    pub async fn startup_report(&self) -> HealthReport {
+        let mut checks = Vec::new();
+        match self.phase() {
+            ServicePhase::Starting => checks.push(HealthCheck::unhealthy(
+                "startup",
+                ServicePhase::Starting.to_string(),
+            )),
+            ServicePhase::Ready => checks.push(HealthCheck::healthy("startup")),
+            ServicePhase::Draining => checks.push(HealthCheck::degraded(
+                "startup",
+                ServicePhase::Draining.to_string(),
+            )),
+        }
+        HealthReport::new(checks)
+    }
+
+    async fn run_registered_checks(&self) -> Vec<HealthCheck> {
+        let checks = self
+            .checks
+            .read()
+            .expect("health registry lock poisoned")
+            .clone();
+        let mut out = Vec::with_capacity(checks.len());
+        for registered in checks {
+            let mut check = (registered.check)().await;
+            if check.name.is_empty() {
+                check.name = registered.name;
+            }
+            out.push(check);
+        }
+        out
+    }
+
+    fn phase_checks(&self) -> Vec<HealthCheck> {
+        match self.phase() {
+            ServicePhase::Starting => vec![HealthCheck::unhealthy(
+                "phase",
+                ServicePhase::Starting.to_string(),
+            )],
+            ServicePhase::Ready => vec![HealthCheck::healthy("phase")],
+            ServicePhase::Draining => vec![HealthCheck::degraded(
+                "phase",
+                ServicePhase::Draining.to_string(),
+            )],
+        }
+    }
 }
 
 impl HealthCheck {
@@ -176,5 +368,26 @@ mod tests {
 
         assert!(rendered.contains(r"cache\nprimary=degraded"));
         assert!(rendered.contains(r"message=warming\nslowly"));
+    }
+
+    #[tokio::test]
+    async fn registry_reports_phase_and_dependencies() {
+        let registry = HealthRegistry::new();
+        registry.register_dependency("db", || async { Ok(()) });
+
+        let starting = registry.readiness_report().await;
+        assert!(!starting.is_ready());
+        assert_eq!(starting.checks[0].status, HealthStatus::Unhealthy);
+
+        registry.mark_ready();
+        let ready = registry.readiness_report().await;
+        assert!(ready.is_ready());
+        assert!(ready.checks.iter().any(|check| check.name == "db"));
+
+        registry.mark_draining();
+        let draining = registry.readiness_report().await;
+        assert!(!draining.is_ready());
+        assert_eq!(draining.checks[0].status, HealthStatus::Degraded);
+        assert!(draining.is_alive());
     }
 }

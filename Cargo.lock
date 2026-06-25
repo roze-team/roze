@@ -3594,18 +3594,23 @@ dependencies = [
  "roze-error",
  "roze-http",
  "roze-jwt",
+ "roze-kafka",
  "roze-log",
  "roze-metrics",
  "roze-middleware",
  "roze-mongo",
+ "roze-mq",
+ "roze-nats",
  "roze-openapi",
  "roze-result",
  "roze-rpc",
+ "roze-search",
  "roze-validation",
  "sea-orm",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "validator",
 ]
@@ -3670,7 +3675,9 @@ dependencies = [
 name = "roze-health"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
+ "tokio",
 ]
 
 [[package]]

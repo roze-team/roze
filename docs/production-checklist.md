@@ -7,6 +7,9 @@ This checklist is the baseline for considering a Roze service production-ready.
 - Service is built from a tagged Roze release or a pinned Git revision.
 - `CHANGELOG.md` and upgrade notes have been reviewed.
 - `bash scripts/production-smoke.sh` passes.
+- `bash scripts/rozectl-smoke.sh` passes.
+- `bash scripts/roze-project-external-smoke.sh` passes when validating the full
+  external dependency profile locally.
 - Generated REST and RPC compile smoke tests pass:
   - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
   - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
