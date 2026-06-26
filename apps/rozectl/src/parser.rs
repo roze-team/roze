@@ -345,7 +345,7 @@ fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, Par
         _ => return Ok(None),
     };
 
-    let (path, signature) = split_first_token(rest).unwrap_or((rest.trim(), ""));
+    let (path, signature) = split_route_path_and_signature(rest);
     if path.is_empty() {
         return Err(ParseError::InvalidLine {
             line: line_no + 1,
@@ -615,6 +615,24 @@ fn split_first_token(input: &str) -> Option<(&str, &str)> {
     let idx = input.find(char::is_whitespace)?;
     let (head, tail) = input.split_at(idx);
     Some((head, tail.trim_start()))
+}
+
+fn split_route_path_and_signature(input: &str) -> (&str, &str) {
+    let input = input.trim();
+    if input.is_empty() {
+        return ("", "");
+    }
+
+    let first_space = input.find(char::is_whitespace);
+    let first_paren = input.find('(');
+    let split_at = match (first_space, first_paren) {
+        (Some(space), Some(paren)) => space.min(paren),
+        (Some(space), None) => space,
+        (None, Some(paren)) => paren,
+        (None, None) => return (input, ""),
+    };
+    let (path, signature) = input.split_at(split_at);
+    (path.trim(), signature.trim_start())
 }
 
 fn trim_wrapping_parens(input: &str) -> &str {
@@ -910,6 +928,24 @@ mod tests {
         assert_eq!(spec.rpc_methods.len(), 1);
         assert_eq!(spec.rpc_methods[0].request, "GetUserReq");
         assert_eq!(spec.rpc_methods[0].response, "UserResp");
+    }
+
+    #[test]
+    fn parses_legacy_goctl_route_signature_without_space_after_path() {
+        let spec = parse_api(
+            r#"
+            service shorturl-api {
+                @handler shorten
+                get /shorten(shortenReq) returns(shortenResp)
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.rest_routes.len(), 1);
+        assert_eq!(spec.rest_routes[0].path, "/shorten");
+        assert_eq!(spec.rest_routes[0].request, "shortenReq");
+        assert_eq!(spec.rest_routes[0].response, "shortenResp");
     }
 
     #[test]

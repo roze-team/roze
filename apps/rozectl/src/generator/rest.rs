@@ -390,13 +390,12 @@ pub fn render_logic(spec: &ApiSpec) -> String {
             }
         }
         out.push_str(&format!(
-            "    Ok({response}::default_response())\n",
+            "    Ok({response}::default())\n",
             response = route.response
         ));
         out.push_str("}\n\n");
     }
 
-    out.push_str(&render_default_impls(spec));
     out
 }
 
@@ -413,7 +412,7 @@ fn render_logic_fn(route: &RestRoute) -> String {
     out.push_str("    let _ = request_ctx;\n");
     out.push_str("    let _ = req;\n");
     out.push_str(&format!(
-        "    Ok({response}::default_response())\n",
+        "    Ok({response}::default())\n",
         response = route.response
     ));
     out.push_str("}\n");
@@ -433,7 +432,6 @@ pub fn render_logic_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
 
-    out.push_str(&render_default_impls(spec));
     out
 }
 
@@ -807,32 +805,6 @@ fn custom_middlewares(spec: &ApiSpec) -> Vec<String> {
             if seen.insert(name.clone()) {
                 out.push(name);
             }
-        }
-    }
-    out
-}
-
-fn render_default_impls(spec: &ApiSpec) -> String {
-    let mut seen = HashSet::new();
-    let mut out = String::new();
-    for response in spec.rest_routes.iter().map(|route| &route.response) {
-        if !seen.insert(response) {
-            continue;
-        }
-        if let Some(ty) = spec.types.iter().find(|ty| &ty.name == response) {
-            out.push_str(&format!("impl {} {{\n", ty.name));
-            out.push_str("    fn default_response() -> Self {\n");
-            out.push_str("        Self {\n");
-            for field in &ty.fields {
-                out.push_str(&format!(
-                    "            {}: {},\n",
-                    rust_field_name(field),
-                    default_value(&field.ty)
-                ));
-            }
-            out.push_str("        }\n");
-            out.push_str("    }\n");
-            out.push_str("}\n\n");
         }
     }
     out
@@ -1526,14 +1498,6 @@ fn escape_doc(doc: &str) -> String {
     doc.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn default_value(ty: &str) -> &'static str {
-    match ty {
-        "String" | "string" => "String::new()",
-        "bool" => "false",
-        _ => "Default::default()",
-    }
-}
-
 fn map_type(ty: &str) -> String {
     let ty = ty.trim();
     if let Some((key, value)) = map_key_value_types(ty) {
@@ -2008,7 +1972,7 @@ mod tests {
         assert!(handlers.contains("Result<ApiResponse<EmptyResp>, RozeError>"));
 
         let logic = render_logic(&spec);
-        assert!(logic.contains("Ok(EmptyResp::default_response())"));
+        assert!(logic.contains("Ok(EmptyResp::default())"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains("builder.add_operation(\"/health\", HttpMethod::Get"));

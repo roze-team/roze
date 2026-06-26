@@ -14,20 +14,20 @@ use crate::{
         ServiceInstance,
     },
 };
-use dashmap::DashMap;
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_grpc::transport::{
     Channel, Code, Endpoint, MetadataMap, MetadataValue, Request, Server, Status,
 };
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
-use roze_metrics::record_rpc_method;
+use roze_metrics::{record_resilience_decision, record_rpc_method};
+use roze_resilience::{BreakerRegistry, RateLimitRegistry};
 use roze_trace::generate_trace_id;
 use tokio::time::sleep;
 use tracing::info;
 
-static METHOD_RATE_LIMITS: OnceLock<DashMap<String, MethodRateLimitState>> = OnceLock::new();
-static METHOD_BREAKERS: OnceLock<DashMap<String, MethodBreakerState>> = OnceLock::new();
+static METHOD_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
+static METHOD_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 pub const ERROR_CODE_METADATA: &str = "x-roze-error-code";
@@ -623,18 +623,6 @@ pub struct MethodGuard {
     breaker: Option<MethodBreakerConfig>,
 }
 
-#[derive(Debug)]
-struct MethodRateLimitState {
-    tokens: f64,
-    last_refill: Instant,
-}
-
-#[derive(Debug)]
-struct MethodBreakerState {
-    failures: u32,
-    open_until: Option<Instant>,
-}
-
 pub fn method_policy(
     governance: Option<&roze_config::GovernanceConfig>,
     method: &str,
@@ -681,14 +669,24 @@ pub fn begin_method(
     let policy = method_policy(governance, &method);
     let key = format!("{service}:{method}");
     if let Some(config) = &policy.rate_limit {
-        enforce_method_rate_limit(&key, config)?;
+        match enforce_method_rate_limit(&key, config) {
+            Ok(()) => record_resilience_decision("rpc", "rate_limit", "allowed"),
+            Err(status) => {
+                record_resilience_decision("rpc", "rate_limit", "rejected");
+                return Err(status);
+            }
+        }
     }
     if policy
         .breaker
         .as_ref()
         .is_some_and(|_| method_breaker_is_open(&key))
     {
+        record_resilience_decision("rpc", "breaker", "open");
         return Err(Status::unavailable("circuit open"));
+    }
+    if policy.breaker.is_some() {
+        record_resilience_decision("rpc", "breaker", "allowed");
     }
     let request_ctx = match policy.timeout {
         Some(timeout) => request_ctx.with_timeout(timeout),
@@ -716,6 +714,11 @@ pub fn finish_method(guard: MethodGuard, code: impl Into<String>) {
         guard.started_at.elapsed(),
     );
     if let Some(config) = guard.breaker {
+        record_resilience_decision(
+            "rpc",
+            "breaker",
+            if success { "success" } else { "failure" },
+        );
         method_breaker_record(&guard.key, success, &config);
     }
 }
@@ -746,74 +749,42 @@ fn retry_delay(base: Duration, attempt: usize) -> Duration {
 
 #[allow(clippy::result_large_err)]
 fn enforce_method_rate_limit(key: &str, config: &MethodRateLimitConfig) -> Result<(), Status> {
-    let mut states = METHOD_RATE_LIMITS
-        .get_or_init(DashMap::new)
-        .entry(key.to_string())
-        .or_insert_with(|| MethodRateLimitState {
-            tokens: config.burst as f64,
-            last_refill: Instant::now(),
-        });
-    refill_method_tokens(&mut states, config);
-    if states.tokens >= 1.0 {
-        states.tokens -= 1.0;
+    if METHOD_RATE_LIMITS
+        .get_or_init(RateLimitRegistry::new)
+        .allow(key, rate_limit_config(*config))
+    {
         Ok(())
     } else {
         Err(Status::resource_exhausted("rate limited"))
     }
 }
 
-fn refill_method_tokens(state: &mut MethodRateLimitState, config: &MethodRateLimitConfig) {
-    let refill_secs = config.refill.as_secs_f64();
-    if refill_secs <= 0.0 {
-        state.tokens = config.burst as f64;
-        state.last_refill = Instant::now();
-        return;
-    }
-    let now = Instant::now();
-    let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-    let tokens_to_add = elapsed / refill_secs;
-    if tokens_to_add > 0.0 {
-        state.tokens = (state.tokens + tokens_to_add).min(config.burst as f64);
-        state.last_refill = now;
+fn rate_limit_config(config: MethodRateLimitConfig) -> roze_resilience::RateLimitConfig {
+    roze_resilience::RateLimitConfig {
+        burst: config.burst,
+        refill: config.refill,
     }
 }
 
 fn method_breaker_is_open(key: &str) -> bool {
-    let mut states = METHOD_BREAKERS
-        .get_or_init(DashMap::new)
-        .entry(key.to_string())
-        .or_insert_with(|| MethodBreakerState {
-            failures: 0,
-            open_until: None,
-        });
-    if let Some(open_until) = states.open_until {
-        if Instant::now() < open_until {
-            return true;
-        }
-        states.open_until = None;
-        states.failures = 0;
-    }
-    false
+    METHOD_BREAKERS
+        .get_or_init(BreakerRegistry::new)
+        .is_open(key)
 }
 
 fn method_breaker_record(key: &str, success: bool, config: &MethodBreakerConfig) {
-    let mut states = METHOD_BREAKERS
-        .get_or_init(DashMap::new)
-        .entry(key.to_string())
-        .or_insert_with(|| MethodBreakerState {
-            failures: 0,
-            open_until: None,
-        });
+    let registry = METHOD_BREAKERS.get_or_init(BreakerRegistry::new);
     if success {
-        states.failures = 0;
-        states.open_until = None;
+        registry.record_success(key);
         return;
     }
-    states.failures = states.failures.saturating_add(1);
-    if states.failures >= config.failure_threshold.max(1) {
-        states.failures = 0;
-        states.open_until = Some(Instant::now() + config.reset_timeout);
-    }
+    registry.record_failure(
+        key,
+        roze_resilience::BreakerConfig {
+            failure_threshold: config.failure_threshold,
+            reset_timeout: config.reset_timeout,
+        },
+    );
 }
 
 #[cfg(test)]

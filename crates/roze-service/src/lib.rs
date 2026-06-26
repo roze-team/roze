@@ -1,4 +1,14 @@
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use anyhow::Context;
+use roze_shutdown::{channel, ShutdownHandle, ShutdownListener};
+use tokio::task::JoinSet;
 
 #[derive(Debug, Clone)]
 pub struct AppState<C> {
@@ -87,8 +97,304 @@ pub fn service_builder<C>(name: impl Into<Arc<str>>, config: C) -> ServiceBuilde
     ServiceBuilder::new(name, config)
 }
 
+pub type ServiceFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+
+pub trait RuntimeService: Send + Sync + 'static {
+    fn name(&self) -> &str;
+
+    fn start(&self, shutdown: ShutdownListener) -> ServiceFuture<'_>;
+
+    fn stop(&self) -> ServiceFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub struct FnService<F> {
+    name: Arc<str>,
+    start: F,
+}
+
+impl<F> FnService<F> {
+    pub fn new(name: impl Into<Arc<str>>, start: F) -> Self {
+        Self {
+            name: name.into(),
+            start,
+        }
+    }
+}
+
+impl<F, Fut> RuntimeService for FnService<F>
+where
+    F: Fn(ShutdownListener) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn start(&self, shutdown: ShutdownListener) -> ServiceFuture<'_> {
+        Box::pin((self.start)(shutdown))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceGroupConfig {
+    pub shutdown_timeout: Duration,
+    pub stop_on_first_error: bool,
+}
+
+impl Default for ServiceGroupConfig {
+    fn default() -> Self {
+        Self {
+            shutdown_timeout: Duration::from_secs(30),
+            stop_on_first_error: true,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ServiceGroupHandle {
+    shutdown: ShutdownHandle,
+}
+
+impl ServiceGroupHandle {
+    pub fn shutdown(&self) {
+        self.shutdown.trigger();
+    }
+}
+
+pub struct ServiceGroup {
+    config: ServiceGroupConfig,
+    services: Vec<Arc<dyn RuntimeService>>,
+    shutdown: ShutdownHandle,
+    listener: ShutdownListener,
+}
+
+impl Default for ServiceGroup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ServiceGroup {
+    pub fn new() -> Self {
+        Self::with_config(ServiceGroupConfig::default())
+    }
+
+    pub fn with_config(config: ServiceGroupConfig) -> Self {
+        let (shutdown, listener) = channel();
+        Self {
+            config,
+            services: Vec::new(),
+            shutdown,
+            listener,
+        }
+    }
+
+    pub fn add<S>(&mut self, service: S) -> &mut Self
+    where
+        S: RuntimeService,
+    {
+        self.services.push(Arc::new(service));
+        self
+    }
+
+    pub fn add_arc<S>(&mut self, service: Arc<S>) -> &mut Self
+    where
+        S: RuntimeService,
+    {
+        self.services.push(service);
+        self
+    }
+
+    pub fn add_fn<F, Fut>(&mut self, name: impl Into<Arc<str>>, start: F) -> &mut Self
+    where
+        F: Fn(ShutdownListener) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        self.add(FnService::new(name, start))
+    }
+
+    pub fn handle(&self) -> ServiceGroupHandle {
+        ServiceGroupHandle {
+            shutdown: self.shutdown.clone(),
+        }
+    }
+
+    pub fn shutdown_listener(&self) -> ShutdownListener {
+        self.listener.clone()
+    }
+
+    pub async fn start(self) -> anyhow::Result<()> {
+        self.start_with_shutdown(roze_shutdown::listen_for_ctrl_c())
+            .await
+    }
+
+    pub async fn start_with_shutdown<F>(self, shutdown: F) -> anyhow::Result<()>
+    where
+        F: Future<Output = ()> + Send,
+    {
+        if self.services.is_empty() {
+            return Ok(());
+        }
+
+        let mut tasks = spawn_services(&self.services, &self.listener);
+        let mut active = self.services.len();
+        let mut errors = Vec::new();
+        tokio::pin!(shutdown);
+
+        while active > 0 {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    self.shutdown.trigger();
+                    break;
+                }
+                _ = self.listener.clone().wait() => {
+                    break;
+                }
+                joined = tasks.join_next() => {
+                    let Some(joined) = joined else {
+                        break;
+                    };
+                    active -= 1;
+                    if handle_service_exit(joined, &mut errors) && self.config.stop_on_first_error {
+                        self.shutdown.trigger();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if self.listener.is_triggered() || active > 0 {
+            self.shutdown.trigger();
+            stop_services(&self.services, self.config.shutdown_timeout, &mut errors).await;
+            wait_for_tasks(
+                &mut tasks,
+                active,
+                self.config.shutdown_timeout,
+                &mut errors,
+            )
+            .await;
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("{}", errors.join("; ")))
+        }
+    }
+}
+
+struct ServiceTaskExit {
+    name: String,
+    result: anyhow::Result<()>,
+}
+
+fn spawn_services(
+    services: &[Arc<dyn RuntimeService>],
+    shutdown: &ShutdownListener,
+) -> JoinSet<ServiceTaskExit> {
+    let mut tasks = JoinSet::new();
+    for service in services {
+        let service = Arc::clone(service);
+        let listener = shutdown.clone();
+        let name = service.name().to_string();
+        tasks.spawn(async move {
+            let result = service.start(listener).await;
+            ServiceTaskExit { name, result }
+        });
+    }
+    tasks
+}
+
+fn handle_service_exit(
+    joined: Result<ServiceTaskExit, tokio::task::JoinError>,
+    errors: &mut Vec<String>,
+) -> bool {
+    match joined {
+        Ok(exit) => match exit.result {
+            Ok(()) => false,
+            Err(error) => {
+                errors.push(format!("service {} failed: {error:#}", exit.name));
+                true
+            }
+        },
+        Err(error) => {
+            errors.push(format!("service task failed: {error}"));
+            true
+        }
+    }
+}
+
+async fn stop_services(
+    services: &[Arc<dyn RuntimeService>],
+    timeout: Duration,
+    errors: &mut Vec<String>,
+) {
+    match tokio::time::timeout(timeout, run_stop_hooks(services)).await {
+        Ok(stop_errors) => errors.extend(stop_errors),
+        Err(_) => errors.push(format!(
+            "service group stop hooks timed out after {timeout:?}"
+        )),
+    }
+}
+
+async fn run_stop_hooks(services: &[Arc<dyn RuntimeService>]) -> Vec<String> {
+    let mut tasks = JoinSet::new();
+    for service in services.iter().rev() {
+        let service = Arc::clone(service);
+        let name = service.name().to_string();
+        tasks.spawn(async move {
+            service
+                .stop()
+                .await
+                .with_context(|| format!("service {name} stop hook failed"))
+        });
+    }
+
+    let mut errors = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(format!("{error:#}")),
+            Err(error) => errors.push(format!("service stop task failed: {error}")),
+        }
+    }
+    errors
+}
+
+async fn wait_for_tasks(
+    tasks: &mut JoinSet<ServiceTaskExit>,
+    active: usize,
+    timeout: Duration,
+    errors: &mut Vec<String>,
+) {
+    let result = tokio::time::timeout(timeout, async {
+        for _ in 0..active {
+            match tasks.join_next().await {
+                Some(joined) => {
+                    handle_service_exit(joined, errors);
+                }
+                None => break,
+            }
+        }
+    })
+    .await;
+
+    if result.is_err() {
+        errors.push(format!(
+            "service group tasks timed out after shutdown timeout {timeout:?}"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,5 +407,107 @@ mod tests {
         assert_eq!(state.config(), &Config(7));
         assert_eq!(state.metadata_value("env"), Some("test"));
         let _ = state.uptime();
+    }
+
+    #[tokio::test]
+    async fn service_group_runs_function_service_until_shutdown() {
+        let mut group = ServiceGroup::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let handle = group.handle();
+
+        group.add_fn("worker", {
+            let started = started.clone();
+            move |shutdown| {
+                let started = started.clone();
+                async move {
+                    started.store(true, Ordering::SeqCst);
+                    shutdown.wait().await;
+                    Ok(())
+                }
+            }
+        });
+
+        let join = tokio::spawn(group.start_with_shutdown(std::future::pending()));
+        tokio::time::timeout(Duration::from_millis(50), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("service should start");
+
+        handle.shutdown();
+        join.await
+            .expect("group task should join")
+            .expect("group should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn service_group_runs_stop_hooks_on_external_shutdown() {
+        struct Stoppable {
+            stopped: Arc<AtomicBool>,
+        }
+
+        impl RuntimeService for Stoppable {
+            fn name(&self) -> &str {
+                "stoppable"
+            }
+
+            fn start(&self, shutdown: ShutdownListener) -> ServiceFuture<'_> {
+                Box::pin(async move {
+                    shutdown.wait().await;
+                    Ok(())
+                })
+            }
+
+            fn stop(&self) -> ServiceFuture<'_> {
+                Box::pin(async move {
+                    self.stopped.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut group = ServiceGroup::new();
+        group.add(Stoppable {
+            stopped: stopped.clone(),
+        });
+
+        group
+            .start_with_shutdown(async {})
+            .await
+            .expect("shutdown should be clean");
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn service_group_stops_peers_after_service_error() {
+        let mut group = ServiceGroup::with_config(ServiceGroupConfig {
+            shutdown_timeout: Duration::from_millis(100),
+            stop_on_first_error: true,
+        });
+        let peer_stopped = Arc::new(AtomicUsize::new(0));
+
+        group.add_fn("failing", |_| async { Err(anyhow::anyhow!("boom")) });
+        group.add_fn("peer", {
+            let peer_stopped = peer_stopped.clone();
+            move |shutdown| {
+                let peer_stopped = peer_stopped.clone();
+                async move {
+                    shutdown.wait().await;
+                    peer_stopped.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+        });
+
+        let error = group
+            .start_with_shutdown(std::future::pending())
+            .await
+            .expect_err("failing service should fail group");
+
+        assert!(error.to_string().contains("service failing failed"));
+        assert_eq!(peer_stopped.load(Ordering::SeqCst), 1);
     }
 }

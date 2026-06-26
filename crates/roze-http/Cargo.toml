@@ -5,7 +5,11 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 axum.workspace = true
 roze-error = { path = "../roze-error" }
+roze-service = { path = "../roze-service" }
+roze-shutdown = { path = "../roze-shutdown" }
 tokio.workspace = true
+tower.workspace = true
 tracing.workspace = true

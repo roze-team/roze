@@ -1,0 +1,8 @@
+[package]
+name = "roze-resilience"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+dashmap.workspace = true

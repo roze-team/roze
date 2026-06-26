@@ -16,6 +16,7 @@ static ROUTE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RPC_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static GATEWAY_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static QUEUE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static RESILIENCE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetricLabels(BTreeMap<String, String>);
@@ -303,6 +304,18 @@ pub fn record_queue_offset(
     queue_metrics_registry().set_gauge("roze_queue_last_offset", labels, offset as f64);
 }
 
+pub fn record_resilience_decision(
+    transport: impl Into<String>,
+    component: impl Into<String>,
+    outcome: impl Into<String>,
+) {
+    let labels = MetricLabels::new()
+        .insert("transport", transport.into())
+        .insert("component", component.into())
+        .insert("outcome", outcome.into());
+    resilience_metrics_registry().inc_counter("roze_resilience_decisions_total", labels, 1);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -330,6 +343,7 @@ pub fn http_metrics() -> String {
     out.push_str(&rpc_metrics_registry().render());
     out.push_str(&gateway_metrics_registry().render());
     out.push_str(&queue_metrics_registry().render());
+    out.push_str(&resilience_metrics_registry().render());
     out
 }
 
@@ -351,6 +365,10 @@ pub fn gateway_metrics_registry() -> &'static MetricRegistry {
 
 pub fn queue_metrics_registry() -> &'static MetricRegistry {
     QUEUE_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn resilience_metrics_registry() -> &'static MetricRegistry {
+    RESILIENCE_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -484,5 +502,17 @@ mod tests {
         assert!(metrics.contains(r#"group="workers""#));
         assert!(metrics.contains(r#"partition="0""#));
         assert!(metrics.contains(r#"outcome="acked""#));
+    }
+
+    #[test]
+    fn renders_resilience_decision_metrics() {
+        record_resilience_decision("http", "breaker", "open");
+
+        let metrics = http_metrics();
+
+        assert!(metrics.contains("roze_resilience_decisions_total"));
+        assert!(metrics.contains(r#"transport="http""#));
+        assert!(metrics.contains(r#"component="breaker""#));
+        assert!(metrics.contains(r#"outcome="open""#));
     }
 }

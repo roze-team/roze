@@ -3610,7 +3610,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tower",
  "tracing",
  "validator",
 ]
@@ -3630,6 +3629,7 @@ dependencies = [
  "roze-context",
  "roze-jwt",
  "roze-metrics",
+ "roze-resilience",
  "roze-rpc",
  "roze-trace",
  "serde",
@@ -3684,9 +3684,13 @@ dependencies = [
 name = "roze-http"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "roze-error",
+ "roze-service",
+ "roze-shutdown",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -3764,13 +3768,13 @@ name = "roze-middleware"
 version = "0.1.0"
 dependencies = [
  "axum",
- "dashmap",
  "roze-auth",
  "roze-config",
  "roze-context",
  "roze-error",
  "roze-jwt",
  "roze-metrics",
+ "roze-resilience",
  "roze-trace",
  "serde_json",
  "tokio",
@@ -3905,6 +3909,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "roze-resilience"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+]
+
+[[package]]
 name = "roze-result"
 version = "0.1.0"
 dependencies = [
@@ -3930,6 +3941,7 @@ dependencies = [
  "roze-grpc",
  "roze-jwt",
  "roze-metrics",
+ "roze-resilience",
  "roze-trace",
  "serde",
  "serde_json",
@@ -3980,6 +3992,11 @@ dependencies = [
 [[package]]
 name = "roze-service"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "roze-shutdown",
+ "tokio",
+]
 
 [[package]]
 name = "roze-session"

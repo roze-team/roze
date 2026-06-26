@@ -19,17 +19,17 @@ use tower_http::{
 };
 use tracing::Instrument;
 
-use dashmap::DashMap;
 use roze_auth::AuthPrincipal;
 use roze_config::{GovernanceConfig, RouteGovernanceConfig};
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
-use roze_metrics::{record_http_request, record_http_route};
+use roze_metrics::{record_http_request, record_http_route, record_resilience_decision};
+use roze_resilience::{BreakerRegistry, RateLimitRegistry};
 use roze_trace::{generate_trace_id, request_span};
 
-static ROUTE_RATE_LIMITS: OnceLock<DashMap<String, RateLimitState>> = OnceLock::new();
-static ROUTE_BREAKERS: OnceLock<DashMap<String, BreakerState>> = OnceLock::new();
+static ROUTE_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
+static ROUTE_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 
 pub fn apply_common<S>(router: Router<S>) -> Router<S>
 where
@@ -832,14 +832,24 @@ pub fn begin_route(
     let key = format!("{service}:{method}:{route}");
 
     if let Some(config) = &policy.rate_limit {
-        enforce_rate_limit(&key, config)?;
+        match enforce_rate_limit(&key, config) {
+            Ok(()) => record_resilience_decision("http", "rate_limit", "allowed"),
+            Err(error) => {
+                record_resilience_decision("http", "rate_limit", "rejected");
+                return Err(error);
+            }
+        }
     }
     if policy
         .breaker
         .as_ref()
         .is_some_and(|_| route_breaker_is_open(&key))
     {
+        record_resilience_decision("http", "breaker", "open");
         return Err(RozeError::Internal("circuit open".to_string()));
+    }
+    if policy.breaker.is_some() {
+        record_resilience_decision("http", "breaker", "allowed");
     }
 
     let request_ctx = match policy.timeout {
@@ -869,33 +879,17 @@ pub fn finish_route(guard: RouteGuard, success: bool, status: impl Into<String>)
         guard.started_at.elapsed(),
     );
     if let Some(config) = guard.breaker {
+        record_resilience_decision(
+            "http",
+            "breaker",
+            if success { "success" } else { "failure" },
+        );
         route_breaker_record(&guard.key, success, &config);
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RateLimitConfig {
-    pub burst: u32,
-    pub refill: Duration,
-}
-
-#[derive(Debug, Clone)]
-pub struct BreakerConfig {
-    pub failure_threshold: u32,
-    pub reset_timeout: Duration,
-}
-
-#[derive(Debug)]
-struct RateLimitState {
-    tokens: f64,
-    last_refill: Instant,
-}
-
-#[derive(Debug)]
-struct BreakerState {
-    failures: u32,
-    open_until: Option<Instant>,
-}
+pub type RateLimitConfig = roze_resilience::RateLimitConfig;
+pub type BreakerConfig = roze_resilience::BreakerConfig;
 
 fn next_request_id() -> String {
     generate_trace_id()
@@ -987,48 +981,6 @@ fn auth_context_from_principal(principal: &AuthPrincipal) -> AuthContext {
     }
 }
 
-fn refill_tokens(state: &mut RateLimitState, config: &RateLimitConfig) {
-    let refill_secs = config.refill.as_secs_f64();
-    if refill_secs <= 0.0 {
-        state.tokens = config.burst as f64;
-        state.last_refill = Instant::now();
-        return;
-    }
-
-    let now = Instant::now();
-    let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-    let tokens_to_add = elapsed / refill_secs;
-    if tokens_to_add > 0.0 {
-        state.tokens = (state.tokens + tokens_to_add).min(config.burst as f64);
-        state.last_refill = now;
-    }
-}
-
-fn breaker_is_open(state: &mut BreakerState) -> bool {
-    if let Some(open_until) = state.open_until {
-        if Instant::now() < open_until {
-            return true;
-        }
-        state.open_until = None;
-        state.failures = 0;
-    }
-
-    false
-}
-
-fn breaker_record_success(state: &mut BreakerState) {
-    state.failures = 0;
-    state.open_until = None;
-}
-
-fn breaker_record_failure(state: &mut BreakerState, config: &BreakerConfig) {
-    state.failures = state.failures.saturating_add(1);
-    if state.failures >= config.failure_threshold.max(1) {
-        state.failures = 0;
-        state.open_until = Some(Instant::now() + config.reset_timeout);
-    }
-}
-
 fn effective_rate_limit(
     governance: &GovernanceConfig,
     route: Option<&RouteGovernanceConfig>,
@@ -1056,16 +1008,10 @@ fn effective_breaker(
 }
 
 fn enforce_rate_limit(key: &str, config: &RateLimitConfig) -> std::result::Result<(), RozeError> {
-    let mut states = ROUTE_RATE_LIMITS
-        .get_or_init(DashMap::new)
-        .entry(key.to_string())
-        .or_insert_with(|| RateLimitState {
-            tokens: config.burst as f64,
-            last_refill: Instant::now(),
-        });
-    refill_tokens(&mut states, config);
-    if states.tokens >= 1.0 {
-        states.tokens -= 1.0;
+    if ROUTE_RATE_LIMITS
+        .get_or_init(RateLimitRegistry::new)
+        .allow(key, *config)
+    {
         Ok(())
     } else {
         Err(RozeError::Internal("rate limited".to_string()))
@@ -1073,28 +1019,17 @@ fn enforce_rate_limit(key: &str, config: &RateLimitConfig) -> std::result::Resul
 }
 
 fn route_breaker_is_open(key: &str) -> bool {
-    let mut states = ROUTE_BREAKERS
-        .get_or_init(DashMap::new)
-        .entry(key.to_string())
-        .or_insert_with(|| BreakerState {
-            failures: 0,
-            open_until: None,
-        });
-    breaker_is_open(&mut states)
+    ROUTE_BREAKERS
+        .get_or_init(BreakerRegistry::new)
+        .is_open(key)
 }
 
 fn route_breaker_record(key: &str, success: bool, config: &BreakerConfig) {
-    let mut states = ROUTE_BREAKERS
-        .get_or_init(DashMap::new)
-        .entry(key.to_string())
-        .or_insert_with(|| BreakerState {
-            failures: 0,
-            open_until: None,
-        });
+    let registry = ROUTE_BREAKERS.get_or_init(BreakerRegistry::new);
     if success {
-        breaker_record_success(&mut states);
+        registry.record_success(key);
     } else {
-        breaker_record_failure(&mut states, config);
+        registry.record_failure(key, *config);
     }
 }
 
@@ -1110,14 +1045,12 @@ mod tests {
             burst: 3,
             refill: Duration::from_millis(10),
         };
-        let mut state = RateLimitState {
-            tokens: 0.0,
-            last_refill: Instant::now() - Duration::from_millis(50),
-        };
+        let registry = RateLimitRegistry::new();
 
-        refill_tokens(&mut state, &config);
-
-        assert_eq!(state.tokens, 3.0);
+        assert!(registry.allow("route", config));
+        assert!(registry.allow("route", config));
+        assert!(registry.allow("route", config));
+        assert!(!registry.allow("route", config));
     }
 
     #[test]
@@ -1126,20 +1059,17 @@ mod tests {
             failure_threshold: 2,
             reset_timeout: Duration::from_millis(10),
         };
-        let mut state = BreakerState {
-            failures: 0,
-            open_until: None,
-        };
+        let registry = BreakerRegistry::new();
 
-        assert!(!breaker_is_open(&mut state));
-        breaker_record_failure(&mut state, &config);
-        assert!(!breaker_is_open(&mut state));
-        breaker_record_failure(&mut state, &config);
-        assert!(breaker_is_open(&mut state));
+        assert!(!registry.is_open("route"));
+        registry.record_failure("route", config);
+        assert!(!registry.is_open("route"));
+        registry.record_failure("route", config);
+        assert!(registry.is_open("route"));
 
-        state.open_until = Some(Instant::now() - Duration::from_millis(1));
-        assert!(!breaker_is_open(&mut state));
-        assert_eq!(state.failures, 0);
+        std::thread::sleep(Duration::from_millis(11));
+        assert!(!registry.is_open("route"));
+        assert_eq!(registry.snapshot("route").expect("snapshot").failures, 0);
     }
 
     #[tokio::test]

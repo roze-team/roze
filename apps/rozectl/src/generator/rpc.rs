@@ -203,8 +203,8 @@ pub fn render_client(spec: &ApiSpec) -> String {
         out.push_str(&format!(
             "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request(request_template.clone(), &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
-            request = route.request,
-            response = route.response
+            request = proto_type_name(&route.request),
+            response = proto_type_name(&route.response)
         ));
     }
 
@@ -213,8 +213,8 @@ pub fn render_client(spec: &ApiSpec) -> String {
         out.push_str(&format!(
             "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request(request_template.clone(), &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
-            request = method.request,
-            response = method.response
+            request = proto_type_name(&method.request),
+            response = proto_type_name(&method.response)
         ));
     }
 
@@ -230,8 +230,8 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str(&format!(
         "    async fn {handler}(&self, request: Request<proto::{req_ty}>) -> Result<Response<proto::{resp_ty}>, Status> {{\n",
         handler = handler,
-        req_ty = req_ty,
-        resp_ty = resp_ty
+        req_ty = proto_type_name(req_ty),
+        resp_ty = proto_type_name(resp_ty)
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
     out.push_str(&format!(
@@ -274,8 +274,8 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     out.push_str(&format!(
         "    async fn {method_name}(&self, request: Request<proto::{req_ty}>) -> Result<Response<proto::{resp_ty}>, Status> {{\n",
         method_name = method_name,
-        req_ty = req_ty,
-        resp_ty = resp_ty
+        req_ty = proto_type_name(req_ty),
+        resp_ty = proto_type_name(resp_ty)
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
     out.push_str(&format!(
@@ -391,7 +391,7 @@ fn proto_to_app(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
 
 fn app_to_proto(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
     let Some(ty) = find_type(spec, ty_name) else {
-        return format!("proto::{ty_name} {{ }}");
+        return format!("proto::{} {{ }}", proto_type_name(ty_name));
     };
 
     let fields = ty
@@ -407,7 +407,11 @@ fn app_to_proto(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!("proto::{ty_name} {{ {fields} }}")
+    format!("proto::{} {{ {fields} }}", proto_type_name(ty_name))
+}
+
+fn proto_type_name(ty_name: &str) -> String {
+    to_pascal_case(ty_name)
 }
 
 fn proto_to_app_value(spec: &ApiSpec, ty: &str, expr: &str) -> String {
@@ -1106,6 +1110,39 @@ mod tests {
         assert!(client.contains("pub async fn connect_from_config"));
         assert!(client.contains("RpcClientOptions::from_config(&config)"));
         assert!(client.contains("roze_rpc::rpc::client_request("));
+    }
+
+    #[test]
+    fn rpc_proto_references_use_prost_pascal_case_types() {
+        let spec = parse_api(
+            r#"
+            service transformer {
+                rpc expand (expandReq) returns (expandResp)
+            }
+
+            type expandReq {
+                shorten: string
+            }
+
+            type expandResp {
+                url: string
+            }
+            "#,
+        )
+        .expect("api");
+
+        let client = render_client(&spec);
+        assert!(client.contains("req: proto::ExpandReq"));
+        assert!(client.contains("Result<proto::ExpandResp, Status>"));
+        assert!(!client.contains("proto::expandReq"));
+        assert!(!client.contains("proto::expandResp"));
+
+        let server = render_rpc(&spec);
+        assert!(server.contains("Request<proto::ExpandReq>"));
+        assert!(server.contains("Response<proto::ExpandResp>"));
+        assert!(server.contains("Response::new(proto::ExpandResp"));
+        assert!(!server.contains("proto::expandReq"));
+        assert!(!server.contains("proto::expandResp"));
     }
 
     #[test]

@@ -31,6 +31,7 @@ use roze_config::{
     RouteGovernanceConfig,
 };
 use roze_jwt::{verify_token, JwtConfig};
+use roze_resilience::{BreakerRegistry, RateLimitRegistry};
 use roze_rpc::registry::Registry;
 
 #[derive(Clone)]
@@ -50,8 +51,8 @@ struct GatewayRuntime {
     registry_cursors: Arc<Mutex<HashMap<String, usize>>>,
     outlier_states: Arc<Mutex<HashMap<String, OutlierState>>>,
     health_states: Arc<Mutex<HashMap<String, HealthState>>>,
-    rate_limit_states: Arc<Mutex<HashMap<String, TokenBucketState>>>,
-    breaker_states: Arc<Mutex<HashMap<String, CircuitState>>>,
+    rate_limit_states: Arc<RateLimitRegistry>,
+    breaker_states: Arc<BreakerRegistry>,
     stream_connection_states: Arc<StdMutex<HashMap<String, u32>>>,
 }
 
@@ -92,18 +93,6 @@ struct CompiledRoute {
     rate_limit: Option<RateLimitConfig>,
     breaker: Option<BreakerConfig>,
     middlewares: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TokenBucketState {
-    tokens: f64,
-    last_refill: Instant,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CircuitState {
-    failure_count: u32,
-    open_until: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -200,8 +189,8 @@ impl Default for GatewayRuntime {
             registry_cursors: Arc::new(Mutex::new(HashMap::new())),
             outlier_states: Arc::new(Mutex::new(HashMap::new())),
             health_states: Arc::new(Mutex::new(HashMap::new())),
-            rate_limit_states: Arc::new(Mutex::new(HashMap::new())),
-            breaker_states: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit_states: Arc::new(RateLimitRegistry::new()),
+            breaker_states: Arc::new(BreakerRegistry::new()),
             stream_connection_states: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -401,6 +390,7 @@ impl GatewayRuntime {
 
         if !self.rate_allowed(&route).await {
             warn!(route = %route.path, event = "gateway.rate_limited", "route rate limited");
+            roze_metrics::record_resilience_decision("gateway", "rate_limit", "rejected");
             self.record_gateway_response(
                 Some(&route),
                 &request_method,
@@ -414,9 +404,13 @@ impl GatewayRuntime {
                 "too many requests",
             );
         }
+        if route.rate_limit.is_some() {
+            roze_metrics::record_resilience_decision("gateway", "rate_limit", "allowed");
+        }
 
         if self.is_breaker_open(&route).await {
             warn!(route = %route.path, event = "gateway.breaker_open", "breaker open");
+            roze_metrics::record_resilience_decision("gateway", "breaker", "open");
             self.record_gateway_response(
                 Some(&route),
                 &request_method,
@@ -429,6 +423,9 @@ impl GatewayRuntime {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service temporarily unavailable",
             );
+        }
+        if route.breaker.is_some() {
+            roze_metrics::record_resilience_decision("gateway", "breaker", "allowed");
         }
 
         if is_websocket_upgrade(&req) {
@@ -1236,57 +1233,21 @@ impl GatewayRuntime {
             return true;
         };
 
-        let mut states = self.rate_limit_states.lock().await;
-        let state = states.entry(route.path.clone()).or_insert_with(|| {
-            let now = Instant::now();
-            TokenBucketState {
-                tokens: rate_limit.burst as f64,
-                last_refill: now,
-            }
-        });
-
-        let now = Instant::now();
-        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-        let refill_interval = (rate_limit.refill_ms.max(1) as f64) / 1000.0;
-        if elapsed >= refill_interval && rate_limit.burst > 0 {
-            let refill = elapsed / refill_interval;
-            state.tokens = (state.tokens + refill).min(rate_limit.burst as f64);
-            state.last_refill = now;
-        }
-
-        if state.tokens >= 1.0 {
-            state.tokens -= 1.0;
-            return true;
-        }
-
-        false
+        self.rate_limit_states.allow(
+            route.path.clone(),
+            roze_resilience::RateLimitConfig {
+                burst: rate_limit.burst,
+                refill: Duration::from_millis(rate_limit.refill_ms.max(1)),
+            },
+        )
     }
 
     async fn is_breaker_open(&self, route: &CompiledRoute) -> bool {
-        let Some(cfg) = route.breaker else {
+        let Some(_) = route.breaker else {
             return false;
         };
 
-        let mut states = self.breaker_states.lock().await;
-        let state = states
-            .entry(route.path.clone())
-            .or_insert_with(|| CircuitState {
-                failure_count: 0,
-                open_until: None,
-            });
-
-        match state.open_until {
-            Some(open_until) if Instant::now() < open_until => true,
-            Some(open_until) if Instant::now() >= open_until => {
-                state.open_until = None;
-                state.failure_count = 0;
-                false
-            }
-            _ => {
-                let _ = cfg;
-                false
-            }
-        }
+        self.breaker_states.is_open(route.path.clone())
     }
 
     async fn record_breaker_success(&self, route: &CompiledRoute) {
@@ -1294,11 +1255,8 @@ impl GatewayRuntime {
             return;
         };
 
-        let mut states = self.breaker_states.lock().await;
-        if let Some(state) = states.get_mut(&route.path) {
-            state.failure_count = 0;
-            state.open_until = None;
-        }
+        roze_metrics::record_resilience_decision("gateway", "breaker", "success");
+        self.breaker_states.record_success(route.path.clone());
     }
 
     async fn record_breaker_failure(&self, route: &CompiledRoute) {
@@ -1306,18 +1264,14 @@ impl GatewayRuntime {
             return;
         };
 
-        let mut states = self.breaker_states.lock().await;
-        let state = states
-            .entry(route.path.clone())
-            .or_insert_with(|| CircuitState {
-                failure_count: 0,
-                open_until: None,
-            });
-        state.failure_count = state.failure_count.saturating_add(1);
-        if state.failure_count >= cfg.failure_threshold.max(1) {
-            state.failure_count = 0;
-            state.open_until = Some(Instant::now() + Duration::from_millis(cfg.reset_timeout_ms));
-        }
+        roze_metrics::record_resilience_decision("gateway", "breaker", "failure");
+        self.breaker_states.record_failure(
+            route.path.clone(),
+            roze_resilience::BreakerConfig {
+                failure_threshold: cfg.failure_threshold,
+                reset_timeout: Duration::from_millis(cfg.reset_timeout_ms),
+            },
+        );
     }
 }
 

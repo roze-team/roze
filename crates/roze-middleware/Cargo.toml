@@ -6,12 +6,12 @@ version.workspace = true
 
 [dependencies]
 axum.workspace = true
-dashmap.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
 roze-error = { path = "../roze-error" }
 roze-metrics = { path = "../roze-metrics" }
+roze-resilience = { path = "../roze-resilience" }
 roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
 tokio.workspace = true

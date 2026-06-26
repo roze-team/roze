@@ -17,6 +17,7 @@ roze-error = { path = "../roze-error" }
 roze-jwt = { path = "../roze-jwt" }
 roze-grpc = { path = "../roze-grpc" }
 roze-metrics = { path = "../roze-metrics" }
+roze-resilience = { path = "../roze-resilience" }
 roze-trace = { path = "../roze-trace" }
 reqwest.workspace = true
 serde.workspace = true

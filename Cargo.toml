@@ -8,6 +8,7 @@ members = [
     "crates/roze-codec",
     "crates/roze-http",
     "crates/roze-metrics",
+    "crates/roze-resilience",
     "crates/roze-middleware",
     "crates/roze-utils",
     "crates/roze-grpc",
