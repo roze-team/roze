@@ -2,7 +2,10 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -109,6 +112,79 @@ pub trait RuntimeService: Send + Sync + 'static {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecyclePhase {
+    Starting,
+    Running,
+    Draining,
+    Stopped,
+    Failed,
+}
+
+const PHASE_STARTING: u8 = 0;
+const PHASE_RUNNING: u8 = 1;
+const PHASE_DRAINING: u8 = 2;
+const PHASE_STOPPED: u8 = 3;
+const PHASE_FAILED: u8 = 4;
+
+#[derive(Debug, Clone)]
+pub struct LifecycleState {
+    phase: Arc<AtomicU8>,
+}
+
+impl Default for LifecycleState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LifecycleState {
+    pub fn new() -> Self {
+        Self {
+            phase: Arc::new(AtomicU8::new(PHASE_STARTING)),
+        }
+    }
+
+    pub fn phase(&self) -> LifecyclePhase {
+        match self.phase.load(Ordering::SeqCst) {
+            PHASE_RUNNING => LifecyclePhase::Running,
+            PHASE_DRAINING => LifecyclePhase::Draining,
+            PHASE_STOPPED => LifecyclePhase::Stopped,
+            PHASE_FAILED => LifecyclePhase::Failed,
+            _ => LifecyclePhase::Starting,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.phase(), LifecyclePhase::Running)
+    }
+
+    pub fn is_draining(&self) -> bool {
+        matches!(self.phase(), LifecyclePhase::Draining)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.phase(),
+            LifecyclePhase::Stopped | LifecyclePhase::Failed
+        )
+    }
+
+    fn mark(&self, phase: LifecyclePhase) {
+        self.phase.store(phase_code(phase), Ordering::SeqCst);
+    }
+}
+
+fn phase_code(phase: LifecyclePhase) -> u8 {
+    match phase {
+        LifecyclePhase::Starting => PHASE_STARTING,
+        LifecyclePhase::Running => PHASE_RUNNING,
+        LifecyclePhase::Draining => PHASE_DRAINING,
+        LifecyclePhase::Stopped => PHASE_STOPPED,
+        LifecyclePhase::Failed => PHASE_FAILED,
+    }
+}
+
 pub struct FnService<F> {
     name: Arc<str>,
     start: F,
@@ -155,11 +231,21 @@ impl Default for ServiceGroupConfig {
 #[derive(Clone)]
 pub struct ServiceGroupHandle {
     shutdown: ShutdownHandle,
+    lifecycle: LifecycleState,
 }
 
 impl ServiceGroupHandle {
     pub fn shutdown(&self) {
+        self.lifecycle.mark(LifecyclePhase::Draining);
         self.shutdown.trigger();
+    }
+
+    pub fn phase(&self) -> LifecyclePhase {
+        self.lifecycle.phase()
+    }
+
+    pub fn lifecycle(&self) -> LifecycleState {
+        self.lifecycle.clone()
     }
 }
 
@@ -168,6 +254,7 @@ pub struct ServiceGroup {
     services: Vec<Arc<dyn RuntimeService>>,
     shutdown: ShutdownHandle,
     listener: ShutdownListener,
+    lifecycle: LifecycleState,
 }
 
 impl Default for ServiceGroup {
@@ -188,6 +275,7 @@ impl ServiceGroup {
             services: Vec::new(),
             shutdown,
             listener,
+            lifecycle: LifecycleState::new(),
         }
     }
 
@@ -218,11 +306,16 @@ impl ServiceGroup {
     pub fn handle(&self) -> ServiceGroupHandle {
         ServiceGroupHandle {
             shutdown: self.shutdown.clone(),
+            lifecycle: self.lifecycle.clone(),
         }
     }
 
     pub fn shutdown_listener(&self) -> ShutdownListener {
         self.listener.clone()
+    }
+
+    pub fn lifecycle(&self) -> LifecycleState {
+        self.lifecycle.clone()
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
@@ -235,10 +328,12 @@ impl ServiceGroup {
         F: Future<Output = ()> + Send,
     {
         if self.services.is_empty() {
+            self.lifecycle.mark(LifecyclePhase::Stopped);
             return Ok(());
         }
 
         let mut tasks = spawn_services(&self.services, &self.listener);
+        self.lifecycle.mark(LifecyclePhase::Running);
         let mut active = self.services.len();
         let mut errors = Vec::new();
         tokio::pin!(shutdown);
@@ -246,10 +341,12 @@ impl ServiceGroup {
         while active > 0 {
             tokio::select! {
                 _ = &mut shutdown => {
+                    self.lifecycle.mark(LifecyclePhase::Draining);
                     self.shutdown.trigger();
                     break;
                 }
                 _ = self.listener.clone().wait() => {
+                    self.lifecycle.mark(LifecyclePhase::Draining);
                     break;
                 }
                 joined = tasks.join_next() => {
@@ -258,6 +355,7 @@ impl ServiceGroup {
                     };
                     active -= 1;
                     if handle_service_exit(joined, &mut errors) && self.config.stop_on_first_error {
+                        self.lifecycle.mark(LifecyclePhase::Draining);
                         self.shutdown.trigger();
                         break;
                     }
@@ -278,8 +376,10 @@ impl ServiceGroup {
         }
 
         if errors.is_empty() {
+            self.lifecycle.mark(LifecyclePhase::Stopped);
             Ok(())
         } else {
+            self.lifecycle.mark(LifecyclePhase::Failed);
             Err(anyhow::anyhow!("{}", errors.join("; ")))
         }
     }
@@ -440,6 +540,7 @@ mod tests {
         join.await
             .expect("group task should join")
             .expect("group should stop cleanly");
+        assert_eq!(handle.phase(), LifecyclePhase::Stopped);
     }
 
     #[tokio::test]
@@ -470,6 +571,7 @@ mod tests {
 
         let stopped = Arc::new(AtomicBool::new(false));
         let mut group = ServiceGroup::new();
+        let handle = group.handle();
         group.add(Stoppable {
             stopped: stopped.clone(),
         });
@@ -479,6 +581,7 @@ mod tests {
             .await
             .expect("shutdown should be clean");
         assert!(stopped.load(Ordering::SeqCst));
+        assert_eq!(handle.phase(), LifecyclePhase::Stopped);
     }
 
     #[tokio::test]
@@ -487,6 +590,7 @@ mod tests {
             shutdown_timeout: Duration::from_millis(100),
             stop_on_first_error: true,
         });
+        let handle = group.handle();
         let peer_stopped = Arc::new(AtomicUsize::new(0));
 
         group.add_fn("failing", |_| async { Err(anyhow::anyhow!("boom")) });
@@ -509,5 +613,48 @@ mod tests {
 
         assert!(error.to_string().contains("service failing failed"));
         assert_eq!(peer_stopped.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.phase(), LifecyclePhase::Failed);
+    }
+
+    #[tokio::test]
+    async fn service_group_exposes_running_and_draining_phases() {
+        let mut group = ServiceGroup::new();
+        let handle = group.handle();
+        let observed_draining = Arc::new(AtomicBool::new(false));
+
+        group.add_fn("worker", {
+            let handle = handle.clone();
+            let observed_draining = observed_draining.clone();
+            move |shutdown| {
+                let handle = handle.clone();
+                let observed_draining = observed_draining.clone();
+                async move {
+                    while handle.phase() != LifecyclePhase::Running {
+                        tokio::task::yield_now().await;
+                    }
+                    shutdown.wait().await;
+                    observed_draining
+                        .store(handle.phase() == LifecyclePhase::Draining, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+        });
+
+        let join = tokio::spawn(group.start_with_shutdown(std::future::pending()));
+        tokio::time::timeout(Duration::from_millis(50), async {
+            while handle.phase() != LifecyclePhase::Running {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("service group should enter running phase");
+
+        handle.shutdown();
+        join.await
+            .expect("group task should join")
+            .expect("group should stop cleanly");
+
+        assert!(observed_draining.load(Ordering::SeqCst));
+        assert_eq!(handle.phase(), LifecyclePhase::Stopped);
     }
 }
