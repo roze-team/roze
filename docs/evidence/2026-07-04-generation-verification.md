@@ -14,20 +14,17 @@ Project: multi-service mall generated from .api, .proto, and SQL schemas
 
 ## Current Status
 
-This verification reported one Roze generation issue in generated API crates.
-The repository now contains a fix for the Rust API type mapping; downstream
-projects should regenerate and rerun the API compile checks to close the
-external verification loop.
+No unresolved Roze generation issues are currently tracked for this project.
 
-## Reported Issue
+## Resolved Issue
 
-### API Rust generator left `int64` as a Rust type
+### API Rust generator mapping API/IDL `int64` to Rust `i64`
 
-Status: fixed in this repository; pending downstream regeneration confirmation.
+Status: fixed and verified after downstream regeneration.
 
-After regenerating `shop-admin-api` and `shop-app-api`, the generated Rust API
-code used `int64` directly in `src/types/mod.rs` and generated handler request
-structs.
+Before the fix, regenerating `shop-admin-api` and `shop-app-api` produced Rust
+API code that used `int64` directly in `src/types/mod.rs` and generated handler
+request structs.
 
 Examples:
 
@@ -46,10 +43,18 @@ pub(crate) struct ListAreasAreaListReqQuery {
 }
 ```
 
-Rust has no built-in `int64` type alias, so the generated API crates failed to
-compile with `E0425`.
+Rust has no built-in `int64` type alias, so the generated API crates failed
+with:
 
-Reproduction:
+```text
+error[E0425]: cannot find type `int64` in this scope
+```
+
+The fix maps API/IDL `int64` to Rust `i64` in generated shared types and
+handler-local request structs. Related scalar mappings are covered by generator
+tests, including `int`, `int32`, `uint64`, `float`, and `double`.
+
+Downstream verification:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\generate-roze.ps1
@@ -57,20 +62,6 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cargo check --manifest-path services\shop-admin-api\Cargo.toml
 cargo check --manifest-path services\shop-app-api\Cargo.toml
 ```
-
-Observed:
-
-```text
-error[E0425]: cannot find type `int64` in this scope
-```
-
-Expected:
-
-- Rust API generator maps API/IDL `int64` to Rust `i64`.
-- The mapping applies to generated shared types and generated handler-local
-  request structs.
-- Related integer and number aliases are covered, including `int`, `int32`,
-  `uint64`, `float`, and `double`.
 
 Previously tracked issues have been fixed:
 
@@ -80,6 +71,7 @@ Previously tracked issues have been fixed:
 - `RpcService: Debug` requiring `ServiceContext: Debug`.
 - Model generation escaping Rust reserved keywords such as `type`.
 - RPC stubs using partial struct initializers instead of `Default::default()`.
+- API Rust generator mapping API/IDL `int64` to Rust `i64`.
 
 ## Verification
 
@@ -96,6 +88,8 @@ cargo check --manifest-path services\shop-system-rpc\Cargo.toml
 cargo check --manifest-path services\shop-payment-rpc\Cargo.toml
 cargo check --manifest-path services\shop-promotion-rpc\Cargo.toml
 cargo check --manifest-path services\shop-fulfillment-rpc\Cargo.toml
+cargo check --manifest-path services\shop-admin-api\Cargo.toml
+cargo check --manifest-path services\shop-app-api\Cargo.toml
 ```
 
 Spot checks:
