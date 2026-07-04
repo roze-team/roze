@@ -85,6 +85,22 @@ bash scripts/production-evidence.sh \
 The generated report starts as `inconclusive`. A maintainer must fill in all
 measurements and artifacts before changing the verdict to `pass`.
 
+## Soak Entrypoints
+
+The repository includes short-run defaults for validating the soak harnesses.
+Set the duration to 24h/72h when producing real evidence:
+
+```bash
+ROZE_MQ_SOAK_SECONDS=86400 ROZE_MQ_SOAK_MESSAGES=100000000 \
+  bash scripts/production-soak-mq.sh
+
+ROZE_CONFIG_CENTER_SOAK_SECONDS=86400 ROZE_CONFIG_CENTER_SOAK_UPDATES=100000000 \
+  bash scripts/production-soak-config-center.sh
+```
+
+These commands are evidence inputs. The final report still needs the measured
+latency/throughput/resource trends and artifacts described above.
+
 ## Release Gate Relationship
 
 `scripts/release-gate.sh` proves that high-signal automated checks pass. It is

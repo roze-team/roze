@@ -8,6 +8,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
 bash -n scripts/production-evidence.sh
+bash -n scripts/production-soak-mq.sh
+bash -n scripts/production-soak-config-center.sh
 
 cargo test -p roze-gateway
 bash scripts/gateway-smoke.sh

@@ -577,6 +577,7 @@ impl MqAdmin for InMemoryBroker {
             message.topic = record.original_topic.clone();
             message.attempt = 0;
             message.available_at_millis = None;
+            message.idempotency_key = None;
             message
         };
         message.ensure_trace_id();
@@ -958,5 +959,89 @@ mod tests {
             .expect("message should arrive")
             .expect("message");
         assert_eq!(received.message().payload["id"], 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "production-soak: set ROZE_MQ_SOAK_SECONDS/ROZE_MQ_SOAK_MESSAGES for long runs"]
+    async fn production_soak_in_memory_broker() {
+        let seconds = std::env::var("ROZE_MQ_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(5);
+        let max_messages = std::env::var("ROZE_MQ_SOAK_MESSAGES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1_000);
+        let broker = InMemoryBroker::with_dead_letter("dead", 1);
+        let mut orders = broker.subscribe("orders").await.expect("subscribe orders");
+        let mut dead = broker.subscribe("dead").await.expect("subscribe dead");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut sent = 0u64;
+        let mut acked = 0u64;
+        let mut nacked = 0u64;
+
+        while std::time::Instant::now() < deadline && sent < max_messages {
+            let message = Message::new("orders", serde_json::json!({ "id": sent }))
+                .with_group("soak")
+                .with_dead_letter_topic("dead")
+                .with_idempotency_key(format!("soak-{sent}"));
+            broker.publish(message.clone()).await.expect("publish");
+            if sent % 97 == 0 {
+                broker.publish(message).await.expect("publish duplicate");
+            }
+
+            let delivery = tokio::time::timeout(std::time::Duration::from_secs(1), orders.recv())
+                .await
+                .expect("delivery timeout")
+                .expect("delivery");
+            if sent % 13 == 0 {
+                delivery.nack().await.expect("nack");
+                let dead_delivery =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), dead.recv())
+                        .await
+                        .expect("dead letter timeout")
+                        .expect("dead letter delivery");
+                dead_delivery.ack().await.expect("ack dead letter");
+                nacked += 1;
+            } else {
+                delivery.ack().await.expect("ack");
+                acked += 1;
+            }
+            sent += 1;
+        }
+
+        let records = broker
+            .dead_letters_query(DeadLetterQuery {
+                topic: Some("orders".to_string()),
+                group: Some("soak".to_string()),
+                offset: 0,
+                limit: 500,
+            })
+            .await
+            .expect("dead letters");
+        if let Some(record) = records.first() {
+            let mut replay_rx = broker.subscribe("orders").await.expect("subscribe replay");
+            broker
+                .replay_dead_letter(record.id)
+                .await
+                .expect("replay")
+                .expect("replayed message");
+            let replayed =
+                tokio::time::timeout(std::time::Duration::from_secs(1), replay_rx.recv())
+                    .await
+                    .expect("replay timeout")
+                    .expect("replayed delivery");
+            replayed.ack().await.expect("ack replay");
+        }
+
+        let stats = broker.stats().await.expect("stats");
+        println!("roze_mq_soak sent={sent} acked={acked} nacked={nacked} stats={stats:?}");
+
+        assert!(sent > 0, "soak must send at least one message");
+        assert_eq!(stats.published, sent + ((sent.saturating_sub(1)) / 97 + 1));
+        assert_eq!(stats.acked, acked + nacked + u64::from(!records.is_empty()));
+        assert_eq!(stats.nacked, nacked);
+        assert_eq!(stats.dead_lettered, nacked);
+        assert!(stats.duplicated > 0);
     }
 }

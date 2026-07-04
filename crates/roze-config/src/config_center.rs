@@ -2106,6 +2106,120 @@ gateway:
         std::fs::remove_dir_all(root).expect("remove temp root");
     }
 
+    #[test]
+    #[ignore = "production-soak: set ROZE_CONFIG_CENTER_SOAK_SECONDS/ROZE_CONFIG_CENTER_SOAK_UPDATES for long runs"]
+    fn production_soak_admin_store_validation_rollback_and_snapshot() {
+        let seconds = std::env::var("ROZE_CONFIG_CENTER_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(5);
+        let max_updates = std::env::var("ROZE_CONFIG_CENTER_SOAK_UPDATES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1_000);
+        let root = std::env::temp_dir().join(format!(
+            "roze-config-center-soak-{}-{}",
+            std::process::id(),
+            current_millis()
+        ));
+        let snapshot = root.join("admin.json");
+        let operator = ConfigPrincipal::new(
+            "operator",
+            [
+                ConfigPermission::Read,
+                ConfigPermission::Write,
+                ConfigPermission::Rollback,
+                ConfigPermission::Audit,
+                ConfigPermission::WatchStatus,
+            ],
+        );
+        let mut store = ConfigCenterAdminStore::new(
+            ConfigFormat::Yaml,
+            "name: v0\ngateway:\n  timeout_ms: 1000\n",
+            ConfigAdminMetadata::default(),
+            "system",
+        )
+        .expect("create store");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut accepted = 0u64;
+        let mut rejected = 0u64;
+        let mut rollbacks = 0u64;
+
+        while std::time::Instant::now() < deadline && accepted < max_updates {
+            let update = accepted + 1;
+            store
+                .publish(
+                    ConfigChangeRequest {
+                        actor: operator.clone(),
+                        reason: Some(format!("soak update {update}")),
+                    },
+                    format!(
+                        "name: v{update}\ngateway:\n  timeout_ms: {}\n",
+                        1000 + update
+                    ),
+                    ConfigAdminMetadata::default(),
+                )
+                .expect("publish valid config");
+            accepted += 1;
+
+            if update % 17 == 0 {
+                let invalid = store.publish(
+                    ConfigChangeRequest {
+                        actor: operator.clone(),
+                        reason: Some("invalid payload".to_string()),
+                    },
+                    "name: [broken\n",
+                    ConfigAdminMetadata::default(),
+                );
+                assert!(invalid.is_err());
+                rejected += 1;
+            }
+
+            if update % 29 == 0 {
+                store
+                    .rollback(
+                        ConfigChangeRequest {
+                            actor: operator.clone(),
+                            reason: Some("soak rollback".to_string()),
+                        },
+                        1,
+                    )
+                    .expect("rollback");
+                rollbacks += 1;
+            }
+
+            store.set_watch_status(ConfigWatchStatus {
+                mode: ConfigWatchMode::Polling,
+                source: "soak".to_string(),
+                last_revision: Some(update as i64),
+                last_error: None,
+                updated_at_millis: current_millis(),
+            });
+            store.save_to_path(&snapshot).expect("save snapshot");
+            store = ConfigCenterAdminStore::load_from_path(&snapshot).expect("load snapshot");
+            let status = store.watch_status(&operator).expect("watch status");
+            assert_eq!(status.last_revision, Some(update as i64));
+        }
+
+        let audit = store.audit_log(&operator).expect("audit");
+        println!(
+            "roze_config_center_soak accepted={accepted} rejected={rejected} rollbacks={rollbacks} versions={} audit_records={}",
+            store.versions().len(),
+            audit.len()
+        );
+        assert!(accepted > 0, "soak must publish at least one valid update");
+        assert!(audit
+            .iter()
+            .any(|record| record.result == ConfigAuditResult::Allowed));
+        if rejected > 0 {
+            assert!(audit
+                .iter()
+                .any(|record| record.result == ConfigAuditResult::Rejected));
+        }
+
+        std::fs::remove_dir_all(root).expect("remove temp root");
+    }
+
     fn section_hash(signatures: &[ConfigSectionSignature], section: &str) -> Option<String> {
         signatures
             .iter()
