@@ -93,6 +93,15 @@ documented as production release tags.
 
 Before cutting a release:
 
+- The `release-gate` GitHub Actions workflow passes for the release commit or
+  tag. It is the machine-enforced gate for Gateway, Config Center, MQ,
+  Lifecycle, generator smoke, generated compile smoke, and production smoke.
+- The same gate can be run locally with:
+
+```bash
+bash scripts/release-gate.sh
+```
+
 - Create a release tracking issue from the release checklist template.
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
@@ -114,6 +123,14 @@ Before cutting a release:
 - `docs/maturity.md` accurately labels modules as stable/beta/scaffold/planned.
 - `README.md` still states the current pre-release install path.
 - Security-sensitive changes are checked against `SECURITY.md`.
+
+The release gate intentionally runs the high-signal stability checks without
+external Docker Compose dependencies. Full dependency validation remains
+available through:
+
+```bash
+bash scripts/production-smoke.sh --with-compose
+```
 
 ## Breaking Change Notes
 

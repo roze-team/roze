@@ -22,7 +22,10 @@ assignees: ""
 
 ## Verification
 
+- [ ] `release-gate` workflow passed on the release commit or tag
+
 ```bash
+bash scripts/release-gate.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

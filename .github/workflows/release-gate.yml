@@ -1,0 +1,47 @@
+name: release-gate
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+    paths:
+      - "crates/**"
+      - "apps/**"
+      - "scripts/**"
+      - "docs/release.md"
+      - "docs/maturity.md"
+      - "docs/roadmap.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release-gate.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "apps/**"
+      - "scripts/**"
+      - "docs/release.md"
+      - "docs/maturity.md"
+      - "docs/roadmap.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release-gate.yml"
+
+jobs:
+  release-gate:
+    name: release stability gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Release gate
+        run: bash scripts/release-gate.sh
