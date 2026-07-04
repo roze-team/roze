@@ -168,7 +168,10 @@ mod tests {
             request.headers.get("x-meili-api-key").map(String::as_str),
             Some("secret")
         );
-        assert_eq!(request.body_json(), json!([{"id": "user-1", "name": "Ada"}]));
+        assert_eq!(
+            request.body_json(),
+            json!([{"id": "user-1", "name": "Ada"}])
+        );
     }
 
     #[derive(Debug)]
