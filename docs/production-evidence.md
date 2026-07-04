@@ -71,6 +71,20 @@ docs/evidence/<yyyy-mm-dd>-<area>-<duration>.md
 Large raw artifacts such as flamegraphs, logs, and metric exports should be
 linked from the report instead of committed directly.
 
+Create a report scaffold with:
+
+```bash
+bash scripts/production-evidence.sh \
+  --area gateway \
+  --duration 24h \
+  --workload "proxy traffic, retries, fallback, rate limit, breaker, load shedding, hot reload" \
+  --failure-injection "upstream 5xx, timeout, slow response, config reload, upstream recovery" \
+  --command "bash scripts/production-soak-gateway.sh --duration 24h"
+```
+
+The generated report starts as `inconclusive`. A maintainer must fill in all
+measurements and artifacts before changing the verdict to `pass`.
+
 ## Release Gate Relationship
 
 `scripts/release-gate.sh` proves that high-signal automated checks pass. It is

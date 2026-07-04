@@ -7,6 +7,8 @@ cd "$ROOT"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
+bash -n scripts/production-evidence.sh
+
 cargo test -p roze-gateway
 bash scripts/gateway-smoke.sh
 cargo test -p roze-config config_center

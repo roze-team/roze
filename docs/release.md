@@ -130,6 +130,8 @@ bash scripts/release-gate.sh
 - `docs/maturity.md` accurately labels modules as stable/beta/scaffold/planned.
 - Runtime-critical modules marked `stable` have evidence reports that satisfy
   `docs/production-evidence.md`.
+- New evidence reports are generated with `scripts/production-evidence.sh` or
+  contain the same required fields.
 - Public release language follows `docs/stability-commitment.md`.
 - `README.md` still states the current pre-release install path.
 - Security-sensitive changes are checked against `SECURITY.md`.
