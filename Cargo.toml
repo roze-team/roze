@@ -71,7 +71,7 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-axum = { version = "0.8", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }
+axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -93,8 +93,8 @@ mongodb = "3.7.0"
 moka = { version = "0.12", features = ["future"] }
 redis = { version = "0.27", features = ["aio", "tokio-comp"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1.10.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.14.6"
 tonic-build = "0.14.6"
