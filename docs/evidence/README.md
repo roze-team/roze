@@ -2,6 +2,15 @@
 
 This directory stores reproducible long-run evidence reports.
 
+It can also store scoped generator verification notes when they clearly state
+their evidence boundary. These notes support release confidence, but they do
+not replace the long-run reports required before broad production-stability
+claims.
+
+Current scoped verification notes:
+
+- [2026-07-04 generation verification](2026-07-04-generation-verification.md)
+
 Generate a new report scaffold with:
 
 ```bash

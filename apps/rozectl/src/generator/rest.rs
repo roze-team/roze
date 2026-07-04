@@ -1513,8 +1513,16 @@ fn map_type(ty: &str) -> String {
 
     match ty {
         "string" => "String".to_string(),
-        "int" => "i64".to_string(),
-        "uint" => "u64".to_string(),
+        "int" | "int64" => "i64".to_string(),
+        "int32" => "i32".to_string(),
+        "int16" => "i16".to_string(),
+        "int8" => "i8".to_string(),
+        "uint" | "uint64" => "u64".to_string(),
+        "uint32" => "u32".to_string(),
+        "uint16" => "u16".to_string(),
+        "uint8" => "u8".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
         "bool" => "bool".to_string(),
         other => other.to_string(),
     }
@@ -1838,6 +1846,10 @@ mod tests {
                 nickname String `query:"nickname" validate:"required,min=2,max=16"`
                 age int `query:"age" validate:"min=1,max=120"`
                 min_age int `query:"minAge"`
+                parent_id int64 `query:"parent_id"`
+                region_id uint64 `query:"region_id"`
+                lat float `query:"lat"`
+                lng double `query:"lng"`
                 max_age int `query:"maxAge" validate:"gtefield=min_age"`
                 score int `query:"score" validate:"gt=0,lt=100"`
                 page uint `query:"page" validate:"gte=1,lte=500"`
@@ -1897,6 +1909,14 @@ mod tests {
         assert!(handlers.contains("#[validate(does_not_contain = \"admin\")]"));
         assert!(handlers.contains("if !(req.confirm == req.password)"));
         assert!(handlers.contains("if !(req.max_age >= req.min_age)"));
+        assert!(handlers.contains("parent_id: i64"));
+        assert!(handlers.contains("region_id: u64"));
+        assert!(handlers.contains("lat: f32"));
+        assert!(handlers.contains("lng: f64"));
+        assert!(!handlers.contains("parent_id: int64"));
+        assert!(!handlers.contains("region_id: uint64"));
+        assert!(!handlers.contains("lat: float"));
+        assert!(!handlers.contains("lng: double"));
         assert!(handlers.contains("if ![\"active\", \"disabled\"].contains(&value.as_str())"));
         assert!(handlers.contains("if ![\"1\", \"2\"].contains(&value.as_str())"));
         assert!(handlers

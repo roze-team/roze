@@ -1,6 +1,9 @@
 # Production Checklist
 
 This checklist is the baseline for considering a Roze service production-ready.
+Roze itself is currently pre-release, so passing this checklist means a
+specific service has a controlled production path. It does not mean every Roze
+crate, generator, or runtime module is broadly production-stable.
 
 ## Release and Upgrade
 

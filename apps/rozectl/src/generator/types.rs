@@ -45,8 +45,16 @@ fn map_type(ty: &str) -> String {
 
     match ty {
         "string" => "String".to_string(),
-        "int" => "i64".to_string(),
-        "uint" => "u64".to_string(),
+        "int" | "int64" => "i64".to_string(),
+        "int32" => "i32".to_string(),
+        "int16" => "i16".to_string(),
+        "int8" => "i8".to_string(),
+        "uint" | "uint64" => "u64".to_string(),
+        "uint32" => "u32".to_string(),
+        "uint16" => "u16".to_string(),
+        "uint8" => "u8".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
         "bool" => "bool".to_string(),
         other => other.to_string(),
     }
@@ -279,11 +287,17 @@ mod tests {
             type UserResp {
                 UserID u64 `json:"user-id"`
                 CreatedAt int `json:"created_at"`
+                LoginCount int32 `json:"login_count"`
+                Balance int64 `json:"balance"`
+                Level uint32 `json:"level"`
+                Total uint64 `json:"total"`
+                Score float `json:"score"`
+                Ratio double `json:"ratio"`
                 type string `json:"type"`
                 Tags []string `json:"tags"`
-                Scores []int `json:"scores"`
+                Scores []int64 `json:"scores"`
                 Labels map[string]string `json:"labels"`
-                Weights map[string]int `json:"weights"`
+                Weights map[string]uint64 `json:"weights"`
             }
             "#,
         )
@@ -297,11 +311,21 @@ mod tests {
         assert!(rendered.contains("#[serde(rename = \"user-id\")]"));
         assert!(rendered.contains("pub user_i_d: u64,"));
         assert!(rendered.contains("pub created_at: i64,"));
+        assert!(rendered.contains("pub login_count: i32,"));
+        assert!(rendered.contains("pub balance: i64,"));
+        assert!(rendered.contains("pub level: u32,"));
+        assert!(rendered.contains("pub total: u64,"));
+        assert!(rendered.contains("pub score: f32,"));
+        assert!(rendered.contains("pub ratio: f64,"));
         assert!(rendered.contains("pub r#type: String,"));
         assert!(rendered.contains("pub tags: Vec<String>,"));
         assert!(rendered.contains("pub scores: Vec<i64>,"));
         assert!(rendered.contains("pub labels: std::collections::HashMap<String, String>,"));
-        assert!(rendered.contains("pub weights: std::collections::HashMap<String, i64>,"));
+        assert!(rendered.contains("pub weights: std::collections::HashMap<String, u64>,"));
+        assert!(!rendered.contains(": int64,"));
+        assert!(!rendered.contains(": uint64,"));
+        assert!(!rendered.contains(": float,"));
+        assert!(!rendered.contains(": double,"));
         assert!(!rendered.contains("pub user-id"));
     }
 

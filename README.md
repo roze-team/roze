@@ -1,5 +1,14 @@
 # Roze
 
+Roze is currently pre-release. It is suitable for evaluation, internal pilots,
+and controlled production paths where teams pin a reviewed Git revision, inspect
+generated diffs, run the smoke checks, and own production configuration,
+observability, rollback, auth, and dependency governance. Do not treat Roze or
+`rozectl` as a broadly production-stable platform until the
+[release policy](docs/release.md),
+[maturity matrix](docs/maturity.md), and
+[production evidence](docs/production-evidence.md) say so.
+
 Roze is a small Rust service framework scaffold with:
 
 - `crates/roze-core`: base types, errors, results, and shared response helpers.

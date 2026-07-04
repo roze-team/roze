@@ -8,8 +8,10 @@ present in the repository.
 Allowed today:
 
 - "Roze is pre-release."
-- "Gateway, MQ, Config Center, Lifecycle, and generators are in beta and are
-  suitable for internal pilots."
+- "Gateway, MQ, Config Center, and most generators are in beta and are suitable
+  for internal pilots."
+- "Lifecycle/bootstrap and Transactions/outbox/DTM are scaffolds that still
+  need full orchestration or end-to-end examples before stable claims."
 - "Release-gate, smoke tests, and generated compile tests are available."
 - "Some contracts are documented and being hardened."
 

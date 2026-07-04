@@ -24,7 +24,7 @@ one long-run report:
 | Gateway | 24h before beta-to-stable, 72h before broad public stable | proxy traffic, retries, fallback, rate limit, breaker, load shedding, hot reload | upstream 5xx, timeout, slow response, config reload, upstream recovery |
 | MQ | 24h before beta-to-stable, 72h before broad public stable | publish/subscribe, ack, nack, retry, DLQ, replay, idempotency | consumer failure, broker restart, duplicate publish, delayed delivery |
 | Config Center | 24h before beta-to-stable, 72h before broad public stable | watch, polling fallback, valid reload, invalid reload, section events | Etcd disconnect, invalid payload, slow listener, failed listener |
-| Lifecycle | 24h before beta-to-stable | start, drain, shutdown, failed task, timeout hooks | stuck task, signal shutdown, hook timeout |
+| Lifecycle | 24h before moving beyond scaffold | start, drain, shutdown, failed task, timeout hooks | stuck task, signal shutdown, hook timeout |
 | Generated services | 24h before beta-to-stable | generated REST/RPC/search/model/stream projects under load | regenerate/update, config reload, dependency loss |
 
 ## Report Template
