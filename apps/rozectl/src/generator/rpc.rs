@@ -78,7 +78,7 @@ pub fn render_rpc(spec: &ApiSpec) -> String {
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
 
-    out.push_str("#[derive(Debug, Clone)]\n");
+    out.push_str("#[derive(Clone)]\n");
     out.push_str("pub struct RpcService {\n");
     out.push_str("    ctx: ServiceContext,\n");
     out.push_str("}\n\n");
@@ -1151,6 +1151,8 @@ mod tests {
         assert!(!client.contains("proto::expandResp"));
 
         let server = render_rpc(&spec);
+        assert!(server.contains("#[derive(Clone)]"));
+        assert!(!server.contains("#[derive(Debug, Clone)]"));
         assert!(server.contains("Request<proto::ExpandReq>"));
         assert!(server.contains("Response<proto::ExpandResp>"));
         assert!(server.contains("Response::new(proto::ExpandResp"));

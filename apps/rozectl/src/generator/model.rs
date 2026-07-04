@@ -572,22 +572,50 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
         "            toasty_db,\n",
     )
     .unwrap_or(updated);
-    let accessor = r#"
-    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
+    let accessor = r#"    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
         self.toasty_db
             .clone()
             .ok_or_else(|| anyhow::anyhow!("toasty database connection is not configured"))
     }
 
 "#;
-    updated = insert_after_module(
-        &updated,
-        "    pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {\n",
-        accessor,
-    )
-    .unwrap_or(updated);
+    updated = insert_after_read_db_method(&updated, accessor).unwrap_or(updated);
 
     fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
+}
+
+fn insert_after_read_db_method(content: &str, insert: &str) -> Option<String> {
+    let start = content.find("    pub fn read_db(")?;
+    let body_start = content[start..].find('{')? + start;
+    let mut depth = 0usize;
+    for (offset, ch) in content[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = body_start + offset + ch.len_utf8();
+                    let newline_end = content[end..]
+                        .strip_prefix("\r\n")
+                        .map(|_| end + 2)
+                        .or_else(|| content[end..].strip_prefix('\n').map(|_| end + 1))
+                        .unwrap_or(end);
+                    let mut updated = String::with_capacity(content.len() + insert.len());
+                    updated.push_str(&content[..newline_end]);
+                    if !content[..newline_end].ends_with("\n\n")
+                        && !content[..newline_end].ends_with("\r\n\r\n")
+                    {
+                        updated.push('\n');
+                    }
+                    updated.push_str(insert);
+                    updated.push_str(&content[newline_end..]);
+                    return Some(updated);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<String> {
@@ -4993,7 +5021,8 @@ serde.workspace = true
         fs::create_dir_all(out.join("src/svc")).expect("svc dir");
         fs::write(
             out.join("src/svc/mod.rs"),
-            r#"pub struct ServiceContext {
+            r#"#[derive(Clone, Debug)]
+pub struct ServiceContext {
     pub db_connections: Option<roze_db::DatabaseConnections>,
 }
 
@@ -5047,9 +5076,19 @@ impl ServiceContext {
         assert!(mod_rs.contains("pub use user_fields::{UserField, USER_TABLE};"));
         assert!(mod_rs.contains("pub mod user_ext;"));
         let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("svc read");
+        assert!(svc.contains("#[derive(Clone)]"));
+        assert!(!svc.contains("#[derive(Clone, Debug)]"));
         assert!(svc.contains("pub toasty_db: Option<toasty::Db>"));
         assert!(svc.contains("toasty::models!(crate::model::User)"));
         assert!(svc.contains("pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
+        assert!(
+            svc.find("pub fn read_db").expect("read_db")
+                < svc.find("pub fn toasty_db").expect("toasty_db")
+        );
+        assert!(svc.contains("    }\n\n    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
+        assert!(!svc.contains(
+            "pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {\n\n    pub fn toasty_db"
+        ));
         let ext = fs::read_to_string(out.join("src/model/user_ext.rs")).expect("ext read");
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));

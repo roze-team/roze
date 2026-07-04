@@ -1628,6 +1628,8 @@ mod tests {
             }
             message UserResp {
               string name = 1;
+              repeated string permissions = 2;
+              int64 user_count = 3;
             }
             "#,
         )
@@ -1651,5 +1653,10 @@ mod tests {
             fs::read_to_string(out.join("proto/service.proto")).expect("read proto");
         assert!(service_proto.contains("repeated string tags"));
         assert!(service_proto.contains("map<string, int64> scores"));
+        assert!(service_proto.contains("repeated string permissions = 2;"));
+        let logic = fs::read_to_string(out.join("src/logic/get_user.rs")).expect("read logic");
+        assert!(logic.contains("name: String::new()"));
+        assert!(logic.contains("permissions: Vec::new()"));
+        assert!(logic.contains("user_count: 0"));
     }
 }
