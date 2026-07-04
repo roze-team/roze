@@ -3080,6 +3080,7 @@ rest:
 registry:
   kind: memory
   endpoints: []
+  # prefix: /roze/services
   # ttl_seconds: 10
   # renew_interval_secs: 3
 governance:
@@ -3146,6 +3147,7 @@ rpc:
 registry:
   kind: memory
   endpoints: []
+  # prefix: /roze/services
   # ttl_seconds: 10
   # renew_interval_secs: 3
 governance:

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    future::Future,
     net::ToSocketAddrs,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -15,6 +16,14 @@ use tokio::{sync::mpsc, time::interval};
 
 use crate::balance::{self, Balancer};
 use roze_config::{RegistryConfig, RegistryKind, RpcClientEtcdConfig, ServiceConfig};
+
+pub type RegistryWatchFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>>
+            + Send
+            + 'a,
+    >,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct ServiceInstance {
@@ -45,17 +54,7 @@ pub trait Registry: Send + Sync + 'static {
         false
     }
 
-    fn watch(
-        &self,
-        _name: &str,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>,
-                > + Send
-                + '_,
-        >,
-    > {
+    fn watch(&self, _name: &str) -> RegistryWatchFuture<'_> {
         Box::pin(async { anyhow::bail!("registry does not support watch") })
     }
 }
@@ -131,6 +130,7 @@ impl Registry for DnsRegistry {
 #[derive(Debug, Clone)]
 pub struct EtcdRegistry {
     endpoints: Vec<String>,
+    prefix: String,
     ttl_seconds: u64,
     renew_interval_secs: u64,
     client: reqwest::Client,
@@ -141,6 +141,7 @@ impl EtcdRegistry {
     pub fn new(config: &RegistryConfig) -> Self {
         Self {
             endpoints: config.endpoints.clone(),
+            prefix: normalize_etcd_registry_prefix(&config.prefix),
             ttl_seconds: config.ttl_seconds.max(1),
             renew_interval_secs: config.renew_interval_secs.max(1),
             client: reqwest::Client::new(),
@@ -165,7 +166,8 @@ impl EtcdRegistry {
             .post(format!("{}/v3/lease/grant", endpoint))
             .json(&body)
             .send()
-            .await?
+            .await
+            .map_err(|err| with_proxy_diagnostic(err.into(), endpoint))?
             .error_for_status()?;
         let value: serde_json::Value = resp.json().await?;
         extract_json_field(&value, "ID")
@@ -210,7 +212,7 @@ impl ConsulRegistry {
 impl Registry for EtcdRegistry {
     async fn register(&self, instance: ServiceInstance) -> anyhow::Result<()> {
         let payload = serde_json::to_vec(&instance)?;
-        let key = etcd_instance_key(&instance.name, &instance.addr);
+        let key = etcd_instance_key(&self.prefix, &instance.name, &instance.addr);
         let endpoint = first_registry_endpoint(self.endpoints(), "http://127.0.0.1:2379");
         let lease_id = self.grant_lease(&endpoint).await?;
         let body = serde_json::json!({
@@ -223,7 +225,8 @@ impl Registry for EtcdRegistry {
             .post(format!("{}/v3/kv/put", endpoint))
             .json(&body)
             .send()
-            .await?
+            .await
+            .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
             .error_for_status()?;
 
         let lease = lease_id.clone();
@@ -258,7 +261,7 @@ impl Registry for EtcdRegistry {
     }
 
     async fn deregister(&self, name: &str, addr: &str) -> anyhow::Result<()> {
-        let key = etcd_instance_key(name, addr);
+        let key = etcd_instance_key(&self.prefix, name, addr);
         if let Some(handle) = self
             .leases
             .lock()
@@ -276,7 +279,8 @@ impl Registry for EtcdRegistry {
                 .post(format!("{}/v3/kv/deleterange", endpoint))
                 .json(&body)
                 .send()
-                .await?
+                .await
+                .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
                 .error_for_status()?;
         }
 
@@ -284,7 +288,7 @@ impl Registry for EtcdRegistry {
     }
 
     async fn discover(&self, name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
-        let key_prefix = etcd_service_prefix(name);
+        let key_prefix = etcd_service_prefix(&self.prefix, name);
         let range_end = etcd_prefix_end(key_prefix.as_bytes());
         let body = serde_json::json!({
             "key": STANDARD.encode(key_prefix.as_bytes()),
@@ -301,7 +305,15 @@ impl Registry for EtcdRegistry {
 
             let resp = match resp {
                 Ok(resp) => resp.error_for_status()?,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(
+                        service = %name,
+                        endpoint = %endpoint,
+                        error = %with_proxy_diagnostic(err.into(), &endpoint),
+                        "etcd registry discover request failed"
+                    );
+                    continue;
+                }
             };
 
             let payload: EtcdRangeResponse = resp.json().await?;
@@ -326,17 +338,7 @@ impl Registry for EtcdRegistry {
         true
     }
 
-    fn watch(
-        &self,
-        name: &str,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>,
-                > + Send
-                + '_,
-        >,
-    > {
+    fn watch(&self, name: &str) -> RegistryWatchFuture<'_> {
         let registry = self.clone();
         let name = name.to_string();
         Box::pin(async move {
@@ -403,7 +405,8 @@ impl Registry for ConsulRegistry {
             .put(format!("{}/v1/agent/service/register", endpoint))
             .json(&body)
             .send()
-            .await?
+            .await
+            .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
             .error_for_status()?;
 
         let client = self.client.clone();
@@ -446,7 +449,8 @@ impl Registry for ConsulRegistry {
         self.client
             .put(format!("{}/v1/agent/service/deregister/{}", endpoint, id))
             .send()
-            .await?
+            .await
+            .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
             .error_for_status()?;
 
         Ok(())
@@ -465,7 +469,15 @@ impl Registry for ConsulRegistry {
 
             let resp = match resp {
                 Ok(resp) => resp.error_for_status()?,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(
+                        service = %name,
+                        endpoint = %endpoint,
+                        error = %with_proxy_diagnostic(err.into(), &endpoint),
+                        "consul registry discover request failed"
+                    );
+                    continue;
+                }
             };
 
             let services: Vec<ConsulHealthService> = resp.json().await?;
@@ -529,6 +541,7 @@ fn first_registry_endpoint(configured: &[String], default: &str) -> String {
 }
 
 fn normalize_registry_endpoint(endpoint: &str) -> String {
+    let endpoint = endpoint.trim().trim_end_matches('/');
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
@@ -536,12 +549,21 @@ fn normalize_registry_endpoint(endpoint: &str) -> String {
     }
 }
 
-fn etcd_service_prefix(name: &str) -> String {
-    format!("/roze/services/{name}/")
+fn normalize_etcd_registry_prefix(prefix: &str) -> String {
+    let prefix = prefix.trim().trim_matches('/');
+    if prefix.is_empty() {
+        "/roze/services".to_string()
+    } else {
+        format!("/{prefix}")
+    }
 }
 
-fn etcd_instance_key(name: &str, addr: &str) -> String {
-    format!("{}{}", etcd_service_prefix(name), addr)
+fn etcd_service_prefix(prefix: &str, name: &str) -> String {
+    format!("{}/{name}/", normalize_etcd_registry_prefix(prefix))
+}
+
+fn etcd_instance_key(prefix: &str, name: &str, addr: &str) -> String {
+    format!("{}{}", etcd_service_prefix(prefix, name), addr)
 }
 
 fn etcd_prefix_end(prefix: &[u8]) -> Vec<u8> {
@@ -562,7 +584,7 @@ async fn stream_etcd_registry_watch(
     name: &str,
     tx: mpsc::UnboundedSender<Vec<ServiceInstance>>,
 ) -> anyhow::Result<()> {
-    let key_prefix = etcd_service_prefix(name);
+    let key_prefix = etcd_service_prefix(&registry.prefix, name);
     let range_end = etcd_prefix_end(key_prefix.as_bytes());
     let body = serde_json::json!({
         "create_request": {
@@ -575,7 +597,8 @@ async fn stream_etcd_registry_watch(
         .post(format!("{}/v3/watch", endpoint))
         .json(&body)
         .send()
-        .await?
+        .await
+        .map_err(|err| with_proxy_diagnostic(err.into(), endpoint))?
         .error_for_status()?;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -625,6 +648,14 @@ fn extract_json_field(value: &serde_json::Value, field: &str) -> Option<String> 
     })
 }
 
+fn with_proxy_diagnostic(err: anyhow::Error, endpoint: &str) -> anyhow::Error {
+    if let Some(hint) = roze_config::http_proxy_environment_diagnostic(endpoint) {
+        anyhow::anyhow!("{err}; {hint}")
+    } else {
+        err
+    }
+}
+
 fn consul_to_instance(name: &str, service: ConsulHealthService) -> Option<ServiceInstance> {
     let mut addr = service.service.address;
     if addr.is_empty() {
@@ -667,6 +698,7 @@ pub fn registry_from_kind(kind: RegistryKind) -> anyhow::Result<Arc<dyn Registry
     build_registry(&RegistryConfig {
         kind,
         endpoints: Vec::new(),
+        prefix: "/roze/services".to_string(),
         ttl_seconds: 10,
         renew_interval_secs: 3,
     })
@@ -676,6 +708,7 @@ pub fn registry_config_from_rpc_client_etcd(config: &RpcClientEtcdConfig) -> Reg
     RegistryConfig {
         kind: RegistryKind::Etcd,
         endpoints: config.hosts.clone(),
+        prefix: "/roze/services".to_string(),
         ttl_seconds: 10,
         renew_interval_secs: 3,
     }
@@ -1014,8 +1047,29 @@ mod tests {
             "http://127.0.0.1:2379"
         );
         assert_eq!(
+            normalize_registry_endpoint("http://127.0.0.1:2379/"),
+            "http://127.0.0.1:2379"
+        );
+        assert_eq!(
             normalize_registry_endpoint("https://etcd.example:2379"),
             "https://etcd.example:2379"
+        );
+    }
+
+    #[test]
+    fn etcd_registry_prefix_defaults_and_normalizes() {
+        assert_eq!(normalize_etcd_registry_prefix(""), "/roze/services");
+        assert_eq!(
+            normalize_etcd_registry_prefix("/shop/services/"),
+            "/shop/services"
+        );
+        assert_eq!(
+            etcd_service_prefix("/shop/services", "catalog"),
+            "/shop/services/catalog/"
+        );
+        assert_eq!(
+            etcd_instance_key("/shop/services", "catalog", "127.0.0.1:4000"),
+            "/shop/services/catalog/127.0.0.1:4000"
         );
     }
 
@@ -1030,6 +1084,7 @@ mod tests {
 
         assert_eq!(registry.kind, RegistryKind::Etcd);
         assert_eq!(registry.endpoints, config.hosts);
+        assert_eq!(registry.prefix, "/roze/services");
         assert_eq!(registry.ttl_seconds, 10);
         assert_eq!(registry.renew_interval_secs, 3);
     }
@@ -1186,17 +1241,7 @@ mod tests {
                 true
             }
 
-            fn watch(
-                &self,
-                _name: &str,
-            ) -> Pin<
-                Box<
-                    dyn std::future::Future<
-                            Output = anyhow::Result<mpsc::UnboundedReceiver<Vec<ServiceInstance>>>,
-                        > + Send
-                        + '_,
-                >,
-            > {
+            fn watch(&self, _name: &str) -> RegistryWatchFuture<'_> {
                 Box::pin(async {
                     self.rx
                         .lock()
@@ -1229,6 +1274,7 @@ mod tests {
         RegistryConfig {
             kind,
             endpoints: vec![endpoint],
+            prefix: "/roze/services".to_string(),
             ttl_seconds: 10,
             renew_interval_secs: 2,
         }

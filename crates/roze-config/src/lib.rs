@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::Path};
+use std::{collections::BTreeMap, net::IpAddr, net::SocketAddr, path::Path};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -391,6 +391,8 @@ pub struct RegistryConfig {
     pub kind: RegistryKind,
     #[serde(default)]
     pub endpoints: Vec<String>,
+    #[serde(default = "default_registry_prefix")]
+    pub prefix: String,
     #[serde(default = "default_registry_ttl_secs")]
     pub ttl_seconds: u64,
     #[serde(default = "default_registry_renew_interval_secs")]
@@ -674,6 +676,78 @@ fn default_registry_ttl_secs() -> u64 {
 
 fn default_registry_renew_interval_secs() -> u64 {
     3
+}
+
+fn default_registry_prefix() -> String {
+    "/roze/services".to_string()
+}
+
+pub fn http_proxy_environment_diagnostic(endpoint: &str) -> Option<String> {
+    let proxy = active_proxy_env()?;
+    let host = endpoint_host(endpoint)?;
+    if no_proxy_matches(&host) || !looks_internal_host(&host) {
+        return None;
+    }
+
+    Some(format!(
+        "control-plane HTTP request to internal endpoint `{endpoint}` may be routed through {proxy}; add `{host}` to NO_PROXY or clear HTTP_PROXY/HTTPS_PROXY/ALL_PROXY for registry/config-center clients"
+    ))
+}
+
+fn active_proxy_env() -> Option<&'static str> {
+    const PROXY_ENV_KEYS: [&str; 6] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ];
+
+    PROXY_ENV_KEYS
+        .into_iter()
+        .find(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    let normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    reqwest::Url::parse(&normalized)
+        .ok()
+        .and_then(|url| url.host_str().map(ToString::to_string))
+}
+
+fn no_proxy_matches(host: &str) -> bool {
+    let Some(no_proxy) = std::env::var_os("NO_PROXY").or_else(|| std::env::var_os("no_proxy"))
+    else {
+        return false;
+    };
+    let host = host.trim_matches('[').trim_matches(']');
+    no_proxy
+        .to_string_lossy()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry == "*" || entry == host || host.ends_with(entry.trim_start_matches('.')))
+}
+
+fn looks_internal_host(host: &str) -> bool {
+    let host = host.trim_matches('[').trim_matches(']');
+    if matches!(host, "localhost" | "local") || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.octets()[0] == 169
+        }
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+        Err(_) => false,
+    }
 }
 
 fn default_max_connections() -> u32 {
@@ -1252,5 +1326,78 @@ key = "order.rpc"
         assert_eq!(etcd.hosts, vec!["127.0.0.1:2379", "127.0.0.2:2379"]);
         assert_eq!(etcd.key, "order.rpc");
         assert_eq!(etcd.pass, None);
+    }
+
+    #[test]
+    fn registry_prefix_defaults_and_can_be_overridden() {
+        let source = r#"
+name = "demo"
+
+[registry]
+kind = "etcd"
+endpoints = ["127.0.0.1:2379"]
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        assert_eq!(
+            config.registry.as_ref().expect("registry").prefix,
+            "/roze/services"
+        );
+
+        let source = r#"
+name = "demo"
+
+[registry]
+kind = "etcd"
+endpoints = ["127.0.0.1:2379"]
+prefix = "/shop/services"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        assert_eq!(
+            config.registry.as_ref().expect("registry").prefix,
+            "/shop/services"
+        );
+    }
+
+    #[test]
+    fn proxy_diagnostic_warns_for_internal_endpoint_without_no_proxy() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let old_http_proxy = std::env::var_os("HTTP_PROXY");
+        let old_no_proxy = std::env::var_os("NO_PROXY");
+
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:9");
+        std::env::set_var("NO_PROXY", "localhost,127.0.0.1,::1");
+        let hint =
+            http_proxy_environment_diagnostic("http://192.168.1.166:2379").expect("proxy hint");
+        assert!(hint.contains("192.168.1.166"));
+        assert!(hint.contains("NO_PROXY"));
+
+        std::env::set_var("NO_PROXY", "localhost,127.0.0.1,::1,192.168.1.166");
+        assert!(http_proxy_environment_diagnostic("http://192.168.1.166:2379").is_none());
+
+        match old_http_proxy {
+            Some(value) => std::env::set_var("HTTP_PROXY", value),
+            None => std::env::remove_var("HTTP_PROXY"),
+        }
+        match old_no_proxy {
+            Some(value) => std::env::set_var("NO_PROXY", value),
+            None => std::env::remove_var("NO_PROXY"),
+        }
     }
 }

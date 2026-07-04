@@ -92,3 +92,17 @@ bash scripts/production-smoke.sh --with-compose
 - metrics 标签验证
 - trace/context 透传验证
 - i18n 错误响应验证
+
+## Registry Prefix And Proxy Diagnostics
+
+Etcd registry keys default to `/roze/services/{service}/{addr}`. Set
+`registry.prefix`, for example `/shop/services`, to write/read/watch
+`/shop/services/{service}/{addr}` while preserving the same lease, discover,
+and watch behavior.
+
+Registry and config-center HTTP clients use the process proxy environment that
+`reqwest` honors. For private control-plane endpoints such as etcd or Consul on
+`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, loopback, or local hosts,
+include the endpoint host in `NO_PROXY` or clear `HTTP_PROXY`, `HTTPS_PROXY`,
+and `ALL_PROXY`; Roze adds a diagnostic hint to request failures when a proxy
+environment is active and the endpoint is internal.

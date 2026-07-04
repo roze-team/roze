@@ -823,6 +823,7 @@ impl Subscriber for EtcdSubscriber {
                 match fetch_etcd_key(&client, endpoint, &key).await {
                     Ok(value) => return Ok(value),
                     Err(err) => {
+                        let err = with_proxy_diagnostic(err, endpoint);
                         warn!(%err, endpoint, key = %key, "fetching config from etcd failed");
                         last_error = Some(err);
                     }
@@ -1455,6 +1456,14 @@ async fn fetch_etcd_key(client: &reqwest::Client, endpoint: &str, key: &str) -> 
     String::from_utf8(decoded).map_err(|err| anyhow!("config value is not utf-8: {err}"))
 }
 
+fn with_proxy_diagnostic(err: anyhow::Error, endpoint: &str) -> anyhow::Error {
+    if let Some(hint) = crate::http_proxy_environment_diagnostic(endpoint) {
+        anyhow!("{err}; {hint}")
+    } else {
+        err
+    }
+}
+
 async fn stream_etcd_watch(
     client: &reqwest::Client,
     endpoint: &str,
@@ -1475,7 +1484,8 @@ async fn stream_etcd_watch(
         .post(format!("{}/v3/watch", normalize_endpoint(endpoint)))
         .json(&body)
         .send()
-        .await?
+        .await
+        .map_err(|err| with_proxy_diagnostic(err.into(), endpoint))?
         .error_for_status()?;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -2162,7 +2172,7 @@ gateway:
                 .expect("publish valid config");
             accepted += 1;
 
-            if update % 17 == 0 {
+            if update.is_multiple_of(17) {
                 let invalid = store.publish(
                     ConfigChangeRequest {
                         actor: operator.clone(),
@@ -2175,7 +2185,7 @@ gateway:
                 rejected += 1;
             }
 
-            if update % 29 == 0 {
+            if update.is_multiple_of(29) {
                 store
                     .rollback(
                         ConfigChangeRequest {
