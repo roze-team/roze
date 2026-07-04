@@ -2428,7 +2428,7 @@ fn generate_rest_project(
     for (group, handler, content) in rest::render_logic_files(spec) {
         let dir = out.join("src/logic").join(&group);
         fs::create_dir_all(&dir)?;
-        write_preserved(&dir.join(format!("{handler}.rs")), content, options.mode)?;
+        write_preserved_logic(&dir.join(format!("{handler}.rs")), content, options.mode)?;
     }
     fs::write(
         out.join("src/types/mod.rs"),
@@ -2488,7 +2488,7 @@ pub(super) fn generate_rpc_project(
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
     fs::write(out.join("src/logic/mod.rs"), rpc::render_logic_mod(spec))?;
     for (method, content) in rpc::render_logic_files(spec) {
-        write_preserved(
+        write_preserved_logic(
             &out.join("src/logic").join(format!("{method}.rs")),
             content,
             options.mode,
@@ -2516,6 +2516,75 @@ fn write_preserved(path: &Path, content: String, mode: GenerateMode) -> anyhow::
         return Ok(());
     }
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_preserved_logic(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
+    if mode == GenerateMode::Update && path.exists() {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if !is_generated_default_logic_stub(&existing) {
+            return Ok(());
+        }
+    }
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn is_generated_default_logic_stub(content: &str) -> bool {
+    let lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    if lines.is_empty()
+        || !lines[0].starts_with("use super")
+        || lines
+            .iter()
+            .filter(|line| line.starts_with("pub async fn "))
+            .count()
+            != 1
+        || !lines.iter().any(|line| *line == "let _ = ctx;")
+        || !lines.iter().any(|line| *line == "let _ = request_ctx;")
+        || !lines.iter().any(|line| *line == "let _ = req;")
+    {
+        return false;
+    }
+
+    lines.iter().all(|line| {
+        line.starts_with("use super")
+            || line.starts_with("pub async fn ")
+            || *line == "{"
+            || *line == "}"
+            || *line == "let _ = ctx;"
+            || *line == "let _ = request_ctx;"
+            || *line == "let _ = req;"
+            || line.starts_with("Ok(")
+            || line.starts_with("})")
+            || is_default_stub_field_line(line)
+    })
+}
+
+fn is_default_stub_field_line(line: &str) -> bool {
+    let Some((field, value)) = line.trim_end_matches(',').split_once(':') else {
+        return false;
+    };
+    let field = field.trim();
+    let value = value.trim();
+    !field.is_empty()
+        && field
+            .chars()
+            .all(|ch| ch == '_' || ch == '#' || ch.is_ascii_alphanumeric())
+        && matches!(
+            value,
+            "Default::default()"
+                | "String::new()"
+                | "Vec::new()"
+                | "std::collections::HashMap::new()"
+                | "false"
+                | "true"
+                | "0"
+                | "0.0"
+        )
 }
 
 fn ensure_model_module(out: &Path) -> anyhow::Result<()> {
@@ -4603,6 +4672,77 @@ mod tests {
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));
         assert!(cargo.contains("custom.workspace = true"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_update_refreshes_legacy_default_logic_stub() {
+        let spec = parse_api(
+            r#"
+            service fulfillment {
+                rpc CreateAftersales (CreateAftersalesReq) returns (AftersalesOrder)
+            }
+
+            type CreateAftersalesReq {
+                order_id: string
+            }
+
+            type AftersalesOrder {
+                id: i64
+                aftersales_no: string
+                order_id: string
+                status: string
+                type: string
+                refund_amount: string
+                created_at: i64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rpc-update-legacy-logic-test");
+        let out = root.join("fulfillment");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+
+        let logic_path = out.join("src/logic/create_aftersales.rs");
+        fs::write(
+            &logic_path,
+            r#"use super::*;
+
+pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::Context, req: CreateAftersalesReq) -> Result<AftersalesOrder, RozeError> {
+    let _ = ctx;
+    let _ = request_ctx;
+    let _ = req;
+    Ok(AftersalesOrder {
+        id: Default::default(),
+        aftersales_no: String::new(),
+        order_id: String::new(),
+        status: String::new(),
+    })
+}
+"#,
+        )
+        .expect("write legacy logic");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+        )
+        .expect("update generation");
+
+        let logic = fs::read_to_string(logic_path).expect("read logic");
+        assert!(logic.contains("Ok(AftersalesOrder::default())"));
+        assert!(!logic.contains("Ok(AftersalesOrder {"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
