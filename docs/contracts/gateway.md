@@ -9,7 +9,7 @@
   - 空数组表示全部方法；
   - `"*"` 或 `"all"` 表示全部方法。
 - 路由优先级：全局中间件参数 + 路由级中间件参数按以下顺序执行（语义顺序）  
-  `trace -> auth -> rate -> breaker -> timeout -> upstream`
+  `trace -> auth -> rate -> breaker -> shedding -> timeout -> upstream`
 
 ## 2. 配置结构（关键字段）
 
@@ -72,7 +72,7 @@ gateway:
 
 - `route.fallback` 优先于 `gateway.fallback`，未设置时仅使用 HTTP code + message。
 - Gateway route 显式字段优先于 `governance.routes`，`governance.routes` 优先于全局 `governance`。
-- Gateway 当前继承的统一治理字段包括 `timeout_ms`、`retry`、`rate_limit` 和 `breaker`；`shedding` 与 `fallback` 已进入统一配置模型，网关执行逻辑后续接入。
+- Gateway 当前继承的统一治理字段包括 `timeout_ms`、`retry`、`rate_limit`、`breaker` 和 `shedding`；`fallback` 已进入统一配置模型，网关执行逻辑后续接入。
 - `stream_idle_timeout_ms` 是流式响应空闲超时，按 `route > service > gateway` 覆盖；未配置时不额外限制流式 body。
 - `max_stream_connections` 是 SSE/WebSocket 活跃连接数上限，按 `route > service > gateway` 覆盖；未配置时不额外限制长连接数，超限返回 429。
 
@@ -149,6 +149,7 @@ auth:
   - `burst`：可用 tokens 上限
   - `refill_ms`：刷新窗口
 - `breaker` 失败计数满阈值后开启，持续 `reset_timeout_ms` 期间直接返回 503。
+- `shedding` 使用路由级并发上限做第一阶段负载保护；活跃请求数达到 `concurrency` 时直接返回 429。
 
 ## 6. 可观测字段（tracing）
 

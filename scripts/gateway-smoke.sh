@@ -33,7 +33,12 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ retry: "ok", attempts: flaky }));
   }
   if (req.url === "/slow") {
-    return setTimeout(() => res.end(JSON.stringify({ slow: true })), 200);
+    console.log("slow hit");
+    return setTimeout(() => res.end(JSON.stringify({ slow: true })), 1000);
+  }
+  if (req.url === "/shed-slow") {
+    console.log("shed hit");
+    return setTimeout(() => res.end(JSON.stringify({ slow: true })), 1000);
   }
   res.statusCode = 404;
   res.end(JSON.stringify({ error: "not found", url: req.url }));
@@ -93,6 +98,12 @@ gateway:
       rate_limit:
         burst: 1
         refill_ms: 10000
+    - path: /shed
+      service: upstream
+      methods: [GET]
+      rewrite: /shed-slow
+      shedding:
+        concurrency: 1
 governance: {}
 EOF_CONFIG
 
@@ -156,5 +167,16 @@ grep -q 'timeout fallback' "$BASE/response.json"
 
 require_status 200 "http://127.0.0.1:$GATEWAY_PORT/limited"
 require_status 429 "http://127.0.0.1:$GATEWAY_PORT/limited"
+
+curl -sS -o "$BASE/shed-first.json" "http://127.0.0.1:$GATEWAY_PORT/shed" &
+shed_pid=$!
+for _ in $(seq 1 50); do
+  if grep -q "shed hit" "$BASE/upstream.out"; then
+    break
+  fi
+  sleep 0.02
+done
+require_status 429 "http://127.0.0.1:$GATEWAY_PORT/shed"
+wait "$shed_pid"
 
 echo "gateway smoke passed"

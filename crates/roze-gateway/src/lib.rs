@@ -28,7 +28,7 @@ use tracing::warn;
 use roze_config::{
     BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayHealthCheckConfig,
     GatewayOutlierConfig, GatewayRoute, GatewayService, GovernanceConfig, RateLimitConfig,
-    RouteGovernanceConfig,
+    RouteGovernanceConfig, SheddingConfig,
 };
 use roze_jwt::{verify_token, JwtConfig};
 use roze_resilience::{BreakerRegistry, RateLimitRegistry};
@@ -53,6 +53,7 @@ struct GatewayRuntime {
     health_states: Arc<Mutex<HashMap<String, HealthState>>>,
     rate_limit_states: Arc<RateLimitRegistry>,
     breaker_states: Arc<BreakerRegistry>,
+    shedding_states: Arc<StdMutex<HashMap<String, u32>>>,
     stream_connection_states: Arc<StdMutex<HashMap<String, u32>>>,
 }
 
@@ -92,6 +93,7 @@ struct CompiledRoute {
     fallback: Option<GatewayFallbackResponse>,
     rate_limit: Option<RateLimitConfig>,
     breaker: Option<BreakerConfig>,
+    shedding: Option<SheddingConfig>,
     middlewares: Vec<String>,
 }
 
@@ -115,6 +117,11 @@ struct StreamConnectionPermit {
     route: String,
     protocol: &'static str,
     started: Instant,
+}
+
+struct SheddingPermit {
+    states: Arc<StdMutex<HashMap<String, u32>>>,
+    key: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,6 +178,19 @@ impl Drop for StreamConnectionPermit {
     }
 }
 
+impl Drop for SheddingPermit {
+    fn drop(&mut self) {
+        if let Ok(mut states) = self.states.lock() {
+            if let Some(value) = states.get_mut(&self.key) {
+                *value = value.saturating_sub(1);
+                if *value == 0 {
+                    states.remove(&self.key);
+                }
+            }
+        }
+    }
+}
+
 impl Default for GatewayRuntime {
     fn default() -> Self {
         Self {
@@ -191,6 +211,7 @@ impl Default for GatewayRuntime {
             health_states: Arc::new(Mutex::new(HashMap::new())),
             rate_limit_states: Arc::new(RateLimitRegistry::new()),
             breaker_states: Arc::new(BreakerRegistry::new()),
+            shedding_states: Arc::new(StdMutex::new(HashMap::new())),
             stream_connection_states: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -267,6 +288,7 @@ pub fn build_router_with_registry_governance_and_auth(
                 fallback: runtime.global_fallback.clone(),
                 rate_limit: None,
                 breaker: None,
+                shedding: None,
                 middlewares: Vec::new(),
             });
         }
@@ -426,6 +448,29 @@ impl GatewayRuntime {
         }
         if route.breaker.is_some() {
             roze_metrics::record_resilience_decision("gateway", "breaker", "allowed");
+        }
+
+        let _shedding_permit = match self.try_acquire_shedding(&route) {
+            Ok(permit) => permit,
+            Err(()) => {
+                warn!(route = %route.path, event = "gateway.load_shed", "route load shed");
+                roze_metrics::record_resilience_decision("gateway", "shedding", "rejected");
+                self.record_gateway_response(
+                    Some(&route),
+                    &request_method,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "load_shed",
+                    started,
+                );
+                return build_fallback(
+                    route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "gateway load shed",
+                );
+            }
+        };
+        if route.shedding.is_some() {
+            roze_metrics::record_resilience_decision("gateway", "shedding", "allowed");
         }
 
         if is_websocket_upgrade(&req) {
@@ -1273,6 +1318,24 @@ impl GatewayRuntime {
             },
         );
     }
+
+    fn try_acquire_shedding(&self, route: &CompiledRoute) -> Result<Option<SheddingPermit>, ()> {
+        let Some(cfg) = route.shedding else {
+            return Ok(None);
+        };
+        let limit = cfg.concurrency.max(1) as u32;
+        let key = route.path.clone();
+        let mut states = self.shedding_states.lock().map_err(|_| ())?;
+        let current = states.entry(key.clone()).or_insert(0);
+        if *current >= limit {
+            return Err(());
+        }
+        *current += 1;
+        Ok(Some(SheddingPermit {
+            states: self.shedding_states.clone(),
+            key,
+        }))
+    }
 }
 
 fn first_service_name(mut services: Vec<&String>) -> Option<&str> {
@@ -1369,6 +1432,10 @@ fn compile_routes(
                     .breaker
                     .or_else(|| route_governance.and_then(|route| route.breaker))
                     .or_else(|| governance.and_then(|governance| governance.breaker)),
+                shedding: route
+                    .shedding
+                    .or_else(|| route_governance.and_then(|route| route.shedding))
+                    .or_else(|| governance.and_then(|governance| governance.shedding)),
                 middlewares: normalize_middlewares(route.middlewares),
             }
         })
@@ -2324,6 +2391,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_shedding_rejects_when_concurrency_is_full() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new().route(
+            "/slow",
+            get({
+                let hits = hits.clone();
+                move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(120)).await;
+                        "ok"
+                    }
+                }
+            }),
+        );
+        let upstream_addr = spawn_router(upstream).await;
+        let gateway = build_router(
+            GatewayConfig {
+                services: vec![GatewayService {
+                    name: "slow".to_string(),
+                    upstream: format!("http://{upstream_addr}"),
+                    ..empty_gateway_service()
+                }],
+                routes: vec![GatewayRoute {
+                    path: "/slow".to_string(),
+                    service: "slow".to_string(),
+                    methods: vec!["GET".to_string()],
+                    shedding: Some(SheddingConfig {
+                        concurrency: 1,
+                        ..Default::default()
+                    }),
+                    ..empty_gateway_route()
+                }],
+                ..empty_gateway_config()
+            },
+            None,
+        );
+        let gateway_addr = spawn_router(gateway).await;
+        let client = reqwest::Client::new();
+        let first = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .get(format!("http://{gateway_addr}/slow"))
+                    .send()
+                    .await
+                    .expect("first gateway response")
+            })
+        };
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while hits.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first request should reach upstream");
+
+        let second = client
+            .get(format!("http://{gateway_addr}/slow"))
+            .send()
+            .await
+            .expect("second gateway response");
+        assert_eq!(second.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+        let first = first.await.expect("first task");
+        assert_eq!(first.status(), reqwest::StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn discovers_registry_upstreams_round_robin() {
         let first_hits = Arc::new(AtomicUsize::new(0));
         let second_hits = Arc::new(AtomicUsize::new(0));
@@ -2730,6 +2869,7 @@ mod tests {
             fallback: None,
             rate_limit: None,
             breaker: None,
+            shedding: None,
             middlewares: Vec::new(),
             stream_idle_timeout_ms: None,
             max_stream_connections: None,
@@ -2776,6 +2916,10 @@ mod tests {
                 failure_threshold: 4,
                 reset_timeout_ms: 1_000,
             }),
+            shedding: Some(SheddingConfig {
+                concurrency: 2,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         governance.routes.insert(
@@ -2808,6 +2952,7 @@ mod tests {
         assert_eq!(route.retry_backoff_ms, 5);
         assert_eq!(route.rate_limit.expect("rate limit").burst, 10);
         assert_eq!(route.breaker.expect("breaker").failure_threshold, 4);
+        assert_eq!(route.shedding.expect("shedding").concurrency, 2);
     }
 
     #[test]
@@ -2960,6 +3105,7 @@ mod tests {
             fallback: None,
             rate_limit: None,
             breaker: None,
+            shedding: None,
         }
     }
 

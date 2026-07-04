@@ -139,6 +139,8 @@ pub struct GatewayRoute {
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
     pub breaker: Option<BreakerConfig>,
+    #[serde(default)]
+    pub shedding: Option<SheddingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
