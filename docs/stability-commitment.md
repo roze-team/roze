@@ -18,8 +18,9 @@ Not allowed today:
 - "All Roze crates are production-stable."
 - "Roze is battle-tested in production" without a linked production evidence
   report.
-- "Config Center is stable" before management API, audit, rollback, watch
-  status, and permission checks are implemented and tested.
+- "Config Center is stable" before management semantics, audit, rollback,
+  watch status, permission checks, snapshot backup/restore or external
+  control-plane integration, and long-run evidence are implemented and tested.
 - "MSRV is guaranteed" before the release policy names a fixed MSRV and CI
   proves it.
 

@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     hash::{Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
     string::ToString,
@@ -25,7 +25,8 @@ use tokio::{
 };
 use tracing::warn;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfigFormat {
     Json,
     Yaml,
@@ -256,6 +257,488 @@ impl Default for ConfigCenterConfig {
             key: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigPermission {
+    Read,
+    Write,
+    Rollback,
+    Audit,
+    WatchStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigPrincipal {
+    pub id: String,
+    #[serde(default)]
+    pub permissions: Vec<ConfigPermission>,
+}
+
+impl ConfigPrincipal {
+    pub fn new(
+        id: impl Into<String>,
+        permissions: impl IntoIterator<Item = ConfigPermission>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            permissions: permissions.into_iter().collect(),
+        }
+    }
+
+    fn can(&self, permission: ConfigPermission) -> bool {
+        self.permissions.contains(&permission)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigChangeRequest {
+    pub actor: ConfigPrincipal,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigVersionRecord {
+    pub version: u64,
+    pub hash: String,
+    pub raw: String,
+    pub source: String,
+    pub namespace: Option<String>,
+    pub app: Option<String>,
+    pub key: Option<String>,
+    pub author: String,
+    pub reason: Option<String>,
+    pub created_at_millis: u64,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigAuditAction {
+    Read,
+    Publish,
+    Rollback,
+    Audit,
+    WatchStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigAuditResult {
+    Allowed,
+    Denied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigAuditRecord {
+    pub id: u64,
+    pub ts_millis: u64,
+    pub actor: String,
+    pub action: ConfigAuditAction,
+    pub result: ConfigAuditResult,
+    pub version: Option<u64>,
+    pub target_version: Option<u64>,
+    pub hash: Option<String>,
+    pub reason: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigWatchMode {
+    NativeWatch,
+    Polling,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigWatchStatus {
+    pub mode: ConfigWatchMode,
+    pub source: String,
+    pub last_revision: Option<i64>,
+    pub last_error: Option<String>,
+    pub updated_at_millis: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigAdminMetadata {
+    pub source: String,
+    pub namespace: Option<String>,
+    pub app: Option<String>,
+    pub key: Option<String>,
+}
+
+impl Default for ConfigAdminMetadata {
+    fn default() -> Self {
+        Self {
+            source: "admin".to_string(),
+            namespace: None,
+            app: None,
+            key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigCenterAdminStore {
+    format: ConfigFormat,
+    versions: Vec<ConfigVersionRecord>,
+    audit: Vec<ConfigAuditRecord>,
+    watch_status: ConfigWatchStatus,
+    next_audit_id: u64,
+}
+
+impl ConfigCenterAdminStore {
+    pub fn new(
+        format: ConfigFormat,
+        initial_raw: impl Into<String>,
+        metadata: ConfigAdminMetadata,
+        actor: impl Into<String>,
+    ) -> Result<Self> {
+        let initial_raw = initial_raw.into();
+        parse_config_value(&initial_raw, format)?;
+        let now = current_millis();
+        let version = ConfigVersionRecord {
+            version: 1,
+            hash: snapshot_hash(&initial_raw),
+            raw: initial_raw,
+            source: metadata.source.clone(),
+            namespace: metadata.namespace,
+            app: metadata.app,
+            key: metadata.key,
+            author: actor.into(),
+            reason: Some("initial import".to_string()),
+            created_at_millis: now,
+            active: true,
+        };
+        Ok(Self {
+            format,
+            versions: vec![version],
+            audit: Vec::new(),
+            watch_status: ConfigWatchStatus {
+                mode: ConfigWatchMode::Unavailable,
+                source: metadata.source,
+                last_revision: None,
+                last_error: None,
+                updated_at_millis: now,
+            },
+            next_audit_id: 1,
+        })
+    }
+
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let raw = std::fs::read_to_string(path).map_err(|err| {
+            anyhow!(
+                "read config admin snapshot {} failed: {err}",
+                path.display()
+            )
+        })?;
+        let mut store: Self = serde_json::from_str(&raw).map_err(|err| {
+            anyhow!(
+                "parse config admin snapshot {} failed: {err}",
+                path.display()
+            )
+        })?;
+        store.validate_snapshot()?;
+        store.next_audit_id = store.next_audit_id.max(
+            store
+                .audit
+                .iter()
+                .map(|record| record.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        Ok(store)
+    }
+
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                anyhow!(
+                    "create config admin snapshot directory {} failed: {err}",
+                    parent.display()
+                )
+            })?;
+        }
+        let raw = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, raw).map_err(|err| {
+            anyhow!(
+                "write config admin snapshot {} failed: {err}",
+                path.display()
+            )
+        })
+    }
+
+    pub fn current(&mut self, actor: &ConfigPrincipal) -> Result<ConfigVersionRecord> {
+        self.require(actor, ConfigPermission::Read, ConfigAuditAction::Read)?;
+        let record = self
+            .active_version()
+            .ok_or_else(|| anyhow!("config admin store has no active version"))?
+            .clone();
+        self.push_audit(ConfigAuditRecordInput {
+            actor,
+            action: ConfigAuditAction::Read,
+            result: ConfigAuditResult::Allowed,
+            version: Some(record.version),
+            target_version: None,
+            hash: Some(record.hash.clone()),
+            reason: None,
+            error: None,
+        });
+        Ok(record)
+    }
+
+    pub fn publish(
+        &mut self,
+        request: ConfigChangeRequest,
+        raw: impl Into<String>,
+        metadata: ConfigAdminMetadata,
+    ) -> Result<ConfigVersionRecord> {
+        self.require(
+            &request.actor,
+            ConfigPermission::Write,
+            ConfigAuditAction::Publish,
+        )?;
+
+        let raw = raw.into();
+        if let Err(err) = parse_config_value(&raw, self.format) {
+            let error = format!("config validation failed: {err}");
+            self.push_audit(ConfigAuditRecordInput {
+                actor: &request.actor,
+                action: ConfigAuditAction::Publish,
+                result: ConfigAuditResult::Rejected,
+                version: None,
+                target_version: None,
+                hash: Some(snapshot_hash(&raw)),
+                reason: request.reason.clone(),
+                error: Some(error.clone()),
+            });
+            return Err(anyhow!(error));
+        }
+
+        let version = self.next_version();
+        for record in &mut self.versions {
+            record.active = false;
+        }
+        let record = ConfigVersionRecord {
+            version,
+            hash: snapshot_hash(&raw),
+            raw,
+            source: metadata.source,
+            namespace: metadata.namespace,
+            app: metadata.app,
+            key: metadata.key,
+            author: request.actor.id.clone(),
+            reason: request.reason.clone(),
+            created_at_millis: current_millis(),
+            active: true,
+        };
+        self.versions.push(record.clone());
+        self.push_audit(ConfigAuditRecordInput {
+            actor: &request.actor,
+            action: ConfigAuditAction::Publish,
+            result: ConfigAuditResult::Allowed,
+            version: Some(record.version),
+            target_version: None,
+            hash: Some(record.hash.clone()),
+            reason: request.reason,
+            error: None,
+        });
+        Ok(record)
+    }
+
+    pub fn rollback(
+        &mut self,
+        request: ConfigChangeRequest,
+        target_version: u64,
+    ) -> Result<ConfigVersionRecord> {
+        self.require(
+            &request.actor,
+            ConfigPermission::Rollback,
+            ConfigAuditAction::Rollback,
+        )?;
+
+        let target = match self
+            .versions
+            .iter()
+            .find(|record| record.version == target_version)
+            .cloned()
+        {
+            Some(target) => target,
+            None => {
+                let error = format!("config version {target_version} not found");
+                self.push_audit(ConfigAuditRecordInput {
+                    actor: &request.actor,
+                    action: ConfigAuditAction::Rollback,
+                    result: ConfigAuditResult::Rejected,
+                    version: self.active_version().map(|record| record.version),
+                    target_version: Some(target_version),
+                    hash: None,
+                    reason: request.reason.clone(),
+                    error: Some(error.clone()),
+                });
+                return Err(anyhow!(error));
+            }
+        };
+
+        for record in &mut self.versions {
+            record.active = record.version == target_version;
+        }
+        self.push_audit(ConfigAuditRecordInput {
+            actor: &request.actor,
+            action: ConfigAuditAction::Rollback,
+            result: ConfigAuditResult::Allowed,
+            version: Some(target.version),
+            target_version: Some(target.version),
+            hash: Some(target.hash.clone()),
+            reason: request.reason,
+            error: None,
+        });
+        Ok(self
+            .active_version()
+            .expect("rollback just marked an active version")
+            .clone())
+    }
+
+    pub fn audit_log(&mut self, actor: &ConfigPrincipal) -> Result<Vec<ConfigAuditRecord>> {
+        self.require(actor, ConfigPermission::Audit, ConfigAuditAction::Audit)?;
+        self.push_audit(ConfigAuditRecordInput {
+            actor,
+            action: ConfigAuditAction::Audit,
+            result: ConfigAuditResult::Allowed,
+            version: self.active_version().map(|record| record.version),
+            target_version: None,
+            hash: None,
+            reason: None,
+            error: None,
+        });
+        Ok(self.audit.clone())
+    }
+
+    pub fn watch_status(&mut self, actor: &ConfigPrincipal) -> Result<ConfigWatchStatus> {
+        self.require(
+            actor,
+            ConfigPermission::WatchStatus,
+            ConfigAuditAction::WatchStatus,
+        )?;
+        let status = self.watch_status.clone();
+        self.push_audit(ConfigAuditRecordInput {
+            actor,
+            action: ConfigAuditAction::WatchStatus,
+            result: ConfigAuditResult::Allowed,
+            version: self.active_version().map(|record| record.version),
+            target_version: None,
+            hash: None,
+            reason: None,
+            error: None,
+        });
+        Ok(status)
+    }
+
+    pub fn set_watch_status(&mut self, status: ConfigWatchStatus) {
+        self.watch_status = status;
+    }
+
+    pub fn versions(&self) -> &[ConfigVersionRecord] {
+        &self.versions
+    }
+
+    fn active_version(&self) -> Option<&ConfigVersionRecord> {
+        self.versions.iter().find(|record| record.active)
+    }
+
+    fn validate_snapshot(&self) -> Result<()> {
+        let active_count = self.versions.iter().filter(|record| record.active).count();
+        if active_count != 1 {
+            return Err(anyhow!(
+                "config admin snapshot must contain exactly one active version, found {active_count}"
+            ));
+        }
+        for record in &self.versions {
+            parse_config_value(&record.raw, self.format).map_err(|err| {
+                anyhow!(
+                    "config admin snapshot version {} is invalid: {err}",
+                    record.version
+                )
+            })?;
+            if snapshot_hash(&record.raw) != record.hash {
+                return Err(anyhow!(
+                    "config admin snapshot version {} hash mismatch",
+                    record.version
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn next_version(&self) -> u64 {
+        self.versions
+            .iter()
+            .map(|record| record.version)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    fn require(
+        &mut self,
+        actor: &ConfigPrincipal,
+        permission: ConfigPermission,
+        action: ConfigAuditAction,
+    ) -> Result<()> {
+        if actor.can(permission) {
+            return Ok(());
+        }
+        let error = format!("actor `{}` lacks {:?} permission", actor.id, permission);
+        self.push_audit(ConfigAuditRecordInput {
+            actor,
+            action,
+            result: ConfigAuditResult::Denied,
+            version: self.active_version().map(|record| record.version),
+            target_version: None,
+            hash: None,
+            reason: None,
+            error: Some(error.clone()),
+        });
+        Err(anyhow!(error))
+    }
+
+    fn push_audit(&mut self, input: ConfigAuditRecordInput<'_>) {
+        let record = ConfigAuditRecord {
+            id: self.next_audit_id,
+            ts_millis: current_millis(),
+            actor: input.actor.id.clone(),
+            action: input.action,
+            result: input.result,
+            version: input.version,
+            target_version: input.target_version,
+            hash: input.hash,
+            reason: input.reason,
+            error: input.error,
+        };
+        self.next_audit_id += 1;
+        self.audit.push(record);
+    }
+}
+
+struct ConfigAuditRecordInput<'a> {
+    actor: &'a ConfigPrincipal,
+    action: ConfigAuditAction,
+    result: ConfigAuditResult,
+    version: Option<u64>,
+    target_version: Option<u64>,
+    hash: Option<String>,
+    reason: Option<String>,
+    error: Option<String>,
 }
 
 pub trait Subscriber: Send + Sync {
@@ -1419,6 +1902,208 @@ gateway:
         .await;
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn config_admin_publish_validates_permissions_and_payload() {
+        let mut store = ConfigCenterAdminStore::new(
+            ConfigFormat::Yaml,
+            "name: demo\n",
+            ConfigAdminMetadata::default(),
+            "system",
+        )
+        .expect("create store");
+        let reader = ConfigPrincipal::new("reader", [ConfigPermission::Read]);
+        let writer = ConfigPrincipal::new(
+            "writer",
+            [
+                ConfigPermission::Read,
+                ConfigPermission::Write,
+                ConfigPermission::Audit,
+            ],
+        );
+
+        let denied = store.publish(
+            ConfigChangeRequest {
+                actor: reader,
+                reason: Some("should fail".to_string()),
+            },
+            "name: denied\n",
+            ConfigAdminMetadata::default(),
+        );
+        assert!(denied
+            .expect_err("reader cannot publish")
+            .to_string()
+            .contains("lacks Write permission"));
+
+        let invalid = store.publish(
+            ConfigChangeRequest {
+                actor: writer.clone(),
+                reason: Some("invalid yaml".to_string()),
+            },
+            "name: [broken\n",
+            ConfigAdminMetadata::default(),
+        );
+        assert!(invalid
+            .expect_err("invalid payload is rejected")
+            .to_string()
+            .contains("config validation failed"));
+        assert_eq!(store.current(&writer).expect("current").raw, "name: demo\n");
+
+        let published = store
+            .publish(
+                ConfigChangeRequest {
+                    actor: writer.clone(),
+                    reason: Some("roll forward".to_string()),
+                },
+                "name: next\n",
+                ConfigAdminMetadata {
+                    source: "admin".to_string(),
+                    namespace: Some("prod".to_string()),
+                    app: Some("user".to_string()),
+                    key: Some("roze/user/config".to_string()),
+                },
+            )
+            .expect("publish valid config");
+
+        assert_eq!(published.version, 2);
+        assert_eq!(published.namespace.as_deref(), Some("prod"));
+        let audit = store.audit_log(&writer).expect("audit");
+        assert!(audit
+            .iter()
+            .any(|record| record.action == ConfigAuditAction::Publish
+                && record.result == ConfigAuditResult::Denied));
+        assert!(audit
+            .iter()
+            .any(|record| record.action == ConfigAuditAction::Publish
+                && record.result == ConfigAuditResult::Rejected));
+        assert!(
+            audit
+                .iter()
+                .any(|record| record.version == Some(2)
+                    && record.result == ConfigAuditResult::Allowed)
+        );
+    }
+
+    #[test]
+    fn config_admin_rolls_back_and_exposes_watch_status_with_permissions() {
+        let mut store = ConfigCenterAdminStore::new(
+            ConfigFormat::Yaml,
+            "name: v1\n",
+            ConfigAdminMetadata::default(),
+            "system",
+        )
+        .expect("create store");
+        let operator = ConfigPrincipal::new(
+            "operator",
+            [
+                ConfigPermission::Read,
+                ConfigPermission::Write,
+                ConfigPermission::Rollback,
+                ConfigPermission::WatchStatus,
+            ],
+        );
+        let reader = ConfigPrincipal::new("reader", [ConfigPermission::Read]);
+
+        store
+            .publish(
+                ConfigChangeRequest {
+                    actor: operator.clone(),
+                    reason: Some("v2".to_string()),
+                },
+                "name: v2\n",
+                ConfigAdminMetadata::default(),
+            )
+            .expect("publish v2");
+        assert_eq!(store.current(&operator).expect("current").version, 2);
+
+        let rolled_back = store
+            .rollback(
+                ConfigChangeRequest {
+                    actor: operator.clone(),
+                    reason: Some("bad rollout".to_string()),
+                },
+                1,
+            )
+            .expect("rollback");
+        assert_eq!(rolled_back.version, 1);
+        assert_eq!(rolled_back.raw, "name: v1\n");
+
+        store.set_watch_status(ConfigWatchStatus {
+            mode: ConfigWatchMode::Polling,
+            source: "etcd".to_string(),
+            last_revision: Some(42),
+            last_error: Some("native watch unavailable".to_string()),
+            updated_at_millis: 7,
+        });
+        assert!(store.watch_status(&reader).is_err());
+        let status = store.watch_status(&operator).expect("watch status");
+        assert_eq!(status.mode, ConfigWatchMode::Polling);
+        assert_eq!(status.last_revision, Some(42));
+    }
+
+    #[test]
+    fn config_admin_snapshot_round_trips_versions_and_audit() {
+        let root = std::env::temp_dir().join(format!(
+            "roze-config-admin-snapshot-{}-{}",
+            std::process::id(),
+            current_millis()
+        ));
+        let snapshot = root.join("admin.json");
+        let mut store = ConfigCenterAdminStore::new(
+            ConfigFormat::Yaml,
+            "name: v1\n",
+            ConfigAdminMetadata::default(),
+            "system",
+        )
+        .expect("create store");
+        let operator = ConfigPrincipal::new(
+            "operator",
+            [
+                ConfigPermission::Read,
+                ConfigPermission::Write,
+                ConfigPermission::Audit,
+            ],
+        );
+        store
+            .publish(
+                ConfigChangeRequest {
+                    actor: operator.clone(),
+                    reason: Some("v2".to_string()),
+                },
+                "name: v2\n",
+                ConfigAdminMetadata::default(),
+            )
+            .expect("publish v2");
+        store.save_to_path(&snapshot).expect("save snapshot");
+
+        let mut loaded = ConfigCenterAdminStore::load_from_path(&snapshot).expect("load snapshot");
+        assert_eq!(loaded.versions().len(), 2);
+        assert_eq!(loaded.current(&operator).expect("current").version, 2);
+        let audit = loaded.audit_log(&operator).expect("audit");
+        assert!(
+            audit
+                .iter()
+                .any(|record| record.action == ConfigAuditAction::Publish
+                    && record.version == Some(2))
+        );
+
+        loaded
+            .publish(
+                ConfigChangeRequest {
+                    actor: operator,
+                    reason: Some("v3".to_string()),
+                },
+                "name: v3\n",
+                ConfigAdminMetadata::default(),
+            )
+            .expect("publish v3");
+        assert!(loaded
+            .audit
+            .windows(2)
+            .all(|window| window[0].id < window[1].id));
+
+        std::fs::remove_dir_all(root).expect("remove temp root");
     }
 
     fn section_hash(signatures: &[ConfigSectionSignature], section: &str) -> Option<String> {

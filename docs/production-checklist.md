@@ -27,8 +27,9 @@ This checklist is the baseline for considering a Roze service production-ready.
 
 - Runtime config is loaded from a controlled source.
 - Config changes have a version, diff, author/source, and rollback path.
-- Config Center management API, audit history, watch status, rollback, and
-  permission checks are implemented before treating it as stable.
+- Config Center management semantics, audit history, watch status, rollback,
+  permission checks, and snapshot backup/restore or external control-plane
+  integration are verified before treating it as stable.
 - Secret values are not stored in generated config files.
 - JWT keys and external credentials have rotation procedures.
 - Config hot reload failure keeps the last valid config.
