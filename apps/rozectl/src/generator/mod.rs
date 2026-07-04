@@ -2543,9 +2543,9 @@ fn is_generated_default_logic_stub(content: &str) -> bool {
             .filter(|line| line.starts_with("pub async fn "))
             .count()
             != 1
-        || !lines.iter().any(|line| *line == "let _ = ctx;")
-        || !lines.iter().any(|line| *line == "let _ = request_ctx;")
-        || !lines.iter().any(|line| *line == "let _ = req;")
+        || !lines.contains(&"let _ = ctx;")
+        || !lines.contains(&"let _ = request_ctx;")
+        || !lines.contains(&"let _ = req;")
     {
         return false;
     }

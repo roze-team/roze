@@ -99,6 +99,7 @@ pub fn generate_model_project(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn inspect_model_project(
     table: &str,
     schema_name: Option<&str>,

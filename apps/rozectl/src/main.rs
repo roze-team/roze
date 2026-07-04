@@ -304,6 +304,7 @@ enum RpcCommands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum KubeCommands {
     Deploy {
@@ -348,6 +349,7 @@ enum KubeCommands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum HelmCommands {
     Chart {
