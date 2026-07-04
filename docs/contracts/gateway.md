@@ -72,7 +72,7 @@ gateway:
 
 - `route.fallback` 优先于 `gateway.fallback`，未设置时仅使用 HTTP code + message。
 - Gateway route 显式字段优先于 `governance.routes`，`governance.routes` 优先于全局 `governance`。
-- Gateway 当前继承的统一治理字段包括 `timeout_ms`、`retry`、`rate_limit`、`breaker` 和 `shedding`；`fallback` 已进入统一配置模型，网关执行逻辑后续接入。
+- Gateway 当前继承的统一治理字段包括 `timeout_ms`、`retry`、`rate_limit`、`breaker`、`shedding` 和 `fallback`。
 - `stream_idle_timeout_ms` 是流式响应空闲超时，按 `route > service > gateway` 覆盖；未配置时不额外限制流式 body。
 - `max_stream_connections` 是 SSE/WebSocket 活跃连接数上限，按 `route > service > gateway` 覆盖；未配置时不额外限制长连接数，超限返回 429。
 
@@ -150,6 +150,7 @@ auth:
   - `refill_ms`：刷新窗口
 - `breaker` 失败计数满阈值后开启，持续 `reset_timeout_ms` 期间直接返回 503。
 - `shedding` 使用路由级并发上限做第一阶段负载保护；活跃请求数达到 `concurrency` 时直接返回 429。
+- `fallback` 可由 `route.fallback`、`governance.routes`、`governance` 或 `gateway.fallback` 提供，按显式路由、路由治理、全局治理、网关默认的顺序选择；可配置 `status`、`body` 和 `headers`。
 
 ## 6. 可观测字段（tracing）
 

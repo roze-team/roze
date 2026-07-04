@@ -27,8 +27,8 @@ use tracing::warn;
 
 use roze_config::{
     BreakerConfig, GatewayConfig, GatewayFallbackResponse, GatewayHealthCheckConfig,
-    GatewayOutlierConfig, GatewayRoute, GatewayService, GovernanceConfig, RateLimitConfig,
-    RouteGovernanceConfig, SheddingConfig,
+    GatewayOutlierConfig, GatewayRoute, GatewayService, GovernanceConfig, GovernanceFallbackConfig,
+    RateLimitConfig, RouteGovernanceConfig, SheddingConfig,
 };
 use roze_jwt::{verify_token, JwtConfig};
 use roze_resilience::{BreakerRegistry, RateLimitRegistry};
@@ -1423,7 +1423,10 @@ fn compile_routes(
                     .retry_backoff_ms
                     .unwrap_or_else(|| retry.map(|retry| retry.backoff_ms).unwrap_or_default()),
                 rewrite: route.rewrite,
-                fallback: route.fallback,
+                fallback: route
+                    .fallback
+                    .or_else(|| route_governance.and_then(governance_fallback_response))
+                    .or_else(|| governance.and_then(governance_fallback_response)),
                 rate_limit: route
                     .rate_limit
                     .or_else(|| route_governance.and_then(|route| route.rate_limit))
@@ -1462,6 +1465,38 @@ fn effective_retry(
     route_governance
         .and_then(|route| route.retry)
         .or_else(|| governance.and_then(|governance| governance.retry))
+}
+
+fn governance_fallback_response(
+    config: &impl HasGovernanceFallback,
+) -> Option<GatewayFallbackResponse> {
+    governance_fallback_to_gateway(config.fallback_config()?)
+}
+
+trait HasGovernanceFallback {
+    fn fallback_config(&self) -> Option<&GovernanceFallbackConfig>;
+}
+
+impl HasGovernanceFallback for GovernanceConfig {
+    fn fallback_config(&self) -> Option<&GovernanceFallbackConfig> {
+        self.fallback.as_ref()
+    }
+}
+
+impl HasGovernanceFallback for RouteGovernanceConfig {
+    fn fallback_config(&self) -> Option<&GovernanceFallbackConfig> {
+        self.fallback.as_ref()
+    }
+}
+
+fn governance_fallback_to_gateway(
+    config: &GovernanceFallbackConfig,
+) -> Option<GatewayFallbackResponse> {
+    config.enabled.then(|| GatewayFallbackResponse {
+        status: config.status,
+        body: config.body.clone(),
+        headers: config.headers.clone(),
+    })
 }
 
 fn retries_from_max_attempts(retry: roze_config::RetryConfig) -> u32 {
@@ -2920,6 +2955,12 @@ mod tests {
                 concurrency: 2,
                 ..Default::default()
             }),
+            fallback: Some(GovernanceFallbackConfig {
+                enabled: true,
+                status: 598,
+                body: Some(serde_json::json!({"code": 598, "message": "governed"})),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         governance.routes.insert(
@@ -2953,6 +2994,7 @@ mod tests {
         assert_eq!(route.rate_limit.expect("rate limit").burst, 10);
         assert_eq!(route.breaker.expect("breaker").failure_threshold, 4);
         assert_eq!(route.shedding.expect("shedding").concurrency, 2);
+        assert_eq!(route.fallback.as_ref().expect("fallback").status, 598);
     }
 
     #[test]
@@ -3107,6 +3149,46 @@ mod tests {
             breaker: None,
             shedding: None,
         }
+    }
+
+    #[test]
+    fn route_governance_fallback_overrides_global_governance_fallback() {
+        let mut governance = GovernanceConfig {
+            fallback: Some(GovernanceFallbackConfig {
+                enabled: true,
+                status: 598,
+                body: Some(serde_json::json!({"message": "global"})),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        governance.routes.insert(
+            "/user".to_string(),
+            RouteGovernanceConfig {
+                fallback: Some(GovernanceFallbackConfig {
+                    enabled: true,
+                    status: 597,
+                    body: Some(serde_json::json!({"message": "route"})),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let routes = compile_routes(
+            vec![GatewayRoute {
+                path: "/user".to_string(),
+                service: "user".to_string(),
+                methods: vec!["GET".to_string()],
+                ..empty_gateway_route()
+            }],
+            Some(&governance),
+        );
+        let route = routes.first().expect("compiled route");
+
+        let fallback = route.fallback.as_ref().expect("fallback");
+        assert_eq!(fallback.status, 597);
+        assert_eq!(fallback.body.as_ref().expect("body")["message"], "route");
     }
 
     fn empty_gateway_service() -> GatewayService {

@@ -597,10 +597,16 @@ impl Default for RetryConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovernanceFallbackConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_gateway_fallback_status")]
+    pub status: u16,
+    #[serde(default)]
+    pub body: Option<Value>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -904,6 +910,9 @@ concurrency = 32
 
 [governance.fallback]
 enabled = true
+status = 598
+body = { code = 598, message = "governed" }
+headers = { "x-fallback" = "governance" }
 
 [governance.routes.login.breaker]
 failure_threshold = 2
@@ -932,7 +941,14 @@ backoff_ms = 5
             default_rate_limit_refill_ms()
         );
         assert_eq!(governance.shedding.expect("shedding").concurrency, 32);
-        assert!(governance.fallback.expect("fallback").enabled);
+        let fallback = governance.fallback.expect("fallback");
+        assert!(fallback.enabled);
+        assert_eq!(fallback.status, 598);
+        assert_eq!(fallback.body.expect("fallback body")["message"], "governed");
+        assert_eq!(
+            fallback.headers.get("x-fallback").map(String::as_str),
+            Some("governance")
+        );
         assert_eq!(
             governance
                 .routes
