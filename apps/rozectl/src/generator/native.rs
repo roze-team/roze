@@ -1655,8 +1655,7 @@ mod tests {
         assert!(service_proto.contains("map<string, int64> scores"));
         assert!(service_proto.contains("repeated string permissions = 2;"));
         let logic = fs::read_to_string(out.join("src/logic/get_user.rs")).expect("read logic");
-        assert!(logic.contains("name: String::new()"));
-        assert!(logic.contains("permissions: Vec::new()"));
-        assert!(logic.contains("user_count: 0"));
+        assert!(logic.contains("Ok(UserResp::default())"));
+        assert!(!logic.contains("Ok(UserResp {"));
     }
 }

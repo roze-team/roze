@@ -338,13 +338,12 @@ pub fn render_logic_files(spec: &ApiSpec) -> Vec<(String, String)> {
     files
 }
 
-fn render_logic_file(spec: &ApiSpec, method: &str, req_ty: &str, resp_ty: &str) -> String {
+fn render_logic_file(_spec: &ApiSpec, method: &str, req_ty: &str, resp_ty: &str) -> String {
     format!(
-        "use super::*;\n\npub async fn {method}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {req_ty}) -> Result<{resp_ty}, RozeError> {{\n    let _ = ctx;\n    let _ = request_ctx;\n    let _ = req;\n    Ok({resp_ty} {{ {defaults} }})\n}}\n",
+        "use super::*;\n\npub async fn {method}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {req_ty}) -> Result<{resp_ty}, RozeError> {{\n    let _ = ctx;\n    let _ = request_ctx;\n    let _ = req;\n    Ok({resp_ty}::default())\n}}\n",
         method = method,
         req_ty = req_ty,
-        resp_ty = resp_ty,
-        defaults = default_fields(spec, resp_ty)
+        resp_ty = resp_ty
     )
 }
 
@@ -1053,44 +1052,6 @@ fn handler_name(method: &HttpMethod, path: &str) -> String {
     format!("{}_{}", method, path_name)
 }
 
-fn default_fields(spec: &ApiSpec, name: &str) -> String {
-    spec.types
-        .iter()
-        .find(|ty| ty.name == name)
-        .map(|ty| {
-            ty.fields
-                .iter()
-                .map(|field| {
-                    let name = rust_field_name(field);
-                    format!("{}: {}", name, default_value(&field.ty))
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
-}
-
-fn default_value(ty: &str) -> String {
-    if map_key_value_types(ty).is_some() {
-        return "std::collections::HashMap::new()".to_string();
-    }
-    if collection_element_type(ty).is_some() {
-        return "Vec::new()".to_string();
-    }
-
-    match map_type(ty).as_str() {
-        "String" => "String::new()",
-        "bool" => "false",
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
-        | "usize" => "0",
-        "f32" => "0.0",
-        "f64" => "0.0",
-        "Vec<u8>" => "Vec::new()",
-        _ => "Default::default()",
-    }
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1259,9 +1220,7 @@ mod tests {
 
         let files = render_logic_files(&spec);
         let logic = &files[0].1;
-        assert!(logic.contains("permissions: Vec::new()"));
-        assert!(logic.contains("today_order_count: 0"));
-        assert!(logic.contains("today_pay_amount: String::new()"));
-        assert!(logic.contains("enabled: false"));
+        assert!(logic.contains("Ok(ListPermissionsResponse::default())"));
+        assert!(!logic.contains("Ok(ListPermissionsResponse {"));
     }
 }
