@@ -15,6 +15,10 @@ services.
   gateway, config center, MQ, governance, generation, docs, and security.
 - [Module maturity matrix](../maturity.md): stable/beta/scaffold/planned status
   for each framework area.
+- [Stability commitment](../stability-commitment.md): public claim rules,
+  stable-module requirements, experimental surface, and MSRV commitment.
+- [Production evidence](../production-evidence.md): required long-run,
+  failure-injection, and leak-report evidence before stable runtime claims.
 - [Release policy](../release.md): SemVer, MSRV, crates.io/GitHub Release
   expectations, and breaking-change rules.
 - [Production checklist](../production-checklist.md): deployment, config,

@@ -13,15 +13,22 @@ This checklist is the baseline for considering a Roze service production-ready.
 - Generated REST and RPC compile smoke tests pass:
   - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
   - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
+  - `cargo test -p rozectl generated_stream_project_compiles -- --ignored`
 - Generated-code changes were applied with `--update` and reviewed as a diff.
 - User-owned files under `src/logic/**`, custom middleware, and `config.yaml`
   were not overwritten.
 - Rollback command and previous binary/image are available.
+- Runtime-critical modules marked `stable` have a production evidence report
+  that follows [Production Evidence](production-evidence.md).
+- Public production-readiness wording follows
+  [Stability Commitment](stability-commitment.md).
 
 ## Configuration and Secrets
 
 - Runtime config is loaded from a controlled source.
 - Config changes have a version, diff, author/source, and rollback path.
+- Config Center management API, audit history, watch status, rollback, and
+  permission checks are implemented before treating it as stable.
 - Secret values are not stored in generated config files.
 - JWT keys and external credentials have rotation procedures.
 - Config hot reload failure keeps the last valid config.

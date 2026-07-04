@@ -27,6 +27,10 @@ Recommended for evaluation and internal pilots:
 - Record the Roze revision in generated service repositories.
 - Read [Module Maturity Matrix](maturity.md) before adopting a crate in a
   production path.
+- Read [Stability Commitment](stability-commitment.md) before making public
+  production-readiness claims.
+- Read [Production Evidence](production-evidence.md) before marking runtime
+  modules as stable.
 - Read [Upgrade Guide](upgrade.md) before regenerating existing projects.
 
 ## Versioning
@@ -50,8 +54,9 @@ The current workspace uses Rust 2021. Generated REST/RPC services also pin
 `edition = "2021"` so they do not inherit a parent workspace's Rust 2024
 edition.
 
-Roze does not yet claim a fixed MSRV. Until CI proves an MSRV matrix, use the
-latest stable Rust toolchain for local development and evaluation.
+Roze does not yet claim a fixed MSRV. Until CI proves an MSRV matrix, do not
+make an MSRV guarantee and use the latest stable Rust toolchain for local
+development and evaluation.
 
 Planned MSRV policy before the first stable release:
 
@@ -95,7 +100,8 @@ Before cutting a release:
 
 - The `release-gate` GitHub Actions workflow passes for the release commit or
   tag. It is the machine-enforced gate for Gateway, Config Center, MQ,
-  Lifecycle, generator smoke, generated compile smoke, and production smoke.
+  Lifecycle, generator smoke, generated compile smoke, stream generator compile
+  smoke, and production smoke.
 - The same gate can be run locally with:
 
 ```bash
@@ -113,6 +119,7 @@ bash scripts/release-gate.sh
 - `bash scripts/rozectl-smoke.sh`
 - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
 - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
+- `cargo test -p rozectl generated_stream_project_compiles -- --ignored`
 - `--update` ownership tests pass and prove user logic is preserved.
 - Gateway smoke tests cover rewrite, timeout, auth, rate limit, breaker, retry,
   fallback, and hot reload.
@@ -121,6 +128,9 @@ bash scripts/release-gate.sh
   isolation.
 - `CHANGELOG.md` and upgrade notes are updated.
 - `docs/maturity.md` accurately labels modules as stable/beta/scaffold/planned.
+- Runtime-critical modules marked `stable` have evidence reports that satisfy
+  `docs/production-evidence.md`.
+- Public release language follows `docs/stability-commitment.md`.
 - `README.md` still states the current pre-release install path.
 - Security-sensitive changes are checked against `SECURITY.md`.
 

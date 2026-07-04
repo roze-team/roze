@@ -17,6 +17,7 @@ Status legend:
 | --- | --- | --- |
 | REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned files on `--update`; generated REST + model + search compile smoke exists as an ignored `rozectl` test; needs more Roze `.api` edge fixtures. |
 | RPC generation | beta | Generates split server/client/pb/logic layout. Method rate-limit and breaker state use DashMap for concurrent hot paths; memory registry has Criterion hot-path baselines; generated RPC compile smoke exists as an ignored `rozectl` test; needs more proto fixture coverage. |
+| Stream worker generation | beta | `rozectl stream gen` creates producer, consumer, envelope, config, type, and README scaffolding from RPC methods. Generated stream worker compile smoke exists as an ignored `rozectl` test; needs live broker examples and richer event-contract fixtures. |
 | OpenAPI generation | beta | Produces OpenAPI 3 documents; validator constraint projection still has known gaps. |
 | TS/JS/Dart SDK generation | beta | Covers route/path/query/header/body generation; needs richer error/interceptor/retry/timeout support. |
 | HTTP middleware | beta | Covers trace, recover, metrics, CORS, timeout, max connections, shedding, gunzip, and body limit. Route rate-limit and breaker state use DashMap for concurrent hot paths; needs more end-to-end service tests. |
@@ -47,3 +48,11 @@ A module can move to `stable` only when it has:
 - Failure behavior documented, including retry/rollback/fallback boundaries.
 - Upgrade notes for breaking generated-code changes.
 - A production example or smoke test that a user can run locally.
+- Reproducible production evidence for runtime-critical modules, following
+  [Production Evidence](production-evidence.md).
+
+## Public Commitment Boundary
+
+Public stability claims must follow [Stability Commitment](stability-commitment.md).
+In short: beta modules can be used for pilots, but a module is not production
+stable until this matrix says `stable` and the release policy evidence exists.

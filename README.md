@@ -41,9 +41,9 @@ bash scripts/rozectl-smoke.sh
 ```
 
 The smoke path includes generated REST/RPC compile tests, core runtime crate
-tests, and app-level checks. `--with-compose` starts the integration profile for
-Etcd, Consul, Kafka, NATS, Redis, Postgres, MySQL, MongoDB, Elasticsearch,
-OpenSearch, and Meilisearch.
+tests, generated stream worker compile tests, and app-level checks.
+`--with-compose` starts the integration profile for Etcd, Consul, Kafka, NATS,
+Redis, Postgres, MySQL, MongoDB, Elasticsearch, OpenSearch, and Meilisearch.
 `scripts/rozectl-smoke.sh` verifies the `rozectl` CLI command surface with
 temporary files, fake Docker for `dev`, and a fake local search server for
 search inspect.
@@ -90,6 +90,8 @@ authorization, permission checks, and search ranking rules.
 - [Requirements vs current architecture](docs/requirements-architecture-comparison.md)
 - [Roadmap](docs/roadmap.md)
 - [Module maturity matrix](docs/maturity.md)
+- [Stability commitment](docs/stability-commitment.md)
+- [Production evidence](docs/production-evidence.md)
 - [Release policy](docs/release.md)
 - [Upgrade guide](docs/upgrade.md)
 - [Production checklist](docs/production-checklist.md)
