@@ -4121,9 +4121,10 @@ mod tests {
         )
         .expect("diff project");
 
-        assert!(report.contains("M src/types/mod.rs"), "{report}");
+        let normalized_report = report.replace('\\', "/");
+        assert!(normalized_report.contains("M src/types/mod.rs"), "{report}");
         assert!(
-            !report.contains("src/logic/users/get_users_id.rs"),
+            !normalized_report.contains("src/logic/users/get_users_id.rs"),
             "{report}"
         );
         assert_eq!(

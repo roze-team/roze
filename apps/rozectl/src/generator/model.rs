@@ -419,6 +419,9 @@ fn write_model_project(
     }
 
     update_model_dependencies(out, orm)?;
+    if orm == ModelOrm::Toasty {
+        update_toasty_service_context(out, models)?;
+    }
     update_main_rs(out)?;
     Ok(())
 }
@@ -526,6 +529,67 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", manifest_path.display()))
 }
 
+fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Result<()> {
+    let svc_path = out.join("src/svc/mod.rs");
+    if !svc_path.is_file() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&svc_path)
+        .with_context(|| format!("failed to read {}", svc_path.display()))?;
+    if content.contains("toasty_db") || !content.contains("pub struct ServiceContext") {
+        return Ok(());
+    }
+    let content = content.replace("#[derive(Clone, Debug)]", "#[derive(Clone)]");
+
+    let model_list = models
+        .iter()
+        .map(|model| format!("crate::model::{}", to_pascal_case(&model.name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if model_list.is_empty() {
+        return Ok(());
+    }
+
+    let Some(mut updated) = insert_after_module(
+        &content,
+        "    pub db_connections: Option<roze_db::DatabaseConnections>,\n",
+        "    pub toasty_db: Option<toasty::Db>,\n",
+    ) else {
+        return Ok(());
+    };
+    updated = insert_after_module(
+        &updated,
+        "        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;\n",
+        &format!(
+            "        let toasty_db = match config.database.as_ref() {{\n            Some(database) => Some(toasty::Db::builder().models(toasty::models!({model_list})).connect(&database.url).await?),\n            None => None,\n        }};\n"
+        ),
+    )
+    .unwrap_or(updated);
+    updated = insert_after_module(
+        &updated,
+        "            db_connections,\n",
+        "            toasty_db,\n",
+    )
+    .unwrap_or(updated);
+    let accessor = r#"
+    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
+        self.toasty_db
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("toasty database connection is not configured"))
+    }
+
+"#;
+    updated = insert_after_module(
+        &updated,
+        "    pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {\n",
+        accessor,
+    )
+    .unwrap_or(updated);
+
+    fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
+}
+
 fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<String> {
     let idx = content.find(needle)?;
     let mut updated = String::with_capacity(content.len() + insert.len());
@@ -597,10 +661,10 @@ fn render_model_mod(models: &[ModelSpec], orm: ModelOrm) -> String {
         ));
         match orm {
             ModelOrm::SeaOrm => out.push_str(&format!(
-                "pub use {module}::{{{pascal}Repository, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
+                "pub use {module}::{{{pascal}Page, {pascal}Query, {pascal}Repository, {pascal}SortField, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
             )),
             ModelOrm::Toasty => out.push_str(&format!(
-                "pub use {module}::{{{pascal}, {pascal}Repository}};\n"
+                "pub use {module}::{{{pascal}, {pascal}Page, {pascal}Query, {pascal}Repository, {pascal}SortField}};\n"
             )),
         }
     }
@@ -4926,6 +4990,31 @@ serde.workspace = true
 "#,
         )
         .expect("manifest");
+        fs::create_dir_all(out.join("src/svc")).expect("svc dir");
+        fs::write(
+            out.join("src/svc/mod.rs"),
+            r#"pub struct ServiceContext {
+    pub db_connections: Option<roze_db::DatabaseConnections>,
+}
+
+impl ServiceContext {
+    pub async fn new(config: Config) -> anyhow::Result<Self> {
+        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
+        Ok(Self {
+            db_connections,
+        })
+    }
+
+    pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
+        self.db_connections
+            .as_ref()
+            .map(|connections| connections.read())
+            .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
+    }
+}
+"#,
+        )
+        .expect("svc");
 
         generate_model_project(
             r#"
@@ -4952,10 +5041,15 @@ serde.workspace = true
         assert!(fields.contains("pub enum UserField"));
         assert!(fields.contains("Self::Name => \"name\""));
         let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
-        assert!(mod_rs.contains("pub use user::{User, UserRepository};"));
+        assert!(mod_rs
+            .contains("pub use user::{User, UserPage, UserQuery, UserRepository, UserSortField};"));
         assert!(mod_rs.contains("pub mod user_fields;"));
         assert!(mod_rs.contains("pub use user_fields::{UserField, USER_TABLE};"));
         assert!(mod_rs.contains("pub mod user_ext;"));
+        let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("svc read");
+        assert!(svc.contains("pub toasty_db: Option<toasty::Db>"));
+        assert!(svc.contains("toasty::models!(crate::model::User)"));
+        assert!(svc.contains("pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
         let ext = fs::read_to_string(out.join("src/model/user_ext.rs")).expect("ext read");
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));

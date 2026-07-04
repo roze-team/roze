@@ -1070,12 +1070,25 @@ fn default_fields(spec: &ApiSpec, name: &str) -> String {
         .unwrap_or_default()
 }
 
-fn default_value(ty: &str) -> &'static str {
-    match ty {
-        "String" | "string" => "String::new()",
+fn default_value(ty: &str) -> String {
+    if map_key_value_types(ty).is_some() {
+        return "std::collections::HashMap::new()".to_string();
+    }
+    if collection_element_type(ty).is_some() {
+        return "Vec::new()".to_string();
+    }
+
+    match map_type(ty).as_str() {
+        "String" => "String::new()",
         "bool" => "false",
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+        | "usize" => "0",
+        "f32" => "0.0",
+        "f64" => "0.0",
+        "Vec<u8>" => "Vec::new()",
         _ => "Default::default()",
     }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -1219,5 +1232,34 @@ mod tests {
         assert!(rendered.contains(
             "users: resp.users.into_iter().map(|item| proto::UserItem { id: item.id, r#type: item.r#type }).collect()"
         ));
+    }
+
+    #[test]
+    fn rpc_logic_stubs_default_response_fields() {
+        let spec = parse_api(
+            r#"
+            service system {
+                rpc ListPermissions (ListPermissionsRequest) returns (ListPermissionsResponse)
+            }
+
+            type ListPermissionsRequest {
+            }
+
+            type ListPermissionsResponse {
+                permissions: []string
+                today_order_count: i64
+                today_pay_amount: string
+                enabled: bool
+            }
+            "#,
+        )
+        .expect("api");
+
+        let files = render_logic_files(&spec);
+        let logic = &files[0].1;
+        assert!(logic.contains("permissions: Vec::new()"));
+        assert!(logic.contains("today_order_count: 0"));
+        assert!(logic.contains("today_pay_amount: String::new()"));
+        assert!(logic.contains("enabled: false"));
     }
 }

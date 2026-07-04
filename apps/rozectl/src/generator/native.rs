@@ -1064,10 +1064,30 @@ fn parse_proto_messages(source: &str) -> anyhow::Result<Vec<TypeDef>> {
     let mut idx = 0;
     while idx < lines.len() {
         let line = lines[idx].trim();
-        if let Some(name) = line
+        if let Some(raw_name) = line
             .strip_prefix("message ")
             .and_then(|rest| rest.split_whitespace().next())
         {
+            let name = raw_name.trim_end_matches('{').to_string();
+            let inline_body = line
+                .split_once('{')
+                .and_then(|(_, rest)| rest.split_once('}').map(|(body, _)| body.trim()));
+            if let Some(body) = inline_body {
+                let mut fields = Vec::new();
+                for field_line in body
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                {
+                    if let Some(field) = parse_proto_field(field_line)? {
+                        fields.push(field);
+                    }
+                }
+                types.push(TypeDef { name, fields });
+                idx += 1;
+                continue;
+            }
+
             idx += 1;
             let mut fields = Vec::new();
             while idx < lines.len() {
@@ -1083,10 +1103,7 @@ fn parse_proto_messages(source: &str) -> anyhow::Result<Vec<TypeDef>> {
                     fields.push(field);
                 }
             }
-            types.push(TypeDef {
-                name: name.trim_end_matches('{').to_string(),
-                fields,
-            });
+            types.push(TypeDef { name, fields });
             continue;
         }
         idx += 1;
@@ -1346,6 +1363,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_inline_empty_proto_messages() {
+        let spec = parse_proto_api_spec(
+            r#"
+            syntax = "proto3";
+            package system;
+
+            service SystemService {
+              rpc ListPermissions (ListPermissionsRequest) returns (ListPermissionsResponse);
+            }
+
+            message ListPermissionsRequest {}
+            message ListPermissionsResponse {
+              repeated string permissions = 1;
+            }
+            "#,
+        )
+        .expect("parse proto");
+
+        let request = spec
+            .types
+            .iter()
+            .find(|ty| ty.name == "ListPermissionsRequest")
+            .expect("request type");
+        assert!(request.fields.is_empty());
+
+        let proto = crate::generator::render_proto(&spec).expect("render proto");
+        assert!(proto.contains("message ListPermissionsRequest {\n}\n"));
+        assert!(proto.contains("repeated string permissions = 1;"));
+    }
+
+    #[test]
     fn renders_dockerfile() {
         let rendered = render_dockerfile(&DockerOptions {
             out: PathBuf::from("Dockerfile"),
@@ -1548,7 +1596,12 @@ mod tests {
         fs::write(&api, sample_api()).expect("write api");
         let out = root.join("out");
 
-        run_api_plugin("cat > plugin.json", &api, &out).expect("run plugin");
+        let plugin = if cfg!(target_os = "windows") {
+            "more > plugin.json"
+        } else {
+            "cat > plugin.json"
+        };
+        run_api_plugin(plugin, &api, &out).expect("run plugin");
 
         let payload = fs::read_to_string(out.join("plugin.json")).expect("read plugin output");
         assert!(payload.contains("\"service\": \"user-api\""));
