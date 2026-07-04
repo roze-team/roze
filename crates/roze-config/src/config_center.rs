@@ -236,6 +236,7 @@ pub struct ConfigCenterConfig {
     pub format: ConfigFormat,
     pub poll_interval: Duration,
     pub debounce: Duration,
+    pub listener_timeout: Duration,
     pub source: Option<String>,
     pub namespace: Option<String>,
     pub app: Option<String>,
@@ -248,6 +249,7 @@ impl Default for ConfigCenterConfig {
             format: ConfigFormat::Json,
             poll_interval: Duration::from_secs(5),
             debounce: Duration::from_millis(400),
+            listener_timeout: Duration::from_millis(500),
             source: None,
             namespace: None,
             app: None,
@@ -606,10 +608,13 @@ async fn watch_loop<T>(
                     err.to_string(),
                 );
 
-                let listeners = inner.reload_listeners.read().await.clone();
-                for listener in listeners {
-                    listener(&result);
-                }
+                notify_reload_listeners(
+                    inner.reload_listeners.read().await.clone(),
+                    result.clone(),
+                    options.listener_timeout,
+                    &source,
+                )
+                .await;
                 warn!(
                     source = %source,
                     hash = %result.hash,
@@ -651,16 +656,22 @@ async fn watch_loop<T>(
         );
 
         if result.changed {
-            let listeners = inner.listeners.read().await.clone();
-            for listener in listeners {
-                listener(&parsed);
-            }
+            notify_config_listeners(
+                inner.listeners.read().await.clone(),
+                parsed.clone(),
+                options.listener_timeout,
+                &source,
+            )
+            .await;
         }
 
-        let reload_listeners = inner.reload_listeners.read().await.clone();
-        for listener in reload_listeners {
-            listener(&result);
-        }
+        notify_reload_listeners(
+            inner.reload_listeners.read().await.clone(),
+            result.clone(),
+            options.listener_timeout,
+            &source,
+        )
+        .await;
 
         pending = None;
         let changed_paths = result
@@ -679,6 +690,80 @@ async fn watch_loop<T>(
             success = result.success,
             "config center reload applied"
         );
+    }
+}
+
+async fn notify_config_listeners<T>(
+    listeners: Vec<Listener<T>>,
+    config: T,
+    timeout: Duration,
+    source: &str,
+) where
+    T: Clone + Send + 'static,
+{
+    let mut tasks = listeners
+        .into_iter()
+        .enumerate()
+        .map(|(index, listener)| {
+            let config = config.clone();
+            tokio::task::spawn_blocking(move || {
+                listener(&config);
+                index
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for task in tasks.drain(..) {
+        match time::timeout(timeout.max(Duration::from_millis(1)), task).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                warn!(%err, source, "config center config listener failed");
+            }
+            Err(_) => {
+                warn!(
+                    source,
+                    timeout_ms = timeout.as_millis(),
+                    "config center config listener timed out"
+                );
+            }
+        }
+    }
+}
+
+async fn notify_reload_listeners<T>(
+    listeners: Vec<ReloadListener<T>>,
+    result: ReloadResult<T>,
+    timeout: Duration,
+    source: &str,
+) where
+    T: Clone + Send + 'static,
+{
+    let mut tasks = listeners
+        .into_iter()
+        .enumerate()
+        .map(|(index, listener)| {
+            let result = result.clone();
+            tokio::task::spawn_blocking(move || {
+                listener(&result);
+                index
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for task in tasks.drain(..) {
+        match time::timeout(timeout.max(Duration::from_millis(1)), task).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                warn!(%err, source, "config center reload listener failed");
+            }
+            Err(_) => {
+                warn!(
+                    source,
+                    timeout_ms = timeout.as_millis(),
+                    "config center reload listener timed out"
+                );
+            }
+        }
     }
 }
 
@@ -1068,6 +1153,10 @@ struct EtcdWatchUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc as StdArc,
+    };
 
     #[test]
     fn parses_config_format_names() {
@@ -1279,6 +1368,57 @@ gateway:
         assert_eq!(events[0].section, "*");
         assert!(!events[0].success);
         assert_eq!(events[0].error.as_deref(), Some("parse failed"));
+    }
+
+    #[tokio::test]
+    async fn config_listener_timeout_does_not_block_following_listeners() {
+        let hits = StdArc::new(AtomicUsize::new(0));
+        let slow: Listener<()> = Arc::new(|_| {
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        let fast_hits = hits.clone();
+        let fast: Listener<()> = Arc::new(move |_| {
+            fast_hits.fetch_add(1, Ordering::SeqCst);
+        });
+
+        notify_config_listeners(vec![slow, fast], (), Duration::from_millis(10), "test").await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_listener_panic_does_not_block_following_listeners() {
+        let hits = StdArc::new(AtomicUsize::new(0));
+        let panicking: ReloadListener<()> = Arc::new(|_| panic!("listener panic"));
+        let fast_hits = hits.clone();
+        let fast: ReloadListener<()> = Arc::new(move |_| {
+            fast_hits.fetch_add(1, Ordering::SeqCst);
+        });
+        let result = ReloadResult::success(
+            ReloadMetadata {
+                version: 2,
+                old_version: 1,
+                hash: "new".to_string(),
+                old_hash: "old".to_string(),
+                namespace: None,
+                app: None,
+                key: None,
+                source: "test".to_string(),
+            },
+            (),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        notify_reload_listeners(
+            vec![panicking, fast],
+            result,
+            Duration::from_millis(50),
+            "test",
+        )
+        .await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     fn section_hash(signatures: &[ConfigSectionSignature], section: &str) -> Option<String> {

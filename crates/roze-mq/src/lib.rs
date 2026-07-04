@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -171,15 +171,17 @@ impl Message {
 
 #[derive(Debug)]
 struct DeliveryState {
-    acked: AtomicBool,
-    nacked: AtomicBool,
+    state: AtomicU8,
 }
+
+const DELIVERY_PENDING: u8 = 0;
+const DELIVERY_ACKED: u8 = 1;
+const DELIVERY_NACKED: u8 = 2;
 
 impl DeliveryState {
     fn new() -> Self {
         Self {
-            acked: AtomicBool::new(false),
-            nacked: AtomicBool::new(false),
+            state: AtomicU8::new(DELIVERY_PENDING),
         }
     }
 }
@@ -202,21 +204,45 @@ impl Delivery {
     }
 
     pub fn is_acked(&self) -> bool {
-        self.state.acked.load(Ordering::SeqCst)
+        self.state.state.load(Ordering::SeqCst) == DELIVERY_ACKED
     }
 
     pub fn is_nacked(&self) -> bool {
-        self.state.nacked.load(Ordering::SeqCst)
+        self.state.state.load(Ordering::SeqCst) == DELIVERY_NACKED
     }
 
     pub async fn ack(&self) -> anyhow::Result<()> {
-        self.state.acked.store(true, Ordering::SeqCst);
-        (self.ack_fn)().await
+        if self
+            .state
+            .state
+            .compare_exchange(
+                DELIVERY_PENDING,
+                DELIVERY_ACKED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            (self.ack_fn)().await?;
+        }
+        Ok(())
     }
 
     pub async fn nack(&self) -> anyhow::Result<()> {
-        self.state.nacked.store(true, Ordering::SeqCst);
-        (self.nack_fn)().await
+        if self
+            .state
+            .state
+            .compare_exchange(
+                DELIVERY_PENDING,
+                DELIVERY_NACKED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            (self.nack_fn)().await?;
+        }
+        Ok(())
     }
 
     pub fn external(message: Message, ack_fn: DeliveryAction, nack_fn: DeliveryAction) -> Self {
@@ -756,6 +782,55 @@ mod tests {
         assert_eq!(dead.message().topic, "dead");
         assert_eq!(dead.message().attempt, 0);
         assert_eq!(broker.dead_letters().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ack_is_idempotent_and_blocks_later_nack() {
+        let broker = InMemoryBroker::new();
+        let mut rx = broker.subscribe("orders").await.expect("subscribe");
+        broker
+            .publish(Message::new("orders", serde_json::json!({"id": 1})))
+            .await
+            .expect("publish");
+
+        let delivery = rx.recv().await.expect("delivery");
+        delivery.ack().await.expect("first ack");
+        delivery.ack().await.expect("second ack");
+        delivery.nack().await.expect("late nack");
+
+        assert!(delivery.is_acked());
+        assert!(!delivery.is_nacked());
+        let stats = broker.stats().await.expect("stats");
+        assert_eq!(stats.acked, 1);
+        assert_eq!(stats.nacked, 0);
+        assert_eq!(stats.dead_lettered, 0);
+    }
+
+    #[tokio::test]
+    async fn nack_is_idempotent_and_blocks_later_ack() {
+        let broker = InMemoryBroker::with_dead_letter("dead", 1);
+        let mut dead_rx = broker.subscribe("dead").await.expect("subscribe dead");
+        let mut rx = broker.subscribe("orders").await.expect("subscribe orders");
+        broker
+            .publish(
+                Message::new("orders", serde_json::json!({"id": 1})).with_dead_letter_topic("dead"),
+            )
+            .await
+            .expect("publish");
+
+        let delivery = rx.recv().await.expect("delivery");
+        delivery.nack().await.expect("first nack");
+        delivery.nack().await.expect("second nack");
+        delivery.ack().await.expect("late ack");
+
+        assert!(delivery.is_nacked());
+        assert!(!delivery.is_acked());
+        let dead = dead_rx.recv().await.expect("dead letter");
+        assert_eq!(dead.message().topic, "dead");
+        let stats = broker.stats().await.expect("stats");
+        assert_eq!(stats.acked, 0);
+        assert_eq!(stats.nacked, 1);
+        assert_eq!(stats.dead_lettered, 1);
     }
 
     #[tokio::test]

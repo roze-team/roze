@@ -232,6 +232,10 @@ fn route_signature(
 }
 
 fn config_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("ROZE_GATEWAY_CONFIG_FILE") {
+        return std::path::PathBuf::from(path);
+    }
+
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let manifest_config = manifest_dir.join("config.yaml");
     if manifest_config.exists() {

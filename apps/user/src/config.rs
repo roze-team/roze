@@ -88,6 +88,10 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis);
+    let listener_timeout = std::env::var("ROZE_CONFIG_CENTER_LISTENER_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(Duration::from_millis(500), Duration::from_millis);
 
     let configured_file = std::env::var("ROZE_CONFIG_CENTER_FILE")
         .ok()
@@ -119,6 +123,7 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
             format,
             poll_interval,
             debounce: debounce_ms.unwrap_or_else(|| Duration::from_millis(400)),
+            listener_timeout,
             source: Some(source),
             namespace,
             app,

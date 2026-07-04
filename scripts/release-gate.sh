@@ -8,6 +8,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
 cargo test -p roze-gateway
+bash scripts/gateway-smoke.sh
 cargo test -p roze-config config_center
 cargo test -p roze-mq
 cargo test -p roze-service -p roze-bootstrap -p roze-shutdown

@@ -100,6 +100,10 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map_or(Duration::from_millis(400), Duration::from_millis);
+    let listener_timeout = std::env::var("ROZE_CONFIG_CENTER_LISTENER_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(Duration::from_millis(500), Duration::from_millis);
 
     let source = if endpoints.is_some() {
         "etcd".to_string()
@@ -118,6 +122,7 @@ fn parse_config_center_from_env(path: &Path) -> Option<ConfigCenterInput> {
             format,
             poll_interval,
             debounce,
+            listener_timeout,
             source: Some(source),
             namespace,
             app,
