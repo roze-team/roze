@@ -3,7 +3,7 @@ mod parser;
 
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
@@ -135,6 +135,10 @@ enum Commands {
     Search {
         #[command(subcommand)]
         command: SearchCommands,
+    },
+    Stream {
+        #[command(subcommand)]
+        command: StreamCommands,
     },
     Template {
         #[command(subcommand)]
@@ -608,6 +612,22 @@ enum SearchCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum StreamCommands {
+    Gen {
+        #[arg(long)]
+        api: PathBuf,
+        #[arg(long, default_value = "stream")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let registry = generator::registry();
@@ -809,6 +829,19 @@ fn main() -> anyhow::Result<()> {
                     options(force, update, roze_source),
                 ))?;
             }
+        },
+        Commands::Stream { command } => match command {
+            StreamCommands::Gen {
+                api,
+                out,
+                force,
+                update,
+                roze_source,
+            } => generator::write_stream_worker_project(
+                &api,
+                &out,
+                options(force, update, roze_source),
+            )?,
         },
         Commands::Template { command } => match command {
             TemplateCommands::List => {
@@ -1657,7 +1690,9 @@ fn check_helm_file(issues: &mut Vec<String>, chart: &Path, file: &str, fragments
 
 fn run_dev(command: DevCommands) -> anyhow::Result<()> {
     let args = dev_compose_args(&command)?;
-    let status = Command::new("docker")
+    let docker = std::env::var_os("ROZECTL_DOCKER_BIN").unwrap_or_else(|| OsString::from("docker"));
+    let mut process = docker_command(docker);
+    let status = process
         .args(args)
         .status()
         .map_err(|err| anyhow::anyhow!("failed to run docker compose: {err}"))?;
@@ -1665,6 +1700,25 @@ fn run_dev(command: DevCommands) -> anyhow::Result<()> {
         anyhow::bail!("docker compose exited with {status}");
     }
     Ok(())
+}
+
+fn docker_command(docker: OsString) -> Command {
+    if cfg!(target_os = "windows") && is_windows_command_script(&docker) {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(docker);
+        command
+    } else {
+        Command::new(docker)
+    }
+}
+
+fn is_windows_command_script(path: &OsStr) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
 }
 
 fn dev_compose_args(command: &DevCommands) -> anyhow::Result<Vec<OsString>> {
@@ -2379,6 +2433,26 @@ spec:
             openapi.command,
             Commands::Openapi {
                 command: OpenApiCommands::Generate { .. }
+            }
+        ));
+
+        let stream = Cli::try_parse_from([
+            "rozectl",
+            "stream",
+            "gen",
+            "--api",
+            "user.api",
+            "--out",
+            "stream",
+            "--update",
+            "--roze-source",
+            "path",
+        ])
+        .expect("parse stream gen");
+        assert!(matches!(
+            stream.command,
+            Commands::Stream {
+                command: StreamCommands::Gen { .. }
             }
         ));
 

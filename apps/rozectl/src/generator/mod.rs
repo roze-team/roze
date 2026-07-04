@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::{bail, Context};
 
-use crate::parser::{ApiSpec, HttpMethod};
+use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
 const REST_ROZE_CRATES: [&str; 17] = [
@@ -57,6 +57,8 @@ const RPC_ROZE_CRATES: [&str; 17] = [
     "roze-transaction",
     "roze-validation",
 ];
+
+const STREAM_ROZE_CRATES: [&str; 2] = ["roze-mq", "roze-validation"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectKind {
@@ -508,6 +510,85 @@ pub fn write_http_smoke_test_project(
     Ok(())
 }
 
+pub fn write_stream_worker_project(
+    api: &Path,
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)
+        .with_context(|| format!("failed to parse api file {}", api.display()))?;
+    if spec.rpc_methods.is_empty() {
+        bail!(
+            "{} has no rpc methods to map to stream topics",
+            api.display()
+        );
+    }
+
+    ensure_output(out, options.mode)?;
+    fs::create_dir_all(out.join("src/config"))
+        .with_context(|| format!("failed to create {}", out.join("src/config").display()))?;
+    fs::create_dir_all(out.join("src/stream"))
+        .with_context(|| format!("failed to create {}", out.join("src/stream").display()))?;
+    fs::create_dir_all(out.join("src/types"))
+        .with_context(|| format!("failed to create {}", out.join("src/types").display()))?;
+
+    write_stream_cargo_toml(&spec, out, options)?;
+    fs::write(out.join("README.md"), render_stream_readme(&spec, api))
+        .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
+    write_preserved(
+        &out.join("config.yaml"),
+        render_stream_config_yaml(&spec),
+        options.mode,
+    )?;
+    fs::write(out.join("src/main.rs"), render_stream_main(&spec))
+        .with_context(|| format!("failed to write {}", out.join("src/main.rs").display()))?;
+    fs::write(out.join("src/config/mod.rs"), render_stream_config_rs()).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("src/config/mod.rs").display()
+        )
+    })?;
+    fs::write(
+        out.join("src/types/mod.rs"),
+        types::render_types(&spec.types),
+    )
+    .with_context(|| format!("failed to write {}", out.join("src/types/mod.rs").display()))?;
+    fs::write(out.join("src/stream/mod.rs"), render_stream_mod()).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("src/stream/mod.rs").display()
+        )
+    })?;
+    fs::write(
+        out.join("src/stream/envelope.rs"),
+        render_stream_envelope(&spec),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("src/stream/envelope.rs").display()
+        )
+    })?;
+    fs::write(
+        out.join("src/stream/producer.rs"),
+        render_stream_producer(&spec),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("src/stream/producer.rs").display()
+        )
+    })?;
+    write_preserved(
+        &out.join("src/stream/consumer.rs"),
+        render_stream_consumer(&spec),
+        options.mode,
+    )?;
+    register_workspace_member(out)?;
+    Ok(())
+}
+
 fn write_api_markdown_doc_with(
     api: &Path,
     out: &Path,
@@ -529,6 +610,340 @@ fn write_api_markdown_doc_with(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(out, render(&spec, api)).with_context(|| format!("failed to write {}", out.display()))
+}
+
+fn write_stream_cargo_toml(
+    spec: &ApiSpec,
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let workspace_root = find_workspace_root(out)?;
+    let local_crates_prefix = match options.dependency_source {
+        DependencySource::Git => None,
+        DependencySource::Path => Some(local_crates_prefix(
+            out,
+            workspace_root.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--roze-source path requires a Cargo workspace containing the Roze crates"
+                )
+            })?,
+        )?),
+    };
+    fs::write(
+        out.join("Cargo.toml"),
+        render_stream_cargo_toml(
+            spec,
+            out,
+            options.dependency_source,
+            local_crates_prefix.as_deref(),
+            workspace_root.is_some(),
+        ),
+    )
+    .with_context(|| format!("failed to write {}", out.join("Cargo.toml").display()))
+}
+
+fn render_stream_cargo_toml(
+    spec: &ApiSpec,
+    out: &Path,
+    dependency_source: DependencySource,
+    local_crates_prefix: Option<&str>,
+    in_workspace: bool,
+) -> String {
+    let package_name = package_name_from_output(out, spec);
+    let package = if in_workspace {
+        r#"edition = "2021"
+license.workspace = true
+version.workspace = true"#
+    } else {
+        r#"edition = "2021"
+license = "MIT"
+version = "0.1.0""#
+    };
+    let common_dependencies = if in_workspace {
+        r#"anyhow.workspace = true
+config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+validator.workspace = true"#
+    } else {
+        r#"anyhow = "1"
+config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+validator = { version = "0.20", features = ["derive"] }"#
+    };
+    let roze_dependencies =
+        roze_dependencies(dependency_source, local_crates_prefix, &STREAM_ROZE_CRATES);
+
+    format!(
+        r#"[package]
+name = "{package_name}"
+{package}
+
+[dependencies]
+{common_dependencies}
+{roze_dependencies}
+"#
+    )
+}
+
+fn render_stream_readme(spec: &ApiSpec, api: &Path) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(&mut out, "# {} Stream Worker", spec.service).unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "Generated by `rozectl stream gen`.").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Source").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "- API: `{}`", api.display()).unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Topics").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "| Method | Topic | DLQ | Request | Response |").unwrap();
+    writeln!(&mut out, "| --- | --- | --- | --- | --- |").unwrap();
+    for method in &spec.rpc_methods {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` |",
+            method.name,
+            stream_topic(spec, method),
+            stream_dlq_topic(spec, method),
+            method.request,
+            method.response
+        )
+        .unwrap();
+    }
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Editable Files").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "- `src/stream/consumer.rs` owns business handling and is preserved during `--update`."
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "- `config.yaml` owns deploy-time stream settings and is preserved during `--update`."
+    )
+    .unwrap();
+    out
+}
+
+fn render_stream_config_yaml(spec: &ApiSpec) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(&mut out, "name: {}-stream", to_snake_case(&spec.service)).unwrap();
+    writeln!(&mut out, "stream:").unwrap();
+    writeln!(
+        &mut out,
+        "  consumer_group: {}-workers",
+        to_snake_case(&spec.service)
+    )
+    .unwrap();
+    writeln!(&mut out, "  topics:").unwrap();
+    for method in &spec.rpc_methods {
+        writeln!(&mut out, "    - method: {}", method.name).unwrap();
+        writeln!(&mut out, "      topic: {}", stream_topic(spec, method)).unwrap();
+        writeln!(
+            &mut out,
+            "      dead_letter_topic: {}",
+            stream_dlq_topic(spec, method)
+        )
+        .unwrap();
+    }
+    out
+}
+
+fn render_stream_config_rs() -> String {
+    r#"use std::path::Path;
+
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    pub name: String,
+    pub stream: StreamConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamConfig {
+    pub consumer_group: String,
+    pub topics: Vec<StreamTopic>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamTopic {
+    pub method: String,
+    pub topic: String,
+    pub dead_letter_topic: String,
+}
+
+pub fn load(path: impl AsRef<Path>) -> anyhow::Result<AppConfig> {
+    let config = ::config::Config::builder()
+        .add_source(::config::File::from(path.as_ref()).required(false))
+        .build()?;
+    Ok(config.try_deserialize()?)
+}
+"#
+    .to_string()
+}
+
+fn render_stream_main(_spec: &ApiSpec) -> String {
+    r#"mod config;
+mod stream;
+mod types;
+
+use std::path::PathBuf;
+
+use roze_mq::InMemoryBroker;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let config = config::load(config_path())?;
+    let broker = InMemoryBroker::new();
+    tracing::info!(service = %config.name, group = %config.stream.consumer_group, "stream worker starting");
+    stream::consumer::run(&broker, &config.stream).await
+}
+
+fn config_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_config = manifest_dir.join("config.yaml");
+    if manifest_config.exists() {
+        manifest_config
+    } else {
+        PathBuf::from("config.yaml")
+    }
+}
+"#
+    .to_string()
+}
+
+fn render_stream_mod() -> String {
+    r#"pub mod consumer;
+pub mod envelope;
+pub mod producer;
+"#
+    .to_string()
+}
+
+fn render_stream_envelope(spec: &ApiSpec) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "#![allow(dead_code)]\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct TopicBinding {\n    pub method: &'static str,\n    pub topic: &'static str,\n    pub dead_letter_topic: &'static str,\n    pub request: &'static str,\n    pub response: &'static str,\n}\n\n",
+    );
+    for method in &spec.rpc_methods {
+        writeln!(
+            &mut out,
+            "pub const {}: &str = {:?};",
+            stream_topic_const(method),
+            stream_topic(spec, method)
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "pub const {}: &str = {:?};",
+            stream_dlq_const(method),
+            stream_dlq_topic(spec, method)
+        )
+        .unwrap();
+    }
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "pub const BINDINGS: &[TopicBinding] = &[").unwrap();
+    for method in &spec.rpc_methods {
+        writeln!(
+            &mut out,
+            "    TopicBinding {{ method: {:?}, topic: {}, dead_letter_topic: {}, request: {:?}, response: {:?} }},",
+            method.name,
+            stream_topic_const(method),
+            stream_dlq_const(method),
+            method.request,
+            method.response
+        )
+        .unwrap();
+    }
+    writeln!(&mut out, "];").unwrap();
+    out
+}
+
+fn render_stream_producer(spec: &ApiSpec) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "use roze_mq::{Message, Publisher};\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\n",
+    );
+    for method in &spec.rpc_methods {
+        let fn_name = format!("publish_{}", to_snake_case(&method.name));
+        writeln!(
+            &mut out,
+            "pub async fn {fn_name}<P>(publisher: &P, payload: {request}) -> anyhow::Result<()>\nwhere\n    P: Publisher,\n{{\n    let payload = serde_json::to_value(payload)?;\n    let idempotency_key = format!(\"{{}}:{{}}\", {topic_const}, payload);\n    let message = Message::new({topic_const}, payload)\n        .with_dead_letter_topic({dlq_const})\n        .with_idempotency_key(idempotency_key);\n    publisher.publish(message).await\n}}\n",
+            request = method.request,
+            topic_const = stream_topic_const(method),
+            dlq_const = stream_dlq_const(method)
+        )
+        .unwrap();
+    }
+    out
+}
+
+fn render_stream_consumer(spec: &ApiSpec) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(
+        "use roze_mq::{Delivery, Subscriber};\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig) -> anyhow::Result<()>\nwhere\n    S: Subscriber,\n{\n    tracing::info!(group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        workers.push(tokio::spawn(async move {\n            loop {\n                match rx.recv().await {\n                    Ok(delivery) => {\n                        if let Err(error) = dispatch(&delivery).await {\n                            tracing::error!(topic = %topic, ?error, \"stream message failed\");\n                            if let Err(error) = delivery.nack().await {\n                                tracing::error!(topic = %topic, ?error, \"failed to nack stream message\");\n                            }\n                        } else if let Err(error) = delivery.ack().await {\n                            tracing::error!(topic = %topic, ?error, \"failed to ack stream message\");\n                        }\n                    }\n                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                        tracing::warn!(topic = %topic, skipped, \"stream receiver lagged\");\n                    }\n                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                }\n            }\n        }));\n    }\n\n    tokio::signal::ctrl_c().await?;\n    for worker in workers {\n        worker.abort();\n    }\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
+    );
+    for method in &spec.rpc_methods {
+        writeln!(
+            &mut out,
+            "        {topic_const} => {{\n            let payload: {request} = serde_json::from_value(delivery.message().payload.clone())?;\n            handle_{method_name}(payload).await\n        }},",
+            topic_const = stream_topic_const(method),
+            request = method.request,
+            method_name = to_snake_case(&method.name)
+        )
+        .unwrap();
+    }
+    out.push_str(
+        "        topic => anyhow::bail!(\"unknown stream topic `{topic}`\"),\n    }\n}\n\n",
+    );
+    for method in &spec.rpc_methods {
+        writeln!(
+            &mut out,
+            "pub async fn handle_{method_name}(_payload: {request}) -> anyhow::Result<()> {{\n    tracing::info!(method = {:?}, \"stream handler invoked\");\n    Ok(())\n}}\n",
+            method.name,
+            method_name = to_snake_case(&method.name),
+            request = method.request
+        )
+        .unwrap();
+    }
+    out
+}
+
+fn stream_topic(spec: &ApiSpec, method: &RpcMethod) -> String {
+    format!(
+        "{}.{}",
+        to_snake_case(&spec.service),
+        to_snake_case(&method.name)
+    )
+}
+
+fn stream_dlq_topic(spec: &ApiSpec, method: &RpcMethod) -> String {
+    format!("{}.dlq", stream_topic(spec, method))
+}
+
+fn stream_topic_const(method: &RpcMethod) -> String {
+    format!("TOPIC_{}", to_snake_case(&method.name).to_ascii_uppercase())
+}
+
+fn stream_dlq_const(method: &RpcMethod) -> String {
+    format!("DLQ_{}", to_snake_case(&method.name).to_ascii_uppercase())
 }
 
 fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
@@ -3921,6 +4336,104 @@ mod tests {
 
         cargo_check_generated(&out.join("Cargo.toml"));
         fs::remove_dir_all(root).expect("remove compile workspace");
+    }
+
+    #[test]
+    #[ignore = "compile-smoke: generates a stream worker project and runs cargo check"]
+    fn generated_stream_project_compiles() {
+        let root = generated_compile_workspace("rozectl-stream-compile-smoke");
+        let api = root.join("user-stream.api");
+        let out = root.join("apps/user-stream");
+        fs::write(
+            &api,
+            r#"
+            service user {
+                rpc UserCreated (UserCreatedReq) returns (UserCreatedResp)
+                rpc UserDeleted (UserDeletedReq) returns (UserDeletedResp)
+            }
+
+            type (
+                UserCreatedReq {
+                    id: u64
+                    email: string
+                }
+
+                UserCreatedResp {
+                    ok: bool
+                }
+
+                UserDeletedReq {
+                    id: u64
+                }
+
+                UserDeletedResp {
+                    ok: bool
+                }
+            )
+            "#,
+        )
+        .expect("write stream api");
+
+        write_stream_worker_project(
+            &api,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("generate stream project");
+
+        cargo_check_generated(&out.join("Cargo.toml"));
+        fs::remove_dir_all(root).expect("remove compile workspace");
+    }
+
+    #[test]
+    fn writes_stream_worker_project() {
+        let root = temp_test_root("rozectl-stream-gen");
+        fs::create_dir_all(&root).expect("create stream root");
+        let api = root.join("user.api");
+        let out = root.join("stream");
+        fs::write(
+            &api,
+            r#"
+            service user {
+                rpc UserCreated (UserCreatedReq) returns (UserCreatedResp)
+            }
+
+            type (
+                UserCreatedReq {
+                    id: u64
+                    email: string
+                }
+
+                UserCreatedResp {
+                    ok: bool
+                }
+            )
+            "#,
+        )
+        .expect("write api");
+
+        write_stream_worker_project(
+            &api,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("write stream project");
+
+        let envelope =
+            fs::read_to_string(out.join("src/stream/envelope.rs")).expect("read envelope");
+        assert!(envelope.contains("TOPIC_USER_CREATED"));
+        assert!(envelope.contains("\"user.user_created\""));
+        let producer =
+            fs::read_to_string(out.join("src/stream/producer.rs")).expect("read producer");
+        assert!(producer.contains("publish_user_created"));
+        let consumer =
+            fs::read_to_string(out.join("src/stream/consumer.rs")).expect("read consumer");
+        assert!(consumer.contains("handle_user_created"));
+        assert!(fs::read_to_string(out.join("README.md"))
+            .expect("read readme")
+            .contains("`user.user_created.dlq`"));
+
+        fs::remove_dir_all(root).expect("remove stream root");
     }
 
     #[test]

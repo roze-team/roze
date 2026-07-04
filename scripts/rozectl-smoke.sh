@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${ROZECTL_BIN:-$ROOT/target/debug/rozectl}"
-BASE="${ROZE_ROZECTL_SMOKE_DIR:-/private/tmp/roze-rozectl-smoke}"
+BASE="${ROZE_ROZECTL_SMOKE_DIR:-${TMPDIR:-/tmp}/roze-rozectl-smoke}"
 OUT="$BASE/out"
 SEARCH_PORT="${ROZE_SMOKE_SEARCH_PORT:-18770}"
 
@@ -141,12 +141,23 @@ printf 'plugin ok\n' > "$ROZECTL_OUT_DIR/plugin-output/result.txt"
 EOF_PLUGIN
 chmod +x "$BASE/plugin.sh"
 
-cat >"$OUT/fake-bin/docker" <<'EOF_DOCKER'
+cat >"$BASE/plugin.cmd" <<'EOF_PLUGIN_CMD'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$input | Out-Null; $out = Join-Path $env:ROZECTL_OUT_DIR 'plugin-output'; New-Item -ItemType Directory -Force -Path $out | Out-Null; Set-Content -Path (Join-Path $out 'result.txt') -Value 'plugin ok'"
+EOF_PLUGIN_CMD
+
+cat >"$OUT/fake-bin/docker" <<EOF_DOCKER
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> /private/tmp/roze-rozectl-smoke/out/docker-args.log
+printf '%s\n' "\$*" >> "$OUT/docker-args.log"
 exit 0
 EOF_DOCKER
 chmod +x "$OUT/fake-bin/docker"
+
+cat >"$OUT/fake-bin/docker.cmd" <<EOF_DOCKER_CMD
+@echo off
+echo %*>>"$OUT/docker-args.log"
+exit /b 0
+EOF_DOCKER_CMD
 
 cat >"$BASE/search-server.js" <<EOF_NODE
 const http = require("http");
@@ -187,6 +198,10 @@ MODEL="$BASE/user.model"
 SQL="$BASE/user.sql"
 SEARCH="$BASE/user.search"
 PLUGIN="$BASE/plugin.sh"
+PLUGIN_CMD="$PLUGIN"
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  PLUGIN_CMD="$BASE/plugin.cmd"
+fi
 
 pass() {
   printf 'PASS %s\n' "$1"
@@ -217,6 +232,8 @@ for help_args in \
   "search --help" \
   "search generate --help" \
   "search inspect --help" \
+  "stream --help" \
+  "stream gen --help" \
   "template --help" \
   "template list --help" \
   "template show --help" \
@@ -273,7 +290,7 @@ pass "api client ts/js/dart"
 test -d "$OUT/api-doc"
 pass "api doc"
 
-"$BIN" api plugin --plugin "$PLUGIN" --api "$API" --dir "$OUT/plugin-dir" >/dev/null
+"$BIN" api plugin --plugin "$PLUGIN_CMD" --api "$API" --dir "$OUT/plugin-dir" >/dev/null
 test -f "$OUT/plugin-dir/plugin-output/result.txt"
 pass "api plugin"
 
@@ -336,6 +353,12 @@ test -f "$OUT/search-generate/src/search/users.rs"
 test -f "$OUT/search-opensearch/src/search/users.rs"
 test -f "$OUT/search-meilisearch/src/search/users.rs"
 pass "search generate elasticsearch/opensearch/meilisearch"
+
+"$BIN" stream gen --api "$RPC_API" --out "$OUT/stream-worker" --force >/dev/null
+test -f "$OUT/stream-worker/src/stream/consumer.rs"
+test -f "$OUT/stream-worker/src/stream/producer.rs"
+grep -q 'TOPIC_GET_USER' "$OUT/stream-worker/src/stream/envelope.rs"
+pass "stream gen"
 
 if command -v node >/dev/null 2>&1; then
   ROZE_SMOKE_SEARCH_PORT="$SEARCH_PORT" node "$BASE/search-server.js" >"$OUT/search-server.log" 2>&1 &
@@ -411,11 +434,18 @@ pass "helm chart/validate"
 "$BIN" doctor --config "$OUT/api-generate/config.yaml" --tool cargo >/dev/null
 pass "doctor"
 
-PATH="$OUT/fake-bin:$PATH" "$BIN" dev status -f "$ROOT/docker-compose.integration.yml" >/dev/null
+PATH_SEP=":"
+DOCKER_BIN="$OUT/fake-bin/docker"
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  PATH_SEP=";"
+  DOCKER_BIN="$OUT/fake-bin/docker.cmd"
+fi
+
+ROZECTL_DOCKER_BIN="$DOCKER_BIN" PATH="$OUT/fake-bin$PATH_SEP$PATH" "$BIN" dev status -f "$ROOT/docker-compose.integration.yml" >/dev/null
 grep -q 'compose -f .*/docker-compose.integration.yml ps' "$OUT/docker-args.log"
-PATH="$OUT/fake-bin:$PATH" "$BIN" dev up -f "$ROOT/docker-compose.integration.yml" --detach >/dev/null
+ROZECTL_DOCKER_BIN="$DOCKER_BIN" PATH="$OUT/fake-bin$PATH_SEP$PATH" "$BIN" dev up -f "$ROOT/docker-compose.integration.yml" --detach >/dev/null
 grep -q 'compose -f .*/docker-compose.integration.yml up -d' "$OUT/docker-args.log"
-PATH="$OUT/fake-bin:$PATH" "$BIN" dev down -f "$ROOT/docker-compose.integration.yml" -v >/dev/null
+ROZECTL_DOCKER_BIN="$DOCKER_BIN" PATH="$OUT/fake-bin$PATH_SEP$PATH" "$BIN" dev down -f "$ROOT/docker-compose.integration.yml" -v >/dev/null
 grep -q 'compose -f .*/docker-compose.integration.yml down -v' "$OUT/docker-args.log"
 pass "dev status/up/down"
 
