@@ -513,7 +513,11 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
 
     for ty in &spec.types {
         out.push_str("    {\n");
-        out.push_str("        let mut properties = BTreeMap::new();\n");
+        if ty.fields.is_empty() {
+            out.push_str("        let properties = BTreeMap::new();\n");
+        } else {
+            out.push_str("        let mut properties = BTreeMap::new();\n");
+        }
         let mut required = Vec::new();
         for field in &ty.fields {
             out.push_str(&format!(
@@ -2003,6 +2007,33 @@ mod tests {
         assert!(openapi.contains("builder.add_operation(\"/health\", HttpMethod::Get"));
         assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
+    }
+
+    #[test]
+    fn openapi_empty_schema_properties_are_not_mutable() {
+        let spec = parse_api(
+            r#"
+            service upload-api {
+                @handler uploadToken
+                post /upload/token (UploadTokenReq) returns (UploadTokenResp)
+            }
+
+            type UploadTokenReq {
+            }
+
+            type UploadTokenResp {
+                token string `json:"token"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi.contains("let properties = BTreeMap::new();"));
+        assert!(!openapi.contains("let mut properties = BTreeMap::new();\n        builder = builder.component_schema(\"UploadTokenReq\""));
+        assert!(openapi.contains(
+            "let mut properties = BTreeMap::new();\n        properties.insert(\"token\""
+        ));
     }
 
     #[test]

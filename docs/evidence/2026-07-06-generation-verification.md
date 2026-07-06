@@ -6,7 +6,7 @@ Target repo: <https://github.com/roze-team/roze.git>
 
 ```text
 roze git dependency: regenerated after user updated roze on 2026-07-06
-roze locked commit after regeneration: 6cc9eb67
+roze locked commit after regeneration: e7c336d4
 rozectl --version: 0.1.0
 OS: Windows / PowerShell
 Rust: stable toolchain from local cargo
@@ -27,9 +27,11 @@ No unresolved Roze generation issues are currently blocking this project.
   new generator output.
 - Verified `rozectl api generate --update` preserves app-owned service context
   extensions and extra logic module declarations after the Roze fix.
+- Fixed generated OpenAPI schema helpers so empty schema property maps are not
+  emitted as mutable bindings.
 - Verified `shop-catalog-rpc` and `shop-admin-api` with `cargo check`.
 
-## Resolved Issue
+## Resolved Issues
 
 ### API `--update` overwrites app-owned integration points
 
@@ -83,6 +85,46 @@ Roze fix:
 - `src/logic/<group>/mod.rs` refreshes generated route logic exports while
   preserving additional app-owned `mod ...;` declarations such as
   `mod catalog_map;`.
+
+### OpenAPI generator emits unused `mut` for empty schema properties
+
+Observed after regenerating `shop-admin-api` with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\generate-roze.ps1
+```
+
+`cargo check --manifest-path services\shop-admin-api\Cargo.toml` succeeded, but
+Rust reported:
+
+```text
+warning: variable does not need to be mutable
+   --> src\openapi\mod.rs:430:13
+430 |         let mut properties = BTreeMap::new();
+```
+
+The generated code appeared when a schema helper had no inserted properties:
+
+```rust
+fn upload_token_req_schema() -> Schema {
+    let mut properties = BTreeMap::new();
+    Schema::object(properties)
+}
+```
+
+Expected Roze behavior:
+
+- Generate `let properties = BTreeMap::new();` when no fields are inserted.
+- Emit `let mut properties` only when generated code subsequently calls
+  `properties.insert(...)`.
+- Keep generated OpenAPI modules warning-clean under default Rust warnings.
+
+Roze fix:
+
+- Empty generated OpenAPI component schemas now use
+  `let properties = BTreeMap::new();`.
+- Non-empty generated OpenAPI component schemas still use
+  `let mut properties = BTreeMap::new();` before inserting fields.
 
 ## Operational Note
 
