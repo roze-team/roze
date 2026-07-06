@@ -419,6 +419,13 @@ enum TemplateCommands {
         #[arg(long, default_value = "templates")]
         dir: PathBuf,
     },
+    Update {
+        name: String,
+        #[arg(long, default_value = "templates")]
+        dir: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -875,6 +882,9 @@ fn main() -> anyhow::Result<()> {
             TemplateCommands::Diff { name, dir } => {
                 run_template_diff(&name, &dir)?;
             }
+            TemplateCommands::Update { name, dir, force } => {
+                run_template_update(&name, &dir, force)?;
+            }
         },
         Commands::Diff { command } => run_diff(command, &registry)?,
         Commands::Contract { command } => run_contract(command)?,
@@ -1146,6 +1156,36 @@ fn run_template_diff(name: &str, dir: &Path) -> anyhow::Result<()> {
             &format!("builtin:{name}")
         )
     );
+    Ok(())
+}
+
+fn run_template_update(name: &str, dir: &Path, force: bool) -> anyhow::Result<()> {
+    let path = dir.join(template_file_name(name)?);
+    let expected = generator::template(name)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", parent.display()))?;
+    }
+
+    if path.exists() {
+        let current = fs::read_to_string(&path)
+            .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+        if normalize_line_endings(&current) == normalize_line_endings(&expected) {
+            println!("template {name} is already up to date: {}", path.display());
+            return Ok(());
+        }
+        if !force {
+            anyhow::bail!(
+                "template {} differs from built-in template; run `rozectl template diff {name} --dir {}` first or pass --force",
+                path.display(),
+                dir.display()
+            );
+        }
+    }
+
+    fs::write(&path, expected)
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))?;
+    println!("template {name} updated: {}", path.display());
     Ok(())
 }
 
@@ -2654,6 +2694,23 @@ spec:
             }
         ));
 
+        let template_update = Cli::try_parse_from([
+            "rozectl",
+            "template",
+            "update",
+            "api",
+            "--dir",
+            "templates",
+            "--force",
+        ])
+        .expect("parse template update");
+        assert!(matches!(
+            template_update.command,
+            Commands::Template {
+                command: TemplateCommands::Update { force: true, .. }
+            }
+        ));
+
         let openapi = Cli::try_parse_from([
             "rozectl",
             "openapi",
@@ -3551,6 +3608,35 @@ type (
         assert!(diff.contains("-old"));
         assert!(diff.contains("+new"));
         assert!(diff.contains("+added"));
+    }
+
+    #[test]
+    fn template_update_protects_local_customizations() {
+        let root = std::env::temp_dir().join(format!(
+            "rozectl-template-update-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create template root");
+        let api_template = root.join("api.api");
+        fs::write(&api_template, "custom template\n").expect("write custom template");
+
+        let err = run_template_update("api", &root, false).expect_err("custom template rejected");
+        assert!(err.to_string().contains("diff api"));
+        assert_eq!(
+            fs::read_to_string(&api_template).expect("read custom template"),
+            "custom template\n"
+        );
+
+        run_template_update("api", &root, true).expect("force update template");
+        assert_eq!(
+            fs::read_to_string(&api_template).expect("read updated template"),
+            generator::template("api").expect("builtin template")
+        );
+
+        fs::remove_dir_all(root).expect("remove template root");
     }
 
     #[test]
