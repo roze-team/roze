@@ -97,6 +97,20 @@ types, duplicate fields or wire names, duplicate REST routes, duplicate RPC
 methods, unknown request/response or nested field types, and route path
 parameters that are not declared as `path` fields on the request type.
 
+Format an API contract:
+
+```bash
+rozectl api format example/user.api
+rozectl api format example/user.api --check
+rozectl api format example/user.api --write
+```
+
+`api format` parses the `.api` file and prints a canonical form to stdout by
+default. Pass `--check` in CI to fail when a contract is not formatted, or
+`--write` to replace the input file in-place after review. The formatter is
+AST-based, so it intentionally normalizes layout and annotations instead of
+preserving comments or ad hoc spacing.
+
 Check contract breaking changes before regenerating or releasing:
 
 ```bash

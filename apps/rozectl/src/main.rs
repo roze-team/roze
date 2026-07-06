@@ -251,6 +251,13 @@ enum ApiCommands {
     Validate {
         api: PathBuf,
     },
+    Format {
+        api: PathBuf,
+        #[arg(long)]
+        write: bool,
+        #[arg(long, conflicts_with = "write")]
+        check: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -693,6 +700,7 @@ fn main() -> anyhow::Result<()> {
                 generator::native::run_api_plugin(&plugin, &api, &dir)?;
             }
             ApiCommands::Validate { api } => run_api_validate(&api)?,
+            ApiCommands::Format { api, write, check } => run_api_format(&api, write, check)?,
         },
         Commands::Rpc { command } => match command {
             RpcCommands::Generate {
@@ -1073,6 +1081,166 @@ fn run_api_validate(path: &Path) -> anyhow::Result<()> {
         eprintln!("- {}", issue.detail);
     }
     anyhow::bail!("api validate failed")
+}
+
+fn run_api_format(path: &Path, write: bool, check: bool) -> anyhow::Result<()> {
+    let source = fs::read_to_string(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    let spec = parser::parse_api(&source)
+        .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))?;
+    let formatted = format_api_spec(&spec);
+
+    if check {
+        if normalize_line_endings(&source) == formatted {
+            println!("api format check passed: {}", path.display());
+            return Ok(());
+        }
+        anyhow::bail!("api format check failed: {}", path.display());
+    }
+
+    if write {
+        fs::write(path, formatted)
+            .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))?;
+        println!("api formatted: {}", path.display());
+        return Ok(());
+    }
+
+    print!("{formatted}");
+    Ok(())
+}
+
+fn format_api_spec(spec: &parser::ApiSpec) -> String {
+    let mut out = String::new();
+    out.push_str("syntax = \"v1\"\n\n");
+
+    if !spec.info.is_empty() {
+        out.push_str("info (\n");
+        for pair in &spec.info {
+            out.push_str(&format!("    {}: \"{}\"\n", pair.key, pair.value));
+        }
+        out.push_str(")\n\n");
+    }
+
+    if spec.rest_routes.iter().all(|route| route.server.is_none()) {
+        if let Some(server) = &spec.server {
+            render_api_server_block(&mut out, server, "");
+            out.push('\n');
+        }
+    }
+
+    out.push_str(&format!("service {} {{\n", spec.service));
+    for route in &spec.rest_routes {
+        if let Some(server) = &route.server {
+            render_api_server_block(&mut out, server, "    ");
+        }
+        if let Some(doc) = &route.doc {
+            out.push_str(&format!("    @doc \"{}\"\n", doc));
+        }
+        for middleware in &route.middlewares {
+            out.push_str(&format!("    @middleware {}\n", middleware));
+        }
+        if let Some(handler) = &route.handler {
+            out.push_str(&format!("    @handler {}\n", handler));
+        }
+        out.push_str(&format!(
+            "    {} {} ({}) returns ({})\n",
+            format_api_http_method(&route.method),
+            route.path,
+            route.request,
+            route.response
+        ));
+    }
+    for method in &spec.rpc_methods {
+        out.push_str(&format!(
+            "    rpc {} ({}) returns ({})\n",
+            method.name, method.request, method.response
+        ));
+    }
+    out.push_str("}\n");
+
+    if !spec.types.is_empty() {
+        out.push('\n');
+        out.push_str("type (\n");
+        for ty in &spec.types {
+            out.push_str(&format!("    {} {{\n", ty.name));
+            for field in &ty.fields {
+                out.push_str(&format!(
+                    "        {} {}{}\n",
+                    field.name,
+                    field.ty,
+                    format_api_field_tags(field)
+                ));
+            }
+            out.push_str("    }\n");
+        }
+        out.push_str(")\n");
+    }
+
+    out
+}
+
+fn render_api_server_block(out: &mut String, server: &parser::ServerSpec, indent: &str) {
+    out.push_str(&format!("{indent}@server (\n"));
+    if let Some(prefix) = &server.prefix {
+        out.push_str(&format!("{indent}    prefix: {prefix}\n"));
+    }
+    if let Some(group) = &server.group {
+        out.push_str(&format!("{indent}    group: {group}\n"));
+    }
+    if let Some(jwt) = &server.jwt {
+        out.push_str(&format!("{indent}    jwt: {jwt}\n"));
+    }
+    if !server.middlewares.is_empty() {
+        out.push_str(&format!(
+            "{indent}    middleware: {}\n",
+            server.middlewares.join(", ")
+        ));
+    }
+    out.push_str(&format!("{indent})\n"));
+}
+
+fn format_api_http_method(method: &parser::HttpMethod) -> &'static str {
+    match method {
+        parser::HttpMethod::Get => "get",
+        parser::HttpMethod::Post => "post",
+        parser::HttpMethod::Put => "put",
+        parser::HttpMethod::Patch => "patch",
+        parser::HttpMethod::Delete => "delete",
+    }
+}
+
+fn format_api_field_tags(field: &parser::Field) -> String {
+    let mut tags = Vec::new();
+    match field.source {
+        parser::FieldSource::Auto => {}
+        parser::FieldSource::Json => push_api_field_tag(&mut tags, "json", field),
+        parser::FieldSource::Query => push_api_field_tag(&mut tags, "query", field),
+        parser::FieldSource::Form => push_api_field_tag(&mut tags, "form", field),
+        parser::FieldSource::Path => push_api_field_tag(&mut tags, "path", field),
+        parser::FieldSource::Header => push_api_field_tag(&mut tags, "header", field),
+    }
+    if let Some(validate) = &field.validate {
+        tags.push(format!("validate:\"{validate}\""));
+    }
+
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" `{}`", tags.join(" "))
+    }
+}
+
+fn push_api_field_tag(tags: &mut Vec<String>, name: &str, field: &parser::Field) {
+    let wire_name = field
+        .wire_name
+        .as_deref()
+        .or(field.json_name.as_deref())
+        .unwrap_or(field.name.as_str());
+    tags.push(format!("{name}:\"{wire_name}\""));
+}
+
+fn normalize_line_endings(source: &str) -> String {
+    source.replace("\r\n", "\n")
 }
 
 fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
@@ -2710,6 +2878,14 @@ spec:
             }
         ));
 
+        let api_format = parse(["rozectl", "api", "format", "user.api", "--check"]);
+        assert!(matches!(
+            api_format.command,
+            Commands::Api {
+                command: ApiCommands::Format { check: true, .. }
+            }
+        ));
+
         let openapi = Cli::try_parse_from([
             "rozectl",
             "openapi",
@@ -3186,6 +3362,95 @@ spec:
         ));
         assert!(report.contains("field GetUserReq.profile references unknown type: MissingProfile"));
         assert!(report.contains("path parameter `:id` is missing from GetUserReq as a path field"));
+    }
+
+    #[test]
+    fn api_format_renders_canonical_contract() {
+        let spec = parser::parse_api(
+            r#"
+            syntax="v1"
+            info(
+                title: "User API"
+                desc: "Example"
+            )
+            service user-api {
+                @server(
+                    prefix: /api/v1
+                    group: user
+                    middleware: auth, trace
+                )
+                @doc("Get user")
+                @middleware(audit)
+                @handler(getUser)
+                get   /users/:id(GetUserReq)returns(GetUserResp)
+                rpc Ping (PingReq)returns(PingResp)
+            }
+            type(
+                GetUserReq {
+                    id string `path:"id"`
+                    token string `header:"X-Token"`
+                    name string `json:"name" validate:"optional"`
+                }
+                GetUserResp {
+                    id string `json:"id"`
+                }
+                PingReq {
+                    requestId string `json:"requestId"`
+                }
+                PingResp {
+                    ok bool `json:"ok"`
+                }
+            )
+            "#,
+        )
+        .expect("parse spec");
+
+        let formatted = format_api_spec(&spec);
+
+        assert_eq!(
+            formatted,
+            r#"syntax = "v1"
+
+info (
+    title: "User API"
+    desc: "Example"
+)
+
+service user-api {
+    @server (
+        prefix: /api/v1
+        group: user
+        middleware: auth, trace
+    )
+    @doc "Get user"
+    @middleware audit
+    @handler getUser
+    get /users/:id (GetUserReq) returns (GetUserResp)
+    rpc Ping (PingReq) returns (PingResp)
+}
+
+type (
+    GetUserReq {
+        id string `path:"id"`
+        token string `header:"X-Token"`
+        name string `json:"name" validate:"optional"`
+    }
+    GetUserResp {
+        id string `json:"id"`
+    }
+    PingReq {
+        requestId string `json:"requestId"`
+    }
+    PingResp {
+        ok bool `json:"ok"`
+    }
+)
+"#
+        );
+        assert_eq!(
+            normalize_line_endings(&formatted.replace('\n', "\r\n")),
+            formatted
+        );
     }
 
     #[test]
