@@ -414,6 +414,11 @@ enum TemplateCommands {
         #[arg(long, default_value = "templates")]
         out: PathBuf,
     },
+    Diff {
+        name: String,
+        #[arg(long, default_value = "templates")]
+        dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -867,6 +872,9 @@ fn main() -> anyhow::Result<()> {
             TemplateCommands::Init { out } => {
                 generator::init_templates(&out)?;
             }
+            TemplateCommands::Diff { name, dir } => {
+                run_template_diff(&name, &dir)?;
+            }
         },
         Commands::Diff { command } => run_diff(command, &registry)?,
         Commands::Contract { command } => run_contract(command)?,
@@ -1107,6 +1115,73 @@ fn run_api_format(path: &Path, write: bool, check: bool) -> anyhow::Result<()> {
 
     print!("{formatted}");
     Ok(())
+}
+
+fn run_template_diff(name: &str, dir: &Path) -> anyhow::Result<()> {
+    let path = dir.join(template_file_name(name)?);
+    let expected = generator::template(name)?;
+    if !path.exists() {
+        println!("A {}", path.display());
+        println!(
+            "{}",
+            render_unified_diff("", &expected, "/dev/null", &path.display().to_string())
+        );
+        return Ok(());
+    }
+
+    let current = fs::read_to_string(&path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    if normalize_line_endings(&current) == normalize_line_endings(&expected) {
+        println!("template {name} is up to date: {}", path.display());
+        return Ok(());
+    }
+
+    println!("M {}", path.display());
+    println!(
+        "{}",
+        render_unified_diff(
+            &normalize_line_endings(&current),
+            &normalize_line_endings(&expected),
+            &path.display().to_string(),
+            &format!("builtin:{name}")
+        )
+    );
+    Ok(())
+}
+
+fn template_file_name(name: &str) -> anyhow::Result<&'static str> {
+    match name {
+        "api" => Ok("api.api"),
+        "rpc" => Ok("rpc.api"),
+        "model" => Ok("model.model"),
+        other => anyhow::bail!("unknown template `{other}`; expected api, rpc or model"),
+    }
+}
+
+fn render_unified_diff(old: &str, new: &str, old_name: &str, new_name: &str) -> String {
+    let old_lines = old.lines().collect::<Vec<_>>();
+    let new_lines = new.lines().collect::<Vec<_>>();
+    let mut out = String::new();
+    out.push_str(&format!("--- {old_name}\n"));
+    out.push_str(&format!("+++ {new_name}\n"));
+    out.push_str("@@\n");
+
+    let max_len = old_lines.len().max(new_lines.len());
+    for idx in 0..max_len {
+        match (old_lines.get(idx), new_lines.get(idx)) {
+            (Some(old_line), Some(new_line)) if old_line == new_line => {
+                out.push_str(&format!(" {old_line}\n"));
+            }
+            (Some(old_line), Some(new_line)) => {
+                out.push_str(&format!("-{old_line}\n"));
+                out.push_str(&format!("+{new_line}\n"));
+            }
+            (Some(old_line), None) => out.push_str(&format!("-{old_line}\n")),
+            (None, Some(new_line)) => out.push_str(&format!("+{new_line}\n")),
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 fn format_api_spec(spec: &parser::ApiSpec) -> String {
@@ -2569,6 +2644,16 @@ spec:
             }
         ));
 
+        let template_diff =
+            Cli::try_parse_from(["rozectl", "template", "diff", "api", "--dir", "templates"])
+                .expect("parse template diff");
+        assert!(matches!(
+            template_diff.command,
+            Commands::Template {
+                command: TemplateCommands::Diff { .. }
+            }
+        ));
+
         let openapi = Cli::try_parse_from([
             "rozectl",
             "openapi",
@@ -3451,6 +3536,21 @@ type (
             normalize_line_endings(&formatted.replace('\n', "\r\n")),
             formatted
         );
+    }
+
+    #[test]
+    fn template_diff_renders_file_level_changes() {
+        assert_eq!(template_file_name("api").expect("template"), "api.api");
+        assert!(template_file_name("missing").is_err());
+
+        let diff = render_unified_diff("line1\nold\n", "line1\nnew\nadded\n", "local", "builtin");
+
+        assert!(diff.contains("--- local"));
+        assert!(diff.contains("+++ builtin"));
+        assert!(diff.contains(" line1"));
+        assert!(diff.contains("-old"));
+        assert!(diff.contains("+new"));
+        assert!(diff.contains("+added"));
     }
 
     #[test]

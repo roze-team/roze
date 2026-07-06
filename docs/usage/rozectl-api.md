@@ -111,6 +111,20 @@ default. Pass `--check` in CI to fail when a contract is not formatted, or
 AST-based, so it intentionally normalizes layout and annotations instead of
 preserving comments or ad hoc spacing.
 
+Inspect and compare built-in starter templates:
+
+```bash
+rozectl template list
+rozectl template show api
+rozectl template init --out templates
+rozectl template diff api --dir templates
+```
+
+`template init` writes the built-in API, RPC, and model starter templates into
+the target directory. `template diff` compares one local template file
+(`api.api`, `rpc.api`, or `model.model`) against the current built-in template
+and prints a small unified diff without modifying the local file.
+
 Check contract breaking changes before regenerating or releasing:
 
 ```bash
