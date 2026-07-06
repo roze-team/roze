@@ -44,6 +44,7 @@ pub enum FieldSource {
 pub struct Field {
     pub name: String,
     pub ty: String,
+    pub embedded: bool,
     pub json_name: Option<String>,
     pub source: FieldSource,
     pub wire_name: Option<String>,
@@ -65,6 +66,7 @@ pub struct RestRoute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
+    Head,
     Post,
     Put,
     Patch,
@@ -338,6 +340,7 @@ fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, Par
     };
     let method = match method_name {
         "get" => HttpMethod::Get,
+        "head" => HttpMethod::Head,
         "post" => HttpMethod::Post,
         "put" => HttpMethod::Put,
         "patch" => HttpMethod::Patch,
@@ -461,26 +464,40 @@ fn parse_field(line: &str, line_no: usize) -> Result<Field, ParseError> {
         Field {
             name: field_name.to_string(),
             ty: field_ty.to_string(),
+            embedded: false,
             json_name: None,
             source: FieldSource::Auto,
             wire_name: None,
             validate: None,
         }
     } else {
-        let mut parts = line.split_whitespace();
-        let field_name = parts.next().unwrap_or_default();
-        let field_ty = parts.next().unwrap_or_default();
-        if field_name.is_empty() || field_ty.is_empty() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        let field_name = parts.first().copied().unwrap_or_default();
+        let field_ty = parts.get(1).copied().unwrap_or_default();
+        if field_name.is_empty() {
             return invalid(line_no, "expected `Field Type `json:\"field\"``");
         }
 
-        Field {
-            name: field_name.to_string(),
-            ty: field_ty.to_string(),
-            json_name: None,
-            source: FieldSource::Auto,
-            wire_name: None,
-            validate: None,
+        if field_ty.is_empty() || field_ty.starts_with('`') {
+            Field {
+                name: embedded_field_name(field_name),
+                ty: field_name.trim_start_matches('*').to_string(),
+                embedded: true,
+                json_name: None,
+                source: FieldSource::Auto,
+                wire_name: None,
+                validate: None,
+            }
+        } else {
+            Field {
+                name: field_name.to_string(),
+                ty: field_ty.to_string(),
+                embedded: false,
+                json_name: None,
+                source: FieldSource::Auto,
+                wire_name: None,
+                validate: None,
+            }
         }
     };
 
@@ -513,6 +530,32 @@ fn parse_field(line: &str, line_no: usize) -> Result<Field, ParseError> {
     }
 
     Ok(field)
+}
+
+fn embedded_field_name(ty: &str) -> String {
+    let ty = ty
+        .trim_start_matches('*')
+        .rsplit(['.', '/'])
+        .next()
+        .unwrap_or(ty);
+    let mut out = String::new();
+    let mut prev_lower_or_digit = false;
+    for ch in ty.chars() {
+        if ch.is_ascii_uppercase() {
+            if prev_lower_or_digit && !out.is_empty() {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_lower_or_digit = false;
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else if !out.ends_with('_') && !out.is_empty() {
+            out.push('_');
+            prev_lower_or_digit = false;
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 fn parse_tag_value(line: &str, tag: &str) -> Option<String> {
@@ -903,6 +946,8 @@ mod tests {
                 @middleware(auth, trace)
                 @handler(getUser)
                 patch   /users/:id   (GetUserReq)returns(UserResp)
+                @handler(ping)
+                head /ping ()
                 rpc   Ping   (GetUserReq)returns(UserResp)
             }
             "#,
@@ -910,9 +955,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(spec.info[0].key, "title");
-        assert_eq!(spec.types.len(), 2);
-        assert_eq!(spec.rest_routes.len(), 1);
+        assert_eq!(spec.types.len(), 4);
+        assert_eq!(spec.rest_routes.len(), 2);
         assert_eq!(spec.rest_routes[0].method, HttpMethod::Patch);
+        assert_eq!(spec.rest_routes[1].method, HttpMethod::Head);
+        assert_eq!(spec.rest_routes[1].request, "EmptyReq");
+        assert_eq!(spec.rest_routes[1].response, "EmptyResp");
         assert_eq!(spec.rest_routes[0].doc.as_deref(), Some("获取用户"));
         assert_eq!(spec.rest_routes[0].middlewares, vec!["auth", "trace"]);
         assert_eq!(spec.rest_routes[0].handler.as_deref(), Some("getUser"));
@@ -1019,5 +1067,75 @@ mod tests {
             spec.types[0].fields[4].validate.as_deref(),
             Some("required,min=2,max=16")
         );
+    }
+
+    #[test]
+    fn parses_multiple_same_name_service_blocks() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            service user-api {
+                @handler createUser
+                post /users (CreateUserReq) returns (UserResp)
+            }
+
+            type (
+                GetUserReq {
+                    id u64 `path:"id"`
+                }
+                CreateUserReq {
+                    name string `json:"name"`
+                }
+                UserResp {
+                    id u64 `json:"id"`
+                }
+            )
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.service, "user-api");
+        assert_eq!(spec.rest_routes.len(), 2);
+        assert_eq!(spec.rest_routes[0].handler.as_deref(), Some("getUser"));
+        assert_eq!(spec.rest_routes[1].handler.as_deref(), Some("createUser"));
+    }
+
+    #[test]
+    fn parses_go_zero_anonymous_embedded_types() {
+        let spec = parse_api(
+            r#"
+            service user-api
+
+            type (
+                BaseReq {
+                    traceId string `json:"traceId,optional" validate:"optional"`
+                }
+                CreateUserReq {
+                    BaseReq
+                    *AuditMeta `json:",inline"`
+                    name string `json:"name"`
+                }
+            )
+            "#,
+        )
+        .unwrap();
+
+        let req = spec
+            .types
+            .iter()
+            .find(|ty| ty.name == "CreateUserReq")
+            .expect("request type");
+        assert_eq!(req.fields[0].name, "base_req");
+        assert_eq!(req.fields[0].ty, "BaseReq");
+        assert!(req.fields[0].embedded);
+        assert_eq!(req.fields[1].name, "audit_meta");
+        assert_eq!(req.fields[1].ty, "AuditMeta");
+        assert!(req.fields[1].embedded);
+        assert_eq!(req.fields[2].name, "name");
+        assert!(!req.fields[2].embedded);
     }
 }

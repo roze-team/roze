@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
     generator::{rust_identifier, to_pascal_case, to_snake_case},
-    parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute},
+    parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute, TypeDef},
 };
 
 pub fn render_rest_main(_spec: &ApiSpec) -> String {
@@ -65,7 +65,7 @@ fn config_path() -> std::path::PathBuf {
 pub fn render_handlers(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(unused_imports)]\n\n");
     out.push_str(
-        "use axum::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, routing::{delete, get, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+        "use axum::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, routing::{delete, get, head, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    Router::new()\n");
@@ -94,6 +94,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         let handler = resolved_handler_name(route);
         let routing_fn = match route.method {
             HttpMethod::Get => "get",
+            HttpMethod::Head => "head",
             HttpMethod::Post => "post",
             HttpMethod::Put => "put",
             HttpMethod::Patch => "patch",
@@ -251,11 +252,12 @@ pub fn render_route_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
     route_groups(spec)
         .into_iter()
         .map(|(group, routes)| {
-            let mut out = String::from("use axum::{routing::{delete, get, patch, post, put}, Router};\n\nuse crate::handler;\nuse crate::svc::ServiceContext;\n\npub fn routes() -> Router<ServiceContext> {\n    Router::new()\n");
+            let mut out = String::from("use axum::{routing::{delete, get, head, patch, post, put}, Router};\n\nuse crate::handler;\nuse crate::svc::ServiceContext;\n\npub fn routes() -> Router<ServiceContext> {\n    Router::new()\n");
             for route in routes {
                 let handler = resolved_handler_name(route);
                 let routing_fn = match route.method {
                     HttpMethod::Get => "get",
+                    HttpMethod::Head => "head",
                     HttpMethod::Post => "post",
                     HttpMethod::Put => "put",
                     HttpMethod::Patch => "patch",
@@ -366,7 +368,7 @@ pub fn render_logic(spec: &ApiSpec) -> String {
     for route in &spec.rest_routes {
         let handler = resolved_handler_name(route);
         match route.method {
-            HttpMethod::Get | HttpMethod::Delete => {
+            HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete => {
                 out.push_str(&format!(
                     "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
                     handler = handler,
@@ -513,13 +515,14 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
 
     for ty in &spec.types {
         out.push_str("    {\n");
-        if ty.fields.is_empty() {
+        let fields = expanded_type_fields(spec, ty);
+        if fields.is_empty() {
             out.push_str("        let properties = BTreeMap::new();\n");
         } else {
             out.push_str("        let mut properties = BTreeMap::new();\n");
         }
         let mut required = Vec::new();
-        for field in &ty.fields {
+        for field in fields {
             out.push_str(&format!(
                 "        properties.insert({:?}.to_string(), {});\n",
                 field_wire_name(field),
@@ -603,6 +606,7 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
             full_route_path_for_route(spec, route),
             match route.method {
                 HttpMethod::Get => "Get",
+                HttpMethod::Head => "Head",
                 HttpMethod::Post => "Post",
                 HttpMethod::Put => "Put",
                 HttpMethod::Patch => "Patch",
@@ -732,7 +736,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     } else {
         out.push_str(&format!("    let req = {} {{\n", route.request));
         for field in &request_ty.fields {
-            let value = field_value_expr(field, route, &route_spec);
+            let value = field_value_expr(spec, field, route, &route_spec);
             out.push_str(&format!("        {}: {},\n", rust_field_name(field), value));
         }
         out.push_str("    };\n");
@@ -822,7 +826,9 @@ fn render_partial_struct(name: &str, fields: &[&Field], source: FieldSource) -> 
         if source == FieldSource::Query {
             out.push_str("    #[serde(default)]\n");
         }
-        if let Some(rename) = serde_rename(field) {
+        if field.embedded {
+            out.push_str("    #[serde(flatten)]\n");
+        } else if let Some(rename) = serde_rename(field) {
             out.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
         }
         if let Some(validate) = validation_attr(field) {
@@ -1222,10 +1228,30 @@ fn field_by_name<'a>(fields: &'a [Field], name: &str) -> Option<&'a Field> {
 }
 
 fn field_value_expr(
+    api: &ApiSpec,
     field: &Field,
     route: &crate::parser::RestRoute,
     spec: &RouteRequestSpec<'_>,
 ) -> String {
+    if field.embedded {
+        let Some(ty) = find_type(api, &field.ty) else {
+            return format!("{} {{}}", field.ty);
+        };
+        let fields = ty
+            .fields
+            .iter()
+            .map(|nested| {
+                format!(
+                    "{}: {}",
+                    rust_field_name(nested),
+                    field_value_expr(api, nested, route, spec)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{} {{ {fields} }}", field.ty);
+    }
+
     match resolve_field_source(field, route, spec) {
         FieldSource::Path => format!("path.{}", rust_field_name(field)),
         FieldSource::Query => format!("query.{}", rust_field_name(field)),
@@ -1261,7 +1287,7 @@ fn route_request_spec<'a>(
     let mut groups: HashMap<FieldSource, Vec<&'a Field>> = HashMap::new();
     let mut has_header = false;
 
-    for field in &request_ty.fields {
+    for field in expanded_type_fields(spec, request_ty) {
         let source = resolve_field_source(
             field,
             route,
@@ -1322,6 +1348,38 @@ struct RouteRequestSpec<'a> {
     path_params: HashSet<String>,
 }
 
+fn find_type<'a>(spec: &'a ApiSpec, name: &str) -> Option<&'a TypeDef> {
+    spec.types.iter().find(|ty| ty.name == name)
+}
+
+fn expanded_type_fields<'a>(spec: &'a ApiSpec, ty: &'a TypeDef) -> Vec<&'a Field> {
+    let mut fields = Vec::new();
+    let mut stack = HashSet::new();
+    expand_type_fields(spec, ty, &mut stack, &mut fields);
+    fields
+}
+
+fn expand_type_fields<'a>(
+    spec: &'a ApiSpec,
+    ty: &'a TypeDef,
+    stack: &mut HashSet<String>,
+    fields: &mut Vec<&'a Field>,
+) {
+    if !stack.insert(ty.name.clone()) {
+        return;
+    }
+    for field in &ty.fields {
+        if field.embedded {
+            if let Some(nested) = find_type(spec, &field.ty) {
+                expand_type_fields(spec, nested, stack, fields);
+                continue;
+            }
+        }
+        fields.push(field);
+    }
+    stack.remove(&ty.name);
+}
+
 fn resolve_field_source(
     field: &Field,
     route: &crate::parser::RestRoute,
@@ -1332,7 +1390,10 @@ fn resolve_field_source(
             let name = normalize_ident(&field_wire_name(field));
             if spec.path_params.contains(&name) {
                 FieldSource::Path
-            } else if matches!(route.method, HttpMethod::Get | HttpMethod::Delete) {
+            } else if matches!(
+                route.method,
+                HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete
+            ) {
                 FieldSource::Query
             } else {
                 FieldSource::Json
@@ -1412,6 +1473,7 @@ fn normalize_ident(input: &str) -> String {
 fn handler_name(method: &HttpMethod, path: &str) -> String {
     let method = match method {
         HttpMethod::Get => "get",
+        HttpMethod::Head => "head",
         HttpMethod::Post => "post",
         HttpMethod::Put => "put",
         HttpMethod::Patch => "patch",
@@ -1433,6 +1495,7 @@ pub fn handler_name_for_openapi(method: &HttpMethod, path: &str) -> String {
 fn http_method_name(method: &HttpMethod) -> &'static str {
     match method {
         HttpMethod::Get => "GET",
+        HttpMethod::Head => "HEAD",
         HttpMethod::Post => "POST",
         HttpMethod::Put => "PUT",
         HttpMethod::Patch => "PATCH",
@@ -1978,6 +2041,8 @@ mod tests {
                 get /health returns (HealthResp)
                 @handler ping
                 get /ping
+                @handler pingHead
+                head /ping-head ()
                 @handler logout
                 post /logout (LogoutReq)
             }
@@ -1996,6 +2061,7 @@ mod tests {
         let handlers = render_handlers(&spec);
         assert!(handlers.contains(".route(\"/health\", get(health))"));
         assert!(handlers.contains(".route(\"/ping\", get(ping))"));
+        assert!(handlers.contains(".route(\"/ping-head\", head(ping_head))"));
         assert!(handlers.contains(".route(\"/logout\", post(logout))"));
         assert!(handlers.contains("let req = EmptyReq {};"));
         assert!(handlers.contains("Result<ApiResponse<EmptyResp>, RozeError>"));
@@ -2005,6 +2071,7 @@ mod tests {
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains("builder.add_operation(\"/health\", HttpMethod::Get"));
+        assert!(openapi.contains("builder.add_operation(\"/ping-head\", HttpMethod::Head"));
         assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
     }

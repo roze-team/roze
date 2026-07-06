@@ -12,7 +12,9 @@ pub fn render_types(types: &[TypeDef]) -> String {
         out.push_str("#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]\n");
         out.push_str(&format!("pub struct {} {{\n", ty.name));
         for field in &ty.fields {
-            if let Some(rename) = serde_rename(field) {
+            if field.embedded {
+                out.push_str("    #[serde(flatten)]\n");
+            } else if let Some(rename) = serde_rename(field) {
                 out.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
             }
             if let Some(validate) = validation_attr(field) {
@@ -350,5 +352,30 @@ mod tests {
         assert!(rendered.contains("#[validate(length(min = 2, max = 16))]"));
         assert!(rendered.contains("#[validate(range(min = 1, max = 120))]"));
         assert!(rendered.contains("#[validate(length(min = 1))]"));
+    }
+
+    #[test]
+    fn renders_anonymous_embedded_types_as_flattened_fields() {
+        let spec = parse_api(
+            r#"
+            service user-api
+
+            type (
+                BaseReq {
+                    traceId string `json:"traceId,optional" validate:"optional"`
+                }
+                CreateUserReq {
+                    BaseReq
+                    name string `json:"name"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let rendered = render_types(&spec.types);
+
+        assert!(rendered.contains("    #[serde(flatten)]\n    pub base_req: BaseReq,"));
+        assert!(!rendered.contains("#[serde(rename = \"base_req\")]"));
     }
 }

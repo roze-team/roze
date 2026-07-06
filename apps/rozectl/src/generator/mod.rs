@@ -1231,7 +1231,7 @@ fn render_mock_main(spec: &ApiSpec) -> String {
     let mut out = String::new();
     writeln!(
         &mut out,
-        "use axum::{{routing::{{delete, get, patch, post, put}}, Json, Router}};"
+        "use axum::{{routing::{{delete, get, head, patch, post, put}}, Json, Router}};"
     )
     .unwrap();
     writeln!(&mut out).unwrap();
@@ -1588,6 +1588,7 @@ fn http_smoke_sample_string(ty: &str) -> String {
 fn mock_axum_method(method: &crate::parser::HttpMethod) -> &'static str {
     match method {
         crate::parser::HttpMethod::Get => "get",
+        crate::parser::HttpMethod::Head => "head",
         crate::parser::HttpMethod::Post => "post",
         crate::parser::HttpMethod::Put => "put",
         crate::parser::HttpMethod::Patch => "patch",
@@ -1693,6 +1694,7 @@ fn sanitize_rust_ident(input: &str) -> String {
 fn http_method_name(method: &HttpMethod) -> &'static str {
     match method {
         HttpMethod::Get => "GET",
+        HttpMethod::Head => "HEAD",
         HttpMethod::Post => "POST",
         HttpMethod::Put => "PUT",
         HttpMethod::Patch => "PATCH",
@@ -1701,15 +1703,132 @@ fn http_method_name(method: &HttpMethod) -> &'static str {
 }
 
 pub fn write_openapi_json(api: &Path, out: &Path) -> anyhow::Result<()> {
-    let source = read_api_source(api)?;
-    let spec = crate::parser::parse_api(&source)?;
-    validate_project_kind(&spec, ProjectKind::Rest)?;
-    let document = openapi_document(&spec);
+    let document = openapi_document_from_api(api)?;
     if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     fs::write(out, serde_json::to_string_pretty(&document)?)
         .with_context(|| format!("failed to write {}", out.display()))
+}
+
+pub fn write_openapi_yaml(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let document = openapi_document_from_api(api)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, render_yaml_document(&document))
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+fn openapi_document_from_api(api: &Path) -> anyhow::Result<serde_json::Value> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    Ok(openapi_document(&spec))
+}
+
+fn render_yaml_document(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    render_yaml_value(value, 0, &mut out);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn render_yaml_value(value: &serde_json::Value, indent: usize, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) if map.is_empty() => {
+            out.push_str(&" ".repeat(indent));
+            out.push_str("{}\n");
+        }
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                out.push_str(&" ".repeat(indent));
+                out.push_str(&render_yaml_key(key));
+                if yaml_scalar(value).is_some() || is_empty_collection(value) {
+                    out.push_str(": ");
+                    out.push_str(&render_yaml_inline(value));
+                    out.push('\n');
+                } else {
+                    out.push_str(":\n");
+                    render_yaml_value(value, indent + 2, out);
+                }
+            }
+        }
+        serde_json::Value::Array(values) if values.is_empty() => {
+            out.push_str(&" ".repeat(indent));
+            out.push_str("[]\n");
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                out.push_str(&" ".repeat(indent));
+                if yaml_scalar(value).is_some() || is_empty_collection(value) {
+                    out.push_str("- ");
+                    out.push_str(&render_yaml_inline(value));
+                    out.push('\n');
+                } else {
+                    out.push_str("-\n");
+                    render_yaml_value(value, indent + 2, out);
+                }
+            }
+        }
+        value => {
+            out.push_str(&" ".repeat(indent));
+            out.push_str(&render_yaml_inline(value));
+            out.push('\n');
+        }
+    }
+}
+
+fn render_yaml_inline(value: &serde_json::Value) -> String {
+    match yaml_scalar(value) {
+        Some(scalar) => scalar,
+        None if matches!(value, serde_json::Value::Array(values) if values.is_empty()) => {
+            "[]".to_string()
+        }
+        None if matches!(value, serde_json::Value::Object(map) if map.is_empty()) => {
+            "{}".to_string()
+        }
+        None => quote_yaml_string(&value.to_string()),
+    }
+}
+
+fn yaml_scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => Some("null".to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(quote_yaml_string(value)),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
+}
+
+fn is_empty_collection(value: &serde_json::Value) -> bool {
+    matches!(value, serde_json::Value::Array(values) if values.is_empty())
+        || matches!(value, serde_json::Value::Object(map) if map.is_empty())
+}
+
+fn render_yaml_key(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        key.to_string()
+    } else {
+        quote_yaml_string(key)
+    }
+}
+
+fn quote_yaml_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
 }
 
 pub(super) fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
@@ -1728,7 +1847,7 @@ pub(super) fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
 
     let mut schemas = serde_json::Map::new();
     for ty in &spec.types {
-        schemas.insert(ty.name.clone(), openapi_type_schema(ty));
+        schemas.insert(ty.name.clone(), openapi_type_schema_for_spec(spec, ty));
     }
 
     let mut components = serde_json::Map::new();
@@ -1789,7 +1908,7 @@ fn openapi_operation(spec: &ApiSpec, route: &crate::parser::RestRoute) -> serde_
     let mut json_body_fields = Vec::new();
     let mut form_body_fields = Vec::new();
     if let Some(request_ty) = request_ty {
-        for field in &request_ty.fields {
+        for field in expanded_api_fields(spec, request_ty) {
             match openapi_field_source(field, route) {
                 crate::parser::FieldSource::Path => {
                     parameters.push(openapi_parameter(field, "path", true))
@@ -1819,7 +1938,7 @@ fn openapi_operation(spec: &ApiSpec, route: &crate::parser::RestRoute) -> serde_
             openapi_request_body("application/x-www-form-urlencoded", &form_body_fields),
         );
     } else if !json_body_fields.is_empty()
-        || (request_ty.is_some_and(|ty| !ty.fields.is_empty())
+        || (request_ty.is_some_and(|ty| !expanded_api_fields(spec, ty).is_empty())
             && matches!(
                 route.method,
                 crate::parser::HttpMethod::Post
@@ -1899,10 +2018,10 @@ fn route_has_jwt(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
         .is_some()
 }
 
-fn openapi_type_schema(ty: &crate::parser::TypeDef) -> serde_json::Value {
+fn openapi_type_schema_for_spec(spec: &ApiSpec, ty: &crate::parser::TypeDef) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
-    for field in &ty.fields {
+    for field in expanded_api_fields(spec, ty) {
         properties.insert(field_wire_name(field), openapi_schema(&field.ty));
         required.push(serde_json::Value::String(field_wire_name(field)));
     }
@@ -1945,6 +2064,41 @@ fn openapi_request_body(content_type: &str, fields: &[&crate::parser::Field]) ->
             }
         }
     })
+}
+
+fn expanded_api_fields<'a>(
+    spec: &'a ApiSpec,
+    ty: &'a crate::parser::TypeDef,
+) -> Vec<&'a crate::parser::Field> {
+    let mut fields = Vec::new();
+    let mut stack = HashSet::new();
+    expand_api_fields(spec, ty, &mut stack, &mut fields);
+    fields
+}
+
+fn expand_api_fields<'a>(
+    spec: &'a ApiSpec,
+    ty: &'a crate::parser::TypeDef,
+    stack: &mut HashSet<String>,
+    fields: &mut Vec<&'a crate::parser::Field>,
+) {
+    if !stack.insert(ty.name.clone()) {
+        return;
+    }
+    for field in &ty.fields {
+        if field.embedded {
+            if let Some(nested) = spec
+                .types
+                .iter()
+                .find(|candidate| candidate.name == field.ty)
+            {
+                expand_api_fields(spec, nested, stack, fields);
+                continue;
+            }
+        }
+        fields.push(field);
+    }
+    stack.remove(&ty.name);
 }
 
 fn openapi_schema(ty: &str) -> serde_json::Value {
@@ -2014,7 +2168,9 @@ fn openapi_field_source(
                 crate::parser::FieldSource::Path
             } else if matches!(
                 route.method,
-                crate::parser::HttpMethod::Get | crate::parser::HttpMethod::Delete
+                crate::parser::HttpMethod::Get
+                    | crate::parser::HttpMethod::Head
+                    | crate::parser::HttpMethod::Delete
             ) {
                 crate::parser::FieldSource::Query
             } else {
@@ -2104,6 +2260,7 @@ fn normalize_ident(input: &str) -> String {
 fn openapi_method_name(method: &crate::parser::HttpMethod) -> &'static str {
     match method {
         crate::parser::HttpMethod::Get => "get",
+        crate::parser::HttpMethod::Head => "head",
         crate::parser::HttpMethod::Post => "post",
         crate::parser::HttpMethod::Put => "put",
         crate::parser::HttpMethod::Patch => "patch",
@@ -2141,6 +2298,39 @@ pub fn write_dart_client(api: &Path, out: &Path) -> anyhow::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(out, client::render_dart_client(&spec))
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+pub fn write_java_client(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, client::render_java_client(&spec))
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+pub fn write_kotlin_client(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, client::render_kotlin_client(&spec))
+        .with_context(|| format!("failed to write {}", out.display()))
+}
+
+pub fn write_swift_client(api: &Path, out: &Path) -> anyhow::Result<()> {
+    let source = read_api_source(api)?;
+    let spec = crate::parser::parse_api(&source)?;
+    validate_project_kind(&spec, ProjectKind::Rest)?;
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(out, client::render_swift_client(&spec))
         .with_context(|| format!("failed to write {}", out.display()))
 }
 
@@ -2550,11 +2740,45 @@ fn write_logic_group_mod(path: &Path, content: String, mode: GenerateMode) -> an
 }
 
 fn merge_app_owned_mod_declarations(generated: &str, existing: &str) -> String {
-    let mut merged = generated.to_string();
     let generated_modules = generated
         .lines()
         .filter_map(mod_declaration_name)
         .collect::<HashSet<_>>();
+    let generated_pub_uses = generated
+        .lines()
+        .filter_map(pub_use_declaration)
+        .collect::<Vec<_>>();
+    let existing_pub_uses = existing
+        .lines()
+        .filter_map(|line| {
+            pub_use_declaration(line).map(|pub_use| (line.trim().to_string(), pub_use))
+        })
+        .collect::<Vec<_>>();
+
+    let mut replaced_pub_uses = HashSet::new();
+    let mut merged = String::new();
+    for line in generated.lines() {
+        if let Some(generated_pub_use) = pub_use_declaration(line) {
+            if let Some((existing_line, _)) =
+                existing_pub_uses.iter().find(|(_, existing_pub_use)| {
+                    existing_pub_use.module == generated_pub_use.module
+                        && generated_pub_use
+                            .symbols
+                            .iter()
+                            .all(|symbol| existing_pub_use.symbols.contains(symbol))
+                })
+            {
+                merged.push_str(existing_line);
+                merged.push('\n');
+                replaced_pub_uses.insert(existing_line.clone());
+                continue;
+            }
+        }
+
+        merged.push_str(line);
+        merged.push('\n');
+    }
+
     let extra_mods = existing
         .lines()
         .filter_map(|line| {
@@ -2562,7 +2786,16 @@ fn merge_app_owned_mod_declarations(generated: &str, existing: &str) -> String {
             (!generated_modules.contains(&name)).then_some(line.trim().to_string())
         })
         .collect::<Vec<_>>();
-    if extra_mods.is_empty() {
+    let extra_pub_uses = existing_pub_uses
+        .into_iter()
+        .filter_map(|(line, pub_use)| {
+            let generated_has_same_module = generated_pub_uses
+                .iter()
+                .any(|generated_pub_use| generated_pub_use.module == pub_use.module);
+            (!generated_has_same_module && !replaced_pub_uses.contains(&line)).then_some(line)
+        })
+        .collect::<Vec<_>>();
+    if extra_mods.is_empty() && extra_pub_uses.is_empty() {
         return merged;
     }
 
@@ -2570,6 +2803,10 @@ fn merge_app_owned_mod_declarations(generated: &str, existing: &str) -> String {
         merged.push('\n');
     }
     for line in extra_mods {
+        merged.push_str(&line);
+        merged.push('\n');
+    }
+    for line in extra_pub_uses {
         merged.push_str(&line);
         merged.push('\n');
     }
@@ -2587,6 +2824,54 @@ fn mod_declaration_name(line: &str) -> Option<String> {
             .chars()
             .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
     .then(|| name.to_string())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PubUseDeclaration {
+    module: String,
+    symbols: HashSet<String>,
+}
+
+fn pub_use_declaration(line: &str) -> Option<PubUseDeclaration> {
+    let line = line.trim();
+    let rest = line.strip_prefix("pub use ")?;
+    let rest = rest.strip_suffix(';')?.trim();
+    let (module, symbols) = rest.split_once("::")?;
+    let module = module.trim();
+    if !is_rust_ident(module) {
+        return None;
+    }
+
+    let symbols = if let Some(symbols) = symbols
+        .trim()
+        .strip_prefix('{')
+        .and_then(|symbols| symbols.strip_suffix('}'))
+    {
+        symbols
+            .split(',')
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+            .map(str::to_string)
+            .collect::<HashSet<_>>()
+    } else {
+        let symbol = symbols.trim();
+        if !is_rust_ident(symbol) {
+            return None;
+        }
+        HashSet::from([symbol.to_string()])
+    };
+
+    (!symbols.is_empty()).then(|| PubUseDeclaration {
+        module: module.to_string(),
+        symbols,
+    })
+}
+
+fn is_rust_ident(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn is_generated_default_logic_stub(content: &str) -> bool {
@@ -3338,6 +3623,7 @@ fn sanitize_group(service: &str) -> String {
 fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
     match method {
         crate::parser::HttpMethod::Get => "GET",
+        crate::parser::HttpMethod::Head => "HEAD",
         crate::parser::HttpMethod::Post => "POST",
         crate::parser::HttpMethod::Put => "PUT",
         crate::parser::HttpMethod::Patch => "PATCH",
@@ -3692,6 +3978,7 @@ fn render_proto(spec: &ApiSpec) -> anyhow::Result<String> {
         let rpc_name = route.handler.clone().unwrap_or_else(|| {
             let method = match route.method {
                 crate::parser::HttpMethod::Get => "get",
+                crate::parser::HttpMethod::Head => "head",
                 crate::parser::HttpMethod::Post => "post",
                 crate::parser::HttpMethod::Put => "put",
                 crate::parser::HttpMethod::Patch => "patch",
@@ -3975,6 +4262,82 @@ mod tests {
             "uint64"
         );
         assert!(document["components"]["securitySchemes"]["bearerAuth"].is_object());
+    }
+
+    #[test]
+    fn openapi_document_flattens_embedded_request_fields() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @handler createUser
+                post /users (CreateUserReq) returns (UserResp)
+            }
+            type (
+                BaseReq {
+                    traceId string `json:"traceId"`
+                }
+                CreateUserReq {
+                    BaseReq
+                    name string `json:"name"`
+                }
+                UserResp {
+                    id u64 `json:"id"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let document = openapi_document(&spec);
+
+        assert_eq!(
+            document["components"]["schemas"]["CreateUserReq"]["properties"]["traceId"]["type"],
+            "string"
+        );
+        assert_eq!(
+            document["paths"]["/users"]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"]["properties"]["traceId"]["type"],
+            "string"
+        );
+        assert!(
+            document["components"]["schemas"]["CreateUserReq"]["properties"]["baseReq"].is_null()
+        );
+    }
+
+    #[test]
+    fn writes_openapi_yaml_document() {
+        let root = temp_test_root("rozectl-openapi-yaml");
+        fs::create_dir_all(&root).expect("create root");
+        let api = root.join("user.api");
+        let out = root.join("docs/swagger.yaml");
+        fs::write(
+            &api,
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+            type (
+                GetUserReq {
+                    id u64 `path:"id"`
+                }
+                UserResp {
+                    name string `json:"name"`
+                }
+            )
+            "#,
+        )
+        .expect("write api");
+
+        write_openapi_yaml(&api, &out).expect("write yaml");
+
+        let yaml = fs::read_to_string(&out).expect("read yaml");
+        assert!(yaml.contains("openapi: \"3.0.0\""));
+        assert!(yaml.contains("\"/users/{id}\":"));
+        assert!(yaml.contains("operationId: \"getUser\""));
+        assert!(yaml.contains("components:"));
+
+        fs::remove_dir_all(root).expect("remove root");
     }
 
     #[test]
@@ -4717,7 +5080,7 @@ mod tests {
         .expect("write custom middleware");
         fs::write(
             out.join("src/logic/users/mod.rs"),
-            "mod get_user;\npub use get_user::get_user;\nmod catalog_map;\n",
+            "mod get_user;\npub use get_user::{get_user, AdminTokenReq};\nmod catalog_map;\n",
         )
         .expect("write custom logic group mod");
         let svc_path = out.join("src/svc/mod.rs");
@@ -4774,6 +5137,9 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/logic/users/mod.rs"))
             .expect("read logic group mod")
             .contains("mod catalog_map;"));
+        assert!(fs::read_to_string(out.join("src/logic/users/mod.rs"))
+            .expect("read logic group mod")
+            .contains("pub use get_user::{get_user, AdminTokenReq};"));
         assert!(fs::read_to_string(out.join("src/svc/mod.rs"))
             .expect("read svc")
             .contains("pub fn catalog(&self)"));

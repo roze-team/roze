@@ -68,6 +68,22 @@ enum SearchEngine {
     Meilisearch,
 }
 
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CompletionShell {
+    #[default]
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum QuickstartKind {
+    #[default]
+    Api,
+    Rpc,
+}
+
 impl From<RozeSource> for DependencySource {
     fn from(value: RozeSource) -> Self {
         match value {
@@ -204,20 +220,74 @@ enum Commands {
         #[command(subcommand)]
         command: HelmCommands,
     },
+    Completion {
+        #[arg(value_enum, default_value_t)]
+        shell: CompletionShell,
+    },
+    Env,
+    Upgrade {
+        #[arg(long, default_value = "https://github.com/roze-team/roze.git")]
+        repo: String,
+        #[arg(long, conflicts_with = "rev")]
+        branch: Option<String>,
+        #[arg(long, conflicts_with = "branch")]
+        rev: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Quickstart {
+        #[arg(default_value = "hello")]
+        name: String,
+        #[arg(long, value_enum, default_value_t)]
+        kind: QuickstartKind,
+        #[arg(short = 'o', long, alias = "o")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum ApiCommands {
+    #[command(alias = "gen")]
     Generate {
-        api: PathBuf,
-        #[arg(long, default_value = ".")]
+        api: Option<PathBuf>,
+        #[arg(short = 'a', long = "api")]
+        api_file: Option<PathBuf>,
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
+        #[arg(short = 'd', long = "dir")]
+        dir: Option<PathBuf>,
         #[arg(long)]
         force: bool,
         #[arg(long, conflicts_with = "force")]
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+    },
+    Go {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+        #[arg(long)]
+        style: Option<String>,
+    },
+    Swagger {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        yaml: bool,
     },
     New {
         name: String,
@@ -232,10 +302,74 @@ enum ApiCommands {
         #[command(subcommand)]
         command: ClientCommands,
     },
+    Ts {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Js {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Dart {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Java {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Kotlin {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Swift {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Ios {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
+    Android {
+        #[arg(short = 'a', long)]
+        api: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+    },
     Doc {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
-        #[arg(long = "out", default_value = "doc")]
+        #[arg(short = 'o', long = "out", alias = "o", default_value = "doc")]
         out: PathBuf,
         #[arg(long)]
         api: Option<PathBuf>,
@@ -249,10 +383,14 @@ enum ApiCommands {
         dir: PathBuf,
     },
     Validate {
-        api: PathBuf,
+        api: Option<PathBuf>,
+        #[arg(short = 'a', long = "api")]
+        api_file: Option<PathBuf>,
     },
     Format {
-        api: PathBuf,
+        api: Option<PathBuf>,
+        #[arg(short = 'a', long = "api")]
+        api_file: Option<PathBuf>,
         #[arg(long)]
         write: bool,
         #[arg(long, conflicts_with = "write")]
@@ -264,33 +402,65 @@ enum ApiCommands {
 enum ClientCommands {
     Ts {
         api: PathBuf,
-        #[arg(long, default_value = "client.ts")]
+        #[arg(short = 'o', long, alias = "o", default_value = "client.ts")]
         out: PathBuf,
     },
     Js {
         api: PathBuf,
-        #[arg(long, default_value = "client.js")]
+        #[arg(short = 'o', long, alias = "o", default_value = "client.js")]
         out: PathBuf,
     },
     Dart {
         api: PathBuf,
-        #[arg(long, default_value = "client.dart")]
+        #[arg(short = 'o', long, alias = "o", default_value = "client.dart")]
+        out: PathBuf,
+    },
+    Java {
+        api: PathBuf,
+        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.java")]
+        out: PathBuf,
+    },
+    Kotlin {
+        api: PathBuf,
+        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.kt")]
+        out: PathBuf,
+    },
+    Swift {
+        api: PathBuf,
+        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.swift")]
+        out: PathBuf,
+    },
+    Ios {
+        api: PathBuf,
+        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.swift")]
+        out: PathBuf,
+    },
+    Android {
+        api: PathBuf,
+        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.kt")]
         out: PathBuf,
     },
 }
 
 #[derive(Debug, Subcommand)]
 enum RpcCommands {
+    #[command(alias = "gen")]
     Generate {
-        api: PathBuf,
-        #[arg(long, default_value = ".")]
+        api: Option<PathBuf>,
+        #[arg(short = 'a', long = "api")]
+        api_file: Option<PathBuf>,
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
+        #[arg(short = 'd', long = "dir")]
+        dir: Option<PathBuf>,
         #[arg(long)]
         force: bool,
         #[arg(long, conflicts_with = "force")]
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(short = 'm', long = "multiple")]
+        multiple: bool,
     },
     New {
         name: String,
@@ -303,7 +473,7 @@ enum RpcCommands {
     },
     Protoc {
         proto: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -311,6 +481,14 @@ enum RpcCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(short = 'm', long = "multiple")]
+        multiple: bool,
+    },
+    Template {
+        #[arg(short = 'o', long = "out", alias = "o")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -406,30 +584,55 @@ enum HelmCommands {
 
 #[derive(Debug, Subcommand)]
 enum TemplateCommands {
-    List,
+    List {
+        #[arg(long, alias = "home")]
+        dir: Option<PathBuf>,
+    },
     Show {
         name: String,
+        #[arg(long, alias = "home")]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Init {
-        #[arg(long, default_value = "templates")]
+        #[arg(long, alias = "home", default_value = "templates")]
         out: PathBuf,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Diff {
         name: String,
-        #[arg(long, default_value = "templates")]
+        #[arg(long, alias = "home", default_value = "templates")]
         dir: PathBuf,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Update {
         name: String,
-        #[arg(long, default_value = "templates")]
+        #[arg(long, alias = "home", default_value = "templates")]
         dir: PathBuf,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
         #[arg(long)]
         force: bool,
     },
     Revert {
         name: String,
-        #[arg(long, default_value = "templates")]
+        #[arg(long, alias = "home", default_value = "templates")]
         dir: PathBuf,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
         #[arg(long)]
         no_backup: bool,
     },
@@ -479,7 +682,7 @@ enum MockCommands {
     Gen {
         #[arg(short = 'a', long = "api")]
         api: PathBuf,
-        #[arg(long, default_value = "mock-server")]
+        #[arg(short = 'o', long, alias = "o", default_value = "mock-server")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -491,7 +694,7 @@ enum TestCommands {
     Gen {
         #[arg(short = 'a', long = "api")]
         api: PathBuf,
-        #[arg(long, default_value = "contract-tests")]
+        #[arg(short = 'o', long, alias = "o", default_value = "contract-tests")]
         out: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:3000")]
         base_url: String,
@@ -543,7 +746,7 @@ enum DocCommands {
     Service {
         #[arg(short = 'a', long = "api")]
         api: PathBuf,
-        #[arg(long, default_value = "SERVICE.md")]
+        #[arg(short = 'o', long, alias = "o", default_value = "SERVICE.md")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -551,7 +754,7 @@ enum DocCommands {
     AiContext {
         #[arg(short = 'a', long = "api")]
         api: PathBuf,
-        #[arg(long, default_value = "AI_CONTEXT.md")]
+        #[arg(short = 'o', long, alias = "o", default_value = "AI_CONTEXT.md")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -560,18 +763,22 @@ enum DocCommands {
 
 #[derive(Debug, Subcommand)]
 enum OpenApiCommands {
+    #[command(alias = "gen")]
     Generate {
-        api: PathBuf,
-        #[arg(long, default_value = "openapi.json")]
+        api: Option<PathBuf>,
+        #[arg(short = 'a', long = "api")]
+        api_file: Option<PathBuf>,
+        #[arg(short = 'o', long, alias = "o", default_value = "openapi.json")]
         out: PathBuf,
     },
 }
 
 #[derive(Debug, Subcommand)]
 enum ModelCommands {
+    #[command(alias = "gen")]
     Generate {
         schema: PathBuf,
-        #[arg(long, default_value = ".")]
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -594,8 +801,70 @@ enum ModelCommands {
         db_kind: DbKind,
         #[arg(long, default_value_t = 100)]
         sample_size: u64,
-        #[arg(long, default_value = ".")]
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
+    },
+    Mysql {
+        #[command(subcommand)]
+        command: ModelSqlCompatCommands,
+    },
+    Pg {
+        #[command(subcommand)]
+        command: ModelSqlCompatCommands,
+    },
+    Mongo {
+        #[arg(long)]
+        schema: Option<PathBuf>,
+        #[arg(long)]
+        collection: Option<String>,
+        #[arg(long)]
+        db_url: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        sample_size: u64,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelSqlCompatCommands {
+    Datasource {
+        #[arg(short = 'u', long = "url", alias = "db-url")]
+        db_url: String,
+        #[arg(short = 't', long = "table")]
+        table: String,
+        #[arg(long)]
+        schema: Option<String>,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        orm: ModelOrm,
+    },
+    Ddl {
+        #[arg(short = 's', long = "src")]
+        src: PathBuf,
+        #[arg(short = 'd', long, default_value = ".")]
+        dir: PathBuf,
         #[arg(long)]
         force: bool,
         #[arg(long, conflicts_with = "force")]
@@ -609,11 +878,12 @@ enum ModelCommands {
 
 #[derive(Debug, Subcommand)]
 enum SearchCommands {
+    #[command(alias = "gen")]
     Generate {
         schema: PathBuf,
         #[arg(long, value_enum, default_value_t)]
         engine: SearchEngine,
-        #[arg(long, default_value = ".")]
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -632,7 +902,7 @@ enum SearchCommands {
         api_key: Option<String>,
         #[arg(long, default_value_t = 100)]
         sample_size: u64,
-        #[arg(long, default_value = ".")]
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -645,10 +915,11 @@ enum SearchCommands {
 
 #[derive(Debug, Subcommand)]
 enum StreamCommands {
+    #[command(alias = "generate")]
     Gen {
         #[arg(long)]
         api: PathBuf,
-        #[arg(long, default_value = "stream")]
+        #[arg(short = 'o', long, alias = "o", default_value = "stream")]
         out: PathBuf,
         #[arg(long)]
         force: bool,
@@ -660,24 +931,51 @@ enum StreamCommands {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli_from(std::env::args_os());
     let registry = generator::registry();
 
     match cli.command {
         Commands::Api { command } => match command {
             ApiCommands::Generate {
                 api,
+                api_file,
                 out,
+                dir,
                 force,
                 update,
                 roze_source,
             } => {
+                let api = resolve_input_path(api, api_file, "api")?;
+                let out = dir.unwrap_or(out);
                 validate_api_for_generation(&api)?;
                 registry.dispatch(GeneratorCommand::ApiGenerate {
                     api,
                     out,
                     options: options(force, update, roze_source),
                 })?
+            }
+            ApiCommands::Go {
+                api,
+                dir,
+                force,
+                update,
+                roze_source,
+                style: _,
+            } => {
+                validate_api_for_generation(&api)?;
+                registry.dispatch(GeneratorCommand::ApiGenerate {
+                    api,
+                    out: dir,
+                    options: options(force, update, roze_source),
+                })?
+            }
+            ApiCommands::Swagger { api, dir, yaml } => {
+                validate_api_for_generation(&api)?;
+                if yaml {
+                    generator::write_openapi_yaml(&api, &dir.join("swagger.yaml"))?;
+                } else {
+                    generator::write_openapi_json(&api, &dir.join("swagger.json"))?;
+                }
             }
             ApiCommands::New {
                 name,
@@ -712,7 +1010,63 @@ fn main() -> anyhow::Result<()> {
                     validate_api_for_generation(&api)?;
                     generator::write_dart_client(&api, &out)?;
                 }
+                ClientCommands::Java { api, out } => {
+                    validate_api_for_generation(&api)?;
+                    generator::write_java_client(&api, &out)?;
+                }
+                ClientCommands::Kotlin { api, out } => {
+                    validate_api_for_generation(&api)?;
+                    generator::write_kotlin_client(&api, &out)?;
+                }
+                ClientCommands::Swift { api, out } | ClientCommands::Ios { api, out } => {
+                    validate_api_for_generation(&api)?;
+                    generator::write_swift_client(&api, &out)?;
+                }
+                ClientCommands::Android { api, out } => {
+                    validate_api_for_generation(&api)?;
+                    generator::write_kotlin_client(&api, &out)?;
+                }
             },
+            ApiCommands::Ts { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_ts_client(&api, &resolve_client_out(dir, out, "client.ts"))?;
+            }
+            ApiCommands::Js { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_js_client(&api, &resolve_client_out(dir, out, "client.js"))?;
+            }
+            ApiCommands::Dart { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_dart_client(&api, &resolve_client_out(dir, out, "client.dart"))?;
+            }
+            ApiCommands::Java { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_java_client(
+                    &api,
+                    &resolve_client_out(dir, out, "RozeApiClient.java"),
+                )?;
+            }
+            ApiCommands::Kotlin { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_kotlin_client(
+                    &api,
+                    &resolve_client_out(dir, out, "RozeApiClient.kt"),
+                )?;
+            }
+            ApiCommands::Swift { api, dir, out } | ApiCommands::Ios { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_swift_client(
+                    &api,
+                    &resolve_client_out(dir, out, "RozeApiClient.swift"),
+                )?;
+            }
+            ApiCommands::Android { api, dir, out } => {
+                validate_api_for_generation(&api)?;
+                generator::write_kotlin_client(
+                    &api,
+                    &resolve_client_out(dir, out, "RozeApiClient.kt"),
+                )?;
+            }
             ApiCommands::Doc { dir, out, api } => {
                 validate_optional_api_for_generation(api.as_deref())?;
                 let out = if out.is_absolute() {
@@ -726,17 +1080,33 @@ fn main() -> anyhow::Result<()> {
                 validate_api_for_generation(&api)?;
                 generator::native::run_api_plugin(&plugin, &api, &dir)?;
             }
-            ApiCommands::Validate { api } => run_api_validate(&api)?,
-            ApiCommands::Format { api, write, check } => run_api_format(&api, write, check)?,
+            ApiCommands::Validate { api, api_file } => {
+                let api = resolve_input_path(api, api_file, "api")?;
+                run_api_validate(&api)?
+            }
+            ApiCommands::Format {
+                api,
+                api_file,
+                write,
+                check,
+            } => {
+                let api = resolve_input_path(api, api_file, "api")?;
+                run_api_format(&api, write, check)?
+            }
         },
         Commands::Rpc { command } => match command {
             RpcCommands::Generate {
                 api,
+                api_file,
                 out,
+                dir,
                 force,
                 update,
                 roze_source,
+                multiple: _,
             } => {
+                let api = resolve_input_path(api, api_file, "api")?;
+                let out = dir.unwrap_or(out);
                 validate_api_for_generation(&api)?;
                 registry.dispatch(GeneratorCommand::RpcGenerate {
                     api,
@@ -770,12 +1140,36 @@ fn main() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
+                multiple: _,
             } => {
                 generator::native::generate_rpc_from_proto(
                     &proto,
                     &out,
                     options(force, update, roze_source),
                 )?;
+            }
+            RpcCommands::Template { out, force } => {
+                let template = generator::template("rpc")?;
+                if let Some(out) = out {
+                    if out.exists() && !force {
+                        anyhow::bail!(
+                            "{} already exists; pass --force to overwrite it",
+                            out.display()
+                        );
+                    }
+                    if let Some(parent) =
+                        out.parent().filter(|parent| !parent.as_os_str().is_empty())
+                    {
+                        fs::create_dir_all(parent).map_err(|err| {
+                            anyhow::anyhow!("failed to create {}: {err}", parent.display())
+                        })?;
+                    }
+                    fs::write(&out, template).map_err(|err| {
+                        anyhow::anyhow!("failed to write {}: {err}", out.display())
+                    })?;
+                } else {
+                    println!("{template}");
+                }
             }
         },
         Commands::Model { command } => match command {
@@ -833,6 +1227,45 @@ fn main() -> anyhow::Result<()> {
                 ),
                 orm: orm.into(),
             })?,
+            ModelCommands::Mysql { command } => {
+                run_sql_model_compat(command, DbKind::MySql, &registry)?
+            }
+            ModelCommands::Pg { command } => {
+                run_sql_model_compat(command, DbKind::Postgres, &registry)?
+            }
+            ModelCommands::Mongo {
+                schema,
+                collection,
+                db_url,
+                sample_size,
+                dir,
+                force,
+                update,
+                roze_source,
+            } => match (schema, collection, db_url) {
+                (Some(schema), None, None) => registry.dispatch(GeneratorCommand::ModelGenerate {
+                    schema,
+                    out: dir,
+                    options: options(force, update, roze_source),
+                    format: generator::model::ModelFormat::Mongo,
+                    orm: generator::model::ModelOrm::Toasty,
+                })?,
+                (None, Some(table), Some(db_url)) => {
+                    registry.dispatch(GeneratorCommand::ModelInspect {
+                        table,
+                        schema: None,
+                        db_url,
+                        db_kind: generator::model::InspectDatabaseKind::Mongo,
+                        sample_size,
+                        out: dir,
+                        options: options(force, update, roze_source),
+                        orm: generator::model::ModelOrm::Toasty,
+                    })?
+                }
+                _ => anyhow::bail!(
+                    "model mongo expects either --schema <file> or --collection <name> --db-url <url>"
+                ),
+            },
         },
         Commands::Search { command } => match command {
             SearchCommands::Generate {
@@ -891,27 +1324,52 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Template { command } => match command {
-            TemplateCommands::List => {
-                println!("api\nrpc\nmodel");
+            TemplateCommands::List { dir } => {
+                run_template_list(dir.as_deref())?;
             }
-            TemplateCommands::Show { name } => {
-                println!("{}", generator::template(&name)?);
+            TemplateCommands::Show {
+                name,
+                dir,
+                remote,
+                branch,
+            } => {
+                println!(
+                    "{}",
+                    template_source(&name, dir.as_deref(), remote.as_deref(), branch.as_deref())?
+                );
             }
-            TemplateCommands::Init { out } => {
-                generator::init_templates(&out)?;
+            TemplateCommands::Init {
+                out,
+                remote,
+                branch,
+            } => {
+                run_template_init(&out, remote.as_deref(), branch.as_deref())?;
             }
-            TemplateCommands::Diff { name, dir } => {
-                run_template_diff(&name, &dir)?;
+            TemplateCommands::Diff {
+                name,
+                dir,
+                remote,
+                branch,
+            } => {
+                run_template_diff(&name, &dir, remote.as_deref(), branch.as_deref())?;
             }
-            TemplateCommands::Update { name, dir, force } => {
-                run_template_update(&name, &dir, force)?;
+            TemplateCommands::Update {
+                name,
+                dir,
+                remote,
+                branch,
+                force,
+            } => {
+                run_template_update(&name, &dir, remote.as_deref(), branch.as_deref(), force)?;
             }
             TemplateCommands::Revert {
                 name,
                 dir,
+                remote,
+                branch,
                 no_backup,
             } => {
-                run_template_revert(&name, &dir, !no_backup)?;
+                run_template_revert(&name, &dir, remote.as_deref(), branch.as_deref(), !no_backup)?;
             }
         },
         Commands::Diff { command } => run_diff(command, &registry)?,
@@ -951,7 +1409,8 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Openapi { command } => match command {
-            OpenApiCommands::Generate { api, out } => {
+            OpenApiCommands::Generate { api, api_file, out } => {
+                let api = resolve_input_path(api, api_file, "api")?;
                 validate_api_for_generation(&api)?;
                 generator::write_openapi_json(&api, &out)?;
             }
@@ -1067,10 +1526,131 @@ fn main() -> anyhow::Result<()> {
             }
             HelmCommands::Validate { chart } => run_helm_validate(&chart)?,
         },
+        Commands::Completion { shell } => {
+            print!("{}", render_completion(shell));
+        }
+        Commands::Env => run_env()?,
+        Commands::Upgrade {
+            repo,
+            branch,
+            rev,
+            dry_run,
+        } => run_upgrade(&repo, branch.as_deref(), rev.as_deref(), dry_run)?,
+        Commands::Quickstart {
+            name,
+            kind,
+            out,
+            force,
+            roze_source,
+        } => {
+            let out = resolve_new_out(&name, out);
+            let mode = if force {
+                GenerateMode::Force
+            } else {
+                GenerateMode::Create
+            };
+            let options = GenerateOptions::new(mode, roze_source.into());
+            match kind {
+                QuickstartKind::Api => registry.dispatch(GeneratorCommand::ApiNew {
+                    name,
+                    out,
+                    options,
+                })?,
+                QuickstartKind::Rpc => registry.dispatch(GeneratorCommand::RpcNew {
+                    name,
+                    out,
+                    options,
+                })?,
+            }
+        }
     }
 
     Ok(())
 }
+
+fn parse_cli_from<I, T>(args: I) -> Cli
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    Cli::parse_from(normalize_go_style_flags(args))
+}
+
+fn try_parse_cli_from<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    Cli::try_parse_from(normalize_go_style_flags(args))
+}
+
+fn normalize_go_style_flags<I, T>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    args.into_iter()
+        .map(|arg| normalize_go_style_flag(arg.into()))
+        .collect()
+}
+
+fn normalize_go_style_flag(arg: OsString) -> OsString {
+    let text = arg.to_string_lossy();
+    let Some(rest) = text.strip_prefix('-') else {
+        return arg;
+    };
+    if rest.starts_with('-') || rest.len() <= 1 {
+        return arg;
+    }
+    let name = rest.split_once('=').map_or(rest, |(name, _)| name);
+    if GO_STYLE_LONG_FLAGS.contains(&name) {
+        OsString::from(format!("--{rest}"))
+    } else {
+        arg
+    }
+}
+
+const GO_STYLE_LONG_FLAGS: &[&str] = &[
+    "api",
+    "api-key",
+    "branch",
+    "chart",
+    "check",
+    "collection",
+    "db-kind",
+    "db-url",
+    "dir",
+    "dry-run",
+    "engine",
+    "env",
+    "file",
+    "force",
+    "format",
+    "home",
+    "image",
+    "kind",
+    "multiple",
+    "namespace",
+    "no-backup",
+    "orm",
+    "out",
+    "plugin",
+    "port",
+    "remote",
+    "replicas",
+    "repo",
+    "rev",
+    "roze-source",
+    "sample-size",
+    "schema",
+    "src",
+    "style",
+    "table",
+    "update",
+    "url",
+    "write",
+    "yaml",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContractIssue {
@@ -1185,9 +1765,43 @@ fn run_api_format(path: &Path, write: bool, check: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_template_diff(name: &str, dir: &Path) -> anyhow::Result<()> {
+fn run_template_list(dir: Option<&Path>) -> anyhow::Result<()> {
+    if let Some(dir) = dir {
+        let mut names = Vec::new();
+        for name in ["api", "rpc", "model"] {
+            if dir.join(template_file_name(name)?).exists() {
+                names.push(name);
+            }
+        }
+        if names.is_empty() {
+            println!("api\nrpc\nmodel");
+        } else {
+            println!("{}", names.join("\n"));
+        }
+        return Ok(());
+    }
+
+    println!("api\nrpc\nmodel");
+    Ok(())
+}
+
+fn run_template_init(out: &Path, remote: Option<&str>, branch: Option<&str>) -> anyhow::Result<()> {
+    if let Some(remote) = remote {
+        let home = RemoteTemplateHome::clone(remote, branch)?;
+        copy_template_home(home.path(), out)?;
+        return Ok(());
+    }
+    generator::init_templates(out)
+}
+
+fn run_template_diff(
+    name: &str,
+    dir: &Path,
+    remote: Option<&str>,
+    branch: Option<&str>,
+) -> anyhow::Result<()> {
     let path = dir.join(template_file_name(name)?);
-    let expected = generator::template(name)?;
+    let expected = template_source(name, None, remote, branch)?;
     if !path.exists() {
         println!("A {}", path.display());
         println!(
@@ -1217,9 +1831,15 @@ fn run_template_diff(name: &str, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_template_update(name: &str, dir: &Path, force: bool) -> anyhow::Result<()> {
+fn run_template_update(
+    name: &str,
+    dir: &Path,
+    remote: Option<&str>,
+    branch: Option<&str>,
+    force: bool,
+) -> anyhow::Result<()> {
     let path = dir.join(template_file_name(name)?);
-    let expected = generator::template(name)?;
+    let expected = template_source(name, None, remote, branch)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", parent.display()))?;
@@ -1247,9 +1867,15 @@ fn run_template_update(name: &str, dir: &Path, force: bool) -> anyhow::Result<()
     Ok(())
 }
 
-fn run_template_revert(name: &str, dir: &Path, backup: bool) -> anyhow::Result<()> {
+fn run_template_revert(
+    name: &str,
+    dir: &Path,
+    remote: Option<&str>,
+    branch: Option<&str>,
+    backup: bool,
+) -> anyhow::Result<()> {
     let path = dir.join(template_file_name(name)?);
-    let expected = generator::template(name)?;
+    let expected = template_source(name, None, remote, branch)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", parent.display()))?;
@@ -1275,6 +1901,93 @@ fn run_template_revert(name: &str, dir: &Path, backup: bool) -> anyhow::Result<(
         .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))?;
     println!("template {name} reverted: {}", path.display());
     Ok(())
+}
+
+fn template_source(
+    name: &str,
+    dir: Option<&Path>,
+    remote: Option<&str>,
+    branch: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(dir) = dir {
+        let path = dir.join(template_file_name(name)?);
+        return fs::read_to_string(&path)
+            .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()));
+    }
+
+    if let Some(remote) = remote {
+        let home = RemoteTemplateHome::clone(remote, branch)?;
+        return read_template_from_home(home.path(), name);
+    }
+
+    generator::template(name)
+}
+
+fn read_template_from_home(home: &Path, name: &str) -> anyhow::Result<String> {
+    let path = home.join(template_file_name(name)?);
+    fs::read_to_string(&path)
+        .map_err(|err| anyhow::anyhow!("failed to read template {}: {err}", path.display()))
+}
+
+fn copy_template_home(from: &Path, to: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(to)
+        .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", to.display()))?;
+    for name in ["api", "rpc", "model"] {
+        let file_name = template_file_name(name)?;
+        let source = from.join(file_name);
+        if source.exists() {
+            fs::copy(&source, to.join(file_name)).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to copy template {} to {}: {err}",
+                    source.display(),
+                    to.join(file_name).display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+struct RemoteTemplateHome {
+    path: PathBuf,
+}
+
+impl RemoteTemplateHome {
+    fn clone(remote: &str, branch: Option<&str>) -> anyhow::Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "rozectl-template-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        let mut command = Command::new("git");
+        command.arg("clone").arg("--depth").arg("1");
+        if let Some(branch) = branch {
+            command.arg("--branch").arg(branch);
+        }
+        command.arg(remote).arg(&path);
+        let status = command
+            .status()
+            .with_context(|| format!("failed to clone template remote {remote}"))?;
+        if !status.success() {
+            anyhow::bail!("template remote clone failed with status {status}");
+        }
+
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for RemoteTemplateHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 fn template_backup_path(path: &Path) -> PathBuf {
@@ -1376,12 +2089,20 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
         for ty in &spec.types {
             out.push_str(&format!("    {} {{\n", ty.name));
             for field in &ty.fields {
-                out.push_str(&format!(
-                    "        {} {}{}\n",
-                    field.name,
-                    field.ty,
-                    format_api_field_tags(field)
-                ));
+                if field.embedded {
+                    out.push_str(&format!(
+                        "        {}{}\n",
+                        field.ty,
+                        format_api_field_tags(field)
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "        {} {}{}\n",
+                        field.name,
+                        field.ty,
+                        format_api_field_tags(field)
+                    ));
+                }
             }
             out.push_str("    }\n");
         }
@@ -1414,6 +2135,7 @@ fn render_api_server_block(out: &mut String, server: &parser::ServerSpec, indent
 fn format_api_http_method(method: &parser::HttpMethod) -> &'static str {
     match method {
         parser::HttpMethod::Get => "get",
+        parser::HttpMethod::Head => "head",
         parser::HttpMethod::Post => "post",
         parser::HttpMethod::Put => "put",
         parser::HttpMethod::Patch => "patch",
@@ -1765,6 +2487,7 @@ fn validation_resolved_handler_name(route: &parser::RestRoute) -> String {
 fn validation_handler_name(method: &parser::HttpMethod, path: &str) -> String {
     let method = match method {
         parser::HttpMethod::Get => "get",
+        parser::HttpMethod::Head => "head",
         parser::HttpMethod::Post => "post",
         parser::HttpMethod::Put => "put",
         parser::HttpMethod::Patch => "patch",
@@ -2209,6 +2932,7 @@ fn rest_route_key(spec: &parser::ApiSpec, route: &parser::RestRoute) -> String {
 fn http_method_name(method: &parser::HttpMethod) -> &'static str {
     match method {
         parser::HttpMethod::Get => "GET",
+        parser::HttpMethod::Head => "HEAD",
         parser::HttpMethod::Post => "POST",
         parser::HttpMethod::Put => "PUT",
         parser::HttpMethod::Patch => "PATCH",
@@ -2863,8 +3587,213 @@ fn options(force: bool, update: bool, roze_source: RozeSource) -> GenerateOption
     GenerateOptions::new(mode, roze_source.into())
 }
 
+fn render_completion(shell: CompletionShell) -> &'static str {
+    match shell {
+        CompletionShell::Bash => {
+            r#"_rozectl()
+{
+    local cur prev commands
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm completion env upgrade quickstart help"
+    case "$prev" in
+        rozectl)
+            COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+            return 0
+            ;;
+        api)
+            COMPREPLY=( $(compgen -W "generate go swagger new client ts js dart java kotlin swift ios android doc plugin validate format" -- "$cur") )
+            return 0
+            ;;
+        rpc)
+            COMPREPLY=( $(compgen -W "generate new protoc template" -- "$cur") )
+            return 0
+            ;;
+        model)
+            COMPREPLY=( $(compgen -W "generate inspect mysql pg mongo" -- "$cur") )
+            return 0
+            ;;
+        completion)
+            COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "$cur") )
+            return 0
+            ;;
+    esac
+}
+complete -F _rozectl rozectl
+"#
+        }
+        CompletionShell::Zsh => {
+            r#"#compdef rozectl
+_rozectl() {
+  local -a commands
+  commands=(
+    'api:generate REST services, clients, docs, and plugins'
+    'rpc:generate RPC services and templates'
+    'model:generate or inspect database models'
+    'search:generate or inspect search repositories'
+    'stream:generate stream workers'
+    'template:manage starter templates'
+    'diff:preview generated changes'
+    'contract:check contract compatibility'
+    'mock:generate mock servers'
+    'test:generate contract tests'
+    'dev:manage local dependency stack'
+    'doctor:check local environment'
+    'doc:generate service documentation'
+    'openapi:write OpenAPI documents'
+    'docker:write Dockerfile'
+    'kube:write or validate Kubernetes manifests'
+    'helm:write or validate Helm charts'
+    'completion:print shell completion'
+    'env:print rozectl environment'
+    'upgrade:upgrade rozectl'
+    'quickstart:create a starter Roze project'
+  )
+  _describe 'command' commands
+}
+compdef _rozectl rozectl
+"#
+        }
+        CompletionShell::Fish => {
+            r#"complete -c rozectl -f
+complete -c rozectl -n "__fish_use_subcommand" -a "api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm completion env upgrade quickstart help"
+complete -c rozectl -n "__fish_seen_subcommand_from api" -a "generate go swagger new client ts js dart java kotlin swift ios android doc plugin validate format"
+complete -c rozectl -n "__fish_seen_subcommand_from rpc" -a "generate new protoc template"
+complete -c rozectl -n "__fish_seen_subcommand_from model" -a "generate inspect mysql pg mongo"
+complete -c rozectl -n "__fish_seen_subcommand_from completion" -a "bash zsh fish powershell"
+"#
+        }
+        CompletionShell::Powershell => {
+            r#"Register-ArgumentCompleter -Native -CommandName rozectl -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $commands = 'api','rpc','model','search','stream','template','diff','contract','mock','test','dev','doctor','doc','openapi','docker','kube','helm','completion','env','upgrade','quickstart','help'
+    $commands |
+        Where-Object { $_ -like "$wordToComplete*" } |
+        ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }
+}
+"#
+        }
+    }
+}
+
+fn run_env() -> anyhow::Result<()> {
+    println!("ROZECTL_BIN={}", std::env::current_exe()?.display());
+    println!(
+        "ROZECTL_VERSION={}",
+        option_env!("CARGO_PKG_VERSION").unwrap_or("unknown")
+    );
+    println!("CARGO_HOME={}", env_or_empty("CARGO_HOME"));
+    println!("RUSTUP_HOME={}", env_or_empty("RUSTUP_HOME"));
+    println!("RUST_LOG={}", env_or_empty("RUST_LOG"));
+    println!("PATH={}", env_or_empty("PATH"));
+    Ok(())
+}
+
+fn env_or_empty(name: &str) -> String {
+    std::env::var(name).unwrap_or_default()
+}
+
+fn run_upgrade(
+    repo: &str,
+    branch: Option<&str>,
+    rev: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let mut args = vec![
+        "install".to_string(),
+        "--git".to_string(),
+        repo.to_string(),
+        "rozectl".to_string(),
+        "--force".to_string(),
+    ];
+    if let Some(branch) = branch {
+        args.push("--branch".to_string());
+        args.push(branch.to_string());
+    }
+    if let Some(rev) = rev {
+        args.push("--rev".to_string());
+        args.push(rev.to_string());
+    }
+
+    if dry_run {
+        println!("cargo {}", args.join(" "));
+        return Ok(());
+    }
+
+    let status = Command::new("cargo")
+        .args(&args)
+        .status()
+        .context("failed to run cargo install for rozectl upgrade")?;
+    if !status.success() {
+        anyhow::bail!("rozectl upgrade failed with status {status}");
+    }
+    Ok(())
+}
+
+fn resolve_client_out(dir: PathBuf, out: Option<PathBuf>, default_name: &str) -> PathBuf {
+    out.unwrap_or_else(|| dir.join(default_name))
+}
+
+fn resolve_input_path(
+    positional: Option<PathBuf>,
+    flagged: Option<PathBuf>,
+    name: &str,
+) -> anyhow::Result<PathBuf> {
+    match (positional, flagged) {
+        (Some(positional), None) => Ok(positional),
+        (None, Some(flagged)) => Ok(flagged),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("pass `{name}` either positionally or with --{name}, not both")
+        }
+        (None, None) => anyhow::bail!("missing required `{name}` input"),
+    }
+}
+
 fn resolve_new_out(name: &str, out: Option<PathBuf>) -> PathBuf {
     out.unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn run_sql_model_compat(
+    command: ModelSqlCompatCommands,
+    db_kind: DbKind,
+    registry: &generator::GeneratorRegistry,
+) -> anyhow::Result<()> {
+    match command {
+        ModelSqlCompatCommands::Datasource {
+            db_url,
+            table,
+            schema,
+            dir,
+            force,
+            update,
+            roze_source,
+            orm,
+        } => registry.dispatch(GeneratorCommand::ModelInspect {
+            table,
+            schema,
+            db_url,
+            db_kind: db_kind.into(),
+            sample_size: 100,
+            out: dir,
+            options: options(force, update, roze_source),
+            orm: orm.into(),
+        }),
+        ModelSqlCompatCommands::Ddl {
+            src,
+            dir,
+            force,
+            update,
+            roze_source,
+            orm,
+        } => registry.dispatch(GeneratorCommand::ModelGenerate {
+            schema: src,
+            out: dir,
+            options: options(force, update, roze_source),
+            format: generator::model::ModelFormat::Sql,
+            orm: orm.into(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -2873,7 +3802,7 @@ mod tests {
     use clap::Parser;
 
     fn parse(args: impl IntoIterator<Item = &'static str>) -> Cli {
-        Cli::try_parse_from(args).expect("parse cli")
+        try_parse_cli_from(args).expect("parse cli")
     }
 
     fn temp_test_root(name: &str) -> PathBuf {
@@ -3130,6 +4059,73 @@ spec:
             }
         ));
 
+        let api_gen = Cli::try_parse_from(["rozectl", "api", "gen", "user.api", "-o", "out"])
+            .expect("parse api gen alias");
+        assert!(matches!(
+            api_gen.command,
+            Commands::Api {
+                command: ApiCommands::Generate { .. }
+            }
+        ));
+
+        let api_gen_flagged =
+            Cli::try_parse_from(["rozectl", "api", "gen", "--api", "user.api", "--dir", "out"])
+                .expect("parse api gen with api flag");
+        assert!(matches!(
+            api_gen_flagged.command,
+            Commands::Api {
+                command: ApiCommands::Generate {
+                    api_file: Some(_),
+                    dir: Some(_),
+                    ..
+                }
+            }
+        ));
+
+        let api_go = Cli::try_parse_from([
+            "rozectl", "api", "go", "--api", "user.api", "--dir", "out", "--update", "--style",
+            "go_zero",
+        ])
+        .expect("parse goctl-style api go");
+        assert!(matches!(
+            api_go.command,
+            Commands::Api {
+                command: ApiCommands::Go { update: true, .. }
+            }
+        ));
+
+        let api_go_single_dash = parse([
+            "rozectl", "api", "go", "-api", "user.api", "-dir", "out", "-style", "go_zero",
+        ]);
+        assert!(matches!(
+            api_go_single_dash.command,
+            Commands::Api {
+                command: ApiCommands::Go { .. }
+            }
+        ));
+
+        let api_swagger = Cli::try_parse_from([
+            "rozectl", "api", "swagger", "--api", "user.api", "--dir", "docs",
+        ])
+        .expect("parse goctl-style api swagger");
+        assert!(matches!(
+            api_swagger.command,
+            Commands::Api {
+                command: ApiCommands::Swagger { yaml: false, .. }
+            }
+        ));
+
+        let api_swagger_yaml = Cli::try_parse_from([
+            "rozectl", "api", "swagger", "--api", "user.api", "--dir", "docs", "--yaml",
+        ])
+        .expect("parse goctl-style api swagger yaml");
+        assert!(matches!(
+            api_swagger_yaml.command,
+            Commands::Api {
+                command: ApiCommands::Swagger { yaml: true, .. }
+            }
+        ));
+
         let rpc = Cli::try_parse_from(["rozectl", "rpc", "protoc", "user.api"])
             .expect("parse rpc protoc");
         assert!(matches!(
@@ -3139,12 +4135,96 @@ spec:
             }
         ));
 
+        let rpc_gen = Cli::try_parse_from(["rozectl", "rpc", "gen", "user.api", "--o", "out"])
+            .expect("parse rpc gen alias");
+        assert!(matches!(
+            rpc_gen.command,
+            Commands::Rpc {
+                command: RpcCommands::Generate { .. }
+            }
+        ));
+
+        let rpc_gen_single_dash =
+            parse(["rozectl", "rpc", "gen", "-api", "user.api", "-dir", "out"]);
+        assert!(matches!(
+            rpc_gen_single_dash.command,
+            Commands::Rpc {
+                command: RpcCommands::Generate {
+                    api_file: Some(_),
+                    dir: Some(_),
+                    ..
+                }
+            }
+        ));
+
+        let rpc_gen_flagged =
+            Cli::try_parse_from(["rozectl", "rpc", "gen", "--api", "user.api", "--dir", "out"])
+                .expect("parse rpc gen with api flag");
+        assert!(matches!(
+            rpc_gen_flagged.command,
+            Commands::Rpc {
+                command: RpcCommands::Generate {
+                    api_file: Some(_),
+                    dir: Some(_),
+                    ..
+                }
+            }
+        ));
+
+        let rpc_gen_multiple =
+            Cli::try_parse_from(["rozectl", "rpc", "gen", "--api", "user.api", "-m"])
+                .expect("parse rpc gen multiple");
+        assert!(matches!(
+            rpc_gen_multiple.command,
+            Commands::Rpc {
+                command: RpcCommands::Generate { multiple: true, .. }
+            }
+        ));
+
+        let rpc_protoc_multiple =
+            Cli::try_parse_from(["rozectl", "rpc", "protoc", "user.proto", "--multiple"])
+                .expect("parse rpc protoc multiple");
+        assert!(matches!(
+            rpc_protoc_multiple.command,
+            Commands::Rpc {
+                command: RpcCommands::Protoc { multiple: true, .. }
+            }
+        ));
+
+        let rpc_template = Cli::try_parse_from(["rozectl", "rpc", "template", "-o", "rpc.api"])
+            .expect("parse goctl-style rpc template");
+        assert!(matches!(
+            rpc_template.command,
+            Commands::Rpc {
+                command: RpcCommands::Template { out: Some(_), .. }
+            }
+        ));
+
         let template =
             Cli::try_parse_from(["rozectl", "template", "show", "api"]).expect("parse template");
         assert!(matches!(
             template.command,
             Commands::Template {
                 command: TemplateCommands::Show { .. }
+            }
+        ));
+
+        let template_list =
+            Cli::try_parse_from(["rozectl", "template", "list", "--home", "templates"])
+                .expect("parse template list home");
+        assert!(matches!(
+            template_list.command,
+            Commands::Template {
+                command: TemplateCommands::List { dir: Some(_) }
+            }
+        ));
+
+        let template_list_single_dash =
+            parse(["rozectl", "template", "list", "-home", "templates"]);
+        assert!(matches!(
+            template_list_single_dash.command,
+            Commands::Template {
+                command: TemplateCommands::List { dir: Some(_) }
             }
         ));
 
@@ -3172,6 +4252,30 @@ spec:
             template_update.command,
             Commands::Template {
                 command: TemplateCommands::Update { force: true, .. }
+            }
+        ));
+
+        let template_update_remote = Cli::try_parse_from([
+            "rozectl",
+            "template",
+            "update",
+            "api",
+            "--home",
+            "templates",
+            "--remote",
+            "https://example.com/templates.git",
+            "--branch",
+            "main",
+        ])
+        .expect("parse template update remote");
+        assert!(matches!(
+            template_update_remote.command,
+            Commands::Template {
+                command: TemplateCommands::Update {
+                    remote: Some(_),
+                    branch: Some(_),
+                    ..
+                }
             }
         ));
 
@@ -3211,6 +4315,42 @@ spec:
             }
         ));
 
+        let openapi_gen = Cli::try_parse_from([
+            "rozectl",
+            "openapi",
+            "gen",
+            "user.api",
+            "--o",
+            "openapi.json",
+        ])
+        .expect("parse openapi gen alias");
+        assert!(matches!(
+            openapi_gen.command,
+            Commands::Openapi {
+                command: OpenApiCommands::Generate { .. }
+            }
+        ));
+
+        let openapi_gen_flagged = Cli::try_parse_from([
+            "rozectl",
+            "openapi",
+            "gen",
+            "--api",
+            "user.api",
+            "--o",
+            "openapi.json",
+        ])
+        .expect("parse openapi gen with api flag");
+        assert!(matches!(
+            openapi_gen_flagged.command,
+            Commands::Openapi {
+                command: OpenApiCommands::Generate {
+                    api_file: Some(_),
+                    ..
+                }
+            }
+        ));
+
         let diff = Cli::try_parse_from(["rozectl", "diff", "api", "user.api", "--out", "out"])
             .expect("parse diff api");
         assert!(matches!(
@@ -3238,6 +4378,16 @@ spec:
                     engine: SearchEngine::Opensearch,
                     ..
                 }
+            }
+        ));
+
+        let search_gen =
+            Cli::try_parse_from(["rozectl", "search", "gen", "search.schema", "-o", "out"])
+                .expect("parse search gen alias");
+        assert!(matches!(
+            search_gen.command,
+            Commands::Search {
+                command: SearchCommands::Generate { .. }
             }
         ));
 
@@ -3404,6 +4554,16 @@ spec:
             }
         ));
 
+        let direct_ts_client =
+            Cli::try_parse_from(["rozectl", "api", "ts", "--api", "user.api", "--dir", "sdk"])
+                .expect("parse goctl-style api ts");
+        assert!(matches!(
+            direct_ts_client.command,
+            Commands::Api {
+                command: ApiCommands::Ts { .. }
+            }
+        ));
+
         let js_client = Cli::try_parse_from([
             "rozectl",
             "api",
@@ -3420,6 +4580,16 @@ spec:
                 command: ApiCommands::Client {
                     command: ClientCommands::Js { .. }
                 }
+            }
+        ));
+
+        let direct_js_client =
+            Cli::try_parse_from(["rozectl", "api", "js", "-a", "user.api", "-d", "sdk"])
+                .expect("parse goctl-style api js");
+        assert!(matches!(
+            direct_js_client.command,
+            Commands::Api {
+                command: ApiCommands::Js { .. }
             }
         ));
 
@@ -3442,6 +4612,158 @@ spec:
             }
         ));
 
+        let direct_dart_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "dart",
+            "-a",
+            "user.api",
+            "-o",
+            "sdk/user.dart",
+        ])
+        .expect("parse goctl-style api dart");
+        assert!(matches!(
+            direct_dart_client.command,
+            Commands::Api {
+                command: ApiCommands::Dart { out: Some(_), .. }
+            }
+        ));
+
+        let java_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "java",
+            "user.api",
+            "--out",
+            "sdk/RozeApiClient.java",
+        ])
+        .expect("parse api client java");
+        assert!(matches!(
+            java_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Java { .. }
+                }
+            }
+        ));
+
+        let kotlin_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "kotlin",
+            "user.api",
+            "--out",
+            "sdk/RozeApiClient.kt",
+        ])
+        .expect("parse api client kotlin");
+        assert!(matches!(
+            kotlin_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Kotlin { .. }
+                }
+            }
+        ));
+
+        let direct_java_client =
+            Cli::try_parse_from(["rozectl", "api", "java", "-a", "user.api", "-d", "sdk"])
+                .expect("parse goctl-style api java");
+        assert!(matches!(
+            direct_java_client.command,
+            Commands::Api {
+                command: ApiCommands::Java { .. }
+            }
+        ));
+
+        let direct_kotlin_client =
+            Cli::try_parse_from(["rozectl", "api", "kotlin", "-a", "user.api", "-d", "sdk"])
+                .expect("parse goctl-style api kotlin");
+        assert!(matches!(
+            direct_kotlin_client.command,
+            Commands::Api {
+                command: ApiCommands::Kotlin { .. }
+            }
+        ));
+
+        let swift_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "swift",
+            "user.api",
+            "--out",
+            "sdk/RozeApiClient.swift",
+        ])
+        .expect("parse api client swift");
+        assert!(matches!(
+            swift_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Swift { .. }
+                }
+            }
+        ));
+
+        let ios_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "ios",
+            "user.api",
+            "--out",
+            "sdk/RozeApiClient.swift",
+        ])
+        .expect("parse api client ios");
+        assert!(matches!(
+            ios_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Ios { .. }
+                }
+            }
+        ));
+
+        let android_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "android",
+            "user.api",
+            "--out",
+            "sdk/RozeApiClient.kt",
+        ])
+        .expect("parse api client android");
+        assert!(matches!(
+            android_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Android { .. }
+                }
+            }
+        ));
+
+        let direct_ios_client =
+            Cli::try_parse_from(["rozectl", "api", "ios", "-a", "user.api", "-d", "sdk"])
+                .expect("parse goctl-style api ios");
+        assert!(matches!(
+            direct_ios_client.command,
+            Commands::Api {
+                command: ApiCommands::Ios { .. }
+            }
+        ));
+
+        let direct_android_client =
+            Cli::try_parse_from(["rozectl", "api", "android", "-a", "user.api", "-d", "sdk"])
+                .expect("parse goctl-style api android");
+        assert!(matches!(
+            direct_android_client.command,
+            Commands::Api {
+                command: ApiCommands::Android { .. }
+            }
+        ));
+
         let mongo = Cli::try_parse_from([
             "rozectl",
             "model",
@@ -3456,6 +4778,124 @@ spec:
             Commands::Model {
                 command: ModelCommands::Generate {
                     format: ModelFormat::Mongo,
+                    ..
+                }
+            }
+        ));
+
+        let model_gen = Cli::try_parse_from([
+            "rozectl", "model", "gen", "user.sql", "--format", "sql", "--o", "models",
+        ])
+        .expect("parse model gen alias");
+        assert!(matches!(
+            model_gen.command,
+            Commands::Model {
+                command: ModelCommands::Generate {
+                    format: ModelFormat::Sql,
+                    ..
+                }
+            }
+        ));
+
+        let mysql_datasource = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "mysql",
+            "datasource",
+            "--url",
+            "mysql://root:root@127.0.0.1:3306/roze",
+            "--table",
+            "users",
+            "--dir",
+            "models",
+        ])
+        .expect("parse goctl-style model mysql datasource");
+        assert!(matches!(
+            mysql_datasource.command,
+            Commands::Model {
+                command: ModelCommands::Mysql {
+                    command: ModelSqlCompatCommands::Datasource { .. }
+                }
+            }
+        ));
+
+        let pg_ddl = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "pg",
+            "ddl",
+            "--src",
+            "schema.sql",
+            "--dir",
+            "models",
+        ])
+        .expect("parse goctl-style model pg ddl");
+        assert!(matches!(
+            pg_ddl.command,
+            Commands::Model {
+                command: ModelCommands::Pg {
+                    command: ModelSqlCompatCommands::Ddl { .. }
+                }
+            }
+        ));
+
+        let pg_ddl_single_dash = parse([
+            "rozectl",
+            "model",
+            "pg",
+            "ddl",
+            "-src",
+            "schema.sql",
+            "-dir",
+            "models",
+        ]);
+        assert!(matches!(
+            pg_ddl_single_dash.command,
+            Commands::Model {
+                command: ModelCommands::Pg {
+                    command: ModelSqlCompatCommands::Ddl { .. }
+                }
+            }
+        ));
+
+        let mongo_compat = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "mongo",
+            "--collection",
+            "users",
+            "--db-url",
+            "mongodb://127.0.0.1:27017/roze",
+            "--dir",
+            "models",
+        ])
+        .expect("parse goctl-style model mongo");
+        assert!(matches!(
+            mongo_compat.command,
+            Commands::Model {
+                command: ModelCommands::Mongo {
+                    collection: Some(_),
+                    ..
+                }
+            }
+        ));
+
+        let mongo_compat_single_dash = parse([
+            "rozectl",
+            "model",
+            "mongo",
+            "-collection",
+            "users",
+            "-db-url",
+            "mongodb://127.0.0.1:27017/roze",
+            "-dir",
+            "models",
+        ]);
+        assert!(matches!(
+            mongo_compat_single_dash.command,
+            Commands::Model {
+                command: ModelCommands::Mongo {
+                    collection: Some(_),
                     ..
                 }
             }
@@ -3496,6 +4936,24 @@ spec:
             }
         ));
 
+        let client_o = parse([
+            "rozectl",
+            "api",
+            "client",
+            "ts",
+            "user.api",
+            "--o",
+            "sdk/user.ts",
+        ]);
+        assert!(matches!(
+            client_o.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Ts { .. }
+                }
+            }
+        ));
+
         let api_validate = parse(["rozectl", "api", "validate", "user.api"]);
         assert!(matches!(
             api_validate.command,
@@ -3504,11 +4962,35 @@ spec:
             }
         ));
 
+        let api_validate_flagged = parse(["rozectl", "api", "validate", "--api", "user.api"]);
+        assert!(matches!(
+            api_validate_flagged.command,
+            Commands::Api {
+                command: ApiCommands::Validate {
+                    api_file: Some(_),
+                    ..
+                }
+            }
+        ));
+
         let api_format = parse(["rozectl", "api", "format", "user.api", "--check"]);
         assert!(matches!(
             api_format.command,
             Commands::Api {
                 command: ApiCommands::Format { check: true, .. }
+            }
+        ));
+
+        let api_format_flagged =
+            parse(["rozectl", "api", "format", "--api", "user.api", "--write"]);
+        assert!(matches!(
+            api_format_flagged.command,
+            Commands::Api {
+                command: ApiCommands::Format {
+                    api_file: Some(_),
+                    write: true,
+                    ..
+                }
             }
         ));
 
@@ -3548,7 +5030,18 @@ spec:
             }
         ));
 
-        let doc = Cli::try_parse_from(["rozectl", "api", "doc", "--dir", ".", "--out", "doc"])
+        let stream_generate = Cli::try_parse_from([
+            "rozectl", "stream", "generate", "--api", "user.api", "--o", "stream",
+        ])
+        .expect("parse stream generate alias");
+        assert!(matches!(
+            stream_generate.command,
+            Commands::Stream {
+                command: StreamCommands::Gen { .. }
+            }
+        ));
+
+        let doc = Cli::try_parse_from(["rozectl", "api", "doc", "--dir", ".", "--o", "doc"])
             .expect("parse api doc");
         assert!(matches!(
             doc.command,
@@ -3570,6 +5063,54 @@ spec:
 
         let docker = parse(["rozectl", "docker", "--binary", "user-api"]);
         assert!(matches!(docker.command, Commands::Docker { .. }));
+
+        let completion = parse(["rozectl", "completion", "powershell"]);
+        assert!(matches!(
+            completion.command,
+            Commands::Completion {
+                shell: CompletionShell::Powershell
+            }
+        ));
+
+        let env = parse(["rozectl", "env"]);
+        assert!(matches!(env.command, Commands::Env));
+
+        let upgrade = parse([
+            "rozectl",
+            "upgrade",
+            "--repo",
+            "https://example.com/roze.git",
+            "--branch",
+            "main",
+            "--dry-run",
+        ]);
+        assert!(matches!(
+            upgrade.command,
+            Commands::Upgrade {
+                branch: Some(_),
+                dry_run: true,
+                ..
+            }
+        ));
+
+        let quickstart = parse([
+            "rozectl",
+            "quickstart",
+            "demo",
+            "--kind",
+            "rpc",
+            "--o",
+            "out",
+        ]);
+        assert!(matches!(
+            quickstart.command,
+            Commands::Quickstart {
+                name,
+                kind: QuickstartKind::Rpc,
+                out: Some(_),
+                ..
+            } if name == "demo"
+        ));
 
         let kube = Cli::try_parse_from([
             "rozectl",
@@ -3648,6 +5189,16 @@ spec:
                 command: HelmCommands::Validate { .. }
             }
         ));
+    }
+
+    #[test]
+    fn renders_completion_scripts() {
+        assert!(render_completion(CompletionShell::Bash).contains("complete -F _rozectl rozectl"));
+        assert!(render_completion(CompletionShell::Zsh).contains("#compdef rozectl"));
+        assert!(render_completion(CompletionShell::Fish).contains("complete -c rozectl"));
+        assert!(
+            render_completion(CompletionShell::Powershell).contains("Register-ArgumentCompleter")
+        );
     }
 
     #[test]
@@ -4306,6 +5857,24 @@ type (
     }
 
     #[test]
+    fn template_source_reads_local_home() {
+        let root = std::env::temp_dir().join(format!(
+            "rozectl-template-home-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create template root");
+        fs::write(root.join("api.api"), "custom api template\n").expect("write local template");
+
+        let source = template_source("api", Some(&root), None, None).expect("read local template");
+        assert_eq!(source, "custom api template\n");
+
+        fs::remove_dir_all(root).expect("remove template root");
+    }
+
+    #[test]
     fn template_update_protects_local_customizations() {
         let root = std::env::temp_dir().join(format!(
             "rozectl-template-update-test-{}",
@@ -4318,14 +5887,15 @@ type (
         let api_template = root.join("api.api");
         fs::write(&api_template, "custom template\n").expect("write custom template");
 
-        let err = run_template_update("api", &root, false).expect_err("custom template rejected");
+        let err = run_template_update("api", &root, None, None, false)
+            .expect_err("custom template rejected");
         assert!(err.to_string().contains("diff api"));
         assert_eq!(
             fs::read_to_string(&api_template).expect("read custom template"),
             "custom template\n"
         );
 
-        run_template_update("api", &root, true).expect("force update template");
+        run_template_update("api", &root, None, None, true).expect("force update template");
         assert_eq!(
             fs::read_to_string(&api_template).expect("read updated template"),
             generator::template("api").expect("builtin template")
@@ -4347,7 +5917,7 @@ type (
         let api_template = root.join("api.api");
         fs::write(&api_template, "custom template\n").expect("write custom template");
 
-        run_template_revert("api", &root, true).expect("revert template");
+        run_template_revert("api", &root, None, None, true).expect("revert template");
         assert_eq!(
             fs::read_to_string(&api_template).expect("read reverted template"),
             generator::template("api").expect("builtin template")
@@ -4360,7 +5930,7 @@ type (
         fs::write(&api_template, "custom again\n").expect("write custom template again");
         let backup_path = template_backup_path(&api_template);
         fs::remove_file(&backup_path).expect("remove backup");
-        run_template_revert("api", &root, false).expect("revert without backup");
+        run_template_revert("api", &root, None, None, false).expect("revert without backup");
         assert!(!backup_path.exists());
         assert_eq!(
             fs::read_to_string(&api_template).expect("read reverted template"),

@@ -1099,6 +1099,7 @@ fn is_number_literal(value: &str) -> bool {
 fn handler_name(method: &HttpMethod, path: &str) -> String {
     let method = match method {
         HttpMethod::Get => "get",
+        HttpMethod::Head => "head",
         HttpMethod::Post => "post",
         HttpMethod::Put => "put",
         HttpMethod::Patch => "patch",

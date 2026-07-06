@@ -979,6 +979,7 @@ fn field_source_name(source: FieldSource) -> &'static str {
 fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
     match method {
         crate::parser::HttpMethod::Get => "GET",
+        crate::parser::HttpMethod::Head => "HEAD",
         crate::parser::HttpMethod::Post => "POST",
         crate::parser::HttpMethod::Put => "PUT",
         crate::parser::HttpMethod::Patch => "PATCH",
@@ -1161,6 +1162,7 @@ fn parse_proto_field(line: &str) -> anyhow::Result<Option<Field>> {
     Ok(Some(Field {
         name: name.trim_end_matches(';').to_string(),
         ty,
+        embedded: false,
         json_name: Some(name.trim_end_matches(';').to_string()),
         source: FieldSource::Auto,
         wire_name: Some(name.trim_end_matches(';').to_string()),

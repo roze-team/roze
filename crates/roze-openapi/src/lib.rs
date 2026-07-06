@@ -26,6 +26,8 @@ pub struct PathItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get: Option<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub post: Option<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub put: Option<Operation>,
@@ -166,6 +168,7 @@ pub struct OpenApiBuilder {
 #[derive(Debug, Clone, Copy)]
 pub enum HttpMethod {
     Get,
+    Head,
     Post,
     Put,
     Patch,
@@ -230,6 +233,7 @@ impl OpenApiBuilder {
         let item = self.document.paths.entry(path).or_default();
         match method {
             HttpMethod::Get => item.get = Some(operation),
+            HttpMethod::Head => item.head = Some(operation),
             HttpMethod::Post => item.post = Some(operation),
             HttpMethod::Put => item.put = Some(operation),
             HttpMethod::Patch => item.patch = Some(operation),
@@ -468,6 +472,11 @@ mod tests {
         );
         builder.add_operation("/login", HttpMethod::Post, op);
         builder.add_operation(
+            "/ping",
+            HttpMethod::Head,
+            Operation::new("ping").empty_response("204", "No Content"),
+        );
+        builder.add_operation(
             "/profile",
             HttpMethod::Patch,
             Operation::new("updateProfile").response("200", "OK", "LoginResp"),
@@ -479,6 +488,7 @@ mod tests {
         assert_eq!(json["info"]["title"], "roze");
         assert_eq!(json["servers"][0]["url"], "/api");
         assert_eq!(json["paths"]["/login"]["post"]["operation_id"], "login");
+        assert_eq!(json["paths"]["/ping"]["head"]["operation_id"], "ping");
         assert_eq!(
             json["paths"]["/profile"]["patch"]["operation_id"],
             "updateProfile"

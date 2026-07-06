@@ -37,6 +37,36 @@ cargo install --git https://github.com/roze-team/roze.git rozectl --force
 See [usage documentation](./README.md#install-rozectl) for local install,
 upgrade, and PATH troubleshooting.
 
+Inspect the installed binary environment or upgrade through the CLI:
+
+```bash
+rozectl env
+rozectl upgrade
+rozectl upgrade --branch main
+rozectl upgrade --dry-run
+```
+
+Generate shell completion scripts:
+
+```bash
+rozectl completion bash
+rozectl completion zsh
+rozectl completion fish
+rozectl completion powershell
+```
+
+Create a starter REST or RPC project quickly:
+
+```bash
+rozectl quickstart
+rozectl quickstart user-api --kind api --o services/user-api
+rozectl quickstart user-rpc --kind rpc --o services/user-rpc
+```
+
+`quickstart` is a goctl-style convenience wrapper over the same starter
+generators used by `rozectl api new` and `rozectl rpc new`; it does not create a
+separate project layout.
+
 Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
 instead of inheriting `edition.workspace`. Toasty is the default SQL model ORM,
 and generated Toasty dependencies use MySQL/PostgreSQL features only; sqlite
@@ -48,7 +78,21 @@ Generate a REST service:
 
 ```bash
 cargo run -p rozectl -- api generate example/user.api --out apps/roze-example --roze-source path
+rozectl api gen example/user.api -o apps/roze-example
+rozectl api gen --api example/user.api --dir apps/roze-example
 ```
+
+goctl-compatible REST generation is also accepted:
+
+```bash
+rozectl api go --api example/user.api --dir apps/roze-example
+rozectl api go -api example/user.api -dir apps/roze-example -style go_zero
+```
+
+For goctl migration, `rozectl` accepts Go flag-style single-dash long options
+for known compatibility flags such as `-api`, `-dir`, `-style`, `-home`,
+`-src`, `-collection`, and `-db-url`. Native Roze examples use standard
+POSIX-style `--api` and short options such as `-o`.
 
 Regenerate framework-owned files while preserving user logic and config:
 
@@ -93,6 +137,7 @@ Validate an API contract before generating:
 
 ```bash
 rozectl api validate example/user.api
+rozectl api validate --api example/user.api
 ```
 
 `api validate` parses the `.api` file and checks contract-level consistency
@@ -115,6 +160,7 @@ Format an API contract:
 
 ```bash
 rozectl api format example/user.api
+rozectl api format --api example/user.api
 rozectl api format example/user.api --check
 rozectl api format example/user.api --write
 ```
@@ -131,8 +177,12 @@ Inspect and compare built-in starter templates:
 rozectl template list
 rozectl template show api
 rozectl template init --out templates
+rozectl template init --home templates
+rozectl template init --home templates --remote https://example.com/roze-templates.git --branch main
 rozectl template diff api --dir templates
+rozectl template diff api --home templates
 rozectl template update api --dir templates
+rozectl template update api --home templates --remote https://example.com/roze-templates.git --branch main
 rozectl template update api --dir templates --force
 rozectl template revert api --dir templates
 rozectl template revert api --dir templates --no-backup
@@ -146,6 +196,11 @@ update` creates a missing local template from the built-in copy, but refuses to
 overwrite a changed local template unless `--force` is passed. `template
 revert` restores a local template to the built-in copy and writes a `.bak`
 backup first unless `--no-backup` is passed.
+`--home` is accepted as a goctl-compatible alias for the local template
+directory. `template init`, `diff`, `update`, and `revert` also accept
+`--remote` plus optional `--branch`; rozectl clones the remote template
+repository temporarily, reads `api.api`, `rpc.api`, or `model.model`, and then
+removes the temporary checkout.
 
 Check contract breaking changes before regenerating or releasing:
 
@@ -281,20 +336,46 @@ Generate client SDKs:
 
 ```bash
 rozectl api client ts example/user.api --out sdk/user.ts
+rozectl api client ts example/user.api --o sdk/user.ts
 rozectl api client js example/user.api --out sdk/user.js
 rozectl api client dart example/user.api --out sdk/user.dart
+rozectl api client java example/user.api --out sdk/RozeApiClient.java
+rozectl api client kotlin example/user.api --out sdk/RozeApiClient.kt
+rozectl api client swift example/user.api --out sdk/RozeApiClient.swift
+rozectl api client ios example/user.api --out sdk/RozeApiClient.swift
+rozectl api client android example/user.api --out sdk/RozeApiClient.kt
+rozectl api ts --api example/user.api --dir sdk
+rozectl api js --api example/user.api --dir sdk
+rozectl api dart --api example/user.api --dir sdk
+rozectl api java --api example/user.api --dir sdk
+rozectl api kotlin --api example/user.api --dir sdk
+rozectl api swift --api example/user.api --dir sdk
+rozectl api ios --api example/user.api --dir sdk
+rozectl api android --api example/user.api --dir sdk
 ```
+
+Java/Kotlin/Android SDKs use the JDK HTTP client and Swift/iOS SDKs use
+Foundation `URLSession`. These generated clients return raw JSON response
+strings and do not require Jackson, Gson, Moshi, or other runtime dependencies.
 
 Generate an OpenAPI 3 document:
 
 ```bash
 rozectl openapi generate example/user.api --out openapi.json
+rozectl openapi gen example/user.api --o openapi.json
+rozectl openapi gen --api example/user.api --o openapi.json
+rozectl api swagger --api example/user.api --dir docs
+rozectl api swagger --api example/user.api --dir docs --yaml
 ```
+
+`api swagger` is the goctl-compatible entry point and writes
+`swagger.json` under `--dir`; pass `--yaml` to write `swagger.yaml` instead.
 
 Generate Markdown API documentation:
 
 ```bash
 rozectl api doc --api example/user.api --dir . --out docs/api
+rozectl api doc --api example/user.api --dir . --o docs/api
 ```
 
 Run a custom API plugin:
@@ -307,17 +388,34 @@ Generate an RPC service from a real `.proto` file:
 
 ```bash
 rozectl rpc protoc example/user.proto --out services/user-rpc
+rozectl rpc gen example/user.api --o services/user-rpc
+rozectl rpc gen --api example/user.api --dir services/user-rpc
+rozectl rpc gen --api example/user.api --dir services/user-rpc -m
+rozectl rpc protoc example/user.proto --out services/user-rpc --multiple
+rozectl rpc template -o rpc.api
+rozectl rpc template --o rpc.api
 ```
+
+`rpc template` is provided for goctl command-shape compatibility. Without
+`-o/--out`, it prints the built-in RPC `.api` starter template to stdout.
+`-m/--multiple` is accepted for goctl-compatible RPC command shape; Roze RPC
+projects already generate split server, client, protobuf, service context, and
+logic modules.
 
 Generate models:
 
 ```bash
 rozectl model generate example/user.sql --out services/user-api --format sql
+rozectl model gen example/user.sql --o services/user-api --format sql
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
 rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
 rozectl model generate example/user.model --out services/user-api --format mongo
 rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/roze --out services/user-api
+rozectl model mysql datasource --url mysql://root:root@127.0.0.1:3306/roze --table users --dir services/user-api
+rozectl model pg ddl --src example/user.sql --dir services/user-api
+rozectl model mongo --collection users --db-url mongodb://127.0.0.1:27017/roze --dir services/user-api
 rozectl search generate example/user.search --engine elasticsearch --out services/user-api
+rozectl search gen example/user.search --engine elasticsearch --o services/user-api
 rozectl search inspect users --engine meilisearch --url http://127.0.0.1:7700 --out services/user-api
 ```
 
@@ -337,10 +435,14 @@ The parser accepts these Roze contract forms:
 - `type Name { ... }` and grouped `type (...)` blocks.
 - Compact block starts such as `info(`, `type(`, and `@server(`.
 - `service name { ... }` REST route blocks.
+- Multiple `service name { ... }` blocks with the same name; routes are merged
+  in declaration order.
 - `@server`, `@handler`, `@doc`, and `@middleware` annotations.
 - `import (...)` blocks.
 - Route signatures with either `returns (Resp)` or `returns(Resp)`.
-- HTTP methods: `get`, `post`, `put`, `patch`, `delete`.
+- HTTP methods: `get`, `head`, `post`, `put`, `patch`, `delete`.
+- Anonymous embedded fields inside types, rendered as flattened serde fields in
+  generated Rust DTOs.
 
 Example:
 
@@ -366,6 +468,26 @@ service user-api {
   post /logout
 }
 ```
+
+go-zero-style anonymous embedding is accepted in grouped or standalone type
+declarations:
+
+```go
+type (
+  BaseReq {
+    traceId string `json:"traceId,optional" validate:"optional"`
+  }
+
+  CreateUserReq {
+    BaseReq
+    name string `json:"name"`
+  }
+)
+```
+
+Generated Rust DTOs use `#[serde(flatten)]` for embedded fields, so JSON bodies
+continue to use the embedded type's field names rather than a nested
+`baseReq` object.
 
 ## Route-scoped `@server`
 
@@ -776,6 +898,8 @@ SQL DDL:
 ```bash
 rozectl model generate example/user.sql --out services/user-api --format sql
 rozectl model generate example/user.sql --out services/user-api --format sql --orm sea-orm
+rozectl model mysql ddl --src example/user.sql --dir services/user-api
+rozectl model pg ddl --src example/user.sql --dir services/user-api
 ```
 
 Database inspection:
@@ -785,6 +909,9 @@ rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1
 rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api --orm sea-orm
 rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/roze --sample-size 100 --out services/user-api
+rozectl model mysql datasource --url mysql://root:root@127.0.0.1:3306/roze --table users --dir services/user-api
+rozectl model pg datasource --url postgres://postgres:postgres@127.0.0.1:5432/roze --table users --schema public --dir services/user-api
+rozectl model mongo --collection users --db-url mongodb://127.0.0.1:27017/roze --dir services/user-api
 ```
 
 Toasty is the default SQL ORM. `--orm sea-orm` switches SQL/DSL/inspection
@@ -883,6 +1010,7 @@ Mongo model generation uses the standard model generator:
 
 ```bash
 rozectl model generate example/user.model --out services/user-api --format mongo
+rozectl model mongo --schema example/user.model --dir services/user-api
 ```
 
 The Mongo output creates a Rust module with a model type, repository, typed CRUD
@@ -1105,6 +1233,24 @@ The plugin receives the same JSON payload through stdin and environment:
 | `ROZECTL_OUT_DIR` | output directory passed by `--dir` |
 
 The plugin owns any files it writes under `ROZECTL_OUT_DIR`.
+
+## CLI environment and upgrade
+
+`rozectl env` prints the active binary path, version, `CARGO_HOME`,
+`RUSTUP_HOME`, `RUST_LOG`, and `PATH`. This mirrors goctl-style environment
+inspection while keeping Roze-specific names.
+
+`rozectl completion <shell>` prints a shell completion script for `bash`,
+`zsh`, `fish`, or `powershell`.
+
+`rozectl upgrade` runs:
+
+```bash
+cargo install --git https://github.com/roze-team/roze.git rozectl --force
+```
+
+Use `--repo`, `--branch`, or `--rev` to pin another source, and `--dry-run` to
+print the cargo command without executing it.
 
 ## Current limitations
 
