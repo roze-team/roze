@@ -1415,6 +1415,8 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     let mut issues = Vec::new();
     validate_unique_types(spec, &mut issues);
     validate_unique_type_fields(spec, &mut issues);
+    validate_generated_type_names(spec, &mut issues);
+    validate_unique_generated_type_fields(spec, &mut issues);
     validate_unique_rest_routes(spec, &mut issues);
     validate_unique_rpc_methods(spec, &mut issues);
     validate_unique_generated_names(spec, &mut issues);
@@ -1456,6 +1458,69 @@ fn validate_unique_type_fields(spec: &parser::ApiSpec, issues: &mut Vec<ApiValid
             }
         }
     }
+}
+
+fn validate_generated_type_names(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let mut seen = BTreeMap::<String, String>::new();
+    for ty in &spec.types {
+        if !is_valid_rust_type_name(&ty.name) {
+            issues.push(api_validation_issue(format!(
+                "type {} is not a valid Rust type name; use UpperCamelCase such as {}",
+                ty.name,
+                generator::to_pascal_case(&ty.name)
+            )));
+        }
+        let generated = generator::to_pascal_case(&ty.name);
+        if let Some(previous) = seen.insert(generated.clone(), ty.name.clone()) {
+            issues.push(api_validation_issue(format!(
+                "duplicate generated type name `{generated}`: {previous} and {}",
+                ty.name
+            )));
+        }
+    }
+}
+
+fn validate_unique_generated_type_fields(
+    spec: &parser::ApiSpec,
+    issues: &mut Vec<ApiValidationIssue>,
+) {
+    for ty in &spec.types {
+        let mut seen = BTreeMap::<String, String>::new();
+        for field in &ty.fields {
+            let generated = generator::rust_identifier(&field.name);
+            if !is_valid_rust_field_name(&generated) {
+                issues.push(api_validation_issue(format!(
+                    "field {}.{} generates invalid Rust field name `{generated}`",
+                    ty.name, field.name
+                )));
+            }
+            if let Some(previous) = seen.insert(generated.clone(), field.name.clone()) {
+                issues.push(api_validation_issue(format!(
+                    "duplicate generated field name `{generated}` in type {}: {previous} and {}",
+                    ty.name, field.name
+                )));
+            }
+        }
+    }
+}
+
+fn is_valid_rust_type_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_uppercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_rust_field_name(name: &str) -> bool {
+    let name = name.strip_prefix("r#").unwrap_or(name);
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_lowercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn validate_unique_rest_routes(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
@@ -3619,6 +3684,13 @@ spec:
             type DuplicateReq {
                 id string `path:"id"`
             }
+            type user_req {
+                field-name string `json:"field-name"`
+                field_name string `json:"field_name"`
+            }
+            type UserReq {
+                ok bool `json:"ok"`
+            }
             type PingReq {
                 requestId string `json:"requestId"`
             }
@@ -3637,7 +3709,12 @@ spec:
             .join("\n");
 
         assert!(report.contains("duplicate type: DuplicateReq"));
+        assert!(report.contains("type user_req is not a valid Rust type name"));
+        assert!(report.contains("duplicate generated type name `UserReq`: user_req and UserReq"));
         assert!(report.contains("duplicate wire field: GetUserReq Json `name`"));
+        assert!(report.contains(
+            "duplicate generated field name `field_name` in type user_req: field-name and field_name"
+        ));
         assert!(report.contains("duplicate REST route: GET /users/:id"));
         assert!(report.contains("duplicate RPC method: Ping"));
         assert!(report.contains("duplicate generated REST handler `get_user` in group `users`"));
