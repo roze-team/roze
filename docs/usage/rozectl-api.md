@@ -3,8 +3,9 @@
 `rozectl api generate` reads a Roze `.api` contract and generates a
 Rust-native Axum REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
-method-level logic, service context extensions, custom middleware, and
-`config.yaml` when `--update` is used.
+method-level logic, service context extensions, config module extensions,
+custom handler adapters, custom middleware, and `config.yaml` when `--update`
+is used.
 
 Think of `rozectl` as a generator for project structure and integration code.
 It can generate API layers, RPC layers, model scaffolds, documentation, client
@@ -61,13 +62,16 @@ cargo run -p rozectl -- api generate example/user.api \
 `--update` preserves:
 
 - REST `src/logic/<group>/<method>.rs`
+- REST `src/config/mod.rs`
+- REST `src/handler/<group>/<method>.rs`
 - REST/RPC `src/svc/mod.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
+- RPC `src/config/mod.rs`
 - RPC `src/logic/<method>.rs`
 - `config.yaml`
 
-Generated glue such as route registration, handler adapters, DTOs, OpenAPI,
-RPC server/client adapters, protobuf include modules, `build.rs`, and
+Generated glue such as route registration, handler module indexes, DTOs,
+OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`, and
 `proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.
 
 Preview regeneration before writing files:
@@ -691,10 +695,12 @@ src/
 
 Framework-owned files can be regenerated with `--update`. Business code should
 live in REST `src/logic/<group>/<method>.rs` or RPC
-`src/logic/<method>.rs`. REST custom middleware lives in
+`src/logic/<method>.rs`. Service config extensions live in
+`src/config/mod.rs`, REST custom handler adapter code lives in
+`src/handler/<group>/<method>.rs`, and REST custom middleware lives in
 `src/middleware/<custom>.rs`. These application-owned files and `config.yaml`
-are preserved on `--update`, while generated boundary files keep HTTP/RPC
-parsing, validation, context extraction, errors, tracing, and response
+are preserved on `--update`, while generated boundary files keep route indexes,
+HTTP/RPC parsing, validation, context extraction, errors, tracing, and response
 contracts consistent across services.
 
 ## OpenAPI output

@@ -543,12 +543,11 @@ pub fn write_stream_worker_project(
     )?;
     fs::write(out.join("src/main.rs"), render_stream_main(&spec))
         .with_context(|| format!("failed to write {}", out.join("src/main.rs").display()))?;
-    fs::write(out.join("src/config/mod.rs"), render_stream_config_rs()).with_context(|| {
-        format!(
-            "failed to write {}",
-            out.join("src/config/mod.rs").display()
-        )
-    })?;
+    write_preserved(
+        &out.join("src/config/mod.rs"),
+        render_stream_config_rs(),
+        options.mode,
+    )?;
     fs::write(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
@@ -2388,7 +2387,7 @@ fn generate_rest_project(
     remove_path_if_exists(&out.join("src/config.rs"))?;
     remove_path_if_exists(&out.join("src/openapi.rs"))?;
     remove_path_if_exists(&out.join("src/types.rs"))?;
-    fs::write(out.join("src/config/mod.rs"), config_rs())?;
+    write_preserved(&out.join("src/config/mod.rs"), config_rs(), options.mode)?;
     fs::write(out.join("src/openapi/mod.rs"), rest::render_openapi(spec))?;
     fs::write(
         out.join("src/handler/mod.rs"),
@@ -2406,7 +2405,7 @@ fn generate_rest_project(
     for (group, handler, content) in rest::render_handler_files(spec) {
         let dir = out.join("src/handler").join(&group);
         fs::create_dir_all(&dir)?;
-        fs::write(dir.join(format!("{handler}.rs")), content)?;
+        write_preserved(&dir.join(format!("{handler}.rs")), content, options.mode)?;
     }
     migrate_flat_module_file(
         out,
@@ -2481,7 +2480,7 @@ pub(super) fn generate_rpc_project(
         config_yaml(spec, ProjectKind::Rpc),
         options.mode,
     )?;
-    fs::write(out.join("src/config/mod.rs"), config_rs())?;
+    write_preserved(&out.join("src/config/mod.rs"), config_rs(), options.mode)?;
     fs::write(out.join("src/pb/mod.rs"), render_pb(spec))?;
     fs::write(
         out.join("src/types/mod.rs"),
@@ -4782,6 +4781,120 @@ mod tests {
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));
         assert!(cargo.contains("custom.workspace = true"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn api_update_preserves_config_module_and_handler_adapters() {
+        let spec = parse_api(
+            r#"
+            service admin-api {
+                @handler authMe
+                get /admin/auth/me returns (AdminInfoResp)
+            }
+
+            type AdminInfoResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-api-update-integration-hooks-test");
+        let out = root.join("admin");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+
+        fs::write(
+            out.join("src/config/mod.rs"),
+            "pub struct ServiceConfig {\n    pub rpc_clients: std::collections::BTreeMap<String, String>,\n}\n",
+        )
+        .expect("write custom config module");
+        fs::write(
+            out.join("src/handler/admin/auth_me.rs"),
+            "use axum::http::HeaderMap;\n\npub async fn auth_me(headers: HeaderMap) -> roze_result::Result<()> {\n    let _ = headers;\n    Ok(())\n}\n",
+        )
+        .expect("write custom handler adapter");
+        fs::write(
+            out.join("src/handler/admin/mod.rs"),
+            "// stale admin handler mod\n",
+        )
+        .expect("write stale handler group mod");
+
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update generation");
+
+        assert!(fs::read_to_string(out.join("src/config/mod.rs"))
+            .expect("read config module")
+            .contains("rpc_clients"));
+        assert!(fs::read_to_string(out.join("src/handler/admin/auth_me.rs"))
+            .expect("read handler adapter")
+            .contains("HeaderMap"));
+        assert!(fs::read_to_string(out.join("src/handler/admin/mod.rs"))
+            .expect("read handler group mod")
+            .contains("pub(crate) use auth_me::auth_me;"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_update_preserves_config_module_extensions() {
+        let spec = parse_api(
+            r#"
+            service catalog-rpc {
+                rpc ListProducts (ListProductsReq) returns (ListProductsResp)
+            }
+
+            type ListProductsReq {
+                page: u64
+            }
+
+            type ListProductsResp {
+                total: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rpc-update-config-hooks-test");
+        let out = root.join("catalog");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+        fs::write(
+            out.join("src/config/mod.rs"),
+            "pub struct ServiceConfig {\n    pub registry_namespace: String,\n}\n",
+        )
+        .expect("write custom config module");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update generation");
+
+        assert!(fs::read_to_string(out.join("src/config/mod.rs"))
+            .expect("read config module")
+            .contains("registry_namespace"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
