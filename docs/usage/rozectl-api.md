@@ -99,7 +99,7 @@ handler/RPC method name collisions, unknown request/response or nested field
 types, non-empty reserved `EmptyReq`/`EmptyResp` declarations, invalid
 generated service/REST/RPC/middleware Rust identifiers, and mismatches between
 route path parameters and request `path` fields, including duplicate route path
-parameters.
+parameters and duplicate generated custom middleware names.
 
 Format an API contract:
 
@@ -773,6 +773,9 @@ rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/r
 
 Toasty is the default SQL ORM. `--orm sea-orm` switches SQL/DSL/inspection
 output to SeaORM-style modules.
+SQL `JSON`/`JSONB` columns generate `serde_json::Value`; ordinary SQL
+`INT`/`INTEGER` columns generate `i32`, while `BIGINT`/`BIGSERIAL` columns
+generate 64-bit integer types.
 Mongo inspection samples collection documents, maps `_id` to `id`, and emits
 Mongo repository modules. It preserves Mongo index metadata, emits find helpers
 for single-field unique indexes, emits compound-index find/list helpers, and

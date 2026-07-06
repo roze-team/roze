@@ -1666,6 +1666,7 @@ fn validate_generated_middleware_identifiers(
     spec: &parser::ApiSpec,
     issues: &mut Vec<ApiValidationIssue>,
 ) {
+    let mut generated_names = BTreeMap::<String, String>::new();
     for route in &spec.rest_routes {
         for middleware in validation_route_middlewares(spec, route) {
             if roze_middleware::BuiltInMiddleware::parse(&middleware).is_some() {
@@ -1678,6 +1679,13 @@ fn validate_generated_middleware_identifiers(
                     rest_route_key(spec, route),
                     middleware
                 )));
+            }
+            if let Some(previous) = generated_names.insert(generated.clone(), middleware.clone()) {
+                if previous != middleware {
+                    issues.push(api_validation_issue(format!(
+                        "duplicate generated custom middleware `{generated}`: {previous} and {middleware}"
+                    )));
+                }
             }
         }
     }
@@ -3875,6 +3883,9 @@ spec:
                 put /keyword-handler (PingReq) returns (PingResp)
                 @handler duplicatedPath
                 get /duplicate/:id/{id} (DuplicatePathReq) returns (PingResp)
+                @handler middlewareCollision
+                @middleware(audit-log, audit_log)
+                get /middleware-collision (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc GetUser (PingReq) returns (PingResp)
@@ -3955,6 +3966,9 @@ spec:
         assert!(report.contains("REST route PUT /keyword-handler generates invalid Rust handler"));
         assert!(report.contains(
             "REST route GET /duplicate/:id/{id} has duplicate path parameter `id` and `id`"
+        ));
+        assert!(report.contains(
+            "duplicate generated custom middleware `audit_log`: audit-log and audit_log"
         ));
         assert!(report.contains("RPC method type generates invalid Rust method `type`"));
         assert!(report.contains(
