@@ -3144,6 +3144,7 @@ governance:
             r#"name: {}
 rpc:
   addr: 127.0.0.1:4000
+  # advertise_addr: 127.0.0.1:4000
 registry:
   kind: memory
   endpoints: []

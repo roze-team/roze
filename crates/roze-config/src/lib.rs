@@ -305,6 +305,8 @@ impl Default for SheddingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcConfig {
     pub addr: SocketAddr,
+    #[serde(default)]
+    pub advertise_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1326,6 +1328,32 @@ key = "order.rpc"
         assert_eq!(etcd.hosts, vec!["127.0.0.1:2379", "127.0.0.2:2379"]);
         assert_eq!(etcd.key, "order.rpc");
         assert_eq!(etcd.pass, None);
+    }
+
+    #[test]
+    fn loads_rpc_advertise_addr() {
+        let source = r#"
+name = "demo"
+
+[rpc]
+addr = "0.0.0.0:4000"
+advertise_addr = "192.168.1.10:4000"
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let rpc = config.rpc.expect("rpc");
+        assert_eq!(rpc.addr.to_string(), "0.0.0.0:4000");
+        assert_eq!(
+            rpc.advertise_addr.expect("advertise addr").to_string(),
+            "192.168.1.10:4000"
+        );
     }
 
     #[test]

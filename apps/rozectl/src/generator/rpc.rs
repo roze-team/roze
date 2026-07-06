@@ -32,10 +32,11 @@ async fn main() -> anyhow::Result<()> {{
         .ok_or_else(|| anyhow::anyhow!("missing rpc config"))?;
     let registry = roze_rpc::registry::build_service_registry(&config)?
         .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
-    let mut registration = roze_rpc::rpc::ServiceRegistrationGuard::start(
+    let mut registration = roze_rpc::rpc::ServiceRegistrationGuard::start_with_advertise_addr(
         registry,
         config.name.clone(),
         rpc.addr,
+        rpc.advertise_addr.unwrap_or(rpc.addr),
     )
     .await?;
     let ctx = svc::ServiceContext::new(config).await?;

@@ -114,8 +114,17 @@ impl ServiceRegistrationGuard {
         service_name: impl Into<String>,
         addr: SocketAddr,
     ) -> anyhow::Result<Self> {
+        Self::start_with_advertise_addr(registry, service_name, addr, addr).await
+    }
+
+    pub async fn start_with_advertise_addr(
+        registry: Arc<dyn Registry>,
+        service_name: impl Into<String>,
+        _bind_addr: SocketAddr,
+        advertise_addr: SocketAddr,
+    ) -> anyhow::Result<Self> {
         let service_name = service_name.into();
-        let addr = addr.to_string();
+        let addr = advertise_addr.to_string();
         registry
             .register(ServiceInstance::new(service_name.clone(), addr.clone()))
             .await?;
@@ -220,19 +229,33 @@ pub async fn connect_channel_with_options(
 pub async fn connect_channel_from_config(
     config: &roze_config::RpcClientConfig,
 ) -> anyhow::Result<Channel> {
+    validate_rpc_client_config_mode(config)?;
     let options = RpcClientOptions::from_config(config);
     if let Some(target) = config.target.as_deref().filter(|target| !target.is_empty()) {
+        info!(
+            mode = "target",
+            "rpc client config selected direct target mode"
+        );
         return connect_channel_with_options(target, options).await;
     }
 
     if rpc_client_has_static_endpoints(config) {
         let target = rpc_client_round_robin_endpoint(config, &RPC_ENDPOINT_CURSOR)?;
+        info!(
+            mode = "endpoints",
+            "rpc client config selected static endpoint mode"
+        );
         return connect_channel_with_options(target, options).await;
     }
 
     if let Some(etcd) = config.etcd.as_ref() {
         let registry_config = registry_config_from_rpc_client_etcd(etcd);
         let registry = EtcdRegistry::new(&registry_config);
+        info!(
+            mode = "etcd",
+            service = %etcd.key,
+            "rpc client config selected etcd discovery mode"
+        );
         return connect_via_registry_with_options(
             &etcd.key,
             &registry,
@@ -244,6 +267,25 @@ pub async fn connect_channel_from_config(
 
     let target = rpc_client_target(config)?;
     connect_channel_with_options(target, options).await
+}
+
+pub fn validate_rpc_client_config_mode(
+    config: &roze_config::RpcClientConfig,
+) -> anyhow::Result<()> {
+    let modes = [
+        rpc_client_has_direct_target(config),
+        rpc_client_has_static_endpoints(config),
+        config.etcd.is_some(),
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count();
+    if modes > 1 {
+        anyhow::bail!(
+            "rpc client config must select exactly one connection mode: target, endpoints, or etcd"
+        );
+    }
+    Ok(())
 }
 
 pub fn rpc_client_has_direct_target(config: &roze_config::RpcClientConfig) -> bool {
@@ -998,6 +1040,28 @@ mod tests {
     }
 
     #[test]
+    fn rpc_client_config_rejects_mixed_connection_modes() {
+        let config = roze_config::RpcClientConfig {
+            etcd: Some(roze_config::RpcClientEtcdConfig {
+                hosts: vec!["127.0.0.1:2379".to_string()],
+                key: "order.rpc".to_string(),
+                ..Default::default()
+            }),
+            endpoints: vec!["127.0.0.1:4000".to_string()],
+            target: None,
+            app: None,
+            token: None,
+            non_block: false,
+            timeout_ms: 2_000,
+            keepalive_time_secs: 20,
+            middlewares: Default::default(),
+        };
+
+        let err = validate_rpc_client_config_mode(&config).expect_err("mixed mode");
+        assert!(err.to_string().contains("exactly one connection mode"));
+    }
+
+    #[test]
     fn apply_client_auth_sets_app_and_token_metadata() {
         let config = roze_config::RpcClientConfig {
             etcd: None,
@@ -1064,6 +1128,24 @@ mod tests {
         .expect("start");
 
         assert_eq!(registry.discover("svc").await.expect("discover").len(), 1);
+        guard.shutdown().await.expect("shutdown");
+        assert!(registry.discover("svc").await.expect("discover").is_empty());
+    }
+
+    #[tokio::test]
+    async fn registration_guard_uses_advertise_addr() {
+        let registry = Arc::new(crate::registry::MemoryRegistry::default());
+        let mut guard = ServiceRegistrationGuard::start_with_advertise_addr(
+            registry.clone(),
+            "svc",
+            "0.0.0.0:9000".parse().unwrap(),
+            "192.168.1.10:9000".parse().unwrap(),
+        )
+        .await
+        .expect("start");
+
+        let instances = registry.discover("svc").await.expect("discover");
+        assert_eq!(instances[0].addr, "192.168.1.10:9000");
         guard.shutdown().await.expect("shutdown");
         assert!(registry.discover("svc").await.expect("discover").is_empty());
     }

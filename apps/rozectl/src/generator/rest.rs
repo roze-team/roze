@@ -645,7 +645,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     ] {
         if let Some(fields) = route_spec.groups.get(&source) {
             let struct_name = partial_struct_name(&handler, &request_ty.name, source);
-            out.push_str(&render_partial_struct(&struct_name, fields));
+            out.push_str(&render_partial_struct(&struct_name, fields, source));
         }
     }
 
@@ -810,11 +810,14 @@ fn custom_middlewares(spec: &ApiSpec) -> Vec<String> {
     out
 }
 
-fn render_partial_struct(name: &str, fields: &[&Field]) -> String {
+fn render_partial_struct(name: &str, fields: &[&Field], source: FieldSource) -> String {
     let mut out = String::new();
     out.push_str("#[derive(Debug, Clone, Deserialize, Validate)]\n");
     out.push_str(&format!("pub(crate) struct {} {{\n", name));
     for field in fields {
+        if source == FieldSource::Query {
+            out.push_str("    #[serde(default)]\n");
+        }
         if let Some(rename) = serde_rename(field) {
             out.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
         }
@@ -1895,6 +1898,8 @@ mod tests {
         assert!(handlers.contains("GetUserReqQuery"));
         assert!(handlers.contains("GetUserReqForm"));
         assert!(handlers.contains("HeaderMap"));
+        assert!(handlers.contains("#[serde(default)]\n    q: String"));
+        assert!(!handlers.contains("#[serde(default)]\n    id: u64"));
         assert!(handlers.contains("header_value::<String>(headers, \"X-Token\")?"));
         assert!(handlers.contains("#[validate(length(min = 2, max = 16))]"));
         assert!(handlers.contains("#[validate(range(min = 1, max = 120))]"));

@@ -100,9 +100,17 @@ Etcd registry keys default to `/roze/services/{service}/{addr}`. Set
 `/shop/services/{service}/{addr}` while preserving the same lease, discover,
 and watch behavior.
 
+RPC servers bind to `rpc.addr` and register that same address by default. Set
+`rpc.advertise_addr` when the process binds to `0.0.0.0` or `127.0.0.1` but
+clients should discover a routable host address.
+
 Registry and config-center HTTP clients use the process proxy environment that
 `reqwest` honors. For private control-plane endpoints such as etcd or Consul on
 `192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, loopback, or local hosts,
 include the endpoint host in `NO_PROXY` or clear `HTTP_PROXY`, `HTTPS_PROXY`,
 and `ALL_PROXY`; Roze adds a diagnostic hint to request failures when a proxy
 environment is active and the endpoint is internal.
+
+RPC clients select exactly one connection mode: `rpc_client.target`,
+`rpc_client.endpoints`, or `rpc_client.etcd`. Mixed modes are rejected during
+connection setup so static endpoints cannot silently bypass registry discovery.

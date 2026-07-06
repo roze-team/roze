@@ -2192,7 +2192,7 @@ fn render_toasty_query_methods(
     use std::fmt::Write as _;
     writeln!(
         out,
-        "    fn build_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+        "    fn build_filter_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
     )
     .unwrap();
     writeln!(
@@ -2262,6 +2262,19 @@ fn render_toasty_query_methods(
             }
         }
     }
+    writeln!(out, "        query").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    fn build_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = Self::build_filter_query(req);"
+    )
+    .unwrap();
     render_toasty_sort(out, model, pascal);
     writeln!(out, "        query").unwrap();
     writeln!(out, "    }}").unwrap();
@@ -2274,13 +2287,13 @@ fn render_toasty_query_methods(
     if model.soft_delete.is_some() {
         writeln!(
             out,
-            "        Self::build_query(&{pascal}Query {{ include_deleted: false, ..Default::default() }}).count().exec(db).await"
+            "        Self::build_filter_query(&{pascal}Query {{ include_deleted: false, ..Default::default() }}).count().exec(db).await"
         )
         .unwrap();
     } else {
         writeln!(
             out,
-            "        Self::build_query(&{pascal}Query::default()).count().exec(db).await"
+            "        Self::build_filter_query(&{pascal}Query::default()).count().exec(db).await"
         )
         .unwrap();
     }
@@ -2301,12 +2314,12 @@ fn render_toasty_query_methods(
         "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
     )
     .unwrap();
-    writeln!(out, "        let mut query = Self::build_query(&req);").unwrap();
     writeln!(
         out,
-        "        let total = query.clone().count().exec(db).await?;"
+        "        let total = Self::build_filter_query(&req).count().exec(db).await?;"
     )
     .unwrap();
+    writeln!(out, "        let mut query = Self::build_query(&req);").unwrap();
     writeln!(out, "        query.limit(page_size as usize);").unwrap();
     writeln!(
         out,
@@ -5089,6 +5102,8 @@ mod tests {
         assert!(
             rendered.contains("pub async fn query(db: &mut dyn toasty::Executor, req: UserQuery)")
         );
+        assert!(rendered.contains("fn build_filter_query(req: &UserQuery)"));
+        assert!(rendered.contains("Self::build_filter_query(&req).count().exec(db).await?"));
         assert!(rendered.contains("pub id_in: Vec<u64>"));
         assert!(rendered.contains("pub id_min: Option<u64>"));
         assert!(rendered.contains("pub nickname: Option<String>"));

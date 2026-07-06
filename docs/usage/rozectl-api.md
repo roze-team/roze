@@ -440,7 +440,14 @@ type GetUserReq {
 ```
 
 If no source tag is present, `rozectl` infers path parameters from route
-segments such as `:id`; otherwise fields default to JSON body fields.
+segments such as `:id`. Remaining untagged fields become query fields for
+`GET` and `DELETE` routes and JSON body fields for mutating routes.
+
+Generated HTTP query extractor structs apply `serde(default)` to each query
+field, so omitted filters deserialize to Rust defaults such as `None`, `0`,
+`false`, an empty string, or an empty collection. Validator tags still run after
+deserialization; use `validate:"required"` or a nonzero range rule when a query
+parameter must be present.
 
 ## Type mapping
 
@@ -725,6 +732,9 @@ SQL repositories additionally generate:
   single-table queries
 - `query` and `list_page` helpers with equality, `IN`, numeric min/max range,
   nullable equality, `IS NULL`, and typed sort fields for non-null columns
+- Toasty query generation counts with the filter-only query and applies
+  `ORDER BY`, `LIMIT`, and `OFFSET` only to the list query, avoiding invalid
+  PostgreSQL count SQL when a sort field is present
 - composite-index helpers such as `find_by_tenant_id_and_name` for unique
   indexes and `list_by_status_and_created_at` for non-unique indexes
 - `insert_many` and `delete_many_by_ids` batch helpers; Toasty uses safe
