@@ -96,8 +96,7 @@ that can otherwise surface only during generation or compilation: duplicate
 types, duplicate fields or wire names, generated Rust type/field name
 collisions, duplicate REST routes, duplicate RPC methods, generated REST
 handler/RPC method name collisions, unknown request/response or nested field
-types, and route path parameters that are not declared as `path` fields on the
-request type.
+types, and mismatches between route path parameters and request `path` fields.
 
 Format an API contract:
 

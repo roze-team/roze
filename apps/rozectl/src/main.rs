@@ -1678,10 +1678,9 @@ fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValida
         .collect::<BTreeMap<_, _>>();
 
     for route in &spec.rest_routes {
-        let required_params = route_path_params(&route.path);
-        if required_params.is_empty() {
-            continue;
-        }
+        let required_params = route_path_params(&route.path)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let Some(request_ty) = types.get(route.request.as_str()) else {
             continue;
         };
@@ -1698,13 +1697,23 @@ fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValida
             })
             .collect::<BTreeSet<_>>();
 
-        for param in required_params {
+        for param in &required_params {
             if !declared_params.contains(param.as_str()) {
                 issues.push(api_validation_issue(format!(
                     "REST route {} path parameter `:{}` is missing from {} as a path field",
                     rest_route_key(spec, route),
                     param,
                     route.request
+                )));
+            }
+        }
+        for param in declared_params {
+            if !required_params.contains(param) {
+                issues.push(api_validation_issue(format!(
+                    "REST route {} request type {} declares path field `{}` that is not present in the route path",
+                    rest_route_key(spec, route),
+                    route.request,
+                    param
                 )));
             }
         }
@@ -3674,6 +3683,7 @@ spec:
 
             type GetUserReq {
                 id string `query:"id"`
+                tenantId string `path:"tenantId"`
                 name string `json:"name"`
                 displayName string `json:"name"`
                 profile MissingProfile `json:"profile"`
@@ -3724,6 +3734,9 @@ spec:
         ));
         assert!(report.contains("field GetUserReq.profile references unknown type: MissingProfile"));
         assert!(report.contains("path parameter `:id` is missing from GetUserReq as a path field"));
+        assert!(report.contains(
+            "request type GetUserReq declares path field `tenantId` that is not present in the route path"
+        ));
     }
 
     #[test]
