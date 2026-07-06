@@ -94,8 +94,9 @@ rozectl api validate example/user.api
 `api validate` parses the `.api` file and checks contract-level consistency
 that can otherwise surface only during generation or compilation: duplicate
 types, duplicate fields or wire names, duplicate REST routes, duplicate RPC
-methods, unknown request/response or nested field types, and route path
-parameters that are not declared as `path` fields on the request type.
+methods, generated REST handler/RPC method name collisions, unknown
+request/response or nested field types, and route path parameters that are not
+declared as `path` fields on the request type.
 
 Format an API contract:
 

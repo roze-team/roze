@@ -1417,6 +1417,7 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_unique_type_fields(spec, &mut issues);
     validate_unique_rest_routes(spec, &mut issues);
     validate_unique_rpc_methods(spec, &mut issues);
+    validate_unique_generated_names(spec, &mut issues);
     validate_referenced_types(spec, &mut issues);
     validate_route_path_params(spec, &mut issues);
     issues
@@ -1477,6 +1478,67 @@ fn validate_unique_rpc_methods(spec: &parser::ApiSpec, issues: &mut Vec<ApiValid
             )));
         }
     }
+}
+
+fn validate_unique_generated_names(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let mut route_handlers = BTreeMap::<(String, String), String>::new();
+    for route in &spec.rest_routes {
+        let group = validation_route_group_name(route);
+        let handler = validation_resolved_handler_name(route);
+        let key = (group.clone(), handler.clone());
+        let route_key = rest_route_key(spec, route);
+        if let Some(previous) = route_handlers.insert(key, route_key.clone()) {
+            issues.push(api_validation_issue(format!(
+                "duplicate generated REST handler `{handler}` in group `{group}`: {previous} and {route_key}"
+            )));
+        }
+    }
+
+    let mut rpc_methods = BTreeMap::<String, String>::new();
+    for method in &spec.rpc_methods {
+        let generated = generator::to_snake_case(&method.name);
+        if let Some(previous) = rpc_methods.insert(generated.clone(), method.name.clone()) {
+            issues.push(api_validation_issue(format!(
+                "duplicate generated RPC method `{generated}`: {previous} and {}",
+                method.name
+            )));
+        }
+    }
+}
+
+fn validation_resolved_handler_name(route: &parser::RestRoute) -> String {
+    route
+        .handler
+        .as_ref()
+        .map(|handler| generator::to_snake_case(handler))
+        .unwrap_or_else(|| validation_handler_name(&route.method, &route.path))
+}
+
+fn validation_handler_name(method: &parser::HttpMethod, path: &str) -> String {
+    let method = match method {
+        parser::HttpMethod::Get => "get",
+        parser::HttpMethod::Post => "post",
+        parser::HttpMethod::Put => "put",
+        parser::HttpMethod::Patch => "patch",
+        parser::HttpMethod::Delete => "delete",
+    };
+    let path_name = path
+        .trim_matches('/')
+        .replace(':', "")
+        .replace(['{', '}'], "")
+        .replace(['/', '-'], "_");
+
+    format!("{method}_{path_name}")
+}
+
+fn validation_route_group_name(route: &parser::RestRoute) -> String {
+    route
+        .path
+        .split('/')
+        .find(|segment| !segment.is_empty() && !segment.starts_with(':'))
+        .map(generator::to_snake_case)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "base".to_string())
 }
 
 fn validate_referenced_types(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
@@ -3535,8 +3597,14 @@ spec:
             service user {
                 get /users/:id (GetUserReq) returns (MissingResp)
                 get /users/:id (GetUserReq) returns (MissingResp)
+                @handler getUser
+                post /users/:id (GetUserReq) returns (PingResp)
+                @handler get_user
+                patch /users/:id (GetUserReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
+                rpc GetUser (PingReq) returns (PingResp)
+                rpc get_user (PingReq) returns (PingResp)
             }
 
             type GetUserReq {
@@ -3572,6 +3640,8 @@ spec:
         assert!(report.contains("duplicate wire field: GetUserReq Json `name`"));
         assert!(report.contains("duplicate REST route: GET /users/:id"));
         assert!(report.contains("duplicate RPC method: Ping"));
+        assert!(report.contains("duplicate generated REST handler `get_user` in group `users`"));
+        assert!(report.contains("duplicate generated RPC method `get_user`: GetUser and get_user"));
         assert!(report.contains(
             "REST route GET /users/:id response type references unknown type: MissingResp"
         ));
