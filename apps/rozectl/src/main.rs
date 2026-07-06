@@ -2,7 +2,7 @@ mod generator;
 mod parser;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs,
     net::{TcpListener, TcpStream, ToSocketAddrs},
@@ -247,6 +247,9 @@ enum ApiCommands {
         api: PathBuf,
         #[arg(long, default_value = ".")]
         dir: PathBuf,
+    },
+    Validate {
+        api: PathBuf,
     },
 }
 
@@ -689,6 +692,7 @@ fn main() -> anyhow::Result<()> {
             ApiCommands::Plugin { plugin, api, dir } => {
                 generator::native::run_api_plugin(&plugin, &api, &dir)?;
             }
+            ApiCommands::Validate { api } => run_api_validate(&api)?,
         },
         Commands::Rpc { command } => match command {
             RpcCommands::Generate {
@@ -1015,6 +1019,11 @@ struct ContractIssue {
     detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApiValidationIssue {
+    detail: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContractIssueKind {
     Breaking,
@@ -1045,6 +1054,277 @@ fn read_api_spec(path: &Path) -> anyhow::Result<parser::ApiSpec> {
         .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
     parser::parse_api(&source)
         .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))
+}
+
+fn run_api_validate(path: &Path) -> anyhow::Result<()> {
+    let spec = read_api_spec(path)?;
+    let issues = validate_api_spec(&spec);
+    if issues.is_empty() {
+        println!("api validate passed: {}", path.display());
+        return Ok(());
+    }
+
+    eprintln!(
+        "api validate failed: {} issue(s) in {}",
+        issues.len(),
+        path.display()
+    );
+    for issue in issues {
+        eprintln!("- {}", issue.detail);
+    }
+    anyhow::bail!("api validate failed")
+}
+
+fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
+    let mut issues = Vec::new();
+    validate_unique_types(spec, &mut issues);
+    validate_unique_type_fields(spec, &mut issues);
+    validate_unique_rest_routes(spec, &mut issues);
+    validate_unique_rpc_methods(spec, &mut issues);
+    validate_referenced_types(spec, &mut issues);
+    validate_route_path_params(spec, &mut issues);
+    issues
+}
+
+fn validate_unique_types(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let mut seen = BTreeSet::new();
+    for ty in &spec.types {
+        if !seen.insert(ty.name.as_str()) {
+            issues.push(api_validation_issue(format!("duplicate type: {}", ty.name)));
+        }
+    }
+}
+
+fn validate_unique_type_fields(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    for ty in &spec.types {
+        let mut seen_names = BTreeSet::new();
+        let mut seen_wire_names = BTreeSet::new();
+        for field in &ty.fields {
+            if !seen_names.insert(field.name.as_str()) {
+                issues.push(api_validation_issue(format!(
+                    "duplicate field: {}.{}",
+                    ty.name, field.name
+                )));
+            }
+            let wire_name = field
+                .wire_name
+                .as_deref()
+                .or(field.json_name.as_deref())
+                .unwrap_or(field.name.as_str());
+            if !seen_wire_names.insert((field.source, wire_name)) {
+                issues.push(api_validation_issue(format!(
+                    "duplicate wire field: {} {:?} `{}`",
+                    ty.name, field.source, wire_name
+                )));
+            }
+        }
+    }
+}
+
+fn validate_unique_rest_routes(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let mut seen = BTreeSet::new();
+    for route in &spec.rest_routes {
+        let key = rest_route_key(spec, route);
+        if !seen.insert(key.clone()) {
+            issues.push(api_validation_issue(format!("duplicate REST route: {key}")));
+        }
+    }
+}
+
+fn validate_unique_rpc_methods(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let mut seen = BTreeSet::new();
+    for method in &spec.rpc_methods {
+        if !seen.insert(method.name.as_str()) {
+            issues.push(api_validation_issue(format!(
+                "duplicate RPC method: {}",
+                method.name
+            )));
+        }
+    }
+}
+
+fn validate_referenced_types(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let type_names = spec
+        .types
+        .iter()
+        .map(|ty| ty.name.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for route in &spec.rest_routes {
+        validate_named_type(
+            &route.request,
+            &type_names,
+            format_args!("REST route {} request type", rest_route_key(spec, route)),
+            issues,
+        );
+        validate_named_type(
+            &route.response,
+            &type_names,
+            format_args!("REST route {} response type", rest_route_key(spec, route)),
+            issues,
+        );
+    }
+
+    for method in &spec.rpc_methods {
+        validate_named_type(
+            &method.request,
+            &type_names,
+            format_args!("RPC method {} request type", method.name),
+            issues,
+        );
+        validate_named_type(
+            &method.response,
+            &type_names,
+            format_args!("RPC method {} response type", method.name),
+            issues,
+        );
+    }
+
+    for ty in &spec.types {
+        for field in &ty.fields {
+            for referenced in referenced_custom_type_names(&field.ty) {
+                if !type_names.contains(referenced.as_str()) {
+                    issues.push(api_validation_issue(format!(
+                        "field {}.{} references unknown type: {}",
+                        ty.name, field.name, referenced
+                    )));
+                }
+            }
+        }
+    }
+}
+
+fn validate_named_type(
+    ty: &str,
+    type_names: &BTreeSet<&str>,
+    context: std::fmt::Arguments<'_>,
+    issues: &mut Vec<ApiValidationIssue>,
+) {
+    if !type_names.contains(ty) {
+        issues.push(api_validation_issue(format!(
+            "{context} references unknown type: {ty}"
+        )));
+    }
+}
+
+fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let types = spec
+        .types
+        .iter()
+        .map(|ty| (ty.name.as_str(), ty))
+        .collect::<BTreeMap<_, _>>();
+
+    for route in &spec.rest_routes {
+        let required_params = route_path_params(&route.path);
+        if required_params.is_empty() {
+            continue;
+        }
+        let Some(request_ty) = types.get(route.request.as_str()) else {
+            continue;
+        };
+        let declared_params = request_ty
+            .fields
+            .iter()
+            .filter(|field| field.source == parser::FieldSource::Path)
+            .map(|field| {
+                field
+                    .wire_name
+                    .as_deref()
+                    .or(field.json_name.as_deref())
+                    .unwrap_or(field.name.as_str())
+            })
+            .collect::<BTreeSet<_>>();
+
+        for param in required_params {
+            if !declared_params.contains(param.as_str()) {
+                issues.push(api_validation_issue(format!(
+                    "REST route {} path parameter `:{}` is missing from {} as a path field",
+                    rest_route_key(spec, route),
+                    param,
+                    route.request
+                )));
+            }
+        }
+    }
+}
+
+fn route_path_params(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter_map(|part| {
+            let name = part.strip_prefix(':')?;
+            let name = name.split(['?', '#']).next().unwrap_or_default();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect()
+}
+
+fn referenced_custom_type_names(ty: &str) -> Vec<String> {
+    type_tokens(ty)
+        .into_iter()
+        .filter(|token| !is_builtin_api_type(token))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn type_tokens(ty: &str) -> Vec<&str> {
+    ty.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|token| !token.is_empty())
+        .filter(|token| {
+            !matches!(
+                *token,
+                "Vec" | "Option" | "HashMap" | "BTreeMap" | "Map" | "List"
+            )
+        })
+        .collect()
+}
+
+fn is_builtin_api_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "bool"
+            | "Boolean"
+            | "string"
+            | "String"
+            | "str"
+            | "bytes"
+            | "Bytes"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "float"
+            | "double"
+            | "int"
+            | "integer"
+            | "uint"
+            | "long"
+            | "datetime"
+            | "DateTime"
+            | "time"
+            | "Time"
+            | "date"
+            | "Date"
+    )
+}
+
+fn api_validation_issue(detail: impl Into<String>) -> ApiValidationIssue {
+    ApiValidationIssue {
+        detail: detail.into(),
+    }
 }
 
 fn check_contract_breaking_changes(
@@ -2422,6 +2702,14 @@ spec:
             }
         ));
 
+        let api_validate = parse(["rozectl", "api", "validate", "user.api"]);
+        assert!(matches!(
+            api_validate.command,
+            Commands::Api {
+                command: ApiCommands::Validate { .. }
+            }
+        ));
+
         let openapi = Cli::try_parse_from([
             "rozectl",
             "openapi",
@@ -2813,6 +3101,91 @@ spec:
 
         let issues = check_contract_breaking_changes(&old_spec, &new_spec);
         assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn api_validate_accepts_consistent_contract() {
+        let spec = parser::parse_api(
+            r#"
+            service user {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (GetUserResp)
+                rpc Ping (PingReq) returns (PingResp)
+            }
+
+            type GetUserReq {
+                id string `path:"id"`
+                filter UserFilter `json:"filter,optional" validate:"optional"`
+            }
+            type UserFilter {
+                keyword string `json:"keyword,optional" validate:"optional"`
+            }
+            type GetUserResp {
+                id string `json:"id"`
+            }
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse spec");
+
+        let issues = validate_api_spec(&spec);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn api_validate_reports_generation_blocking_contract_issues() {
+        let spec = parser::parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (MissingResp)
+                get /users/:id (GetUserReq) returns (MissingResp)
+                rpc Ping (PingReq) returns (PingResp)
+                rpc Ping (PingReq) returns (PingResp)
+            }
+
+            type GetUserReq {
+                id string `query:"id"`
+                name string `json:"name"`
+                displayName string `json:"name"`
+                profile MissingProfile `json:"profile"`
+            }
+            type DuplicateReq {
+                id string `path:"id"`
+            }
+            type DuplicateReq {
+                id string `path:"id"`
+            }
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse spec");
+
+        let issues = validate_api_spec(&spec);
+        let report = issues
+            .iter()
+            .map(|issue| issue.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(report.contains("duplicate type: DuplicateReq"));
+        assert!(report.contains("duplicate wire field: GetUserReq Json `name`"));
+        assert!(report.contains("duplicate REST route: GET /users/:id"));
+        assert!(report.contains("duplicate RPC method: Ping"));
+        assert!(report.contains(
+            "REST route GET /users/:id response type references unknown type: MissingResp"
+        ));
+        assert!(report.contains("field GetUserReq.profile references unknown type: MissingProfile"));
+        assert!(report.contains("path parameter `:id` is missing from GetUserReq as a path field"));
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub struct TypeDef {
     pub fields: Vec<Field>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FieldSource {
     Auto,
     Json,
