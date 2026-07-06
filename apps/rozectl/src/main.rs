@@ -701,16 +701,20 @@ fn main() -> anyhow::Result<()> {
             }
             ApiCommands::Client { command } => match command {
                 ClientCommands::Ts { api, out } => {
+                    validate_api_for_generation(&api)?;
                     generator::write_ts_client(&api, &out)?;
                 }
                 ClientCommands::Js { api, out } => {
+                    validate_api_for_generation(&api)?;
                     generator::write_js_client(&api, &out)?;
                 }
                 ClientCommands::Dart { api, out } => {
+                    validate_api_for_generation(&api)?;
                     generator::write_dart_client(&api, &out)?;
                 }
             },
             ApiCommands::Doc { dir, out, api } => {
+                validate_optional_api_for_generation(api.as_deref())?;
                 let out = if out.is_absolute() {
                     out
                 } else {
@@ -719,6 +723,7 @@ fn main() -> anyhow::Result<()> {
                 generator::native::write_api_markdown_doc(api.as_deref(), &dir, &out)?;
             }
             ApiCommands::Plugin { plugin, api, dir } => {
+                validate_api_for_generation(&api)?;
                 generator::native::run_api_plugin(&plugin, &api, &dir)?;
             }
             ApiCommands::Validate { api } => run_api_validate(&api)?,
@@ -876,11 +881,14 @@ fn main() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
-            } => generator::write_stream_worker_project(
-                &api,
-                &out,
-                options(force, update, roze_source),
-            )?,
+            } => {
+                validate_api_for_generation(&api)?;
+                generator::write_stream_worker_project(
+                    &api,
+                    &out,
+                    options(force, update, roze_source),
+                )?
+            }
         },
         Commands::Template { command } => match command {
             TemplateCommands::List => {
@@ -910,6 +918,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Contract { command } => run_contract(command)?,
         Commands::Mock { command } => match command {
             MockCommands::Gen { api, out, force } => {
+                validate_api_for_generation(&api)?;
                 generator::write_mock_server_project(&api, &out, force)?;
             }
         },
@@ -920,6 +929,7 @@ fn main() -> anyhow::Result<()> {
                 base_url,
                 force,
             } => {
+                validate_api_for_generation(&api)?;
                 generator::write_http_smoke_test_project(&api, &out, &base_url, force)?;
             }
         },
@@ -932,14 +942,17 @@ fn main() -> anyhow::Result<()> {
         } => run_doctor(config, port, tcp, tool)?,
         Commands::Doc { command } => match command {
             DocCommands::Service { api, out, force } => {
+                validate_api_for_generation(&api)?;
                 generator::write_service_markdown_doc(&api, &out, force)?;
             }
             DocCommands::AiContext { api, out, force } => {
+                validate_api_for_generation(&api)?;
                 generator::write_ai_context_markdown_doc(&api, &out, force)?;
             }
         },
         Commands::Openapi { command } => match command {
             OpenApiCommands::Generate { api, out } => {
+                validate_api_for_generation(&api)?;
                 generator::write_openapi_json(&api, &out)?;
             }
         },
@@ -1137,6 +1150,13 @@ fn validate_api_for_generation(path: &Path) -> anyhow::Result<()> {
         "api validation failed before generation for {}:\n{details}",
         path.display()
     )
+}
+
+fn validate_optional_api_for_generation(path: Option<&Path>) -> anyhow::Result<()> {
+    if let Some(path) = path {
+        validate_api_for_generation(path)?;
+    }
+    Ok(())
 }
 
 fn run_api_format(path: &Path, write: bool, check: bool) -> anyhow::Result<()> {
@@ -4125,6 +4145,11 @@ spec:
         assert!(message.contains("RPC method type generates invalid Rust method `type`"));
 
         fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn optional_api_generation_preflight_allows_missing_api() {
+        validate_optional_api_for_generation(None).expect("missing optional api allowed");
     }
 
     #[test]

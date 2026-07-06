@@ -102,8 +102,10 @@ route path parameters and request `path` fields, including duplicate route path
 parameters and duplicate generated custom middleware names.
 Names that normalize to a single `_` are rejected because Rust does not allow
 `_` as a generated item or field identifier.
-`api generate`, `rpc generate`, `diff api`, and `diff rpc` run these
-generation-blocking checks before writing or previewing generated files.
+API-derived generation commands run these generation-blocking checks before
+writing or previewing generated files, including `api generate`, `rpc generate`,
+`diff api`, `diff rpc`, client generation, OpenAPI, mock servers, smoke tests,
+stream workers, docs, and API plugins.
 
 Format an API contract:
 
