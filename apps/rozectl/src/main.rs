@@ -1415,6 +1415,7 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     let mut issues = Vec::new();
     validate_unique_types(spec, &mut issues);
     validate_unique_type_fields(spec, &mut issues);
+    validate_reserved_empty_types(spec, &mut issues);
     validate_generated_type_names(spec, &mut issues);
     validate_unique_generated_type_fields(spec, &mut issues);
     validate_unique_rest_routes(spec, &mut issues);
@@ -1456,6 +1457,36 @@ fn validate_unique_type_fields(spec: &parser::ApiSpec, issues: &mut Vec<ApiValid
                     ty.name, field.source, wire_name
                 )));
             }
+        }
+    }
+}
+
+fn validate_reserved_empty_types(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let uses_empty_req = spec
+        .rest_routes
+        .iter()
+        .any(|route| route.request == "EmptyReq")
+        || spec
+            .rpc_methods
+            .iter()
+            .any(|method| method.request == "EmptyReq");
+    let uses_empty_resp = spec
+        .rest_routes
+        .iter()
+        .any(|route| route.response == "EmptyResp")
+        || spec
+            .rpc_methods
+            .iter()
+            .any(|method| method.response == "EmptyResp");
+
+    for ty in &spec.types {
+        let is_used_reserved_empty = (ty.name == "EmptyReq" && uses_empty_req)
+            || (ty.name == "EmptyResp" && uses_empty_resp);
+        if is_used_reserved_empty && !ty.fields.is_empty() {
+            issues.push(api_validation_issue(format!(
+                "{} is reserved for omitted request/response bodies and must not declare fields",
+                ty.name
+            )));
         }
     }
 }
@@ -3675,6 +3706,8 @@ spec:
                 post /users/:id (GetUserReq) returns (PingResp)
                 @handler get_user
                 patch /users/:id (GetUserReq) returns (PingResp)
+                @handler ping
+                get /ping
                 rpc Ping (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc GetUser (PingReq) returns (PingResp)
@@ -3707,6 +3740,12 @@ spec:
             type PingResp {
                 ok bool `json:"ok"`
             }
+            type EmptyReq {
+                unexpected string `json:"unexpected"`
+            }
+            type EmptyResp {
+                unexpected string `json:"unexpected"`
+            }
             "#,
         )
         .expect("parse spec");
@@ -3722,6 +3761,12 @@ spec:
         assert!(report.contains("type user_req is not a valid Rust type name"));
         assert!(report.contains("duplicate generated type name `UserReq`: user_req and UserReq"));
         assert!(report.contains("duplicate wire field: GetUserReq Json `name`"));
+        assert!(report.contains(
+            "EmptyReq is reserved for omitted request/response bodies and must not declare fields"
+        ));
+        assert!(report.contains(
+            "EmptyResp is reserved for omitted request/response bodies and must not declare fields"
+        ));
         assert!(report.contains(
             "duplicate generated field name `field_name` in type user_req: field-name and field_name"
         ));
