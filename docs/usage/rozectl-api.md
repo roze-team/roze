@@ -527,7 +527,9 @@ Scalar types:
 | --- | --- |
 | `string` / `String` | `String` |
 | `int` | `i64` |
+| `int8`, `int16`, `int32`, `int64` | `i8`, `i16`, `i32`, `i64` |
 | `uint` | `u64` |
+| `uint8`, `uint16`, `uint32`, `uint64` | `u8`, `u16`, `u32`, `u64` |
 | `bool` | `bool` |
 | `i32`, `i64`, `u32`, `u64`, `f32`, `f64` | same Rust type |
 | custom type | component/reference type |
@@ -538,10 +540,12 @@ Container types:
 | --- | --- |
 | `[]string` | `Vec<String>` |
 | `[]int` | `Vec<i64>` |
+| `[]int64` | `Vec<i64>` |
 | `[]T` | `Vec<T>` |
 | `Vec<T>` | `Vec<T>` |
 | `map[string]string` | `std::collections::HashMap<String, String>` |
 | `map[string]int` | `std::collections::HashMap<String, i64>` |
+| `map[string]int64` | `std::collections::HashMap<String, i64>` |
 | `map[K]V` | `std::collections::HashMap<K, V>` |
 | `HashMap<K,V>` | `std::collections::HashMap<K, V>` |
 

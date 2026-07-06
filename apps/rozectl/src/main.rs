@@ -1992,7 +1992,18 @@ fn type_tokens(ty: &str) -> Vec<&str> {
         .filter(|token| {
             !matches!(
                 *token,
-                "Vec" | "Option" | "HashMap" | "BTreeMap" | "Map" | "List"
+                "Vec"
+                    | "vec"
+                    | "Option"
+                    | "option"
+                    | "HashMap"
+                    | "hashmap"
+                    | "BTreeMap"
+                    | "btreemap"
+                    | "Map"
+                    | "map"
+                    | "List"
+                    | "list"
             )
         })
         .collect()
@@ -2025,8 +2036,16 @@ fn is_builtin_api_type(ty: &str) -> bool {
             | "float"
             | "double"
             | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
             | "integer"
             | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
             | "long"
             | "datetime"
             | "DateTime"
@@ -3917,6 +3936,36 @@ spec:
             }
             type PingResp {
                 ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse spec");
+
+        let issues = validate_api_spec(&spec);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn api_validate_accepts_idl_integer_aliases() {
+        let spec = parser::parse_api(
+            r#"
+            service catalog {
+                @handler listProducts
+                get /products (PageReq) returns (PageResp)
+            }
+
+            type PageReq {
+                page int64 `query:"page"`
+                limit int64 `query:"limit"`
+                categoryIds []int64 `query:"categoryIds,optional" validate:"optional"`
+            }
+
+            type PageResp {
+                page int64 `json:"page"`
+                limit int64 `json:"limit"`
+                total uint64 `json:"total"`
+                ids []int64 `json:"ids"`
+                counters map[string]int64 `json:"counters"`
             }
             "#,
         )
