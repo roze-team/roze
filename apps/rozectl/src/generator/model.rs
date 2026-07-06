@@ -172,7 +172,7 @@ async fn inspect_mongo_collection(
     {
         documents.push(document);
     }
-    Ok(model_from_mongo_documents(
+    validate_model_spec(model_from_mongo_documents(
         collection_name,
         &documents,
         indexes,
@@ -3515,7 +3515,7 @@ fn build_inspected_model(
 
     let cache_keys = normalize_cache_keys(&primary, unique_cache_keys.clone(), &fields);
 
-    Ok(ModelSpec {
+    validate_model_spec(ModelSpec {
         name: model_name_from_table(table),
         schema_name,
         table: table.to_string(),
@@ -3657,6 +3657,121 @@ fn validate_tenant_field(
         bail!("model `{model_name}` tenant field `{field_name}` cannot be optional")
     }
     Ok(())
+}
+
+fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>> {
+    let mut generated_modules = HashMap::<String, String>::new();
+    let mut generated_types = HashMap::<String, String>::new();
+
+    for model in &models {
+        validate_model_generated_names(model)?;
+
+        let module = to_snake_case(&model.name);
+        if let Some(previous) = generated_modules.insert(module.clone(), model.name.clone()) {
+            bail!(
+                "duplicate generated model module `{module}`: {previous} and {}",
+                model.name
+            );
+        }
+
+        let ty = to_pascal_case(&model.name);
+        if let Some(previous) = generated_types.insert(ty.clone(), model.name.clone()) {
+            bail!(
+                "duplicate generated model type `{ty}`: {previous} and {}",
+                model.name
+            );
+        }
+    }
+
+    Ok(models)
+}
+
+fn validate_model_spec(model: ModelSpec) -> anyhow::Result<ModelSpec> {
+    validate_model_generated_names(&model)?;
+    Ok(model)
+}
+
+fn validate_model_generated_names(model: &ModelSpec) -> anyhow::Result<()> {
+    let module = to_snake_case(&model.name);
+    if !is_valid_model_rust_ident(&module) || rust_identifier(&module) != module {
+        bail!(
+            "model `{}` generates invalid Rust module `{module}`",
+            model.name
+        );
+    }
+
+    let ty = to_pascal_case(&model.name);
+    if !is_valid_model_rust_type(&ty) {
+        bail!("model `{}` generates invalid Rust type `{ty}`", model.name);
+    }
+
+    let mut generated_fields = HashMap::<String, String>::new();
+    for field in &model.fields {
+        let generated = model_field_ident(field);
+        if !is_valid_model_rust_ident(&generated) {
+            bail!(
+                "model `{}` field `{}` generates invalid Rust field `{generated}`",
+                model.name,
+                model_field_source_label(field)
+            );
+        }
+
+        let variant = to_pascal_case(&field.name);
+        if !is_valid_model_rust_type(&variant) {
+            bail!(
+                "model `{}` field `{}` generates invalid Rust field enum variant `{variant}`",
+                model.name,
+                model_field_source_label(field)
+            );
+        }
+
+        let source = model_field_source_label(field);
+        if let Some(previous) = generated_fields.insert(generated.clone(), source.clone()) {
+            bail!(
+                "duplicate generated model field `{generated}` in model `{}`: {previous} and {source}",
+                model.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn model_field_source_label(field: &ModelField) -> String {
+    field
+        .source_name
+        .as_deref()
+        .unwrap_or(&field.name)
+        .to_string()
+}
+
+fn is_valid_model_rust_type(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if name == "_" {
+        return false;
+    }
+    if !(first == '_' || first.is_ascii_uppercase()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_model_rust_ident(name: &str) -> bool {
+    let name = name.strip_prefix("r#").unwrap_or(name);
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if name == "_" {
+        return false;
+    }
+    if !(first == '_' || first.is_ascii_lowercase()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn infer_soft_delete_field(fields: &[ModelField]) -> Option<String> {
@@ -3983,7 +4098,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         bail!("no model declarations found");
     }
 
-    Ok(models)
+    validate_model_specs(models)
 }
 
 fn normalize_dsl_model_type(ty: &str) -> String {
@@ -4084,7 +4199,7 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         field.comment = Some(comment);
     }
 
-    Ok(models)
+    validate_model_specs(models)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4953,6 +5068,62 @@ mod tests {
         assert_eq!(models[0].indexes.len(), 1);
         assert_eq!(models[0].indexes[0].fields, vec!["tenant_id", "name"]);
         assert!(models[0].indexes[0].unique);
+    }
+
+    #[test]
+    fn rejects_invalid_generated_model_rust_names() {
+        let invalid_model = parse_models(
+            r#"
+        model 123-user {
+            field id i64
+        }
+        "#,
+        )
+        .expect_err("invalid model");
+        assert!(invalid_model
+            .to_string()
+            .contains("model `123-user` generates invalid Rust module `123_user`"));
+
+        let invalid_field = parse_models(
+            r#"
+        model User {
+            field 123-name String
+        }
+        "#,
+        )
+        .expect_err("invalid field");
+        assert!(invalid_field
+            .to_string()
+            .contains("model `User` field `123-name` generates invalid Rust field `123_name`"));
+
+        let duplicate_field = parse_models(
+            r#"
+        model User {
+            field display-name String
+            field display_name String
+        }
+        "#,
+        )
+        .expect_err("duplicate field");
+        assert!(duplicate_field.to_string().contains(
+            "duplicate generated model field `display_name` in model `User`: display-name and display_name"
+        ));
+
+        let duplicate_model = parse_models(
+            r#"
+        model user-profile {
+            field id i64
+        }
+
+        model user_profile {
+            field id i64
+        }
+        "#,
+        )
+        .expect_err("duplicate model");
+        assert!(duplicate_model.to_string().contains(
+            "duplicate generated model module `user_profile`: user-profile and user_profile"
+        ));
     }
 
     #[test]

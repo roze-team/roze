@@ -776,6 +776,8 @@ output to SeaORM-style modules.
 SQL `JSON`/`JSONB` columns generate `serde_json::Value`; ordinary SQL
 `INT`/`INTEGER` columns generate `i32`, while `BIGINT`/`BIGSERIAL` columns
 generate 64-bit integer types.
+Model names and field names must generate valid, non-conflicting Rust module,
+type, field, and field-enum identifiers.
 Mongo inspection samples collection documents, maps `_id` to `id`, and emits
 Mongo repository modules. It preserves Mongo index metadata, emits find helpers
 for single-field unique indexes, emits compound-index find/list helpers, and
