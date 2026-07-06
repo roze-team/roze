@@ -671,11 +671,14 @@ fn main() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
-            } => registry.dispatch(GeneratorCommand::ApiGenerate {
-                api,
-                out,
-                options: options(force, update, roze_source),
-            })?,
+            } => {
+                validate_api_for_generation(&api)?;
+                registry.dispatch(GeneratorCommand::ApiGenerate {
+                    api,
+                    out,
+                    options: options(force, update, roze_source),
+                })?
+            }
             ApiCommands::New {
                 name,
                 out,
@@ -728,11 +731,14 @@ fn main() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
-            } => registry.dispatch(GeneratorCommand::RpcGenerate {
-                api,
-                out,
-                options: options(force, update, roze_source),
-            })?,
+            } => {
+                validate_api_for_generation(&api)?;
+                registry.dispatch(GeneratorCommand::RpcGenerate {
+                    api,
+                    out,
+                    options: options(force, update, roze_source),
+                })?
+            }
             RpcCommands::New {
                 name,
                 out,
@@ -1113,6 +1119,24 @@ fn run_api_validate(path: &Path) -> anyhow::Result<()> {
         eprintln!("- {}", issue.detail);
     }
     anyhow::bail!("api validate failed")
+}
+
+fn validate_api_for_generation(path: &Path) -> anyhow::Result<()> {
+    let spec = read_api_spec(path)?;
+    let issues = validate_api_spec(&spec);
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    let details = issues
+        .iter()
+        .map(|issue| format!("- {}", issue.detail))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "api validation failed before generation for {}:\n{details}",
+        path.display()
+    )
 }
 
 fn run_api_format(path: &Path, write: bool, check: bool) -> anyhow::Result<()> {
@@ -2730,6 +2754,7 @@ fn run_diff(command: DiffCommands, registry: &generator::GeneratorRegistry) -> a
             out,
             roze_source,
         } => {
+            validate_api_for_generation(&api)?;
             let mode = diff_mode(&out);
             let command = GeneratorCommand::ApiGenerate {
                 api,
@@ -2743,6 +2768,7 @@ fn run_diff(command: DiffCommands, registry: &generator::GeneratorRegistry) -> a
             out,
             roze_source,
         } => {
+            validate_api_for_generation(&api)?;
             let mode = diff_mode(&out);
             let command = GeneratorCommand::RpcGenerate {
                 api,
@@ -2809,6 +2835,16 @@ mod tests {
 
     fn parse(args: impl IntoIterator<Item = &'static str>) -> Cli {
         Cli::try_parse_from(args).expect("parse cli")
+    }
+
+    fn temp_test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ))
     }
 
     #[test]
@@ -4019,6 +4055,76 @@ spec:
         assert!(report.contains("service 123-api generates invalid Rust service type `123Api`"));
         assert!(report.contains("type _ is not a valid Rust type name"));
         assert!(report.contains("field _._ generates invalid Rust field name `_`"));
+    }
+
+    #[test]
+    fn api_generation_preflight_rejects_invalid_contract() {
+        let root = temp_test_root("rozectl-api-generation-preflight-test");
+        fs::create_dir_all(&root).expect("create test root");
+        let api = root.join("user.api");
+        fs::write(
+            &api,
+            r#"
+            service user {
+                @handler type
+                get /users (UserReq) returns (UserResp)
+            }
+
+            type UserReq {
+                id string `json:"id"`
+            }
+            type UserResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("write api");
+
+        let err = validate_api_for_generation(&api).expect_err("invalid contract rejected");
+        let message = err.to_string();
+        assert!(message.contains("api validation failed before generation"));
+        assert!(message.contains("REST route GET /users generates invalid Rust handler `type`"));
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn diff_api_uses_generation_preflight_validation() {
+        let root = temp_test_root("rozectl-diff-api-preflight-test");
+        fs::create_dir_all(&root).expect("create test root");
+        let api = root.join("user.api");
+        let out = root.join("out");
+        fs::write(
+            &api,
+            r#"
+            service user {
+                rpc type (PingReq) returns (PingResp)
+            }
+
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("write api");
+
+        let err = run_diff(
+            DiffCommands::Api {
+                api,
+                out,
+                roze_source: RozeSource::Git,
+            },
+            &generator::registry(),
+        )
+        .expect_err("invalid diff contract rejected");
+        let message = err.to_string();
+        assert!(message.contains("api validation failed before generation"));
+        assert!(message.contains("RPC method type generates invalid Rust method `type`"));
+
+        fs::remove_dir_all(root).expect("remove test root");
     }
 
     #[test]
