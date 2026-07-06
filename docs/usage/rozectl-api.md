@@ -120,6 +120,8 @@ rozectl template init --out templates
 rozectl template diff api --dir templates
 rozectl template update api --dir templates
 rozectl template update api --dir templates --force
+rozectl template revert api --dir templates
+rozectl template revert api --dir templates --no-backup
 ```
 
 `template init` writes the built-in API, RPC, and model starter templates into
@@ -127,7 +129,9 @@ the target directory. `template diff` compares one local template file
 (`api.api`, `rpc.api`, or `model.model`) against the current built-in template
 and prints a small unified diff without modifying the local file. `template
 update` creates a missing local template from the built-in copy, but refuses to
-overwrite a changed local template unless `--force` is passed.
+overwrite a changed local template unless `--force` is passed. `template
+revert` restores a local template to the built-in copy and writes a `.bak`
+backup first unless `--no-backup` is passed.
 
 Check contract breaking changes before regenerating or releasing:
 

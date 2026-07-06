@@ -426,6 +426,13 @@ enum TemplateCommands {
         #[arg(long)]
         force: bool,
     },
+    Revert {
+        name: String,
+        #[arg(long, default_value = "templates")]
+        dir: PathBuf,
+        #[arg(long)]
+        no_backup: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -885,6 +892,13 @@ fn main() -> anyhow::Result<()> {
             TemplateCommands::Update { name, dir, force } => {
                 run_template_update(&name, &dir, force)?;
             }
+            TemplateCommands::Revert {
+                name,
+                dir,
+                no_backup,
+            } => {
+                run_template_revert(&name, &dir, !no_backup)?;
+            }
         },
         Commands::Diff { command } => run_diff(command, &registry)?,
         Commands::Contract { command } => run_contract(command)?,
@@ -1187,6 +1201,45 @@ fn run_template_update(name: &str, dir: &Path, force: bool) -> anyhow::Result<()
         .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))?;
     println!("template {name} updated: {}", path.display());
     Ok(())
+}
+
+fn run_template_revert(name: &str, dir: &Path, backup: bool) -> anyhow::Result<()> {
+    let path = dir.join(template_file_name(name)?);
+    let expected = generator::template(name)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| anyhow::anyhow!("failed to create {}: {err}", parent.display()))?;
+    }
+
+    if path.exists() {
+        let current = fs::read_to_string(&path)
+            .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+        if normalize_line_endings(&current) == normalize_line_endings(&expected) {
+            println!("template {name} is already built-in: {}", path.display());
+            return Ok(());
+        }
+        if backup {
+            let backup_path = template_backup_path(&path);
+            fs::write(&backup_path, current).map_err(|err| {
+                anyhow::anyhow!("failed to write backup {}: {err}", backup_path.display())
+            })?;
+            println!("template {name} backup written: {}", backup_path.display());
+        }
+    }
+
+    fs::write(&path, expected)
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))?;
+    println!("template {name} reverted: {}", path.display());
+    Ok(())
+}
+
+fn template_backup_path(path: &Path) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!("{extension}.bak"))
+        .unwrap_or_else(|| "bak".to_string());
+    path.with_extension(extension)
 }
 
 fn template_file_name(name: &str) -> anyhow::Result<&'static str> {
@@ -2711,6 +2764,26 @@ spec:
             }
         ));
 
+        let template_revert = Cli::try_parse_from([
+            "rozectl",
+            "template",
+            "revert",
+            "api",
+            "--dir",
+            "templates",
+            "--no-backup",
+        ])
+        .expect("parse template revert");
+        assert!(matches!(
+            template_revert.command,
+            Commands::Template {
+                command: TemplateCommands::Revert {
+                    no_backup: true,
+                    ..
+                }
+            }
+        ));
+
         let openapi = Cli::try_parse_from([
             "rozectl",
             "openapi",
@@ -3633,6 +3706,42 @@ type (
         run_template_update("api", &root, true).expect("force update template");
         assert_eq!(
             fs::read_to_string(&api_template).expect("read updated template"),
+            generator::template("api").expect("builtin template")
+        );
+
+        fs::remove_dir_all(root).expect("remove template root");
+    }
+
+    #[test]
+    fn template_revert_restores_builtin_template_with_optional_backup() {
+        let root = std::env::temp_dir().join(format!(
+            "rozectl-template-revert-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create template root");
+        let api_template = root.join("api.api");
+        fs::write(&api_template, "custom template\n").expect("write custom template");
+
+        run_template_revert("api", &root, true).expect("revert template");
+        assert_eq!(
+            fs::read_to_string(&api_template).expect("read reverted template"),
+            generator::template("api").expect("builtin template")
+        );
+        assert_eq!(
+            fs::read_to_string(template_backup_path(&api_template)).expect("read backup"),
+            "custom template\n"
+        );
+
+        fs::write(&api_template, "custom again\n").expect("write custom template again");
+        let backup_path = template_backup_path(&api_template);
+        fs::remove_file(&backup_path).expect("remove backup");
+        run_template_revert("api", &root, false).expect("revert without backup");
+        assert!(!backup_path.exists());
+        assert_eq!(
+            fs::read_to_string(&api_template).expect("read reverted template"),
             generator::template("api").expect("builtin template")
         );
 
