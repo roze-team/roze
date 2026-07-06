@@ -3,8 +3,8 @@
 `rozectl api generate` reads a Roze `.api` contract and generates a
 Rust-native Axum REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
-method-level logic, custom middleware, and `config.yaml` when `--update` is
-used.
+method-level logic, service context extensions, custom middleware, and
+`config.yaml` when `--update` is used.
 
 Think of `rozectl` as a generator for project structure and integration code.
 It can generate API layers, RPC layers, model scaffolds, documentation, client
@@ -61,6 +61,7 @@ cargo run -p rozectl -- api generate example/user.api \
 `--update` preserves:
 
 - REST `src/logic/<group>/<method>.rs`
+- REST/RPC `src/svc/mod.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
 - RPC `src/logic/<method>.rs`
 - `config.yaml`
@@ -80,8 +81,9 @@ rozectl diff model example/user.sql --out services/user-api --format sql
 `rozectl diff` writes nothing to the target directory. If the target exists, it
 copies the target to a temporary workspace, runs generation in update mode, and
 prints file-level changes as `A`, `M`, and `D`. This mirrors `--update`
-ownership rules, so business-owned logic files and preserved config are not
-reported as modified unless generation would actually change them.
+ownership rules, so business-owned logic files, service context extensions,
+and preserved config are not reported as modified unless generation would
+actually change them.
 
 Check contract breaking changes before regenerating or releasing:
 
@@ -448,6 +450,12 @@ field, so omitted filters deserialize to Rust defaults such as `None`, `0`,
 `false`, an empty string, or an empty collection. Validator tags still run after
 deserialization; use `validate:"required"` or a nonzero range rule when a query
 parameter must be present.
+
+During `--update`, generated REST projects preserve existing `src/svc/mod.rs`
+so application-owned service clients and dependency accessors are not
+overwritten. Group-level logic module indexes such as `src/logic/admin/mod.rs`
+are refreshed for generated handlers while preserving extra app-owned
+`mod ...;` declarations.
 
 ## Type mapping
 

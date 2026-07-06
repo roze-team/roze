@@ -53,8 +53,8 @@ Public API includes:
 - Metrics, event names, and observable result fields.
 
 Generated code is part of the public API. A generator change is breaking when
-it requires users to rewrite preserved logic, custom middleware, config,
-deployment manifests, or CI wiring.
+it requires users to rewrite preserved logic, service context extensions,
+custom middleware, config, deployment manifests, or CI wiring.
 
 ## Experimental Surface
 

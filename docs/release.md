@@ -45,8 +45,8 @@ Roze should use Semantic Versioning after the first public release:
   and test hardening.
 
 Generated code is part of the public contract. A change is breaking if it
-requires users to rewrite preserved `src/logic/**`, custom middleware, config
-files, or CI/deployment wiring.
+requires users to rewrite preserved `src/logic/**`, `src/svc/mod.rs`, custom
+middleware, config files, or CI/deployment wiring.
 
 ## MSRV
 
@@ -122,7 +122,8 @@ bash scripts/release-gate.sh
 - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
 - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
 - `cargo test -p rozectl generated_stream_project_compiles -- --ignored`
-- `--update` ownership tests pass and prove user logic is preserved.
+- `--update` ownership tests pass and prove user logic, service context
+  extensions, custom middleware, and config are preserved.
 - Gateway smoke tests cover rewrite, timeout, auth, rate limit, breaker, retry,
   fallback, and hot reload.
 - MQ/Kafka tests cover ack, nack, retry, dead letter, and idempotency behavior.

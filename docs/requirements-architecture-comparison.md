@@ -412,7 +412,7 @@ P0 不应该继续扩模块，而应该补“可信闭环”。
 
 1. `rozectl diff`：对 API/RPC/model 生成结果做文件级预览。（已实现 MVP）
 2. generated project tests：REST、RPC、model、search、OpenAPI、SDK、Docker/Kube/Helm 主路径已有生成器覆盖；REST+model+search 组合临时项目和 RPC 临时项目 compile smoke 已落地。
-3. ownership preservation tests：确认 `src/logic/**`、自定义 middleware、`config.yaml` 不被 `--update` 覆盖。
+3. ownership preservation tests：确认 `src/logic/**`、`src/svc/mod.rs`、自定义 middleware、`config.yaml` 不被 `--update` 覆盖。
 4. `rozectl contract check`：对 `.api` 前后版本做 breaking change 检查。（已实现 MVP）
 
 验收：
@@ -492,6 +492,7 @@ AI Collaboration Layer
 | `src/types/**` | 契约 | 从 `.api`/proto 刷新 |
 | `src/openapi/**` | 契约 | 从 `.api` 刷新 |
 | `src/logic/**` | 业务 | `--update` 保留 |
+| `src/svc/mod.rs` | 依赖/应用 | `--update` 保留 |
 | `src/middleware/<custom>.rs` | 业务 | `--update` 保留 |
 | `config.yaml` | 部署/应用 | `--update` 保留 |
 | Docker/K8s/Helm | 运维模板 | 已实现生成和 validate；diff/update 属于增强方向 |

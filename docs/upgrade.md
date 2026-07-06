@@ -16,8 +16,13 @@ releases and crates.io publishing are available.
 
 - REST `src/logic/**`
 - RPC `src/logic/**`
+- REST/RPC `src/svc/mod.rs`
 - custom REST middleware files under `src/middleware/`
 - `config.yaml`
+
+For REST services, group module indexes such as `src/logic/admin/mod.rs`
+refresh generated handler exports while preserving extra app-owned
+`mod ...;` declarations.
 
 Generated glue may be refreshed:
 

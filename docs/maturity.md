@@ -15,7 +15,7 @@ Status legend:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned files on `--update`; generated REST + model + search compile smoke exists as an ignored `rozectl` test; needs more Roze `.api` edge fixtures. |
+| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned logic, service context extensions, custom middleware, and config on `--update`; generated REST + model + search compile smoke exists as an ignored `rozectl` test; needs more Roze `.api` edge fixtures. |
 | RPC generation | beta | Generates split server/client/pb/logic layout. Method rate-limit and breaker state use DashMap for concurrent hot paths; memory registry has Criterion hot-path baselines; generated RPC compile smoke exists as an ignored `rozectl` test; needs more proto fixture coverage. |
 | Stream worker generation | beta | `rozectl stream gen` creates producer, consumer, envelope, config, type, and README scaffolding from RPC methods. Generated stream worker compile smoke exists as an ignored `rozectl` test; needs live broker examples and richer event-contract fixtures. |
 | OpenAPI generation | beta | Produces OpenAPI 3 documents; validator constraint projection still has known gaps. |

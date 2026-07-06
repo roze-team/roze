@@ -1034,6 +1034,11 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
+        "| `src/svc/mod.rs` | application/dependencies | preserved during `--update` |"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
         "| `src/middleware/<custom>.rs` | application | preserved during `--update` |"
     )
     .unwrap();
@@ -2423,7 +2428,7 @@ fn generate_rest_project(
     for (group, content) in rest::render_logic_group_mods(spec) {
         let dir = out.join("src/logic").join(&group);
         fs::create_dir_all(&dir)?;
-        fs::write(dir.join("mod.rs"), content)?;
+        write_logic_group_mod(&dir.join("mod.rs"), content, options.mode)?;
     }
     for (group, handler, content) in rest::render_logic_files(spec) {
         let dir = out.join("src/logic").join(&group);
@@ -2434,9 +2439,10 @@ fn generate_rest_project(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
     )?;
-    fs::write(
-        out.join("src/svc/mod.rs"),
+    write_preserved(
+        &out.join("src/svc/mod.rs"),
         service_context_rs(ProjectKind::Rest),
+        options.mode,
     )?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
     ensure_model_module(out)?;
@@ -2480,9 +2486,10 @@ pub(super) fn generate_rpc_project(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
     )?;
-    fs::write(
-        out.join("src/svc/mod.rs"),
+    write_preserved(
+        &out.join("src/svc/mod.rs"),
         service_context_rs(ProjectKind::Rpc),
+        options.mode,
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
@@ -2527,6 +2534,58 @@ fn write_preserved_logic(path: &Path, content: String, mode: GenerateMode) -> an
         }
     }
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_logic_group_mod(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
+    if mode != GenerateMode::Update || !path.exists() {
+        return fs::write(path, content)
+            .with_context(|| format!("failed to write {}", path.display()));
+    }
+
+    let existing =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let merged = merge_app_owned_mod_declarations(&content, &existing);
+    fs::write(path, merged).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn merge_app_owned_mod_declarations(generated: &str, existing: &str) -> String {
+    let mut merged = generated.to_string();
+    let generated_modules = generated
+        .lines()
+        .filter_map(mod_declaration_name)
+        .collect::<HashSet<_>>();
+    let extra_mods = existing
+        .lines()
+        .filter_map(|line| {
+            let name = mod_declaration_name(line)?;
+            (!generated_modules.contains(&name)).then_some(line.trim().to_string())
+        })
+        .collect::<Vec<_>>();
+    if extra_mods.is_empty() {
+        return merged;
+    }
+
+    if !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    for line in extra_mods {
+        merged.push_str(&line);
+        merged.push('\n');
+    }
+    merged
+}
+
+fn mod_declaration_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    let rest = line
+        .strip_prefix("mod ")
+        .or_else(|| line.strip_prefix("pub mod "))?;
+    let name = rest.strip_suffix(';')?.trim();
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
+    .then(|| name.to_string())
 }
 
 fn is_generated_default_logic_stub(content: &str) -> bool {
@@ -4629,6 +4688,20 @@ mod tests {
             "// custom middleware\n",
         )
         .expect("write custom middleware");
+        fs::write(
+            out.join("src/logic/users/mod.rs"),
+            "mod get_user;\npub use get_user::get_user;\nmod catalog_map;\n",
+        )
+        .expect("write custom logic group mod");
+        let svc_path = out.join("src/svc/mod.rs");
+        let svc = fs::read_to_string(&svc_path).expect("read svc");
+        fs::write(
+            &svc_path,
+            format!(
+                "{svc}\nimpl ServiceContext {{\n    pub fn catalog(&self) -> anyhow::Result<()> {{\n        Ok(())\n    }}\n}}\n"
+            ),
+        )
+        .expect("write custom svc extension");
         fs::write(out.join("config.yaml"), "name: custom\n").expect("write custom config");
         fs::write(out.join("src/handler/mod.rs"), "// stale handler\n")
             .expect("write stale handler");
@@ -4671,6 +4744,12 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/middleware/mod.rs"))
             .expect("read middleware mod")
             .contains("pub use tenant_guard::tenant_guard;"));
+        assert!(fs::read_to_string(out.join("src/logic/users/mod.rs"))
+            .expect("read logic group mod")
+            .contains("mod catalog_map;"));
+        assert!(fs::read_to_string(out.join("src/svc/mod.rs"))
+            .expect("read svc")
+            .contains("pub fn catalog(&self)"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));
@@ -4932,6 +5011,8 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(content.contains("| GET | `/users/:id` | `getUser` | `GetUserReq` | `UserResp` |"));
         assert!(content.contains("| `Ping` | `PingReq` | `PingResp` |"));
         assert!(content.contains("`src/logic/**` | application | preserved during `--update`"));
+        assert!(content
+            .contains("`src/svc/mod.rs` | application/dependencies | preserved during `--update`"));
         assert!(content.contains("rozectl diff api"));
         assert!(write_service_markdown_doc(&api, &out, false).is_err());
         write_service_markdown_doc(&api, &out, true).expect("force service doc");

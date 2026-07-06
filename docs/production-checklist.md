@@ -18,8 +18,8 @@ crate, generator, or runtime module is broadly production-stable.
   - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
   - `cargo test -p rozectl generated_stream_project_compiles -- --ignored`
 - Generated-code changes were applied with `--update` and reviewed as a diff.
-- User-owned files under `src/logic/**`, custom middleware, and `config.yaml`
-  were not overwritten.
+- User-owned files under `src/logic/**`, `src/svc/mod.rs`, custom
+  middleware, and `config.yaml` were not overwritten.
 - Rollback command and previous binary/image are available.
 - Runtime-critical modules marked `stable` have a production evidence report
   that follows [Production Evidence](production-evidence.md).
