@@ -1423,6 +1423,7 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_unique_rpc_methods(spec, &mut issues);
     validate_unique_generated_names(spec, &mut issues);
     validate_generated_rest_rpc_identifiers(spec, &mut issues);
+    validate_generated_middleware_identifiers(spec, &mut issues);
     validate_referenced_types(spec, &mut issues);
     validate_route_path_params(spec, &mut issues);
     issues
@@ -1659,6 +1660,40 @@ fn validate_generated_rest_rpc_identifiers(
 
 fn is_valid_generated_rust_ident(name: &str) -> bool {
     is_valid_rust_field_name(name) && generator::rust_identifier(name) == name
+}
+
+fn validate_generated_middleware_identifiers(
+    spec: &parser::ApiSpec,
+    issues: &mut Vec<ApiValidationIssue>,
+) {
+    for route in &spec.rest_routes {
+        for middleware in validation_route_middlewares(spec, route) {
+            if roze_middleware::BuiltInMiddleware::parse(&middleware).is_some() {
+                continue;
+            }
+            let generated = generator::to_snake_case(&middleware);
+            if !is_valid_generated_rust_ident(&generated) {
+                issues.push(api_validation_issue(format!(
+                    "REST route {} custom middleware {} generates invalid Rust identifier `{generated}`",
+                    rest_route_key(spec, route),
+                    middleware
+                )));
+            }
+        }
+    }
+}
+
+fn validation_route_middlewares(spec: &parser::ApiSpec, route: &parser::RestRoute) -> Vec<String> {
+    let mut names = spec
+        .server
+        .as_ref()
+        .map(|server| server.middlewares.clone())
+        .unwrap_or_default();
+    if let Some(server) = &route.server {
+        names.extend(server.middlewares.clone());
+    }
+    names.extend(route.middlewares.clone());
+    names
 }
 
 fn validation_resolved_handler_name(route: &parser::RestRoute) -> String {
@@ -3767,6 +3802,7 @@ spec:
                 patch /users/:id (GetUserReq) returns (PingResp)
                 @handler ping
                 get /ping
+                @middleware(type, audit.v1)
                 get /assets/logo.png (PingReq) returns (PingResp)
                 @handler type
                 put /keyword-handler (PingReq) returns (PingResp)
@@ -3838,6 +3874,12 @@ spec:
         assert!(report.contains("duplicate generated REST handler `get_user` in group `users`"));
         assert!(report.contains("duplicate generated RPC method `get_user`: GetUser and get_user"));
         assert!(report.contains("REST route GET /assets/logo.png generates invalid Rust handler"));
+        assert!(report.contains(
+            "REST route GET /assets/logo.png custom middleware type generates invalid Rust identifier `type`"
+        ));
+        assert!(report.contains(
+            "REST route GET /assets/logo.png custom middleware audit.v1 generates invalid Rust identifier `audit.v1`"
+        ));
         assert!(report.contains("REST route PUT /keyword-handler generates invalid Rust handler"));
         assert!(report.contains("RPC method type generates invalid Rust method `type`"));
         assert!(report.contains(
