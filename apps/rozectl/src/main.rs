@@ -1421,6 +1421,7 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_unique_rest_routes(spec, &mut issues);
     validate_unique_rpc_methods(spec, &mut issues);
     validate_unique_generated_names(spec, &mut issues);
+    validate_generated_rest_rpc_identifiers(spec, &mut issues);
     validate_referenced_types(spec, &mut issues);
     validate_route_path_params(spec, &mut issues);
     issues
@@ -1600,6 +1601,42 @@ fn validate_unique_generated_names(spec: &parser::ApiSpec, issues: &mut Vec<ApiV
             )));
         }
     }
+}
+
+fn validate_generated_rest_rpc_identifiers(
+    spec: &parser::ApiSpec,
+    issues: &mut Vec<ApiValidationIssue>,
+) {
+    for route in &spec.rest_routes {
+        let group = validation_route_group_name(route);
+        let handler = validation_resolved_handler_name(route);
+        if !is_valid_generated_rust_ident(&group) {
+            issues.push(api_validation_issue(format!(
+                "REST route {} generates invalid Rust route group `{group}`",
+                rest_route_key(spec, route)
+            )));
+        }
+        if !is_valid_generated_rust_ident(&handler) {
+            issues.push(api_validation_issue(format!(
+                "REST route {} generates invalid Rust handler `{handler}`",
+                rest_route_key(spec, route)
+            )));
+        }
+    }
+
+    for method in &spec.rpc_methods {
+        let generated = generator::to_snake_case(&method.name);
+        if !is_valid_generated_rust_ident(&generated) {
+            issues.push(api_validation_issue(format!(
+                "RPC method {} generates invalid Rust method `{generated}`",
+                method.name
+            )));
+        }
+    }
+}
+
+fn is_valid_generated_rust_ident(name: &str) -> bool {
+    is_valid_rust_field_name(name) && generator::rust_identifier(name) == name
 }
 
 fn validation_resolved_handler_name(route: &parser::RestRoute) -> String {
@@ -3708,10 +3745,14 @@ spec:
                 patch /users/:id (GetUserReq) returns (PingResp)
                 @handler ping
                 get /ping
+                get /assets/logo.png (PingReq) returns (PingResp)
+                @handler type
+                put /keyword-handler (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc GetUser (PingReq) returns (PingResp)
                 rpc get_user (PingReq) returns (PingResp)
+                rpc type (PingReq) returns (PingResp)
             }
 
             type GetUserReq {
@@ -3774,6 +3815,9 @@ spec:
         assert!(report.contains("duplicate RPC method: Ping"));
         assert!(report.contains("duplicate generated REST handler `get_user` in group `users`"));
         assert!(report.contains("duplicate generated RPC method `get_user`: GetUser and get_user"));
+        assert!(report.contains("REST route GET /assets/logo.png generates invalid Rust handler"));
+        assert!(report.contains("REST route PUT /keyword-handler generates invalid Rust handler"));
+        assert!(report.contains("RPC method type generates invalid Rust method `type`"));
         assert!(report.contains(
             "REST route GET /users/:id response type references unknown type: MissingResp"
         ));
