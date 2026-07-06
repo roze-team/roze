@@ -1005,9 +1005,11 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
-    writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
     if model.soft_delete.is_some() {
+        writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
         writeln!(&mut out, "        select = self.apply_live_scope(select);").unwrap();
+    } else {
+        writeln!(&mut out, "        let select = Entity::find();").unwrap();
     }
     writeln!(&mut out, "        Ok(select.count(db).await?)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
@@ -1118,9 +1120,11 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
-    writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
     if model.soft_delete.is_some() {
+        writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
         writeln!(&mut out, "        select = self.apply_live_scope(select);").unwrap();
+    } else {
+        writeln!(&mut out, "        let select = Entity::find();").unwrap();
     }
     writeln!(&mut out, "        Ok(select.all(db).await?)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
@@ -1177,20 +1181,15 @@ fn render_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
+    let primary_value_expr = sea_orm_reusable_value_expr(&primary_ty, primary_ident.as_str());
     if model.cache {
         writeln!(
             &mut out,
-            "        let existing = self.find_by_{}_uncached({}.clone()).await?;",
-            primary, primary_ident
+            "        let existing = self.find_by_{primary}_uncached({primary_value_expr}).await?;"
         )
         .unwrap();
     }
-    writeln!(
-        &mut out,
-        "        let delete_key = {}.clone();",
-        primary_ident
-    )
-    .unwrap();
+    writeln!(&mut out, "        let delete_key = {primary_value_expr};").unwrap();
     writeln!(
         &mut out,
         "        let result = Entity::delete_by_id(delete_key).exec(db).await?;"
@@ -1308,8 +1307,8 @@ fn render_model_module(model: &ModelSpec) -> String {
         .unwrap();
         writeln!(
             &mut out,
-            "            let lookup = {}.clone();",
-            primary_ident
+            "            let lookup = {};",
+            sea_orm_reusable_value_expr(&primary_ty, primary_ident.as_str())
         )
         .unwrap();
         writeln!(&mut out, "            return cache").unwrap();
@@ -1370,8 +1369,8 @@ fn render_model_module(model: &ModelSpec) -> String {
             .unwrap();
             writeln!(
                 &mut out,
-                "            let lookup = {}.clone();",
-                field_ident
+                "            let lookup = {};",
+                sea_orm_reusable_value_expr(field_ty, field_ident.as_str())
             )
             .unwrap();
             writeln!(&mut out, "            return cache").unwrap();
@@ -1854,9 +1853,10 @@ fn render_sea_orm_soft_delete_methods(
     )
     .unwrap();
     writeln!(out, "        let db = self.write_db()?;").unwrap();
+    let primary_value_expr = sea_orm_reusable_value_expr(primary_ty, primary_ident.as_str());
     writeln!(
         out,
-        "        let mut update = Entity::update_many().filter(Column::{primary_column}.eq({primary_ident}.clone()));"
+        "        let mut update = Entity::update_many().filter(Column::{primary_column}.eq({primary_value_expr}));"
     )
     .unwrap();
     render_soft_delete_assignment(out, field, &soft_column);
@@ -2387,6 +2387,14 @@ fn option_filter_value_expr(field: &ModelField, ident: &str) -> String {
         format!("req.{ident}")
     } else {
         format!("req.{ident}.clone()")
+    }
+}
+
+fn sea_orm_reusable_value_expr(ty: &str, ident: &str) -> String {
+    if is_copy_filter_type(ty) {
+        ident.to_string()
+    } else {
+        format!("{ident}.clone()")
     }
 }
 
@@ -5088,6 +5096,10 @@ mod tests {
         assert!(rendered.contains("pub async fn find_by_tenant_id_and_name"));
         assert!(rendered.contains("pub async fn cached_find_by_id"));
         assert!(rendered.contains("pub async fn delete_by_id"));
+        assert!(rendered.contains("let existing = self.find_by_id_uncached(id).await?;"));
+        assert!(rendered.contains("let delete_key = id;"));
+        assert!(rendered.contains("Column::Id.eq(id)"));
+        assert!(!rendered.contains("id.clone()"));
     }
 
     #[test]
@@ -6069,7 +6081,7 @@ mod types;
     }
 
     #[test]
-    #[ignore = "runs cargo check against a generated temporary Toasty crate"]
+    #[ignore = "runs cargo check/clippy against a generated temporary Toasty crate"]
     fn generated_toasty_model_crate_compiles() {
         let out = temp_model_output("toasty-compile-smoke");
         write_generated_crate_manifest(
@@ -6106,10 +6118,11 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
         .expect("generate");
 
         cargo_check_generated_crate(&out);
+        cargo_clippy_generated_crate(&out);
     }
 
     #[test]
-    #[ignore = "runs cargo check against a generated temporary SeaORM crate"]
+    #[ignore = "runs cargo check/clippy against a generated temporary SeaORM crate"]
     fn generated_sea_orm_model_crate_compiles() {
         let out = temp_model_output("sea-orm-compile-smoke");
         write_generated_crate_manifest(
@@ -6168,6 +6181,7 @@ impl ServiceContext {
         .expect("generate");
 
         cargo_check_generated_crate(&out);
+        cargo_clippy_generated_crate(&out);
     }
 
     fn temp_model_output(label: &str) -> std::path::PathBuf {
@@ -6184,15 +6198,24 @@ impl ServiceContext {
     }
 
     fn cargo_check_generated_crate(out: &std::path::Path) {
+        cargo_generated_crate(out, "check", &[]);
+    }
+
+    fn cargo_clippy_generated_crate(out: &std::path::Path) {
+        cargo_generated_crate(out, "clippy", &["--all-targets", "--", "-D", "warnings"]);
+    }
+
+    fn cargo_generated_crate(out: &std::path::Path, command: &str, args: &[&str]) {
         let output = Command::new("cargo")
-            .arg("check")
+            .arg(command)
             .arg("--offline")
+            .args(args)
             .current_dir(out)
             .output()
-            .expect("run cargo check");
+            .unwrap_or_else(|err| panic!("run cargo {command}: {err}"));
         if !output.status.success() {
             panic!(
-                "cargo check failed in {}\nstdout:\n{}\nstderr:\n{}",
+                "cargo {command} failed in {}\nstdout:\n{}\nstderr:\n{}",
                 out.display(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
