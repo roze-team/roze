@@ -1576,6 +1576,7 @@ where
     Cli::parse_from(normalize_go_style_flags(args))
 }
 
+#[cfg(test)]
 fn try_parse_cli_from<I, T>(args: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
