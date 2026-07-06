@@ -1416,6 +1416,7 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_unique_types(spec, &mut issues);
     validate_unique_type_fields(spec, &mut issues);
     validate_reserved_empty_types(spec, &mut issues);
+    validate_generated_service_identifiers(spec, &mut issues);
     validate_generated_type_names(spec, &mut issues);
     validate_unique_generated_type_fields(spec, &mut issues);
     validate_unique_rest_routes(spec, &mut issues);
@@ -1489,6 +1490,27 @@ fn validate_reserved_empty_types(spec: &parser::ApiSpec, issues: &mut Vec<ApiVal
                 ty.name
             )));
         }
+    }
+}
+
+fn validate_generated_service_identifiers(
+    spec: &parser::ApiSpec,
+    issues: &mut Vec<ApiValidationIssue>,
+) {
+    let module = generator::to_snake_case(&spec.service);
+    if !is_valid_generated_rust_ident(&module) {
+        issues.push(api_validation_issue(format!(
+            "service {} generates invalid Rust module `{module}`",
+            spec.service
+        )));
+    }
+
+    let service = generator::to_pascal_case(&spec.service);
+    if !is_valid_rust_type_name(&service) {
+        issues.push(api_validation_issue(format!(
+            "service {} generates invalid Rust service type `{service}`",
+            spec.service
+        )));
     }
 }
 
@@ -3826,6 +3848,35 @@ spec:
         assert!(report.contains(
             "request type GetUserReq declares path field `tenantId` that is not present in the route path"
         ));
+    }
+
+    #[test]
+    fn api_validate_reports_invalid_generated_service_identifiers() {
+        let spec = parser::parse_api(
+            r#"
+            service 123-api {
+                rpc Ping (PingReq) returns (PingResp)
+            }
+
+            type PingReq {
+                requestId string `json:"requestId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("parse spec");
+
+        let issues = validate_api_spec(&spec);
+        let report = issues
+            .iter()
+            .map(|issue| issue.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(report.contains("service 123-api generates invalid Rust module `123_api`"));
+        assert!(report.contains("service 123-api generates invalid Rust service type `123Api`"));
     }
 
     #[test]
