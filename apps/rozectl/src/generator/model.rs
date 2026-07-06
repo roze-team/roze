@@ -499,35 +499,47 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
         ModelOrm::SeaOrm => "sea-orm",
         ModelOrm::Toasty => "toasty",
     };
-    if dependencies.contains_key(dependency_name) {
-        return Ok(());
-    }
-
     let uses_workspace = content.contains("edition.workspace = true")
         || content.contains("toasty.workspace = true")
-        || content.contains("sea-orm.workspace = true");
+        || content.contains("sea-orm.workspace = true")
+        || content.contains("serde_json.workspace = true");
 
-    let item = if uses_workspace {
-        let mut table = toml_edit::InlineTable::new();
-        table.insert("workspace", true.into());
-        toml_edit::Item::Value(toml_edit::Value::InlineTable(table))
-    } else {
-        match orm {
-            ModelOrm::SeaOrm => {
-                r#"{ version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }"#
-                    .parse::<toml_edit::Item>()
-                    .expect("valid toml dependency value")
+    if !dependencies.contains_key(dependency_name) {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            match orm {
+                ModelOrm::SeaOrm => {
+                    r#"{ version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }"#
+                        .parse::<toml_edit::Item>()
+                        .expect("valid toml dependency value")
+                }
+                ModelOrm::Toasty => {
+                    r#"{ version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }"#
+                        .parse::<toml_edit::Item>()
+                        .expect("valid toml dependency value")
+                }
             }
-            ModelOrm::Toasty => {
-                r#"{ version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }"#
-                    .parse::<toml_edit::Item>()
-                    .expect("valid toml dependency value")
-            }
-        }
-    };
-    dependencies.insert(dependency_name, item);
+        };
+        dependencies.insert(dependency_name, item);
+    }
+
+    if !dependencies.contains_key("serde_json") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            r#""1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
+        };
+        dependencies.insert("serde_json", item);
+    }
     fs::write(&manifest_path, document.to_string())
         .with_context(|| format!("failed to write {}", manifest_path.display()))
+}
+
+fn workspace_dependency_item() -> toml_edit::Item {
+    let mut table = toml_edit::InlineTable::new();
+    table.insert("workspace", true.into());
+    toml_edit::Item::Value(toml_edit::Value::InlineTable(table))
 }
 
 fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Result<()> {
@@ -4804,6 +4816,10 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         return "bool".to_string();
     }
 
+    if normalized.contains("json") || normalized.contains("jsonb") {
+        return "serde_json::Value".to_string();
+    }
+
     if normalized.contains("bigserial") || normalized.contains("bigint") {
         return if normalized.contains("unsigned") || auto_increment {
             "u64".to_string()
@@ -4823,9 +4839,9 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         || normalized.contains("integer")
     {
         return if normalized.contains("unsigned") {
-            "u64".to_string()
+            "u32".to_string()
         } else {
-            "i64".to_string()
+            "i32".to_string()
         };
     }
 
@@ -4844,9 +4860,7 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         return "Vec<u8>".to_string();
     }
 
-    if normalized.contains("json")
-        || normalized.contains("jsonb")
-        || normalized.contains("char")
+    if normalized.contains("char")
         || normalized.contains("text")
         || normalized.contains("enum")
         || normalized.contains("set")
@@ -4949,6 +4963,8 @@ mod tests {
             `tenant_id` varchar(64) NOT NULL,
             `name` varchar(255) NOT NULL,
             `nickname` varchar(255) NULL DEFAULT 'guest' COMMENT 'Nickname',
+            `config` JSONB NOT NULL DEFAULT '{}'::jsonb,
+            `sort_order` INT NOT NULL DEFAULT 100,
             `deleted` tinyint(1) NOT NULL DEFAULT 0,
             `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY `uniq_users_name` (`name`),
@@ -4971,6 +4987,8 @@ mod tests {
         assert_eq!(models[0].tenant.as_deref(), Some("tenant_id"));
         assert_eq!(models[0].fields[0].ty, "u64");
         assert_eq!(models[0].fields[3].ty, "Option<String>");
+        assert_eq!(models[0].fields[4].ty, "serde_json::Value");
+        assert_eq!(models[0].fields[5].ty, "i32");
         assert_eq!(
             models[0].fields[3].default_value.as_deref(),
             Some("'guest'")
@@ -4980,7 +4998,7 @@ mod tests {
             Some("nickname from profile")
         );
         assert_eq!(
-            models[0].fields[5].default_value.as_deref(),
+            models[0].fields[7].default_value.as_deref(),
             Some("CURRENT_TIMESTAMP")
         );
     }
@@ -5264,7 +5282,8 @@ impl ServiceContext {
             r#"
             CREATE TABLE users (
                 id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(255) NOT NULL
+                name VARCHAR(255) NOT NULL,
+                config JSONB NOT NULL DEFAULT '{}'::jsonb
             );
             "#,
             &out,
@@ -5276,9 +5295,11 @@ impl ServiceContext {
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains("toasty = { workspace = true }"));
+        assert!(manifest.contains("serde_json = { workspace = true }"));
         assert!(!manifest.contains("sea-orm.workspace = true"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("toasty::Model"));
+        assert!(module.contains("pub config: serde_json::Value"));
         let fields = fs::read_to_string(out.join("src/model/user_fields.rs")).expect("fields read");
         assert!(fields.contains(MODEL_GENERATED_MARKER));
         assert!(fields.contains("pub const USER_TABLE: &str = \"users\";"));

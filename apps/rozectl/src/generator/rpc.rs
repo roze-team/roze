@@ -442,7 +442,10 @@ fn proto_to_app_value(spec: &ApiSpec, ty: &str, expr: &str) -> String {
         return expr.to_string();
     }
     if is_known_type(spec, ty) {
-        return proto_to_app(spec, ty, expr);
+        return format!(
+            "{expr}.map(|value| {}).unwrap_or_default()",
+            proto_to_app(spec, ty, "value")
+        );
     }
     expr.to_string()
 }
@@ -467,7 +470,7 @@ fn app_to_proto_value(spec: &ApiSpec, ty: &str, expr: &str) -> String {
         return expr.to_string();
     }
     if is_known_type(spec, ty) {
-        return app_to_proto(spec, ty, expr);
+        return format!("Some({})", app_to_proto(spec, ty, expr));
     }
     expr.to_string()
 }
@@ -1261,6 +1264,41 @@ mod tests {
         assert!(rendered.contains(
             "users: resp.users.into_iter().map(|item| proto::UserItem { id: item.id, r#type: item.r#type }).collect()"
         ));
+    }
+
+    #[test]
+    fn rpc_wraps_singular_nested_message_fields_for_prost() {
+        let spec = parse_api(
+            r#"
+            service user {
+                rpc Login (LoginRequest) returns (LoginResponse)
+            }
+
+            type User {
+                id: u64
+                name: string
+            }
+
+            type LoginRequest {
+                user: User
+            }
+
+            type LoginResponse {
+                token: string
+                user: User
+            }
+            "#,
+        )
+        .expect("api");
+
+        let rendered = render_rpc(&spec);
+
+        assert!(rendered.contains(
+            "user: req.user.map(|value| User { id: value.id, name: value.name }).unwrap_or_default()"
+        ));
+        assert!(
+            rendered.contains("user: Some(proto::User { id: resp.user.id, name: resp.user.name })")
+        );
     }
 
     #[test]
