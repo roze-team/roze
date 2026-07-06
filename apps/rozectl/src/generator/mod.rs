@@ -4086,6 +4086,13 @@ mod tests {
         assert!(cargo.contains(r#"anyhow = "1""#));
         assert!(cargo.contains(r#"tokio = { version = "1""#));
         assert!(cargo.contains(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#));
+        assert_eq!(
+            cargo
+                .matches(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#)
+                .count(),
+            2
+        );
+        assert!(!cargo.contains("rev ="));
         assert!(!cargo.contains(".workspace = true"));
     }
 

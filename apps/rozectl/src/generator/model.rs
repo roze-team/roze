@@ -4129,7 +4129,7 @@ fn normalize_dsl_model_type(ty: &str) -> String {
         "ulong" => "u64".to_string(),
         "float" => "f32".to_string(),
         "double" | "decimal" | "numeric" => "f64".to_string(),
-        "json" | "jsonb" | "value" => "serde_json::Value".to_string(),
+        "json" | "jsonb" | "value" => "String".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -4932,7 +4932,7 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
     }
 
     if normalized.contains("json") || normalized.contains("jsonb") {
-        return "serde_json::Value".to_string();
+        return "String".to_string();
     }
 
     if normalized.contains("bigserial") || normalized.contains("bigint") {
@@ -5158,7 +5158,7 @@ mod tests {
         assert_eq!(models[0].tenant.as_deref(), Some("tenant_id"));
         assert_eq!(models[0].fields[0].ty, "u64");
         assert_eq!(models[0].fields[3].ty, "Option<String>");
-        assert_eq!(models[0].fields[4].ty, "serde_json::Value");
+        assert_eq!(models[0].fields[4].ty, "String");
         assert_eq!(models[0].fields[5].ty, "i32");
         assert_eq!(
             models[0].fields[3].default_value.as_deref(),
@@ -5466,11 +5466,10 @@ impl ServiceContext {
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains("toasty = { workspace = true }"));
-        assert!(manifest.contains("serde_json = { workspace = true }"));
         assert!(!manifest.contains("sea-orm.workspace = true"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("toasty::Model"));
-        assert!(module.contains("pub config: serde_json::Value"));
+        assert!(module.contains("pub config: String"));
         let fields = fs::read_to_string(out.join("src/model/user_fields.rs")).expect("fields read");
         assert!(fields.contains(MODEL_GENERATED_MARKER));
         assert!(fields.contains("pub const USER_TABLE: &str = \"users\";"));

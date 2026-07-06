@@ -779,9 +779,9 @@ rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/r
 
 Toasty is the default SQL ORM. `--orm sea-orm` switches SQL/DSL/inspection
 output to SeaORM-style modules.
-SQL `JSON`/`JSONB` columns generate `serde_json::Value`; ordinary SQL
-`INT`/`INTEGER` columns generate `i32`, while `BIGINT`/`BIGSERIAL` columns
-generate 64-bit integer types.
+SQL `JSON`/`JSONB` columns generate `String` so default Toasty models remain
+compilable; ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
+`BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.
 Model names and field names must generate valid, non-conflicting Rust module,
 type, field, and field-enum identifiers. Names that normalize to a single `_`
 are rejected.
