@@ -4,8 +4,8 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use super::{
-    find_workspace_root, local_crates_prefix, to_pascal_case, to_snake_case, DependencySource,
-    GenerateMode, GenerateOptions,
+    find_workspace_root, local_crates_prefix, rust_identifier, to_pascal_case, to_snake_case,
+    DependencySource, GenerateMode, GenerateOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,8 +222,47 @@ fn normalize_search_spec(mut spec: SearchIndexSpec) -> anyhow::Result<SearchInde
     if spec.fields.is_empty() {
         bail!("search schema requires at least one field");
     }
+    let module = to_snake_case(&spec.name);
+    if !is_valid_search_rust_ident(&module) {
+        bail!(
+            "search index `{}` generates invalid Rust module `{module}`",
+            spec.name
+        );
+    }
+    let pascal = to_pascal_case(&spec.name);
+    if !is_valid_search_rust_type(&pascal) {
+        bail!(
+            "search index `{}` generates invalid Rust type `{pascal}`",
+            spec.name
+        );
+    }
+
+    let mut generated_fields = std::collections::BTreeMap::<String, String>::new();
     let mut has_primary = false;
     for field in &mut spec.fields {
+        if !is_valid_search_rust_ident(&field.name) {
+            bail!(
+                "search field `{}` generates invalid Rust field `{}`",
+                field.source_name.as_deref().unwrap_or(&field.name),
+                field.name
+            );
+        }
+        if let Some(previous) = generated_fields.insert(
+            field.name.clone(),
+            field
+                .source_name
+                .as_deref()
+                .unwrap_or(&field.name)
+                .to_string(),
+        ) {
+            let current = field.source_name.as_deref().unwrap_or(&field.name);
+            bail!(
+                "duplicate generated search field `{}`: {} and {}",
+                field.name,
+                previous,
+                current
+            );
+        }
         if field.name == spec.primary {
             field.primary = true;
         }
@@ -233,6 +272,25 @@ fn normalize_search_spec(mut spec: SearchIndexSpec) -> anyhow::Result<SearchInde
         bail!("search schema primary field `{}` not found", spec.primary);
     }
     Ok(spec)
+}
+
+fn is_valid_search_rust_type(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_uppercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_search_rust_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_lowercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && rust_identifier(name) == name
 }
 
 fn parse_search_type(value: &str) -> anyhow::Result<SearchFieldType> {
@@ -817,6 +875,52 @@ mod tests {
         assert_eq!(spec.fields[0].name, "display_id");
         assert_eq!(spec.fields[0].source_name.as_deref(), Some("display-id"));
         assert_eq!(spec.fields[1].ty, SearchFieldType::U64);
+    }
+
+    #[test]
+    fn rejects_invalid_generated_search_rust_names() {
+        let invalid_index = parse_search_schema(
+            r#"
+            index 123-users
+            primary id
+            field id keyword primary
+            "#,
+        )
+        .expect_err("invalid index");
+        assert!(invalid_index
+            .to_string()
+            .contains("search index `123-users` generates invalid Rust module `123_users`"));
+
+        let invalid_field = parse_search_schema(
+            r#"
+            index users
+            primary id
+            field id keyword primary
+            field type keyword
+            "#,
+        )
+        .expect_err("invalid field");
+        assert!(invalid_field
+            .to_string()
+            .contains("search field `type` generates invalid Rust field `type`"));
+
+        let duplicate_field = parse_search_schema(
+            r#"
+            {
+              "index": "users",
+              "primary": "id",
+              "fields": [
+                { "name": "id", "kind": "keyword", "primary": true },
+                { "name": "display-name", "kind": "text" },
+                { "name": "display_name", "kind": "text" }
+              ]
+            }
+            "#,
+        )
+        .expect_err("duplicate field");
+        assert!(duplicate_field.to_string().contains(
+            "duplicate generated search field `display_name`: display-name and display_name"
+        ));
     }
 
     #[test]

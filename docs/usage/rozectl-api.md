@@ -914,6 +914,9 @@ Supported field kinds are `keyword`, `text`, `i32`, `i64`, `u64`, `f64`,
 such as `integer`, `long`, `unsigned_long`, `float`, `double`, `boolean`,
 `date`, and `object`.
 
+Search index and field names must generate valid, non-conflicting Rust module,
+type, and field identifiers.
+
 The same schema can be written as JSON when a pipeline already owns structured
 metadata:
 
