@@ -1564,6 +1564,9 @@ fn is_valid_rust_type_name(name: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
+    if name == "_" {
+        return false;
+    }
     (first == '_' || first.is_ascii_uppercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
@@ -1574,6 +1577,9 @@ fn is_valid_rust_field_name(name: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
+    if name == "_" {
+        return false;
+    }
     (first == '_' || first.is_ascii_lowercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
@@ -3995,6 +4001,9 @@ spec:
             type PingResp {
                 ok bool `json:"ok"`
             }
+            type _ {
+                _ string `json:"_"`
+            }
             "#,
         )
         .expect("parse spec");
@@ -4008,6 +4017,8 @@ spec:
 
         assert!(report.contains("service 123-api generates invalid Rust module `123_api`"));
         assert!(report.contains("service 123-api generates invalid Rust service type `123Api`"));
+        assert!(report.contains("type _ is not a valid Rust type name"));
+        assert!(report.contains("field _._ generates invalid Rust field name `_`"));
     }
 
     #[test]

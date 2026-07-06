@@ -100,6 +100,8 @@ types, non-empty reserved `EmptyReq`/`EmptyResp` declarations, invalid
 generated service/REST/RPC/middleware Rust identifiers, and mismatches between
 route path parameters and request `path` fields, including duplicate route path
 parameters and duplicate generated custom middleware names.
+Names that normalize to a single `_` are rejected because Rust does not allow
+`_` as a generated item or field identifier.
 
 Format an API contract:
 
@@ -777,7 +779,8 @@ SQL `JSON`/`JSONB` columns generate `serde_json::Value`; ordinary SQL
 `INT`/`INTEGER` columns generate `i32`, while `BIGINT`/`BIGSERIAL` columns
 generate 64-bit integer types.
 Model names and field names must generate valid, non-conflicting Rust module,
-type, field, and field-enum identifiers.
+type, field, and field-enum identifiers. Names that normalize to a single `_`
+are rejected.
 Mongo inspection samples collection documents, maps `_id` to `id`, and emits
 Mongo repository modules. It preserves Mongo index metadata, emits find helpers
 for single-field unique indexes, emits compound-index find/list helpers, and
@@ -917,7 +920,7 @@ such as `integer`, `long`, `unsigned_long`, `float`, `double`, `boolean`,
 `date`, and `object`.
 
 Search index and field names must generate valid, non-conflicting Rust module,
-type, and field identifiers.
+type, and field identifiers. Names that normalize to a single `_` are rejected.
 
 The same schema can be written as JSON when a pipeline already owns structured
 metadata:

@@ -279,6 +279,9 @@ fn is_valid_search_rust_type(name: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
+    if name == "_" {
+        return false;
+    }
     (first == '_' || first.is_ascii_uppercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
@@ -288,6 +291,9 @@ fn is_valid_search_rust_ident(name: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
+    if name == "_" {
+        return false;
+    }
     (first == '_' || first.is_ascii_lowercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
         && rust_identifier(name) == name
@@ -891,6 +897,18 @@ mod tests {
             .to_string()
             .contains("search index `123-users` generates invalid Rust module `123_users`"));
 
+        let underscore_index = parse_search_schema(
+            r#"
+            index _
+            primary id
+            field id keyword primary
+            "#,
+        )
+        .expect_err("invalid underscore index");
+        assert!(underscore_index
+            .to_string()
+            .contains("search index `_` generates invalid Rust module `_`"));
+
         let invalid_field = parse_search_schema(
             r#"
             index users
@@ -903,6 +921,19 @@ mod tests {
         assert!(invalid_field
             .to_string()
             .contains("search field `type` generates invalid Rust field `type`"));
+
+        let underscore_field = parse_search_schema(
+            r#"
+            index users
+            primary id
+            field id keyword primary
+            field _ keyword
+            "#,
+        )
+        .expect_err("invalid underscore field");
+        assert!(underscore_field
+            .to_string()
+            .contains("search field `_` generates invalid Rust field `_`"));
 
         let duplicate_field = parse_search_schema(
             r#"
