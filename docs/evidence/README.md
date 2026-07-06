@@ -9,6 +9,7 @@ claims.
 
 Current scoped verification notes:
 
+- [2026-07-06 generation verification](2026-07-06-generation-verification.md)
 - [2026-07-04 generation verification](2026-07-04-generation-verification.md)
 
 Generate a new report scaffold with:
