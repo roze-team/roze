@@ -98,7 +98,8 @@ collisions, duplicate REST routes, duplicate RPC methods, generated REST
 handler/RPC method name collisions, unknown request/response or nested field
 types, non-empty reserved `EmptyReq`/`EmptyResp` declarations, invalid
 generated service/REST/RPC/middleware Rust identifiers, and mismatches between
-route path parameters and request `path` fields.
+route path parameters and request `path` fields, including duplicate route path
+parameters.
 
 Format an API contract:
 

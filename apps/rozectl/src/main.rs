@@ -1804,6 +1804,19 @@ fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValida
 
     for route in &spec.rest_routes {
         let required_params = route_path_params(&route.path);
+        let mut seen_required = BTreeMap::<&str, &str>::new();
+        for param in &required_params {
+            if let Some(previous) =
+                seen_required.insert(param.normalized.as_str(), param.raw.as_str())
+            {
+                issues.push(api_validation_issue(format!(
+                    "REST route {} has duplicate path parameter `{}` and `{}`",
+                    rest_route_key(spec, route),
+                    previous,
+                    param.raw
+                )));
+            }
+        }
         let required_normalized = required_params
             .iter()
             .map(|param| param.normalized.as_str())
@@ -3860,6 +3873,8 @@ spec:
                 get /assets/logo.png (PingReq) returns (PingResp)
                 @handler type
                 put /keyword-handler (PingReq) returns (PingResp)
+                @handler duplicatedPath
+                get /duplicate/:id/{id} (DuplicatePathReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc GetUser (PingReq) returns (PingResp)
@@ -3886,6 +3901,9 @@ spec:
             }
             type UserReq {
                 ok bool `json:"ok"`
+            }
+            type DuplicatePathReq {
+                id string `path:"id"`
             }
             type PingReq {
                 requestId string `json:"requestId"`
@@ -3935,6 +3953,9 @@ spec:
             "REST route GET /assets/logo.png custom middleware audit.v1 generates invalid Rust identifier `audit.v1`"
         ));
         assert!(report.contains("REST route PUT /keyword-handler generates invalid Rust handler"));
+        assert!(report.contains(
+            "REST route GET /duplicate/:id/{id} has duplicate path parameter `id` and `id`"
+        ));
         assert!(report.contains("RPC method type generates invalid Rust method `type`"));
         assert!(report.contains(
             "REST route GET /users/:id response type references unknown type: MissingResp"
