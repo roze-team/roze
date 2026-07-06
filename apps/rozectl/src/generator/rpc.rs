@@ -63,6 +63,10 @@ fn config_path() -> PathBuf {{
     )
 }
 
+pub fn render_lib() -> String {
+    "pub mod client;\npub mod pb;\n".to_string()
+}
+
 pub fn render_rpc(spec: &ApiSpec) -> String {
     let package = to_snake_case(&spec.service);
     let service = to_pascal_case(&spec.service);

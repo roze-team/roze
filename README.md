@@ -79,7 +79,7 @@ Generated REST services always expose the same Rust project shape:
 `src/main.rs`, `src/config/mod.rs`, `src/route/`, `src/handler/`,
 `src/logic/`, `src/middleware/`, `src/openapi/mod.rs`, `src/svc/mod.rs`, and
 `src/types/mod.rs`. Generated RPC services use `build.rs`,
-`proto/service.proto`, `src/client/mod.rs`, `src/server/mod.rs`,
+`proto/service.proto`, `src/lib.rs`, `src/client/mod.rs`, `src/server/mod.rs`,
 `src/pb/mod.rs`, `src/svc/mod.rs`, `src/types/mod.rs`, and `src/logic/`.
 This keeps route registration, handler adaptation, business logic, context,
 validation, errors, tracing, and response contracts uniform across teams.
@@ -334,6 +334,8 @@ Generated RPC service layout:
 
 ```text
 src/
+  lib.rs
+  main.rs
   config/mod.rs
   logic/
   pb/mod.rs

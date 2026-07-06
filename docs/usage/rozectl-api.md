@@ -681,6 +681,8 @@ Cargo.toml
 build.rs
 config.yaml
 proto/service.proto
+src/lib.rs
+src/main.rs
 src/config/mod.rs
 src/pb/mod.rs
 src/server/mod.rs

@@ -1125,7 +1125,7 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "- `src/server/**`, `src/client/**`, and proto/build files are generated for RPC projects."
+        "- `src/lib.rs`, `src/server/**`, `src/client/**`, and proto/build files are generated for RPC projects."
     )
     .unwrap();
     writeln!(
@@ -2501,6 +2501,7 @@ pub(super) fn generate_rpc_project(
             options.mode,
         )?;
     }
+    fs::write(out.join("src/lib.rs"), rpc::render_lib())?;
     fs::write(out.join("src/main.rs"), rpc::render_main(spec))?;
     fs::write(out.join("proto/service.proto"), render_proto(spec)?)?;
     Ok(())
@@ -4299,6 +4300,7 @@ mod tests {
             .expect("generate rpc project");
 
         assert!(out.join("src/server/mod.rs").is_file());
+        assert!(out.join("src/lib.rs").is_file());
         assert!(out.join("src/client/mod.rs").is_file());
         assert!(out.join("src/config/mod.rs").is_file());
         assert!(out.join("src/pb/mod.rs").is_file());
@@ -4316,6 +4318,9 @@ mod tests {
         assert!(!fs::read_to_string(out.join("Cargo.toml"))
             .expect("read cargo")
             .contains("toasty"));
+        let lib = fs::read_to_string(out.join("src/lib.rs")).expect("read lib");
+        assert!(lib.contains("pub mod client;"));
+        assert!(lib.contains("pub mod pb;"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
         assert!(config.contains("postgres://postgres:postgres@127.0.0.1:5432/user"));
         assert!(!config.contains("sqlite://"));

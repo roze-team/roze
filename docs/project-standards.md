@@ -101,6 +101,7 @@ proto/
   service.proto
   source.proto
 src/
+  lib.rs
   main.rs
   client/mod.rs
   config/mod.rs
