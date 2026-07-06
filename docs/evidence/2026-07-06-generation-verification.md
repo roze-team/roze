@@ -7,6 +7,7 @@ Target repo: <https://github.com/roze-team/roze.git>
 ```text
 roze git dependency: regenerated after user updated roze on 2026-07-06
 roze locked commit after regeneration: e7c336d4
+local Roze generator fixes after regeneration: see latest repository commit
 rozectl --version: 0.1.0
 OS: Windows / PowerShell
 Rust: stable toolchain from local cargo
@@ -29,6 +30,8 @@ No unresolved Roze generation issues are currently blocking this project.
   extensions and extra logic module declarations after the Roze fix.
 - Fixed generated OpenAPI schema helpers so empty schema property maps are not
   emitted as mutable bindings.
+- Locked generated Toasty and SeaORM pagination so `count()` uses a filter-only
+  query before applying generated sort, limit, and offset to the page query.
 - Verified `shop-catalog-rpc` and `shop-admin-api` with `cargo check`.
 
 ## Resolved Issues
@@ -125,6 +128,66 @@ Roze fix:
   `let properties = BTreeMap::new();`.
 - Non-empty generated OpenAPI component schemas still use
   `let mut properties = BTreeMap::new();` before inserting fields.
+
+### Generated SQL pagination with generated sort can leak sort into count
+
+The first observed runtime failure involved Toasty/Postgres pagination with a
+generated sort field.
+
+#### Toasty/Postgres observation
+
+Observed through deployed `shop-admin-api` calling `shop-catalog-rpc` by etcd
+service discovery on `192.168.1.166`.
+
+Service discovery was successful:
+
+```text
+key:   /roze/services/shop-catalog-rpc/127.0.0.1:18800
+value: {"name":"shop-catalog-rpc","addr":"127.0.0.1:18800","weight":1,"metadata":{}}
+```
+
+The API reached RPC, but RPC returned a database error:
+
+```text
+db error: ERROR: column "tbl_0_0.sort_order" must appear in the GROUP BY clause or be used in an aggregate function
+```
+
+The deployed server still had app code setting generated sort fields:
+
+```rust
+sort_by: Some(ProductSortField::SortOrder)
+```
+
+Expected Roze behavior:
+
+- Generated repository `count()` queries should strip generated `sort_by`,
+  `ORDER BY`, `LIMIT`, and `OFFSET`.
+- Generated pagination SQL should remain valid on PostgreSQL when generated
+  `sort_by` fields are set.
+- Toasty and SeaORM generation should both count filter-only queries before
+  applying generated sort and page bounds.
+- Add regression tests for generated model repository pagination with
+  `sort_by`.
+
+Roze fix:
+
+- Generated Toasty repositories calculate `total` with
+  `Self::build_filter_query(&req).count().exec(db).await?`.
+- Generated Toasty repositories apply `sort_by`, `limit`, and `offset` only to
+  the page query created by `Self::build_query(&req)`.
+- Generated SeaORM repositories calculate `total` with
+  `select.clone().count(db).await?` before generated `order_by_*` calls and
+  paginator creation.
+- A regression test now covers a generated `products.sort_order` sort field and
+  asserts Toasty count happens before the sorted page query.
+- A SeaORM regression assertion verifies generated count happens before
+  generated `order_by_*` and no longer uses `paginator.num_items()` after sort.
+
+Deployment note:
+
+- External mall services must regenerate and redeploy from the fixed Roze
+  revision before the deployed `shop-admin-api` to `shop-catalog-rpc` path can
+  prove the runtime issue is gone.
 
 ## Operational Note
 

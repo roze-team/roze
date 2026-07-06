@@ -1625,13 +1625,13 @@ fn render_sea_orm_query_methods(
             }
         }
     }
+    writeln!(out, "        let total = select.clone().count(db).await?;").unwrap();
     render_sea_orm_sort(out, model, pascal);
     writeln!(
         out,
         "        let paginator = select.paginate(db, page_size);"
     )
     .unwrap();
-    writeln!(out, "        let total = paginator.num_items().await?;").unwrap();
     writeln!(
         out,
         "        let items = paginator.fetch_page(page.saturating_sub(1)).await?;"
@@ -5059,6 +5059,14 @@ mod tests {
         assert!(rendered.contains("Column::Nickname.eq(Some(value))"));
         assert!(rendered.contains("Column::Nickname.is_null()"));
         assert!(rendered.contains("order_by_desc(Column::Id)"));
+        let sea_orm_count_pos = rendered
+            .find("let total = select.clone().count(db).await?;")
+            .expect("sea-orm count uses filter-only select");
+        let sea_orm_sort_pos = rendered
+            .find("select = select.order_by_desc(Column::Id)")
+            .expect("sea-orm page query applies generated sort");
+        assert!(sea_orm_count_pos < sea_orm_sort_pos);
+        assert!(!rendered.contains("let total = paginator.num_items().await?;"));
         assert!(rendered.contains("pub async fn insert_many"));
         assert!(rendered.contains("pub async fn soft_delete_by_id"));
         assert!(rendered.contains("pub async fn find_by_id_for_tenant_id"));
@@ -5119,6 +5127,32 @@ mod tests {
         assert!(rendered.contains("User::all().exec(db).await"));
         assert!(rendered.contains(".email(model.email)"));
         assert!(!rendered.contains(".id(model.id)"));
+    }
+
+    #[test]
+    fn toasty_pagination_counts_filter_query_before_applying_sort() {
+        let source = r#"
+        CREATE TABLE products (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            sort_order BIGINT NOT NULL,
+            deleted TINYINT(1) NOT NULL DEFAULT 0
+        );
+        "#;
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let rendered = render_toasty_model_module(&models[0]);
+
+        let count_pos = rendered
+            .find("let total = Self::build_filter_query(&req).count().exec(db).await?;")
+            .expect("count uses filter-only query");
+        let sorted_query_pos = rendered
+            .find("let mut query = Self::build_query(&req);")
+            .expect("page query applies generated sort");
+
+        assert!(count_pos < sorted_query_pos);
+        assert!(!rendered.contains("Self::build_query(&req).count()"));
+        assert!(rendered.contains("Product::fields().sort_order().asc()"));
+        assert!(rendered.contains("Product::fields().sort_order().desc()"));
     }
 
     #[test]
