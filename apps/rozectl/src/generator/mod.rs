@@ -779,6 +779,7 @@ pub struct StreamConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct StreamTopic {
     pub method: String,
     pub topic: String,
@@ -879,7 +880,7 @@ fn render_stream_envelope(spec: &ApiSpec) -> String {
 fn render_stream_producer(spec: &ApiSpec) -> String {
     use std::fmt::Write as _;
     let mut out = String::from(
-        "use roze_mq::{Message, Publisher};\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\n",
+        "#![allow(dead_code)]\n\nuse roze_mq::{Message, Publisher};\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\n",
     );
     for method in &spec.rpc_methods {
         let fn_name = format!("publish_{}", to_snake_case(&method.name));
@@ -3826,16 +3827,28 @@ mod tests {
     }
 
     fn cargo_check_generated(manifest: &Path) {
+        cargo_generated(manifest, "check", &["--quiet"]);
+    }
+
+    fn cargo_clippy_generated(manifest: &Path) {
+        cargo_generated(
+            manifest,
+            "clippy",
+            &["--all-targets", "--", "-D", "warnings"],
+        );
+    }
+
+    fn cargo_generated(manifest: &Path, command: &str, args: &[&str]) {
         let output = std::process::Command::new("cargo")
-            .arg("check")
+            .arg(command)
             .arg("--manifest-path")
             .arg(manifest)
-            .arg("--quiet")
+            .args(args)
             .output()
-            .expect("run cargo check");
+            .unwrap_or_else(|err| panic!("run cargo {command}: {err}"));
         assert!(
             output.status.success(),
-            "cargo check failed for {}\nstdout:\n{}\nstderr:\n{}",
+            "cargo {command} failed for {}\nstdout:\n{}\nstderr:\n{}",
             manifest.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -4329,7 +4342,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "compile-smoke: generates a REST project and runs cargo check"]
+    #[ignore = "compile-smoke: generates a REST project and runs cargo check/clippy"]
     fn generated_rest_project_compiles_with_model_and_search() {
         let root = generated_compile_workspace("rozectl-rest-compile-smoke");
         let api = root.join("user.api");
@@ -4422,11 +4435,12 @@ mod tests {
         .expect("generate search");
 
         cargo_check_generated(&out.join("Cargo.toml"));
+        cargo_clippy_generated(&out.join("Cargo.toml"));
         fs::remove_dir_all(root).expect("remove compile workspace");
     }
 
     #[test]
-    #[ignore = "compile-smoke: generates an RPC project and runs cargo check"]
+    #[ignore = "compile-smoke: generates an RPC project and runs cargo check/clippy"]
     fn generated_rpc_project_compiles() {
         let root = generated_compile_workspace("rozectl-rpc-compile-smoke");
         let api = root.join("user-rpc.api");
@@ -4472,11 +4486,12 @@ mod tests {
         register_workspace_member(&out).expect("register rpc smoke workspace member");
 
         cargo_check_generated(&out.join("Cargo.toml"));
+        cargo_clippy_generated(&out.join("Cargo.toml"));
         fs::remove_dir_all(root).expect("remove compile workspace");
     }
 
     #[test]
-    #[ignore = "compile-smoke: generates a stream worker project and runs cargo check"]
+    #[ignore = "compile-smoke: generates a stream worker project and runs cargo check/clippy"]
     fn generated_stream_project_compiles() {
         let root = generated_compile_workspace("rozectl-stream-compile-smoke");
         let api = root.join("user-stream.api");
@@ -4519,6 +4534,7 @@ mod tests {
         .expect("generate stream project");
 
         cargo_check_generated(&out.join("Cargo.toml"));
+        cargo_clippy_generated(&out.join("Cargo.toml"));
         fs::remove_dir_all(root).expect("remove compile workspace");
     }
 

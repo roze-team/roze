@@ -205,21 +205,25 @@ pub fn render_client(spec: &ApiSpec) -> String {
 
     for route in &spec.rest_routes {
         let handler = resolved_handler_name(route);
+        let retry_request_expr = retry_request_template_expr(spec, &route.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request(request_template.clone(), &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
             request = proto_type_name(&route.request),
-            response = proto_type_name(&route.response)
+            response = proto_type_name(&route.response),
+            retry_request_expr = retry_request_expr
         ));
     }
 
     for method in &spec.rpc_methods {
         let method_name = to_snake_case(&method.name);
+        let retry_request_expr = retry_request_template_expr(spec, &method.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req.clone();\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request(request_template.clone(), &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
             request = proto_type_name(&method.request),
-            response = proto_type_name(&method.response)
+            response = proto_type_name(&method.response),
+            retry_request_expr = retry_request_expr
         ));
     }
 
@@ -470,6 +474,55 @@ fn app_to_proto_value(spec: &ApiSpec, ty: &str, expr: &str) -> String {
 
 fn is_known_type(spec: &ApiSpec, ty_name: &str) -> bool {
     find_type(spec, ty_name).is_some()
+}
+
+fn retry_request_template_expr(spec: &ApiSpec, ty_name: &str) -> &'static str {
+    if is_copy_proto_message(spec, ty_name) {
+        "request_template"
+    } else {
+        "request_template.clone()"
+    }
+}
+
+fn is_copy_proto_message(spec: &ApiSpec, ty_name: &str) -> bool {
+    find_type(spec, ty_name).is_some_and(|ty| {
+        ty.fields
+            .iter()
+            .all(|field| is_copy_proto_field_type(&field.ty))
+    })
+}
+
+fn is_copy_proto_field_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "bool"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "int32"
+            | "int64"
+            | "uint32"
+            | "uint64"
+            | "sint32"
+            | "sint64"
+            | "fixed32"
+            | "fixed64"
+            | "sfixed32"
+            | "sfixed64"
+            | "float"
+            | "double"
+    )
 }
 
 fn find_type<'a>(spec: &'a ApiSpec, ty_name: &str) -> Option<&'a TypeDef> {
@@ -1071,10 +1124,15 @@ mod tests {
                 get /users/:id (GetUserReq) returns (GetUserResp)
 
                 rpc GetUser (GetUserReq) returns (GetUserResp)
+                rpc CreateUser (CreateUserReq) returns (GetUserResp)
             }
 
             type GetUserReq {
                 id: u64
+            }
+
+            type CreateUserReq {
+                name: string
             }
 
             type GetUserResp {
@@ -1089,6 +1147,9 @@ mod tests {
         assert!(client.contains("pub async fn connect_from_config"));
         assert!(client.contains("RpcClientOptions::from_config(&config)"));
         assert!(client.contains("roze_rpc::rpc::client_request("));
+        assert!(client.contains("let request_template = req;"));
+        assert!(client.contains("client_request(request_template, &context"));
+        assert!(client.contains("client_request(request_template.clone(), &context"));
     }
 
     #[test]

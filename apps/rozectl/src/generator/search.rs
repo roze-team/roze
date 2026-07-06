@@ -491,7 +491,7 @@ fn render_search_mod(spec: &SearchIndexSpec) -> String {
     let module = to_snake_case(&spec.name);
     let pascal = to_pascal_case(&spec.name);
     format!(
-        "pub mod {module};\n\npub use {module}::{{{pascal}Document, {pascal}SearchRepository}};\n"
+        "#![allow(unused_imports)]\n\npub mod {module};\n\npub use {module}::{{{pascal}Document, {pascal}SearchRepository}};\n"
     )
 }
 

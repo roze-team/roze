@@ -2225,10 +2225,10 @@ fn render_toasty_query_methods(
         let min_ident = query_field_suffix_ident(field, "min");
         let max_ident = query_field_suffix_ident(field, "max");
         if optional_inner_type(&field.ty).is_some() {
+            let value_expr = option_filter_value_expr(field, field_ident.as_str());
             writeln!(
                 out,
-                "        if let Some(value) = req.{}.clone() {{ query = query.and({pascal}::fields().{}().eq(Some(value))); }}",
-                field_ident, field_ident
+                "        if let Some(value) = {value_expr} {{ query = query.and({pascal}::fields().{field_ident}().eq(Some(value))); }}"
             )
             .unwrap();
             writeln!(
@@ -2237,10 +2237,10 @@ fn render_toasty_query_methods(
             )
             .unwrap();
         } else {
+            let value_expr = option_filter_value_expr(field, field_ident.as_str());
             writeln!(
                 out,
-                "        if let Some(value) = req.{}.clone() {{ query = query.and({pascal}::fields().{}().eq(value)); }}",
-                field_ident, field_ident
+                "        if let Some(value) = {value_expr} {{ query = query.and({pascal}::fields().{field_ident}().eq(value)); }}"
             )
             .unwrap();
             writeln!(
@@ -2249,14 +2249,16 @@ fn render_toasty_query_methods(
             )
             .unwrap();
             if is_numeric_type(&field.ty) {
+                let min_value_expr = option_filter_value_expr(field, min_ident.as_str());
+                let max_value_expr = option_filter_value_expr(field, max_ident.as_str());
                 writeln!(
                     out,
-                    "        if let Some(value) = req.{min_ident}.clone() {{ query = query.and({pascal}::fields().{field_ident}().ge(value)); }}"
+                    "        if let Some(value) = {min_value_expr} {{ query = query.and({pascal}::fields().{field_ident}().ge(value)); }}"
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "        if let Some(value) = req.{max_ident}.clone() {{ query = query.and({pascal}::fields().{field_ident}().le(value)); }}"
+                    "        if let Some(value) = {max_value_expr} {{ query = query.and({pascal}::fields().{field_ident}().le(value)); }}"
                 )
                 .unwrap();
             }
@@ -2378,6 +2380,14 @@ fn render_toasty_query_methods(
         writeln!(out, "    }}").unwrap();
     }
     writeln!(out).unwrap();
+}
+
+fn option_filter_value_expr(field: &ModelField, ident: &str) -> String {
+    if is_copy_filter_type(&field.ty) {
+        format!("req.{ident}")
+    } else {
+        format!("req.{ident}.clone()")
+    }
 }
 
 fn render_toasty_sort(out: &mut String, model: &ModelSpec, pascal: &str) {
@@ -3686,6 +3696,11 @@ fn is_numeric_type(ty: &str) -> bool {
             | "f32"
             | "f64"
     )
+}
+
+fn is_copy_filter_type(ty: &str) -> bool {
+    let ty = optional_inner_type(ty).unwrap_or(ty);
+    ty == "bool" || is_numeric_type(ty)
 }
 
 fn normalize_table_reference(
@@ -5116,8 +5131,13 @@ mod tests {
         assert!(rendered.contains("pub id_min: Option<u64>"));
         assert!(rendered.contains("pub nickname: Option<String>"));
         assert!(rendered.contains("pub nickname_is_null: bool"));
+        assert!(rendered.contains("if let Some(value) = req.id {"));
+        assert!(rendered.contains("if let Some(value) = req.id_min {"));
+        assert!(!rendered.contains("req.id.clone()"));
+        assert!(!rendered.contains("req.id_min.clone()"));
         assert!(rendered.contains("User::fields().id().in_list(req.id_in.clone())"));
         assert!(rendered.contains("User::fields().id().ge(value)"));
+        assert!(rendered.contains("if let Some(value) = req.nickname.clone()"));
         assert!(rendered.contains("User::fields().nickname().eq(Some(value))"));
         assert!(rendered.contains("User::fields().nickname().is_none()"));
         assert!(rendered.contains("query.order_by(User::fields().id().desc())"));
