@@ -1803,8 +1803,10 @@ fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValida
         .collect::<BTreeMap<_, _>>();
 
     for route in &spec.rest_routes {
-        let required_params = route_path_params(&route.path)
-            .into_iter()
+        let required_params = route_path_params(&route.path);
+        let required_normalized = required_params
+            .iter()
+            .map(|param| param.normalized.as_str())
             .collect::<BTreeSet<_>>();
         let Some(request_ty) = types.get(route.request.as_str()) else {
             continue;
@@ -1820,20 +1822,25 @@ fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValida
                     .or(field.json_name.as_deref())
                     .unwrap_or(field.name.as_str())
             })
+            .map(|name| (name, normalize_path_ident(name)))
+            .collect::<Vec<_>>();
+        let declared_normalized = declared_params
+            .iter()
+            .map(|(_, normalized)| normalized.as_str())
             .collect::<BTreeSet<_>>();
 
         for param in &required_params {
-            if !declared_params.contains(param.as_str()) {
+            if !declared_normalized.contains(param.normalized.as_str()) {
                 issues.push(api_validation_issue(format!(
                     "REST route {} path parameter `:{}` is missing from {} as a path field",
                     rest_route_key(spec, route),
-                    param,
+                    param.raw,
                     route.request
                 )));
             }
         }
-        for param in declared_params {
-            if !required_params.contains(param) {
+        for (param, normalized) in declared_params {
+            if !required_normalized.contains(normalized.as_str()) {
                 issues.push(api_validation_issue(format!(
                     "REST route {} request type {} declares path field `{}` that is not present in the route path",
                     rest_route_key(spec, route),
@@ -1845,18 +1852,59 @@ fn validate_route_path_params(spec: &parser::ApiSpec, issues: &mut Vec<ApiValida
     }
 }
 
-fn route_path_params(path: &str) -> Vec<String> {
-    path.split('/')
-        .filter_map(|part| {
-            let name = part.strip_prefix(':')?;
-            let name = name.split(['?', '#']).next().unwrap_or_default();
-            if name.is_empty() {
-                None
-            } else {
-                Some(name.to_string())
+#[derive(Debug, Clone)]
+struct RoutePathParam {
+    raw: String,
+    normalized: String,
+}
+
+fn route_path_params(path: &str) -> Vec<RoutePathParam> {
+    let mut params = Vec::new();
+    let mut chars = path.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            ':' => {
+                let mut raw = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next == '/' {
+                        break;
+                    }
+                    raw.push(next);
+                    chars.next();
+                }
+                push_route_path_param(&mut params, raw);
             }
-        })
-        .collect()
+            '{' => {
+                let mut raw = String::new();
+                for next in chars.by_ref() {
+                    if next == '}' {
+                        break;
+                    }
+                    raw.push(next);
+                }
+                push_route_path_param(&mut params, raw);
+            }
+            _ => {}
+        }
+    }
+
+    params
+}
+
+fn push_route_path_param(params: &mut Vec<RoutePathParam>, raw: String) {
+    let raw = raw.split(['?', '#']).next().unwrap_or_default();
+    if raw.is_empty() {
+        return;
+    }
+    params.push(RoutePathParam {
+        raw: raw.to_string(),
+        normalized: normalize_path_ident(raw),
+    });
+}
+
+fn normalize_path_ident(input: &str) -> String {
+    input.replace('-', "_")
 }
 
 fn referenced_custom_type_names(ty: &str) -> Vec<String> {
@@ -3762,6 +3810,8 @@ spec:
             service user {
                 @handler getUser
                 get /users/:id (GetUserReq) returns (GetUserResp)
+                @handler getUserByTenant
+                get /tenants/:tenant-id/users/:id (TenantUserReq) returns (GetUserResp)
                 rpc Ping (PingReq) returns (PingResp)
             }
 
@@ -3774,6 +3824,10 @@ spec:
             }
             type GetUserResp {
                 id string `json:"id"`
+            }
+            type TenantUserReq {
+                tenantId string `path:"tenant-id"`
+                id string `path:"id"`
             }
             type PingReq {
                 requestId string `json:"requestId"`
