@@ -2175,6 +2175,10 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_optional_clear_methods(
+        out,
+        model.fields.iter().filter(|field| !field.auto_increment),
+    );
     render_sea_orm_edge_builder_setters(out, model, true);
 
     writeln!(
@@ -2326,6 +2330,7 @@ fn render_sea_orm_update_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_optional_clear_methods(out, updatable_model_fields(model, primary));
     render_sea_orm_edge_builder_setters(out, model, false);
 
     writeln!(
@@ -2468,6 +2473,7 @@ fn render_sea_orm_update_many_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_optional_clear_methods(out, updatable_model_fields(model, primary));
     writeln!(
         out,
         "    pub async fn save(self) -> anyhow::Result<Vec<Model>> {{"
@@ -3549,6 +3555,30 @@ fn create_setter_name_by_name(name: &str) -> String {
     rust_identifier(&format!("set_{name}"))
 }
 
+fn clear_setter_name(field: &ModelField) -> String {
+    rust_identifier(&format!("clear_{}", field.name))
+}
+
+fn render_optional_clear_methods<'a, I>(out: &mut String, fields: I)
+where
+    I: IntoIterator<Item = &'a ModelField>,
+{
+    use std::fmt::Write as _;
+
+    for field in fields {
+        if optional_inner_type(&field.ty).is_none() {
+            continue;
+        }
+        let field_ident = model_field_ident(field);
+        let clear = clear_setter_name(field);
+        writeln!(out, "    pub fn {clear}(mut self) -> Self {{").unwrap();
+        writeln!(out, "        self.{field_ident} = Some(None);").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
 fn edge_builder_value_expr(field: &ModelField, value: &str) -> String {
     if let Some(inner_ty) = optional_inner_type(&field.ty) {
         let inner = if is_copy_filter_type(inner_ty) {
@@ -4137,6 +4167,10 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_optional_clear_methods(
+        out,
+        model.fields.iter().filter(|field| !field.auto_increment),
+    );
     render_toasty_edge_builder_setters(out, model, true);
 
     writeln!(
@@ -4276,6 +4310,7 @@ fn render_toasty_update_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_optional_clear_methods(out, updatable_model_fields(model, primary));
     render_toasty_edge_builder_setters(out, model, false);
 
     writeln!(
@@ -4405,6 +4440,7 @@ fn render_toasty_update_many_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_optional_clear_methods(out, updatable_model_fields(model, primary));
 
     writeln!(
         out,
@@ -9417,6 +9453,8 @@ mod tests {
         assert!(rendered.contains("pub fn delete_many(&self) -> UserDeleteMany<'_, 'a>"));
         assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
         assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
+        assert!(rendered.contains("pub fn clear_nickname(mut self) -> Self"));
+        assert!(rendered.contains("self.nickname = Some(None);"));
         assert!(rendered.contains("let active = ActiveModel {"));
         assert!(rendered.contains(
             "name: Set(self.name.ok_or_else(|| anyhow::anyhow!(\"missing required field `name` for User create\"))?),"
@@ -9616,6 +9654,8 @@ mod tests {
             .contains("pub fn delete_many(db: &mut dyn toasty::Executor) -> UserDeleteMany<'_>"));
         assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
         assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
+        assert!(rendered.contains("pub fn clear_nickname(mut self) -> Self"));
+        assert!(rendered.contains("self.nickname = Some(None);"));
         assert!(rendered.contains(
             "let name = self.name.ok_or_else(|| toasty::Error::invalid_record_count(\"missing required field `name` for User create\"))?;"
         ));
