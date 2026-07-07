@@ -362,10 +362,12 @@ standard `ApiResponse` wrapper. Generated `ServiceContext` owns a
 startup are registered as readiness checks, and the registry tracks startup,
 ready, and draining phases. Applications can add more dynamic checks with
 `HealthRegistry::register_dependency` or `HealthRegistry::register_check`.
-New generated REST and RPC entrypoints run under `roze_service::ServiceGroup`.
-When shutdown starts, the generated lifecycle task marks the shared
-`HealthRegistry` as draining, so REST `/readyz` stops reporting ready while the
-process exits through the unified shutdown path.
+New generated REST, RPC, and stream worker entrypoints run under
+`roze_service::ServiceGroup`. When shutdown starts, generated REST/RPC lifecycle
+tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops
+reporting ready while the process exits through the unified shutdown path.
+Generated stream consumers listen to the same shutdown signal and stop worker
+tasks before returning.
 
 Generate client SDKs:
 

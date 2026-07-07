@@ -7,5 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+roze-service = { path = "../roze-service" }
+roze-shutdown = { path = "../roze-shutdown" }
 tokio.workspace = true
 tracing.workspace = true

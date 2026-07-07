@@ -60,7 +60,12 @@ const RPC_ROZE_CRATES: [&str; 18] = [
     "roze-validation",
 ];
 
-const STREAM_ROZE_CRATES: [&str; 2] = ["roze-mq", "roze-validation"];
+const STREAM_ROZE_CRATES: [&str; 4] = [
+    "roze-mq",
+    "roze-service",
+    "roze-shutdown",
+    "roze-validation",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectKind {
@@ -805,6 +810,7 @@ mod types;
 use std::path::PathBuf;
 
 use roze_mq::InMemoryBroker;
+use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -815,7 +821,17 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load(config_path())?;
     let broker = InMemoryBroker::new();
     tracing::info!(service = %config.name, group = %config.stream.consumer_group, "stream worker starting");
-    stream::consumer::run(&broker, &config.stream).await
+    let service_name = config.name.clone();
+    let stream_config = config.stream.clone();
+    let mut group = ServiceGroup::new();
+    group.add_fn(service_name, move |shutdown| {
+        let broker = broker.clone();
+        let stream_config = stream_config.clone();
+        async move {
+            stream::consumer::run(&broker, &stream_config, shutdown).await
+        }
+    });
+    group.start().await
 }
 
 fn config_path() -> PathBuf {
@@ -900,7 +916,7 @@ fn render_stream_producer(spec: &ApiSpec) -> String {
 fn render_stream_consumer(spec: &ApiSpec) -> String {
     use std::fmt::Write as _;
     let mut out = String::from(
-        "use roze_mq::{Delivery, Subscriber};\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig) -> anyhow::Result<()>\nwhere\n    S: Subscriber,\n{\n    tracing::info!(group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        workers.push(tokio::spawn(async move {\n            loop {\n                match rx.recv().await {\n                    Ok(delivery) => {\n                        if let Err(error) = dispatch(&delivery).await {\n                            tracing::error!(topic = %topic, ?error, \"stream message failed\");\n                            if let Err(error) = delivery.nack().await {\n                                tracing::error!(topic = %topic, ?error, \"failed to nack stream message\");\n                            }\n                        } else if let Err(error) = delivery.ack().await {\n                            tracing::error!(topic = %topic, ?error, \"failed to ack stream message\");\n                        }\n                    }\n                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                        tracing::warn!(topic = %topic, skipped, \"stream receiver lagged\");\n                    }\n                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                }\n            }\n        }));\n    }\n\n    tokio::signal::ctrl_c().await?;\n    for worker in workers {\n        worker.abort();\n    }\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
+        "use roze_mq::{Delivery, Subscriber};\nuse roze_shutdown::ShutdownListener;\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig, shutdown: ShutdownListener) -> anyhow::Result<()>\nwhere\n    S: Subscriber,\n{\n    tracing::info!(group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        let worker_shutdown = shutdown.clone();\n        workers.push(tokio::spawn(async move {\n            loop {\n                tokio::select! {\n                    _ = worker_shutdown.clone().wait() => break,\n                    received = rx.recv() => {\n                        match received {\n                            Ok(delivery) => {\n                                if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(topic = %topic, ?error, \"stream message failed\");\n                                    if let Err(error) = delivery.nack().await {\n                                        tracing::error!(topic = %topic, ?error, \"failed to nack stream message\");\n                                    }\n                                } else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(topic = %topic, ?error, \"failed to ack stream message\");\n                                }\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                                tracing::warn!(topic = %topic, skipped, \"stream receiver lagged\");\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                        }\n                    }\n                }\n            }\n        }));\n    }\n\n    shutdown.wait().await;\n    for worker in workers {\n        worker.await?;\n    }\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
     );
     for method in &spec.rpc_methods {
         writeln!(
@@ -4974,7 +4990,15 @@ mod tests {
         assert!(producer.contains("publish_user_created"));
         let consumer =
             fs::read_to_string(out.join("src/stream/consumer.rs")).expect("read consumer");
+        let main = fs::read_to_string(out.join("src/main.rs")).expect("read main");
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
+        assert!(main.contains("use roze_service::ServiceGroup;"));
+        assert!(main.contains("stream::consumer::run(&broker, &stream_config, shutdown).await"));
+        assert!(consumer.contains("ShutdownListener"));
+        assert!(consumer.contains("tokio::select!"));
         assert!(consumer.contains("handle_user_created"));
+        assert!(manifest.contains("roze-service"));
+        assert!(manifest.contains("roze-shutdown"));
         assert!(fs::read_to_string(out.join("README.md"))
             .expect("read readme")
             .contains("`user.user_created.dlq`"));

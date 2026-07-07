@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -238,10 +238,20 @@ impl Default for ServiceGroupConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceGroupSnapshot {
+    pub phase: LifecyclePhase,
+    pub service_count: usize,
+    pub shutdown_timeout: Duration,
+    pub stop_on_first_error: bool,
+}
+
 #[derive(Clone)]
 pub struct ServiceGroupHandle {
     shutdown: ShutdownHandle,
     lifecycle: LifecycleState,
+    config: ServiceGroupConfig,
+    service_count: Arc<AtomicUsize>,
 }
 
 impl ServiceGroupHandle {
@@ -257,11 +267,21 @@ impl ServiceGroupHandle {
     pub fn lifecycle(&self) -> LifecycleState {
         self.lifecycle.clone()
     }
+
+    pub fn snapshot(&self) -> ServiceGroupSnapshot {
+        ServiceGroupSnapshot {
+            phase: self.phase(),
+            service_count: self.service_count.load(Ordering::SeqCst),
+            shutdown_timeout: self.config.shutdown_timeout,
+            stop_on_first_error: self.config.stop_on_first_error,
+        }
+    }
 }
 
 pub struct ServiceGroup {
     config: ServiceGroupConfig,
     services: Vec<Arc<dyn RuntimeService>>,
+    service_count: Arc<AtomicUsize>,
     shutdown: ShutdownHandle,
     listener: ShutdownListener,
     lifecycle: LifecycleState,
@@ -283,6 +303,7 @@ impl ServiceGroup {
         Self {
             config,
             services: Vec::new(),
+            service_count: Arc::new(AtomicUsize::new(0)),
             shutdown,
             listener,
             lifecycle: LifecycleState::new(),
@@ -294,6 +315,7 @@ impl ServiceGroup {
         S: RuntimeService,
     {
         self.services.push(Arc::new(service));
+        self.service_count.fetch_add(1, Ordering::SeqCst);
         self
     }
 
@@ -302,6 +324,7 @@ impl ServiceGroup {
         S: RuntimeService,
     {
         self.services.push(service);
+        self.service_count.fetch_add(1, Ordering::SeqCst);
         self
     }
 
@@ -317,6 +340,8 @@ impl ServiceGroup {
         ServiceGroupHandle {
             shutdown: self.shutdown.clone(),
             lifecycle: self.lifecycle.clone(),
+            config: self.config.clone(),
+            service_count: self.service_count.clone(),
         }
     }
 
@@ -326,6 +351,15 @@ impl ServiceGroup {
 
     pub fn lifecycle(&self) -> LifecycleState {
         self.lifecycle.clone()
+    }
+
+    pub fn snapshot(&self) -> ServiceGroupSnapshot {
+        ServiceGroupSnapshot {
+            phase: self.lifecycle.phase(),
+            service_count: self.service_count.load(Ordering::SeqCst),
+            shutdown_timeout: self.config.shutdown_timeout,
+            stop_on_first_error: self.config.stop_on_first_error,
+        }
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
@@ -685,6 +719,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_group_snapshot_tracks_phase_and_service_count() {
+        let mut group = ServiceGroup::with_config(ServiceGroupConfig {
+            shutdown_timeout: Duration::from_millis(75),
+            stop_on_first_error: false,
+        });
+        let handle = group.handle();
+
+        assert_eq!(
+            group.snapshot(),
+            ServiceGroupSnapshot {
+                phase: LifecyclePhase::Starting,
+                service_count: 0,
+                shutdown_timeout: Duration::from_millis(75),
+                stop_on_first_error: false,
+            }
+        );
+
+        group.add_fn("worker", |shutdown| async move {
+            shutdown.wait().await;
+            Ok(())
+        });
+        assert_eq!(handle.snapshot().service_count, 1);
+
+        let join = tokio::spawn(group.start_with_shutdown(std::future::pending()));
+        assert!(
+            handle
+                .lifecycle()
+                .wait_for_phase(LifecyclePhase::Running, Duration::from_millis(50))
+                .await
+        );
+        assert_eq!(handle.snapshot().phase, LifecyclePhase::Running);
+        assert_eq!(
+            handle.snapshot().shutdown_timeout,
+            Duration::from_millis(75)
+        );
+        assert!(!handle.snapshot().stop_on_first_error);
+
+        handle.shutdown();
+        join.await
+            .expect("service group task should join")
+            .expect("service group should stop cleanly");
+        assert_eq!(handle.snapshot().phase, LifecyclePhase::Stopped);
+    }
+
+    #[tokio::test]
     #[ignore = "production-soak: set ROZE_LIFECYCLE_SOAK_SECONDS/ROZE_LIFECYCLE_SOAK_CYCLES for long runs"]
     async fn production_soak_service_group_lifecycle() {
         let seconds = std::env::var("ROZE_LIFECYCLE_SOAK_SECONDS")
@@ -699,6 +778,9 @@ mod tests {
         let mut cycles = 0_u64;
         let mut worker_exits = 0_u64;
         let mut stop_hooks = 0_u64;
+        let mut running_snapshots = 0_u64;
+        let mut stopped_snapshots = 0_u64;
+        let mut max_service_count = 0_usize;
 
         while Instant::now() < deadline && cycles < max_cycles {
             let mut group = ServiceGroup::with_config(ServiceGroupConfig {
@@ -752,14 +834,28 @@ mod tests {
                     .await,
                 "service group did not enter running phase"
             );
+            let running_snapshot = handle.snapshot();
+            assert_eq!(running_snapshot.phase, LifecyclePhase::Running);
+            assert_eq!(running_snapshot.service_count, 4);
+            assert_eq!(
+                running_snapshot.shutdown_timeout,
+                Duration::from_millis(250)
+            );
+            assert!(running_snapshot.stop_on_first_error);
+            running_snapshots += 1;
+            max_service_count = max_service_count.max(running_snapshot.service_count);
+
             handle.shutdown();
             join.await
                 .expect("service group task should join")
                 .expect("service group should stop cleanly");
 
-            assert_eq!(handle.phase(), LifecyclePhase::Stopped);
+            let stopped_snapshot = handle.snapshot();
+            assert_eq!(stopped_snapshot.phase, LifecyclePhase::Stopped);
+            assert_eq!(stopped_snapshot.service_count, 4);
             assert_eq!(exits.load(Ordering::SeqCst), 4);
             assert_eq!(stops.load(Ordering::SeqCst), 4);
+            stopped_snapshots += 1;
 
             cycles += 1;
             worker_exits += exits.load(Ordering::SeqCst) as u64;
@@ -767,7 +863,7 @@ mod tests {
         }
 
         println!(
-            "roze_lifecycle_soak cycles={cycles} worker_exits={worker_exits} stop_hooks={stop_hooks}"
+            "roze_lifecycle_soak cycles={cycles} worker_exits={worker_exits} stop_hooks={stop_hooks} running_snapshots={running_snapshots} stopped_snapshots={stopped_snapshots} max_service_count={max_service_count}"
         );
         assert!(cycles > 0, "soak must run at least one lifecycle cycle");
     }

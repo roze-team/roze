@@ -40,3 +40,7 @@ Use `ROZE_MQ_SOAK_SECONDS`, `ROZE_MQ_SOAK_MESSAGES`,
 `ROZE_CONFIG_CENTER_SOAK_SECONDS`, `ROZE_CONFIG_CENTER_SOAK_UPDATES`,
 `ROZE_LIFECYCLE_SOAK_SECONDS`, and `ROZE_LIFECYCLE_SOAK_CYCLES` for 24h/72h
 runs.
+
+For lifecycle reports, keep the `roze_lifecycle_soak` summary line in the
+evidence artifact. It records cycles, worker exits, stop hooks, observed
+running/stopped snapshots, and max service count.

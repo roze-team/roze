@@ -17,6 +17,7 @@ bash scripts/gateway-smoke.sh
 cargo test -p roze-config config_center
 cargo test -p roze-mq
 cargo test -p roze-service -p roze-bootstrap -p roze-shutdown
+cargo test -p roze-job
 
 bash scripts/rozectl-smoke.sh
 

@@ -36,6 +36,8 @@ Every report must include:
 - Command used to start the run.
 - Dependency versions and topology.
 - Workload shape: RPS, payload size, topic count, consumer count, route count.
+- Runtime lifecycle snapshot where applicable: phase, service count, shutdown
+  timeout, and stop-on-first-error policy.
 - Duration.
 - Success criteria.
 - Error budget.
@@ -100,6 +102,11 @@ ROZE_CONFIG_CENTER_SOAK_SECONDS=86400 ROZE_CONFIG_CENTER_SOAK_UPDATES=100000000 
 ROZE_LIFECYCLE_SOAK_SECONDS=86400 ROZE_LIFECYCLE_SOAK_CYCLES=100000000 \
   bash scripts/production-soak-lifecycle.sh
 ```
+
+Lifecycle soak output includes a single `roze_lifecycle_soak` summary line with
+`cycles`, `worker_exits`, `stop_hooks`, `running_snapshots`,
+`stopped_snapshots`, and `max_service_count`. Copy that line into the report
+alongside resource trends and failure-injection notes.
 
 These commands are evidence inputs. The final report still needs the measured
 latency/throughput/resource trends and artifacts described above.

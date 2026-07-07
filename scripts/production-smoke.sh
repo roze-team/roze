@@ -46,6 +46,7 @@ cargo test -p roze-health
 cargo test -p roze-service
 cargo test -p roze-bootstrap
 cargo test -p roze-shutdown
+cargo test -p roze-job
 
 cargo check -p user-service
 cargo check -p roze-gateway-app
