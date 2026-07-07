@@ -1081,6 +1081,8 @@ SQL repositories additionally generate:
 - query builders with `where_`, `where_all`, `where_any`, `where_not`,
   `where_none`, `order`, `order_all`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
+- update-many and delete-many mutation builders also support the same
+  `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - entity relation methods for `.ent` edges, such as
   `order.query_user(&ctx.model().user()).await?` on SeaORM and
   `order.query_user(&mut db).await?` on Toasty; nullable foreign-key edges

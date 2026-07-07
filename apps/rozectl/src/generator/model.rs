@@ -2463,6 +2463,7 @@ fn render_sea_orm_update_many_builder(
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_predicate_group_builder_methods(out, pascal);
 
     for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
@@ -2561,6 +2562,7 @@ fn render_sea_orm_delete_many_builder(
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_predicate_group_builder_methods(out, pascal);
     writeln!(out, "    pub async fn exec(self) -> anyhow::Result<u64> {{").unwrap();
     writeln!(out, "        let mut query = self.repo.query();").unwrap();
     writeln!(
@@ -3674,6 +3676,82 @@ where
     }
 }
 
+fn render_predicate_group_builder_methods(out: &mut String, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    pub fn where_all<I>(mut self, predicates: I) -> Self"
+    )
+    .unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Predicate>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(out, "        self.predicates.extend(predicates);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_any<I>(mut self, predicates: I) -> Self"
+    )
+    .unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Predicate>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(
+        out,
+        "        let predicates = predicates.into_iter().collect::<Vec<_>>();"
+    )
+    .unwrap();
+    writeln!(out, "        if !predicates.is_empty() {{").unwrap();
+    writeln!(
+        out,
+        "            self.predicates.push({pascal}Predicate::Or(predicates));"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_not(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        self.predicates.push({pascal}Predicate::Not(Box::new(predicate)));"
+    )
+    .unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_none<I>(mut self, predicates: I) -> Self"
+    )
+    .unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Predicate>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(
+        out,
+        "        let predicates = predicates.into_iter().collect::<Vec<_>>();"
+    )
+    .unwrap();
+    writeln!(out, "        if !predicates.is_empty() {{").unwrap();
+    writeln!(
+        out,
+        "            self.predicates.push({pascal}Predicate::Not(Box::new({pascal}Predicate::Or(predicates))));"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
 fn edge_builder_value_expr(field: &ModelField, value: &str) -> String {
     if let Some(inner_ty) = optional_inner_type(&field.ty) {
         let inner = if is_copy_filter_type(inner_ty) {
@@ -4547,6 +4625,7 @@ fn render_toasty_update_many_builder(
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_predicate_group_builder_methods(out, pascal);
 
     for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
@@ -4648,6 +4727,7 @@ fn render_toasty_delete_many_builder(
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_predicate_group_builder_methods(out, pascal);
     writeln!(out, "    pub async fn exec(self) -> toasty::Result<u64> {{").unwrap();
     writeln!(
         out,
@@ -9731,13 +9811,33 @@ mod tests {
         assert!(rendered.contains("let result = self.repo.delete_one(item.id).exec().await?;"));
         assert!(rendered.contains("pub fn query(&self) -> UserQuery<'_, 'a>"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
-        assert!(rendered.contains("pub fn where_all<I>(mut self, predicates: I) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_all<I>(mut self, predicates: I) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains("self.predicates.extend(predicates);"));
-        assert!(rendered.contains("pub fn where_any<I>(mut self, predicates: I) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_any<I>(mut self, predicates: I) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains("self.predicates.push(UserPredicate::Or(predicates));"));
-        assert!(rendered.contains("pub fn where_not(mut self, predicate: UserPredicate) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_not(mut self, predicate: UserPredicate) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains("self.predicates.push(UserPredicate::Not(Box::new(predicate)));"));
-        assert!(rendered.contains("pub fn where_none<I>(mut self, predicates: I) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_none<I>(mut self, predicates: I) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains(
             "self.predicates.push(UserPredicate::Not(Box::new(UserPredicate::Or(predicates))));"
         ));
@@ -9952,13 +10052,33 @@ mod tests {
         );
         assert!(rendered.contains("pub fn query(db: &mut dyn toasty::Executor) -> UserQuery<'_>"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
-        assert!(rendered.contains("pub fn where_all<I>(mut self, predicates: I) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_all<I>(mut self, predicates: I) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains("self.predicates.extend(predicates);"));
-        assert!(rendered.contains("pub fn where_any<I>(mut self, predicates: I) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_any<I>(mut self, predicates: I) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains("self.predicates.push(UserPredicate::Or(predicates));"));
-        assert!(rendered.contains("pub fn where_not(mut self, predicate: UserPredicate) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_not(mut self, predicate: UserPredicate) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains("self.predicates.push(UserPredicate::Not(Box::new(predicate)));"));
-        assert!(rendered.contains("pub fn where_none<I>(mut self, predicates: I) -> Self"));
+        assert!(
+            rendered
+                .matches("pub fn where_none<I>(mut self, predicates: I) -> Self")
+                .count()
+                >= 3
+        );
         assert!(rendered.contains(
             "self.predicates.push(UserPredicate::Not(Box::new(UserPredicate::Or(predicates))));"
         ));
