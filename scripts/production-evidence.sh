@@ -14,6 +14,7 @@ SUCCESS_CRITERIA=""
 ERROR_BUDGET=""
 VERDICT="inconclusive"
 OUT=""
+LIFECYCLE_SUMMARY=""
 
 usage() {
   cat <<'EOF'
@@ -27,6 +28,7 @@ Usage:
     [--dependencies "..."] \
     [--success-criteria "..."] \
     [--error-budget "..."] \
+    [--lifecycle-summary "roze_lifecycle_soak cycles=... worker_exits=..."] \
     [--verdict pass|fail|inconclusive] \
     [--out docs/evidence/<date>-<area>-<duration>.md]
 
@@ -86,6 +88,11 @@ while [[ $# -gt 0 ]]; do
       ERROR_BUDGET="$2"
       shift 2
       ;;
+    --lifecycle-summary)
+      require_value "$1" "${2:-}"
+      LIFECYCLE_SUMMARY="$2"
+      shift 2
+      ;;
     --verdict)
       require_value "$1" "${2:-}"
       VERDICT="$2"
@@ -133,6 +140,53 @@ require_value "--workload" "$WORKLOAD"
 require_value "--failure-injection" "$FAILURE_INJECTION"
 require_value "--command" "$COMMAND"
 
+if [[ -n "$LIFECYCLE_SUMMARY" && "$AREA" != "lifecycle" ]]; then
+  echo "--lifecycle-summary can only be used with --area lifecycle" >&2
+  exit 2
+fi
+
+LIFECYCLE_CYCLES="TBD"
+LIFECYCLE_WORKER_EXITS="TBD"
+LIFECYCLE_STOP_HOOKS="TBD"
+LIFECYCLE_RUNNING_SNAPSHOTS="TBD"
+LIFECYCLE_STOPPED_SNAPSHOTS="TBD"
+LIFECYCLE_MAX_SERVICE_COUNT="TBD"
+
+if [[ -n "$LIFECYCLE_SUMMARY" ]]; then
+  read -r -a LIFECYCLE_SUMMARY_PARTS <<<"$LIFECYCLE_SUMMARY"
+  if [[ "${LIFECYCLE_SUMMARY_PARTS[0]:-}" != "roze_lifecycle_soak" ]]; then
+    echo "--lifecycle-summary must start with roze_lifecycle_soak" >&2
+    exit 2
+  fi
+
+  for part in "${LIFECYCLE_SUMMARY_PARTS[@]:1}"; do
+    case "$part" in
+      cycles=*)
+        LIFECYCLE_CYCLES="${part#cycles=}"
+        ;;
+      worker_exits=*)
+        LIFECYCLE_WORKER_EXITS="${part#worker_exits=}"
+        ;;
+      stop_hooks=*)
+        LIFECYCLE_STOP_HOOKS="${part#stop_hooks=}"
+        ;;
+      running_snapshots=*)
+        LIFECYCLE_RUNNING_SNAPSHOTS="${part#running_snapshots=}"
+        ;;
+      stopped_snapshots=*)
+        LIFECYCLE_STOPPED_SNAPSHOTS="${part#stopped_snapshots=}"
+        ;;
+      max_service_count=*)
+        LIFECYCLE_MAX_SERVICE_COUNT="${part#max_service_count=}"
+        ;;
+      *)
+        echo "unsupported lifecycle summary field: $part" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
+
 DATE="$(date -u +%Y-%m-%d)"
 if [[ -z "$OUT" ]]; then
   OUT="docs/evidence/${DATE}-${AREA}-${DURATION}.md"
@@ -145,6 +199,30 @@ RUSTC_VERSION="$(rustc --version 2>/dev/null || printf 'missing')"
 CARGO_VERSION="$(cargo --version 2>/dev/null || printf 'missing')"
 OS_NAME="$(uname -a 2>/dev/null || printf 'unknown')"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+AREA_SPECIFIC_SECTIONS=""
+
+if [[ "$AREA" == "lifecycle" ]]; then
+  AREA_SPECIFIC_SECTIONS="$(cat <<EOF_LIFECYCLE
+
+## Lifecycle Snapshot Summary
+
+Copy the \`roze_lifecycle_soak\` summary line from the completed run:
+
+\`\`\`text
+${LIFECYCLE_SUMMARY:-roze_lifecycle_soak cycles=TBD worker_exits=TBD stop_hooks=TBD running_snapshots=TBD stopped_snapshots=TBD max_service_count=TBD}
+\`\`\`
+
+| Field | Result | Notes |
+| --- | --- | --- |
+| cycles | ${LIFECYCLE_CYCLES} | Completed lifecycle start/drain/stop cycles. |
+| worker_exits | ${LIFECYCLE_WORKER_EXITS} | Must equal \`cycles * max_service_count\` for the default soak. |
+| stop_hooks | ${LIFECYCLE_STOP_HOOKS} | Must equal \`cycles * max_service_count\` for the default soak. |
+| running_snapshots | ${LIFECYCLE_RUNNING_SNAPSHOTS} | Must equal \`cycles\`. |
+| stopped_snapshots | ${LIFECYCLE_STOPPED_SNAPSHOTS} | Must equal \`cycles\`. |
+| max_service_count | ${LIFECYCLE_MAX_SERVICE_COUNT} | Expected \`4\` for the default lifecycle soak. |
+EOF_LIFECYCLE
+)"
+fi
 
 cat >"$OUT" <<EOF_REPORT
 # Production Evidence: ${AREA} ${DURATION}
@@ -200,6 +278,7 @@ ${ERROR_BUDGET:-TBD}
 | File descriptors/connections | TBD | Required for Gateway and long-lived streams. |
 | Restart count | TBD | Include unexpected restarts. |
 | Leak check | TBD | Required before any \`pass\` verdict. |
+${AREA_SPECIFIC_SECTIONS}
 
 ## Failure Timeline
 

@@ -43,4 +43,6 @@ runs.
 
 For lifecycle reports, keep the `roze_lifecycle_soak` summary line in the
 evidence artifact. It records cycles, worker exits, stop hooks, observed
-running/stopped snapshots, and max service count.
+running/stopped snapshots, and max service count. The report scaffold includes
+a lifecycle snapshot table automatically when generated with `--area lifecycle`;
+pass the summary line with `--lifecycle-summary "..."` to prefill it.

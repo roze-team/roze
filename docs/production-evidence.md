@@ -106,7 +106,9 @@ ROZE_LIFECYCLE_SOAK_SECONDS=86400 ROZE_LIFECYCLE_SOAK_CYCLES=100000000 \
 Lifecycle soak output includes a single `roze_lifecycle_soak` summary line with
 `cycles`, `worker_exits`, `stop_hooks`, `running_snapshots`,
 `stopped_snapshots`, and `max_service_count`. Copy that line into the report
-alongside resource trends and failure-injection notes.
+alongside resource trends and failure-injection notes. The report scaffold adds
+a lifecycle snapshot section automatically for `--area lifecycle`; pass the
+line with `--lifecycle-summary` to prefill that section.
 
 These commands are evidence inputs. The final report still needs the measured
 latency/throughput/resource trends and artifacts described above.
