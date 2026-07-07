@@ -33,6 +33,8 @@ Implemented in this checkout:
 - Generated Toasty services add `rust_decimal` and Toasty's `rust_decimal`
   feature, including update mode when an older inline Toasty dependency already
   exists.
+- Generated SeaORM services with decimal model fields add `rust_decimal` and
+  SeaORM's `with-rust_decimal` feature.
 - RPC update generation preserves app-owned declarations in `src/logic/mod.rs`
   by reusing the same module-index merge strategy used by REST logic groups.
 - Generated Toasty repositories already expose `query_with_filter`, which lets
@@ -88,6 +90,8 @@ Expected generated changes:
   `rust_decimal::Decimal` or `Option<rust_decimal::Decimal>`.
 - `services/shop-promotion-rpc/Cargo.toml` includes `rust_decimal` and Toasty's
   `rust_decimal` feature.
+- SeaORM-generated services with decimal columns include `rust_decimal` and
+  SeaORM's `with-rust_decimal` feature.
 - `services/shop-promotion-rpc/src/logic/mod.rs` keeps `mod coupon_map;`.
 - `services/shop-user-rpc/src/logic/mod.rs` keeps `mod user_map;`.
 
@@ -126,6 +130,8 @@ Known compatibility risks:
 - Existing generated services with inline Toasty dependencies need the
   `rust_decimal` feature added during update; workspace services need the
   workspace dependency available.
+- Existing generated SeaORM services with decimal fields need the
+  `with-rust_decimal` feature added during update.
 
 Rollback strategy:
 
