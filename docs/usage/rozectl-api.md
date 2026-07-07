@@ -946,6 +946,9 @@ SQL repositories additionally generate:
 - Toasty query generation counts with the filter-only query and applies
   `ORDER BY`, `LIMIT`, and `OFFSET` only to the list query, avoiding invalid
   PostgreSQL count SQL when a sort field is present
+- Toasty repositories expose `query_with_filter` so application-owned
+  extensions can add custom predicates while keeping `total` and paginated
+  items based on the same filter query
 - composite-index helpers such as `find_by_tenant_id_and_name` for unique
   indexes and `list_by_status_and_created_at` for non-unique indexes
 - `insert_many` and `delete_many_by_ids` batch helpers; Toasty uses safe

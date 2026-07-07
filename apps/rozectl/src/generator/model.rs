@@ -2221,10 +2221,10 @@ fn render_toasty_query_methods(
                 field_ident
             )
             .unwrap();
-        } else if let Some(inner_ty) = optional_inner_type(&field.ty) {
+        } else if optional_inner_type(&field.ty).is_some() {
             writeln!(
                 out,
-                "        if !req.include_deleted {{ query = query.and({pascal}::fields().{}().eq(None::<{inner_ty}>)); }}",
+                "        if !req.include_deleted {{ query = query.and({pascal}::fields().{}().is_none()); }}",
                 field_ident
             )
             .unwrap();
@@ -2281,16 +2281,23 @@ fn render_toasty_query_methods(
     writeln!(out).unwrap();
     writeln!(
         out,
+        "    fn apply_sort(mut query: toasty::stmt::Query<toasty::stmt::List<{pascal}>>, req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+    )
+    .unwrap();
+    render_toasty_sort(out, model, pascal);
+    writeln!(out, "        query").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "    fn build_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
     )
     .unwrap();
     writeln!(
         out,
-        "        let mut query = Self::build_filter_query(req);"
+        "        Self::apply_sort(Self::build_filter_query(req), req)"
     )
     .unwrap();
-    render_toasty_sort(out, model, pascal);
-    writeln!(out, "        query").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
     writeln!(
@@ -2311,6 +2318,52 @@ fn render_toasty_query_methods(
         )
         .unwrap();
     }
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn query_with_filter<F>(db: &mut dyn toasty::Executor, req: {pascal}Query, apply_filter: F) -> toasty::Result<{pascal}Page>"
+    )
+    .unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(
+        out,
+        "        F: Fn(toasty::stmt::Query<toasty::stmt::List<{pascal}>>) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>>,"
+    )
+    .unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(
+        out,
+        "        let page = if req.page == 0 {{ 1 }} else {{ req.page }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let total = apply_filter(Self::build_filter_query(&req)).count().exec(db).await?;"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = Self::apply_sort(apply_filter(Self::build_filter_query(&req)), &req);"
+    )
+    .unwrap();
+    writeln!(out, "        query.limit(page_size as usize);").unwrap();
+    writeln!(
+        out,
+        "        query.offset(page.saturating_sub(1).saturating_mul(page_size) as usize);"
+    )
+    .unwrap();
+    writeln!(out, "        let items = query.exec(db).await?;").unwrap();
+    writeln!(
+        out,
+        "        Ok({pascal}Page {{ items, total, page, page_size }})"
+    )
+    .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
     writeln!(
@@ -5327,7 +5380,15 @@ mod tests {
             rendered.contains("pub async fn query(db: &mut dyn toasty::Executor, req: UserQuery)")
         );
         assert!(rendered.contains("fn build_filter_query(req: &UserQuery)"));
+        assert!(rendered.contains("fn apply_sort(mut query: toasty::stmt::Query<toasty::stmt::List<User>>, req: &UserQuery)"));
         assert!(rendered.contains("Self::build_filter_query(&req).count().exec(db).await?"));
+        assert!(rendered.contains("pub async fn query_with_filter<F>(db: &mut dyn toasty::Executor, req: UserQuery, apply_filter: F)"));
+        assert!(rendered.contains(
+            "let total = apply_filter(Self::build_filter_query(&req)).count().exec(db).await?;"
+        ));
+        assert!(rendered.contains(
+            "let mut query = Self::apply_sort(apply_filter(Self::build_filter_query(&req)), &req);"
+        ));
         assert!(rendered.contains("pub id_in: Vec<u64>"));
         assert!(rendered.contains("pub id_min: Option<u64>"));
         assert!(rendered.contains("pub nickname: Option<String>"));
@@ -5374,6 +5435,24 @@ mod tests {
         assert!(!rendered.contains("Self::build_query(&req).count()"));
         assert!(rendered.contains("Product::fields().sort_order().asc()"));
         assert!(rendered.contains("Product::fields().sort_order().desc()"));
+    }
+
+    #[test]
+    fn toasty_nullable_soft_delete_uses_is_none_scope() {
+        let source = r#"
+        CREATE TABLE coupons (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            deleted_at BIGINT NULL
+        );
+        "#;
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let rendered = render_toasty_model_module(&models[0]);
+
+        assert!(rendered.contains(
+            "if !req.include_deleted { query = query.and(Coupon::fields().deleted_at().is_none()); }"
+        ));
+        assert!(!rendered.contains("deleted_at().eq(None::<i64>)"));
     }
 
     #[test]
