@@ -1024,6 +1024,9 @@ SQL repositories additionally generate:
   `status_between`, `nickname_is_null`, `and`, `or`, and `not`
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
+- service projects with `src/svc/mod.rs` also get `src/model/client.rs`,
+  `ModelClient`, and `ServiceContext::model()` as the ent-style model entry
+  point
 - Toasty and SeaORM query generation count with the filter-only query and apply
   `ORDER BY`, `LIMIT`, and `OFFSET` only to the list query
 - composite-index helpers such as `find_by_tenant_id_and_name` for unique
@@ -1044,6 +1047,31 @@ SQL and inspect imports infer soft-delete columns from `deleted`, `is_deleted`,
 `tenant_id`, `org_id`, or `account_id`, then write those decisions into
 `schema.ent`. `.ent` schemas can declare this with `soft_delete <field>` and
 `tenant <field>`.
+
+SeaORM service code can enter model queries through `ServiceContext::model()`:
+
+```rust
+let page = ctx
+    .model()
+    .user()
+    .query()
+    .where_(user::name_contains(keyword))
+    .order(user::id_desc())
+    .paginate(page, page_size)
+    .page()
+    .await?;
+```
+
+Toasty service code can use the same model client to access the generated
+repository entry and the configured Toasty executor:
+
+```rust
+let mut db = ctx.model().toasty_db()?;
+let items = UserRepository::query(&mut db)
+    .where_(user::name_contains(keyword))
+    .all()
+    .await?;
+```
 
 Toasty transaction callbacks use the generated repository helper and can call
 the same generated CRUD methods with the transaction executor:

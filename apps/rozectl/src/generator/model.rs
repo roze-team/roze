@@ -521,12 +521,22 @@ fn write_model_project(
     ensure_model_output(out, options.mode)?;
     let model_dir = out.join("src/model");
     fs::create_dir_all(&model_dir)?;
-    cleanup_stale_generated_model_files(models, &model_dir, options.mode)?;
+    let include_client = out.join("src/svc/mod.rs").is_file();
+    cleanup_stale_generated_model_files(models, &model_dir, options.mode, include_client)?;
 
     // Model files are schema-owned generated artifacts. Refresh them on --update
     // so database/schema changes are reflected deterministically.
     fs::write(model_dir.join("schema.ent"), ent_source)?;
-    fs::write(model_dir.join("mod.rs"), render_model_mod(models, orm))?;
+    if include_client {
+        fs::write(
+            model_dir.join("client.rs"),
+            render_model_client(models, orm),
+        )?;
+    }
+    fs::write(
+        model_dir.join("mod.rs"),
+        render_model_mod(models, orm, include_client),
+    )?;
     for model in models {
         let module_path = model_dir.join(format!("{}.rs", to_snake_case(&model.name)));
         let fields_path = model_dir.join(format!("{}_fields.rs", to_snake_case(&model.name)));
@@ -545,6 +555,7 @@ fn write_model_project(
     }
 
     update_model_dependencies(out, orm, models_need_rust_decimal(models))?;
+    update_model_service_context(out)?;
     if orm == ModelOrm::Toasty {
         update_toasty_service_context(out, models)?;
     }
@@ -789,6 +800,27 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
     fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
 }
 
+fn update_model_service_context(out: &Path) -> anyhow::Result<()> {
+    let svc_path = out.join("src/svc/mod.rs");
+    if !svc_path.is_file() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&svc_path)
+        .with_context(|| format!("failed to read {}", svc_path.display()))?;
+    if content.contains("pub fn model(&self)") || !content.contains("pub struct ServiceContext") {
+        return Ok(());
+    }
+
+    let accessor = r#"    pub fn model(&self) -> crate::model::ModelClient<'_> {
+        crate::model::ModelClient::new(self)
+    }
+
+"#;
+    let updated = insert_after_read_db_method(&content, accessor).unwrap_or(content);
+    fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
+}
+
 fn insert_after_read_db_method(content: &str, insert: &str) -> Option<String> {
     let start = content.find("    pub fn read_db(")?;
     let body_start = content[start..].find('{')? + start;
@@ -840,11 +872,15 @@ fn cleanup_stale_generated_model_files(
     models: &[ModelSpec],
     model_dir: &Path,
     mode: GenerateMode,
+    include_client: bool,
 ) -> anyhow::Result<()> {
     if matches!(mode, GenerateMode::Create) {
         return Ok(());
     }
     let mut expected = HashSet::from(["mod.rs".to_string()]);
+    if include_client {
+        expected.insert("client.rs".to_string());
+    }
     for model in models {
         let module = to_snake_case(&model.name);
         expected.insert(format!("{module}.rs"));
@@ -878,8 +914,12 @@ fn cleanup_stale_generated_model_files(
     Ok(())
 }
 
-fn render_model_mod(models: &[ModelSpec], orm: ModelOrm) -> String {
+fn render_model_mod(models: &[ModelSpec], orm: ModelOrm, include_client: bool) -> String {
     let mut out = format!("{MODEL_GENERATED_MARKER}\n#![allow(dead_code, unused_imports)]\n\n");
+    if include_client {
+        out.push_str("pub mod client;\n");
+        out.push_str("pub use client::ModelClient;\n");
+    }
     for model in models {
         let module = to_snake_case(&model.name);
         let fields_module = format!("{module}_fields");
@@ -901,6 +941,60 @@ fn render_model_mod(models: &[ModelSpec], orm: ModelOrm) -> String {
             )),
         }
     }
+    out
+}
+
+fn render_model_client(models: &[ModelSpec], orm: ModelOrm) -> String {
+    let mut out = format!("{MODEL_GENERATED_MARKER}\n#![allow(dead_code, unused_imports)]\n\n");
+    use std::fmt::Write as _;
+
+    writeln!(out, "use crate::svc::ServiceContext;").unwrap();
+    for model in models {
+        let module = to_snake_case(&model.name);
+        let pascal = to_pascal_case(&model.name);
+        writeln!(out, "use super::{module}::{pascal}Repository;").unwrap();
+    }
+    writeln!(out).unwrap();
+    writeln!(out, "pub struct ModelClient<'a> {{").unwrap();
+    writeln!(out, "    ctx: &'a ServiceContext,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "impl<'a> ModelClient<'a> {{").unwrap();
+    writeln!(out, "    pub fn new(ctx: &'a ServiceContext) -> Self {{").unwrap();
+    writeln!(out, "        Self {{ ctx }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    for model in models {
+        let method = model_field_ident_by_name(&to_snake_case(&model.name));
+        let pascal = to_pascal_case(&model.name);
+        match orm {
+            ModelOrm::SeaOrm => {
+                writeln!(
+                    out,
+                    "    pub fn {method}(&self) -> {pascal}Repository<'a> {{"
+                )
+                .unwrap();
+                writeln!(out, "        {pascal}Repository::new(self.ctx)").unwrap();
+                writeln!(out, "    }}").unwrap();
+            }
+            ModelOrm::Toasty => {
+                writeln!(out, "    pub fn {method}(&self) -> {pascal}Repository {{").unwrap();
+                writeln!(out, "        {pascal}Repository").unwrap();
+                writeln!(out, "    }}").unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
+    if orm == ModelOrm::Toasty {
+        writeln!(
+            out,
+            "    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {{"
+        )
+        .unwrap();
+        writeln!(out, "        self.ctx.toasty_db()").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -6791,8 +6885,7 @@ mod tests {
         .expect("generate from ent");
 
         let sql_model = fs::read_to_string(out.join("src/model/user.rs")).expect("sql model");
-        let ent_model =
-            fs::read_to_string(from_ent.join("src/model/user.rs")).expect("ent model");
+        let ent_model = fs::read_to_string(from_ent.join("src/model/user.rs")).expect("ent model");
         assert_eq!(sql_model, ent_model);
     }
 
@@ -7248,6 +7341,8 @@ impl ServiceContext {
         assert!(fields.contains("pub enum UserField"));
         assert!(fields.contains("Self::Name => \"name\""));
         let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
+        assert!(mod_rs.contains("pub mod client;"));
+        assert!(mod_rs.contains("pub use client::ModelClient;"));
         assert!(mod_rs.contains(
             "pub use user::{User, UserOrder, UserPage, UserPredicate, UserQuery, UserRepository};"
         ));
@@ -7259,6 +7354,8 @@ impl ServiceContext {
         assert!(!svc.contains("#[derive(Clone, Debug)]"));
         assert!(svc.contains("pub toasty_db: Option<toasty::Db>"));
         assert!(svc.contains("toasty::models!(crate::model::User)"));
+        assert!(svc.contains("pub fn model(&self) -> crate::model::ModelClient<'_>"));
+        assert!(svc.contains("crate::model::ModelClient::new(self)"));
         assert!(svc.contains("pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
         assert!(
             svc.find("pub fn read_db").expect("read_db")
@@ -7268,6 +7365,10 @@ impl ServiceContext {
         assert!(!svc.contains(
             "pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {\n\n    pub fn toasty_db"
         ));
+        let client = fs::read_to_string(out.join("src/model/client.rs")).expect("client read");
+        assert!(client.contains("pub struct ModelClient<'a>"));
+        assert!(client.contains("pub fn user(&self) -> UserRepository"));
+        assert!(client.contains("pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
         let ext = fs::read_to_string(out.join("src/model/user_ext.rs")).expect("ext read");
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));
@@ -7295,7 +7396,6 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
 "#,
         )
         .expect("manifest");
-
         generate_model_project(
             r#"
             CREATE TABLE coupons (
@@ -7438,6 +7538,23 @@ toasty.workspace = true
 "#,
         )
         .expect("manifest");
+        fs::create_dir_all(out.join("src/svc")).expect("svc dir");
+        fs::write(
+            out.join("src/svc/mod.rs"),
+            r#"pub struct ServiceContext;
+
+impl ServiceContext {
+    pub fn read_db(&self) -> anyhow::Result<&sea_orm::DatabaseConnection> {
+        unimplemented!()
+    }
+
+    pub fn write_db(&self) -> anyhow::Result<&sea_orm::DatabaseConnection> {
+        unimplemented!()
+    }
+}
+"#,
+        )
+        .expect("svc");
 
         generate_model_project(
             r#"
@@ -7457,6 +7574,11 @@ toasty.workspace = true
         assert!(manifest.contains("sea-orm = { workspace = true }"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("sea_orm::"));
+        let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
+        assert!(mod_rs.contains("pub use client::ModelClient;"));
+        let client = fs::read_to_string(out.join("src/model/client.rs")).expect("client read");
+        assert!(client.contains("pub fn user(&self) -> UserRepository<'a>"));
+        assert!(client.contains("UserRepository::new(self.ctx)"));
     }
 
     #[test]
