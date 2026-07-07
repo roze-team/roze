@@ -1018,8 +1018,9 @@ SQL repositories additionally generate:
   `--update`
 - `schema.ent`, the generated or user-authored entity schema used as the model
   codegen source
-- `{Model}Predicate`, `{Model}Order`, `{Model}Query`, `{Model}Create`, and
-  `{Model}Page` types for ent-style single-table queries and inserts
+- `{Model}Predicate`, `{Model}Order`, `{Model}Query`, `{Model}Create`,
+  `{Model}Update`, `{Model}Delete`, and `{Model}Page` types for ent-style
+  single-table queries and mutations
 - predicate helpers such as `name_contains`, `name_icontains`, `id_in`,
   `status_between`, `nickname_is_null`, `and`, `or`, and `not`
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
@@ -1068,6 +1069,16 @@ let created = ctx
     .set_name("alice".to_string())
     .save()
     .await?;
+
+let updated = ctx
+    .model()
+    .user()
+    .update_one(user_id)
+    .set_name("alice-updated".to_string())
+    .save()
+    .await?;
+
+ctx.model().user().delete_one(user_id).exec().await?;
 ```
 
 Toasty service code can use the same model client to access the generated
@@ -1084,6 +1095,13 @@ let created = UserRepository::create(&mut db)
     .set_name("alice".to_string())
     .save()
     .await?;
+
+let updated = UserRepository::update_one(&mut db, user_id)
+    .set_name("alice-updated".to_string())
+    .save()
+    .await?;
+
+UserRepository::delete_one(&mut db, user_id).exec().await?;
 ```
 
 Toasty transaction callbacks use the generated repository helper and can call
