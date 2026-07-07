@@ -1063,10 +1063,13 @@ SQL repositories additionally generate:
 - `{Model}Predicate`, `{Model}Order`, `{Model}Query`, `{Model}Create`,
   `{Model}Update`, `{Model}Delete`, and `{Model}Page` types for ent-style
   single-table queries and mutations
-- predicate helpers such as `name_contains`, `name_icontains`, `id_in`,
-  `status_between`, `nickname_is_null`, `and`, `or`, and `not`
+- predicate helpers such as `name_contains`, `name_icontains`,
+  `name_equal_fold`, `id_in`, `status_between`, `nickname_is_null`, `and`,
+  `or`, and `not`
 - `*_icontains` predicates render database-level `ILIKE` on supported SQL
   backends instead of applying keyword filtering after pagination
+- `*_equal_fold` predicates provide ent-style case-insensitive equality with
+  the same LIKE pattern escaping and no wildcard expansion
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
 - entity relation methods for `.ent` edges, such as
