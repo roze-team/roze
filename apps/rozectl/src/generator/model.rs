@@ -93,6 +93,7 @@ pub struct ModelField {
     pub source_name: Option<String>,
     pub ty: String,
     pub auto_increment: bool,
+    pub immutable: bool,
     pub default_value: Option<String>,
     pub comment: Option<String>,
 }
@@ -169,6 +170,9 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             }
             if field.auto_increment {
                 writeln!(out, "    auto_increment").unwrap();
+            }
+            if field.immutable {
+                writeln!(out, "    immutable").unwrap();
             }
             if field_unique {
                 writeln!(out, "    unique").unwrap();
@@ -483,6 +487,7 @@ fn mongo_field_from_samples(key: &str, documents: &[Document]) -> ModelField {
         source_name: Some(key.to_string()).filter(|source| source != "_id"),
         ty,
         auto_increment: false,
+        immutable: false,
         default_value: None,
         comment: None,
     }
@@ -2164,7 +2169,8 @@ fn render_sea_orm_edge_builder_setters(out: &mut String, model: &ModelSpec, is_c
         let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
             continue;
         };
-        if field.auto_increment || (!is_create && field.name == model.primary) {
+        if field.auto_increment || (!is_create && (field.name == model.primary || field.immutable))
+        {
             continue;
         }
         let setter = create_setter_name_by_name(&edge.name);
@@ -2201,7 +2207,7 @@ fn render_sea_orm_update_builder(
     writeln!(out, "pub struct {pascal}Update<'repo, 'ctx> {{").unwrap();
     writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
     writeln!(out, "    {primary_ident}: {primary_ty},").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
             writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
@@ -2221,14 +2227,14 @@ fn render_sea_orm_update_builder(
     writeln!(out, "        Self {{").unwrap();
     writeln!(out, "            repo,").unwrap();
     writeln!(out, "            {primary_ident},").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
     }
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let setter = create_setter_name(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
@@ -2266,7 +2272,7 @@ fn render_sea_orm_update_builder(
     .unwrap();
     writeln!(out, "            ..std::default::Default::default()").unwrap();
     writeln!(out, "        }};").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         writeln!(
             out,
@@ -2334,7 +2340,7 @@ fn render_sea_orm_update_many_builder(
     writeln!(out, "pub struct {pascal}UpdateMany<'repo, 'ctx> {{").unwrap();
     writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
     writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
             writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
@@ -2354,7 +2360,7 @@ fn render_sea_orm_update_many_builder(
     writeln!(out, "        Self {{").unwrap();
     writeln!(out, "            repo,").unwrap();
     writeln!(out, "            predicates: Vec::new(),").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
     }
     writeln!(out, "        }}").unwrap();
@@ -2370,7 +2376,7 @@ fn render_sea_orm_update_many_builder(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let setter = create_setter_name(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
@@ -2416,7 +2422,7 @@ fn render_sea_orm_update_many_builder(
         "            let mut update = self.repo.update_one({primary_value});"
     )
     .unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let setter = create_setter_name(field);
         let value_expr = update_slot_value_from_ref(field, "value");
@@ -3291,6 +3297,14 @@ fn model_query_fields(model: &ModelSpec) -> Vec<&ModelField> {
         .collect()
 }
 
+fn updatable_model_fields<'a>(model: &'a ModelSpec, primary: &str) -> Vec<&'a ModelField> {
+    model
+        .fields
+        .iter()
+        .filter(|field| field.name != primary && !field.immutable)
+        .collect()
+}
+
 fn is_string_filter_type(field: &ModelField) -> bool {
     field.ty == "String" || optional_inner_type(&field.ty).is_some_and(|inner| inner == "String")
 }
@@ -3864,7 +3878,8 @@ fn render_toasty_edge_builder_setters(out: &mut String, model: &ModelSpec, is_cr
         let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
             continue;
         };
-        if field.auto_increment || (!is_create && field.name == model.primary) {
+        if field.auto_increment || (!is_create && (field.name == model.primary || field.immutable))
+        {
             continue;
         }
         let setter = create_setter_name_by_name(&edge.name);
@@ -3901,7 +3916,7 @@ fn render_toasty_update_builder(
     writeln!(out, "pub struct {pascal}Update<'a> {{").unwrap();
     writeln!(out, "    db: &'a mut dyn toasty::Executor,").unwrap();
     writeln!(out, "    {primary_ident}: {primary_ty},").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
             writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
@@ -3921,14 +3936,14 @@ fn render_toasty_update_builder(
     writeln!(out, "        Self {{").unwrap();
     writeln!(out, "            db,").unwrap();
     writeln!(out, "            {primary_ident},").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
     }
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let setter = create_setter_name(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
@@ -3962,7 +3977,7 @@ fn render_toasty_update_builder(
         "        let mut model = {pascal}::get_by_{primary}(self.db, &self.{primary_ident}).await?;"
     )
     .unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         writeln!(
             out,
@@ -4021,7 +4036,7 @@ fn render_toasty_update_many_builder(
     writeln!(out, "pub struct {pascal}UpdateMany<'a> {{").unwrap();
     writeln!(out, "    db: &'a mut dyn toasty::Executor,").unwrap();
     writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
             writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
@@ -4041,7 +4056,7 @@ fn render_toasty_update_many_builder(
     writeln!(out, "        Self {{").unwrap();
     writeln!(out, "            db,").unwrap();
     writeln!(out, "            predicates: Vec::new(),").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
     }
     writeln!(out, "        }}").unwrap();
@@ -4057,7 +4072,7 @@ fn render_toasty_update_many_builder(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let setter = create_setter_name(field);
         if let Some(inner_ty) = optional_inner_type(&field.ty) {
@@ -4104,7 +4119,7 @@ fn render_toasty_update_many_builder(
     )
     .unwrap();
     writeln!(out, "        for mut model in items {{").unwrap();
-    for field in model.fields.iter().filter(|field| field.name != primary) {
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let value_expr = update_slot_value_from_ref(field, "value");
         writeln!(
@@ -4916,19 +4931,13 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
         pascal, pascal
     )
     .unwrap();
-    for field in &model.fields {
-        if field.name == *primary {
-            continue;
-        }
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let value_expr = toasty_owned_model_value(field, &format!("model.{field_ident}"));
         writeln!(&mut out, "        let {field_ident} = {value_expr};").unwrap();
     }
     write!(&mut out, "        model.update()").unwrap();
-    for field in &model.fields {
-        if field.name == *primary {
-            continue;
-        }
+    for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         write!(&mut out, "\n            .{}({})", field_ident, field_ident).unwrap();
     }
@@ -6124,6 +6133,7 @@ fn build_inspected_model(
             source_name: None,
             ty,
             auto_increment: column.auto_increment,
+            immutable: false,
             default_value: column.default_value,
             comment: column.comment,
         });
@@ -6842,6 +6852,7 @@ fn parse_ent_field(
     let mut comment = None;
     let mut primary = false;
     let mut unique = false;
+    let mut immutable = false;
 
     while *i < lines.len() {
         let (inner_line_no, raw) = lines[*i];
@@ -6857,6 +6868,7 @@ fn parse_ent_field(
                     source_name,
                     ty,
                     auto_increment,
+                    immutable,
                     default_value,
                     comment,
                 },
@@ -6876,6 +6888,10 @@ fn parse_ent_field(
             auto_increment = true;
             continue;
         }
+        if inner == "immutable" {
+            immutable = true;
+            continue;
+        }
         if let Some(value) = inner.strip_prefix("source ") {
             source_name = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
@@ -6889,7 +6905,7 @@ fn parse_ent_field(
             continue;
         }
         bail!(
-            "line {}: expected `primary`, `unique`, `source`, `auto_increment`, `default`, `comment` or `}}`",
+            "line {}: expected `primary`, `unique`, `immutable`, `source`, `auto_increment`, `default`, `comment` or `}}`",
             inner_line_no + 1
         );
     }
@@ -7184,6 +7200,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                     source_name: None,
                     ty: normalize_dsl_model_type(field_ty),
                     auto_increment: false,
+                    immutable: false,
                     default_value: None,
                     comment: None,
                 });
@@ -7573,6 +7590,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
                 source_name: None,
                 ty,
                 auto_increment: field.auto_increment,
+                immutable: false,
                 default_value: field.default_value,
                 comment: field.comment,
             }
@@ -8539,6 +8557,45 @@ mod tests {
     }
 
     #[test]
+    fn ent_immutable_fields_are_create_only() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field name: string {
+            }
+            field created_at: i64 {
+                immutable
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let created_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_at")
+            .expect("created_at");
+        assert!(created_at.immutable);
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("immutable"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub fn set_created_at(mut self, value: i64) -> Self"));
+        assert!(!sea_orm.contains("pub struct UserUpdate<'repo, 'ctx> {\n    repo: &'repo UserRepository<'ctx>,\n    id: i64,\n    created_at: Option<i64>,"));
+        assert!(!sea_orm.contains("active.created_at = Set(value);"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains("pub fn set_created_at(mut self, value: i64) -> Self"));
+        assert!(!toasty.contains("pub struct UserUpdate<'a> {\n    db: &'a mut dyn toasty::Executor,\n    id: i64,\n    created_at: Option<i64>,"));
+        assert!(!toasty.contains("model.created_at = value;"));
+    }
+
+    #[test]
     fn parses_sql_model_blocks() {
         let source = r#"
         CREATE TABLE `users` (
@@ -8785,6 +8842,7 @@ mod tests {
                     source_name: None,
                     ty: "i64".to_string(),
                     auto_increment: true,
+                    immutable: false,
                     default_value: None,
                     comment: None,
                 },
@@ -8793,6 +8851,7 @@ mod tests {
                     source_name: None,
                     ty: "String".to_string(),
                     auto_increment: false,
+                    immutable: false,
                     default_value: None,
                     comment: None,
                 },
@@ -8801,6 +8860,7 @@ mod tests {
                     source_name: None,
                     ty: "String".to_string(),
                     auto_increment: false,
+                    immutable: false,
                     default_value: None,
                     comment: None,
                 },
@@ -8809,6 +8869,7 @@ mod tests {
                     source_name: None,
                     ty: "Option<String>".to_string(),
                     auto_increment: false,
+                    immutable: false,
                     default_value: None,
                     comment: None,
                 },
@@ -8817,6 +8878,7 @@ mod tests {
                     source_name: None,
                     ty: "bool".to_string(),
                     auto_increment: false,
+                    immutable: false,
                     default_value: None,
                     comment: None,
                 },

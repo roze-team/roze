@@ -1010,6 +1010,10 @@ entity Order {
     unique
   }
 
+  field created_at: i64 {
+    immutable
+  }
+
   edge user {
     to User
     field user_id
@@ -1026,6 +1030,8 @@ relation generator grows composite edge semantics.
 `.ent` fields can declare `unique`; Roze normalizes that into a single-field
 unique index and generates the same unique lookup helpers as an explicit
 `index ... { unique }` block.
+`.ent` fields can declare `immutable`; Roze keeps them available on create
+builders but omits them from update, update-many, and edge update setters.
 SQL `JSON`/`JSONB` columns generate `String` so default Toasty models remain
 compilable; ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
 `BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.
