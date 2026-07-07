@@ -55,17 +55,40 @@ rozectl completion fish
 rozectl completion powershell
 ```
 
+goctl-compatible utility commands are available for migration workflows:
+
+```bash
+rozectl bug
+rozectl bug --verbose
+rozectl config init --o rozectl.yaml
+rozectl config show --file rozectl.yaml
+rozectl config path
+rozectl migrate api --from go-zero --api user.api --o roze.api
+rozectl migrate api user.api --write
+```
+
+`bug` prints a bug-report template with local rozectl/runtime information.
+`config` provides a Roze-style config bootstrap and inspection surface.
+`migrate api` parses a go-zero/Roze `.api` contract through the compatibility
+parser and emits the canonical Roze `.api` format; use `--check` to fail when
+the input is not already canonical, `--write` to update the input in place, or
+`--o/--out` to write a migrated copy.
+
 Create a starter REST or RPC project quickly:
 
 ```bash
 rozectl quickstart
 rozectl quickstart user-api --kind api --o services/user-api
 rozectl quickstart user-rpc --kind rpc --o services/user-rpc
+rozectl quickstart user-api --kind api --home templates
+rozectl quickstart user-rpc --kind rpc --remote https://example.com/roze-templates.git --branch main
 ```
 
 `quickstart` is a goctl-style convenience wrapper over the same starter
 generators used by `rozectl api new` and `rozectl rpc new`; it does not create a
-separate project layout.
+separate project layout. For starter project creation, `quickstart`,
+`rozectl api new`, and `rozectl rpc new` accept `--home`, `--remote`, and
+`--branch` to read `api.api` or `rpc.api` starter templates before generation.
 
 Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
 instead of inheriting `edition.workspace`. Toasty is the default SQL model ORM,
@@ -87,12 +110,13 @@ goctl-compatible REST generation is also accepted:
 ```bash
 rozectl api go --api example/user.api --dir apps/roze-example
 rozectl api go -api example/user.api -dir apps/roze-example -style go_zero
+rozectl api go -api example/user.api -dir apps/roze-example -home templates
 ```
 
 For goctl migration, `rozectl` accepts Go flag-style single-dash long options
 for known compatibility flags such as `-api`, `-dir`, `-style`, `-home`,
-`-src`, `-collection`, and `-db-url`. Native Roze examples use standard
-POSIX-style `--api` and short options such as `-o`.
+`-remote`, `-branch`, `-src`, `-collection`, and `-db-url`. Native Roze
+examples use standard POSIX-style `--api` and short options such as `-o`.
 
 Regenerate framework-owned files while preserving user logic and config:
 
@@ -200,7 +224,14 @@ backup first unless `--no-backup` is passed.
 directory. `template init`, `diff`, `update`, and `revert` also accept
 `--remote` plus optional `--branch`; rozectl clones the remote template
 repository temporarily, reads `api.api`, `rpc.api`, or `model.model`, and then
-removes the temporary checkout.
+removes the temporary checkout. The same starter template source options are
+accepted by `rozectl api new`, `rozectl rpc new`, and `rozectl quickstart`;
+starter generation reads `api.api` or `rpc.api` from the selected source before
+writing the project. Existing-contract generation commands such as
+`rozectl api generate`, `rozectl api go`, `rozectl rpc generate`, and
+`rozectl rpc protoc` also accept and validate `--home`, `--remote`, and
+`--branch` for goctl muscle-memory compatibility, while Roze's Rust code
+templates remain generator-owned.
 
 Check contract breaking changes before regenerating or releasing:
 
@@ -341,6 +372,7 @@ rozectl api client js example/user.api --out sdk/user.js
 rozectl api client dart example/user.api --out sdk/user.dart
 rozectl api client java example/user.api --out sdk/RozeApiClient.java
 rozectl api client kotlin example/user.api --out sdk/RozeApiClient.kt
+rozectl api client kt example/user.api --out sdk/RozeApiClient.kt
 rozectl api client swift example/user.api --out sdk/RozeApiClient.swift
 rozectl api client ios example/user.api --out sdk/RozeApiClient.swift
 rozectl api client android example/user.api --out sdk/RozeApiClient.kt
@@ -349,6 +381,7 @@ rozectl api js --api example/user.api --dir sdk
 rozectl api dart --api example/user.api --dir sdk
 rozectl api java --api example/user.api --dir sdk
 rozectl api kotlin --api example/user.api --dir sdk
+rozectl api kt --api example/user.api --dir sdk
 rozectl api swift --api example/user.api --dir sdk
 rozectl api ios --api example/user.api --dir sdk
 rozectl api android --api example/user.api --dir sdk
@@ -391,7 +424,9 @@ rozectl rpc protoc example/user.proto --out services/user-rpc
 rozectl rpc gen example/user.api --o services/user-rpc
 rozectl rpc gen --api example/user.api --dir services/user-rpc
 rozectl rpc gen --api example/user.api --dir services/user-rpc -m
+rozectl rpc gen --api example/user.api --dir services/user-rpc --home templates
 rozectl rpc protoc example/user.proto --out services/user-rpc --multiple
+rozectl rpc protoc example/user.proto --out services/user-rpc --home templates
 rozectl rpc template -o rpc.api
 rozectl rpc template --o rpc.api
 ```
@@ -400,7 +435,9 @@ rozectl rpc template --o rpc.api
 `-o/--out`, it prints the built-in RPC `.api` starter template to stdout.
 `-m/--multiple` is accepted for goctl-compatible RPC command shape; Roze RPC
 projects already generate split server, client, protobuf, service context, and
-logic modules.
+logic modules. `rpc generate` and `rpc protoc` accept `--home`, `--remote`, and
+`--branch` for goctl command compatibility and validate that the selected RPC
+template source exists.
 
 Generate models:
 
@@ -428,21 +465,29 @@ rozectl kube deploy --name user-api --image registry.example.com/user-api:latest
 
 ## Supported `.api` syntax
 
-The parser accepts these Roze contract forms:
+The parser accepts Roze contracts plus go-zero-compatible API forms:
 
 - `syntax = "v1"` declarations.
 - `info (...)` blocks.
 - `type Name { ... }` and grouped `type (...)` blocks.
 - Compact block starts such as `info(`, `type(`, and `@server(`.
-- `service name { ... }` REST route blocks.
+- `service name` declarations and `service name { ... }` REST/RPC blocks.
 - Multiple `service name { ... }` blocks with the same name; routes are merged
   in declaration order.
-- `@server`, `@handler`, `@doc`, and `@middleware` annotations.
+- `@server`, `@handler`, `@doc`, and `@middleware` annotations, including
+  compact go-zero forms such as `@handler(getUser)`, `@doc("Get user")`, and
+  `@middleware(auth, trace)`.
 - `import (...)` blocks.
-- Route signatures with either `returns (Resp)` or `returns(Resp)`.
+- Route/RPC signatures with either `returns (Resp)` or `returns(Resp)`,
+  including legacy goctl spacing such as `/shorten(Req) returns(Resp)`.
 - HTTP methods: `get`, `head`, `post`, `put`, `patch`, `delete`.
 - Anonymous embedded fields inside types, rendered as flattened serde fields in
   generated Rust DTOs.
+- Go-style field tags for `path`, `query`, `form`, `header`, `json`, and
+  `validate`. JSON options such as `json:"name,optional"` keep `name` as the
+  wire name, while `validate:"optional"` and `validate:"omitempty"` skip
+  generated validation and are treated as additive-safe optional fields in
+  contract checks.
 
 Example:
 
@@ -464,8 +509,25 @@ service user-api {
   @doc "Get a user"
   get /users/:id (GetUserReq) returns (UserResp)
 
+  @handler ping
+  head /ping ()
+
   @handler logout
   post /logout
+}
+```
+
+Multiple same-name service blocks are accepted and merged:
+
+```go
+service user-api {
+  @handler getUser
+  get /users/:id (GetUserReq) returns (UserResp)
+}
+
+service user-api {
+  @handler createUser
+  post /users (CreateUserReq) returns (UserResp)
 }
 ```
 
@@ -494,6 +556,10 @@ continue to use the embedded type's field names rather than a nested
 Multiple `@server` blocks inside a service apply to following routes until the
 next `@server` block. Route-scoped values override the top-level server block
 for path prefix, middleware, and JWT/OpenAPI security.
+When `group` is set, it controls the generated REST handler/logic grouping
+instead of deriving the group from the first route path segment. Multi-level
+go-zero groups such as `admin/user` are accepted and normalized into safe Rust
+module names such as `admin_user`.
 
 ```go
 @server (
@@ -502,6 +568,7 @@ for path prefix, middleware, and JWT/OpenAPI security.
 service user-api {
   @server (
     prefix: /api/v1
+    group: admin/user
     jwt: Auth
   )
   @handler getUser

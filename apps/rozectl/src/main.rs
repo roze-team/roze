@@ -78,6 +78,14 @@ enum CompletionShell {
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum MigrateSource {
+    #[default]
+    #[value(name = "go-zero")]
+    GoZero,
+    Roze,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum QuickstartKind {
     #[default]
     Api,
@@ -220,6 +228,18 @@ enum Commands {
         #[command(subcommand)]
         command: HelmCommands,
     },
+    Bug {
+        #[arg(long)]
+        verbose: bool,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommands,
+    },
     Completion {
         #[arg(value_enum, default_value_t)]
         shell: CompletionShell,
@@ -246,6 +266,12 @@ enum Commands {
         force: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
 }
 
@@ -266,6 +292,12 @@ enum ApiCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Go {
         #[arg(short = 'a', long)]
@@ -280,6 +312,12 @@ enum ApiCommands {
         roze_source: RozeSource,
         #[arg(long)]
         style: Option<String>,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Swagger {
         #[arg(short = 'a', long)]
@@ -297,6 +335,12 @@ enum ApiCommands {
         force: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Client {
         #[command(subcommand)]
@@ -334,6 +378,7 @@ enum ApiCommands {
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
     },
+    #[command(alias = "kt")]
     Kotlin {
         #[arg(short = 'a', long)]
         api: PathBuf,
@@ -420,6 +465,7 @@ enum ClientCommands {
         #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.java")]
         out: PathBuf,
     },
+    #[command(alias = "kt")]
     Kotlin {
         api: PathBuf,
         #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.kt")]
@@ -461,6 +507,12 @@ enum RpcCommands {
         roze_source: RozeSource,
         #[arg(short = 'm', long = "multiple")]
         multiple: bool,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     New {
         name: String,
@@ -470,6 +522,12 @@ enum RpcCommands {
         force: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Protoc {
         proto: PathBuf,
@@ -483,6 +541,12 @@ enum RpcCommands {
         roze_source: RozeSource,
         #[arg(short = 'm', long = "multiple")]
         multiple: bool,
+        #[arg(long, alias = "home")]
+        template_home: Option<PathBuf>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
     },
     Template {
         #[arg(short = 'o', long = "out", alias = "o")]
@@ -579,6 +643,39 @@ enum HelmCommands {
     Validate {
         #[arg(long, default_value = "deploy/chart")]
         chart: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    Init {
+        #[arg(short = 'o', long, alias = "o", default_value = "rozectl.yaml")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    Show {
+        #[arg(short = 'f', long = "file")]
+        file: Option<PathBuf>,
+    },
+    Path,
+}
+
+#[derive(Debug, Subcommand)]
+enum MigrateCommands {
+    Api {
+        #[arg(value_enum, long = "from", default_value_t)]
+        from: MigrateSource,
+        #[arg(value_name = "API")]
+        api: Option<PathBuf>,
+        #[arg(long = "api")]
+        api_file: Option<PathBuf>,
+        #[arg(short = 'o', long, alias = "o")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        write: bool,
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -944,10 +1041,19 @@ fn main() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
+                template_home,
+                remote,
+                branch,
             } => {
                 let api = resolve_input_path(api, api_file, "api")?;
                 let out = dir.unwrap_or(out);
                 validate_api_for_generation(&api)?;
+                validate_generation_template_source(
+                    "api",
+                    template_home.as_deref(),
+                    remote.as_deref(),
+                    branch.as_deref(),
+                )?;
                 registry.dispatch(GeneratorCommand::ApiGenerate {
                     api,
                     out,
@@ -961,8 +1067,17 @@ fn main() -> anyhow::Result<()> {
                 update,
                 roze_source,
                 style: _,
+                template_home,
+                remote,
+                branch,
             } => {
                 validate_api_for_generation(&api)?;
+                validate_generation_template_source(
+                    "api",
+                    template_home.as_deref(),
+                    remote.as_deref(),
+                    branch.as_deref(),
+                )?;
                 registry.dispatch(GeneratorCommand::ApiGenerate {
                     api,
                     out: dir,
@@ -982,20 +1097,26 @@ fn main() -> anyhow::Result<()> {
                 out,
                 force,
                 roze_source,
+                template_home,
+                remote,
+                branch,
             } => {
                 let out = resolve_new_out(&name, out);
-                registry.dispatch(GeneratorCommand::ApiNew {
-                    name,
-                    out,
-                    options: GenerateOptions::new(
-                        if force {
-                            GenerateMode::Force
-                        } else {
-                            GenerateMode::Create
-                        },
-                        roze_source.into(),
-                    ),
-                })?;
+                let options = GenerateOptions::new(
+                    if force {
+                        GenerateMode::Force
+                    } else {
+                        GenerateMode::Create
+                    },
+                    roze_source.into(),
+                );
+                if let Some(source) =
+                    selected_template_source("api", template_home.as_deref(), remote.as_deref(), branch.as_deref())?
+                {
+                    generator::create_api_project_from_source(&name, &out, options, source)?;
+                } else {
+                    registry.dispatch(GeneratorCommand::ApiNew { name, out, options })?;
+                }
             }
             ApiCommands::Client { command } => match command {
                 ClientCommands::Ts { api, out } => {
@@ -1104,10 +1225,19 @@ fn main() -> anyhow::Result<()> {
                 update,
                 roze_source,
                 multiple: _,
+                template_home,
+                remote,
+                branch,
             } => {
                 let api = resolve_input_path(api, api_file, "api")?;
                 let out = dir.unwrap_or(out);
                 validate_api_for_generation(&api)?;
+                validate_generation_template_source(
+                    "rpc",
+                    template_home.as_deref(),
+                    remote.as_deref(),
+                    branch.as_deref(),
+                )?;
                 registry.dispatch(GeneratorCommand::RpcGenerate {
                     api,
                     out,
@@ -1119,20 +1249,26 @@ fn main() -> anyhow::Result<()> {
                 out,
                 force,
                 roze_source,
+                template_home,
+                remote,
+                branch,
             } => {
                 let out = resolve_new_out(&name, out);
-                registry.dispatch(GeneratorCommand::RpcNew {
-                    name,
-                    out,
-                    options: GenerateOptions::new(
-                        if force {
-                            GenerateMode::Force
-                        } else {
-                            GenerateMode::Create
-                        },
-                        roze_source.into(),
-                    ),
-                })?;
+                let options = GenerateOptions::new(
+                    if force {
+                        GenerateMode::Force
+                    } else {
+                        GenerateMode::Create
+                    },
+                    roze_source.into(),
+                );
+                if let Some(source) =
+                    selected_template_source("rpc", template_home.as_deref(), remote.as_deref(), branch.as_deref())?
+                {
+                    generator::create_rpc_project_from_source(&name, &out, options, source)?;
+                } else {
+                    registry.dispatch(GeneratorCommand::RpcNew { name, out, options })?;
+                }
             }
             RpcCommands::Protoc {
                 proto,
@@ -1141,7 +1277,16 @@ fn main() -> anyhow::Result<()> {
                 update,
                 roze_source,
                 multiple: _,
+                template_home,
+                remote,
+                branch,
             } => {
+                validate_generation_template_source(
+                    "rpc",
+                    template_home.as_deref(),
+                    remote.as_deref(),
+                    branch.as_deref(),
+                )?;
                 generator::native::generate_rpc_from_proto(
                     &proto,
                     &out,
@@ -1526,6 +1671,9 @@ fn main() -> anyhow::Result<()> {
             }
             HelmCommands::Validate { chart } => run_helm_validate(&chart)?,
         },
+        Commands::Bug { verbose } => run_bug(verbose)?,
+        Commands::Config { command } => run_config(command)?,
+        Commands::Migrate { command } => run_migrate(command)?,
         Commands::Completion { shell } => {
             print!("{}", render_completion(shell));
         }
@@ -1542,6 +1690,9 @@ fn main() -> anyhow::Result<()> {
             out,
             force,
             roze_source,
+            template_home,
+            remote,
+            branch,
         } => {
             let out = resolve_new_out(&name, out);
             let mode = if force {
@@ -1551,16 +1702,30 @@ fn main() -> anyhow::Result<()> {
             };
             let options = GenerateOptions::new(mode, roze_source.into());
             match kind {
-                QuickstartKind::Api => registry.dispatch(GeneratorCommand::ApiNew {
-                    name,
-                    out,
-                    options,
-                })?,
-                QuickstartKind::Rpc => registry.dispatch(GeneratorCommand::RpcNew {
-                    name,
-                    out,
-                    options,
-                })?,
+                QuickstartKind::Api => {
+                    if let Some(source) = selected_template_source(
+                        "api",
+                        template_home.as_deref(),
+                        remote.as_deref(),
+                        branch.as_deref(),
+                    )? {
+                        generator::create_api_project_from_source(&name, &out, options, source)?;
+                    } else {
+                        registry.dispatch(GeneratorCommand::ApiNew { name, out, options })?;
+                    }
+                }
+                QuickstartKind::Rpc => {
+                    if let Some(source) = selected_template_source(
+                        "rpc",
+                        template_home.as_deref(),
+                        remote.as_deref(),
+                        branch.as_deref(),
+                    )? {
+                        generator::create_rpc_project_from_source(&name, &out, options, source)?;
+                    } else {
+                        registry.dispatch(GeneratorCommand::RpcNew { name, out, options })?;
+                    }
+                }
             }
         }
     }
@@ -1626,6 +1791,7 @@ const GO_STYLE_LONG_FLAGS: &[&str] = &[
     "env",
     "file",
     "force",
+    "from",
     "format",
     "home",
     "image",
@@ -1637,6 +1803,7 @@ const GO_STYLE_LONG_FLAGS: &[&str] = &[
     "out",
     "plugin",
     "port",
+    "path",
     "remote",
     "replicas",
     "repo",
@@ -1922,6 +2089,30 @@ fn template_source(
     }
 
     generator::template(name)
+}
+
+fn selected_template_source(
+    name: &str,
+    dir: Option<&Path>,
+    remote: Option<&str>,
+    branch: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    if dir.is_none() && remote.is_none() {
+        return Ok(None);
+    }
+    template_source(name, dir, remote, branch).map(Some)
+}
+
+fn validate_generation_template_source(
+    name: &str,
+    dir: Option<&Path>,
+    remote: Option<&str>,
+    branch: Option<&str>,
+) -> anyhow::Result<()> {
+    if dir.is_none() && remote.is_none() {
+        return Ok(());
+    }
+    template_source(name, dir, remote, branch).map(|_| ())
 }
 
 fn read_template_from_home(home: &Path, name: &str) -> anyhow::Result<String> {
@@ -3597,14 +3788,14 @@ fn render_completion(shell: CompletionShell) -> &'static str {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm completion env upgrade quickstart help"
+    commands="api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm bug config migrate completion env upgrade quickstart help"
     case "$prev" in
         rozectl)
             COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
             return 0
             ;;
         api)
-            COMPREPLY=( $(compgen -W "generate go swagger new client ts js dart java kotlin swift ios android doc plugin validate format" -- "$cur") )
+            COMPREPLY=( $(compgen -W "generate go swagger new client ts js dart java kt kotlin swift ios android doc plugin validate format" -- "$cur") )
             return 0
             ;;
         rpc)
@@ -3613,6 +3804,14 @@ fn render_completion(shell: CompletionShell) -> &'static str {
             ;;
         model)
             COMPREPLY=( $(compgen -W "generate inspect mysql pg mongo" -- "$cur") )
+            return 0
+            ;;
+        config)
+            COMPREPLY=( $(compgen -W "init show path" -- "$cur") )
+            return 0
+            ;;
+        migrate)
+            COMPREPLY=( $(compgen -W "api" -- "$cur") )
             return 0
             ;;
         completion)
@@ -3646,6 +3845,9 @@ _rozectl() {
     'docker:write Dockerfile'
     'kube:write or validate Kubernetes manifests'
     'helm:write or validate Helm charts'
+    'bug:print a bug report template'
+    'config:manage rozectl configuration'
+    'migrate:migrate go-zero or Roze contracts'
     'completion:print shell completion'
     'env:print rozectl environment'
     'upgrade:upgrade rozectl'
@@ -3658,17 +3860,19 @@ compdef _rozectl rozectl
         }
         CompletionShell::Fish => {
             r#"complete -c rozectl -f
-complete -c rozectl -n "__fish_use_subcommand" -a "api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm completion env upgrade quickstart help"
-complete -c rozectl -n "__fish_seen_subcommand_from api" -a "generate go swagger new client ts js dart java kotlin swift ios android doc plugin validate format"
+complete -c rozectl -n "__fish_use_subcommand" -a "api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm bug config migrate completion env upgrade quickstart help"
+complete -c rozectl -n "__fish_seen_subcommand_from api" -a "generate go swagger new client ts js dart java kt kotlin swift ios android doc plugin validate format"
 complete -c rozectl -n "__fish_seen_subcommand_from rpc" -a "generate new protoc template"
 complete -c rozectl -n "__fish_seen_subcommand_from model" -a "generate inspect mysql pg mongo"
+complete -c rozectl -n "__fish_seen_subcommand_from config" -a "init show path"
+complete -c rozectl -n "__fish_seen_subcommand_from migrate" -a "api"
 complete -c rozectl -n "__fish_seen_subcommand_from completion" -a "bash zsh fish powershell"
 "#
         }
         CompletionShell::Powershell => {
             r#"Register-ArgumentCompleter -Native -CommandName rozectl -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = 'api','rpc','model','search','stream','template','diff','contract','mock','test','dev','doctor','doc','openapi','docker','kube','helm','completion','env','upgrade','quickstart','help'
+    $commands = 'api','rpc','model','search','stream','template','diff','contract','mock','test','dev','doctor','doc','openapi','docker','kube','helm','bug','config','migrate','completion','env','upgrade','quickstart','help'
     $commands |
         Where-Object { $_ -like "$wordToComplete*" } |
         ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }
@@ -3689,6 +3893,138 @@ fn run_env() -> anyhow::Result<()> {
     println!("RUST_LOG={}", env_or_empty("RUST_LOG"));
     println!("PATH={}", env_or_empty("PATH"));
     Ok(())
+}
+
+fn run_bug(verbose: bool) -> anyhow::Result<()> {
+    println!("Roze bug report");
+    println!(
+        "version: {}",
+        option_env!("CARGO_PKG_VERSION").unwrap_or("unknown")
+    );
+    println!("os: {}", std::env::consts::OS);
+    println!("arch: {}", std::env::consts::ARCH);
+    println!("family: {}", std::env::consts::FAMILY);
+    println!("exe: {}", std::env::current_exe()?.display());
+    println!("cwd: {}", std::env::current_dir()?.display());
+    println!();
+    println!("Please include:");
+    println!("- the rozectl command you ran");
+    println!("- the .api/.proto/schema input, or a minimal reproducer");
+    println!("- the expected behavior");
+    println!("- the actual output or panic");
+    if verbose {
+        println!();
+        println!("Environment:");
+        println!("CARGO_HOME={}", env_or_empty("CARGO_HOME"));
+        println!("RUSTUP_HOME={}", env_or_empty("RUSTUP_HOME"));
+        println!("RUST_LOG={}", env_or_empty("RUST_LOG"));
+        println!("PATH={}", env_or_empty("PATH"));
+    }
+    Ok(())
+}
+
+fn run_config(command: ConfigCommands) -> anyhow::Result<()> {
+    match command {
+        ConfigCommands::Init { out, force } => {
+            if out.exists() && !force {
+                anyhow::bail!(
+                    "config already exists at {}; pass --force to overwrite",
+                    out.display()
+                );
+            }
+            fs::write(&out, default_config())?;
+            println!("config written: {}", out.display());
+        }
+        ConfigCommands::Show { file } => {
+            let path = file.unwrap_or_else(default_config_path);
+            if path.exists() {
+                print!("{}", fs::read_to_string(&path)?);
+            } else {
+                print!("{}", default_config());
+            }
+        }
+        ConfigCommands::Path => {
+            println!("{}", default_config_path().display());
+        }
+    }
+    Ok(())
+}
+
+fn run_migrate(command: MigrateCommands) -> anyhow::Result<()> {
+    match command {
+        MigrateCommands::Api {
+            from,
+            api,
+            api_file,
+            out,
+            write,
+            check,
+        } => run_migrate_api(from, api, api_file, out, write, check)?,
+    }
+    Ok(())
+}
+
+fn run_migrate_api(
+    from: MigrateSource,
+    api: Option<PathBuf>,
+    api_file: Option<PathBuf>,
+    out: Option<PathBuf>,
+    write: bool,
+    check: bool,
+) -> anyhow::Result<()> {
+    let input = resolve_input_path(api, api_file, "api")?;
+    let source = fs::read_to_string(&input)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", input.display()))?;
+    let spec = parser::parse_api(&source)
+        .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", input.display()))?;
+    let formatted = format_api_spec(&spec);
+
+    if check {
+        if normalize_line_endings(&source) == formatted {
+            println!("migrate api check passed: {}", input.display());
+            return Ok(());
+        }
+        anyhow::bail!("migrate api check failed: {}", input.display());
+    }
+
+    let source_name = match from {
+        MigrateSource::GoZero => "go-zero",
+        MigrateSource::Roze => "roze",
+    };
+    if let Some(out) = out {
+        fs::write(&out, formatted)
+            .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", out.display()))?;
+        println!(
+            "migrated {source_name} api: {} -> {}",
+            input.display(),
+            out.display()
+        );
+    } else if write {
+        fs::write(&input, formatted)
+            .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", input.display()))?;
+        println!("migrated {source_name} api in place: {}", input.display());
+    } else {
+        print!("{formatted}");
+    }
+    Ok(())
+}
+
+fn default_config_path() -> PathBuf {
+    PathBuf::from("rozectl.yaml")
+}
+
+fn default_config() -> &'static str {
+    r#"# rozectl.yaml
+templates:
+  home: templates
+generation:
+  roze_source: git
+  mode: create
+api:
+  style: roze
+rpc:
+  multiple: false
+"#
 }
 
 fn env_or_empty(name: &str) -> String {
@@ -4083,6 +4419,27 @@ spec:
             }
         ));
 
+        let api_gen_template = parse([
+            "rozectl",
+            "api",
+            "gen",
+            "--api",
+            "user.api",
+            "--dir",
+            "out",
+            "--home",
+            "templates",
+        ]);
+        assert!(matches!(
+            api_gen_template.command,
+            Commands::Api {
+                command: ApiCommands::Generate {
+                    template_home: Some(_),
+                    ..
+                }
+            }
+        ));
+
         let api_go = Cli::try_parse_from([
             "rozectl", "api", "go", "--api", "user.api", "--dir", "out", "--update", "--style",
             "go_zero",
@@ -4102,6 +4459,27 @@ spec:
             api_go_single_dash.command,
             Commands::Api {
                 command: ApiCommands::Go { .. }
+            }
+        ));
+
+        let api_go_template = parse([
+            "rozectl",
+            "api",
+            "go",
+            "-api",
+            "user.api",
+            "-dir",
+            "out",
+            "-home",
+            "templates",
+        ]);
+        assert!(matches!(
+            api_go_template.command,
+            Commands::Api {
+                command: ApiCommands::Go {
+                    template_home: Some(_),
+                    ..
+                }
             }
         ));
 
@@ -4158,6 +4536,27 @@ spec:
             }
         ));
 
+        let rpc_gen_template = parse([
+            "rozectl",
+            "rpc",
+            "gen",
+            "-api",
+            "user.api",
+            "-dir",
+            "out",
+            "-home",
+            "templates",
+        ]);
+        assert!(matches!(
+            rpc_gen_template.command,
+            Commands::Rpc {
+                command: RpcCommands::Generate {
+                    template_home: Some(_),
+                    ..
+                }
+            }
+        ));
+
         let rpc_gen_flagged =
             Cli::try_parse_from(["rozectl", "rpc", "gen", "--api", "user.api", "--dir", "out"])
                 .expect("parse rpc gen with api flag");
@@ -4189,6 +4588,27 @@ spec:
             rpc_protoc_multiple.command,
             Commands::Rpc {
                 command: RpcCommands::Protoc { multiple: true, .. }
+            }
+        ));
+
+        let rpc_protoc_template = parse([
+            "rozectl",
+            "rpc",
+            "protoc",
+            "user.proto",
+            "--home",
+            "templates",
+            "--branch",
+            "main",
+        ]);
+        assert!(matches!(
+            rpc_protoc_template.command,
+            Commands::Rpc {
+                command: RpcCommands::Protoc {
+                    template_home: Some(_),
+                    branch: Some(_),
+                    ..
+                }
             }
         ));
 
@@ -4668,6 +5088,25 @@ spec:
             }
         ));
 
+        let kt_client = Cli::try_parse_from([
+            "rozectl",
+            "api",
+            "client",
+            "kt",
+            "user.api",
+            "--out",
+            "sdk/RozeApiClient.kt",
+        ])
+        .expect("parse api client kt alias");
+        assert!(matches!(
+            kt_client.command,
+            Commands::Api {
+                command: ApiCommands::Client {
+                    command: ClientCommands::Kotlin { .. }
+                }
+            }
+        ));
+
         let direct_java_client =
             Cli::try_parse_from(["rozectl", "api", "java", "-a", "user.api", "-d", "sdk"])
                 .expect("parse goctl-style api java");
@@ -4683,6 +5122,16 @@ spec:
                 .expect("parse goctl-style api kotlin");
         assert!(matches!(
             direct_kotlin_client.command,
+            Commands::Api {
+                command: ApiCommands::Kotlin { .. }
+            }
+        ));
+
+        let direct_kt_client =
+            Cli::try_parse_from(["rozectl", "api", "kt", "-a", "user.api", "-d", "sdk"])
+                .expect("parse goctl-style api kt alias");
+        assert!(matches!(
+            direct_kt_client.command,
             Commands::Api {
                 command: ApiCommands::Kotlin { .. }
             }
@@ -5076,6 +5525,47 @@ spec:
         let env = parse(["rozectl", "env"]);
         assert!(matches!(env.command, Commands::Env));
 
+        let bug = parse(["rozectl", "bug", "--verbose"]);
+        assert!(matches!(bug.command, Commands::Bug { verbose: true }));
+
+        let config_init = parse([
+            "rozectl",
+            "config",
+            "init",
+            "--o",
+            "rozectl.yaml",
+            "--force",
+        ]);
+        assert!(matches!(
+            config_init.command,
+            Commands::Config {
+                command: ConfigCommands::Init { force: true, .. }
+            }
+        ));
+
+        let config_path = parse(["rozectl", "config", "path"]);
+        assert!(matches!(
+            config_path.command,
+            Commands::Config {
+                command: ConfigCommands::Path
+            }
+        ));
+
+        let migrate_api = parse([
+            "rozectl", "migrate", "api", "-from", "go-zero", "-api", "user.api", "-o", "roze.api",
+        ]);
+        assert!(matches!(
+            migrate_api.command,
+            Commands::Migrate {
+                command: MigrateCommands::Api {
+                    from: MigrateSource::GoZero,
+                    api_file: Some(_),
+                    out: Some(_),
+                    ..
+                }
+            }
+        ));
+
         let upgrade = parse([
             "rozectl",
             "upgrade",
@@ -5111,6 +5601,49 @@ spec:
                 out: Some(_),
                 ..
             } if name == "demo"
+        ));
+
+        let quickstart_template = parse([
+            "rozectl",
+            "quickstart",
+            "demo",
+            "--home",
+            "templates",
+            "--remote",
+            "https://example.com/templates.git",
+            "--branch",
+            "main",
+        ]);
+        assert!(matches!(
+            quickstart_template.command,
+            Commands::Quickstart {
+                template_home: Some(_),
+                remote: Some(_),
+                branch: Some(_),
+                ..
+            }
+        ));
+
+        let api_new_template = parse(["rozectl", "api", "new", "demo", "--home", "templates"]);
+        assert!(matches!(
+            api_new_template.command,
+            Commands::Api {
+                command: ApiCommands::New {
+                    template_home: Some(_),
+                    ..
+                }
+            }
+        ));
+
+        let rpc_new_template = parse(["rozectl", "rpc", "new", "demo", "--home", "templates"]);
+        assert!(matches!(
+            rpc_new_template.command,
+            Commands::Rpc {
+                command: RpcCommands::New {
+                    template_home: Some(_),
+                    ..
+                }
+            }
         ));
 
         let kube = Cli::try_parse_from([

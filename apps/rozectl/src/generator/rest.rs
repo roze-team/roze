@@ -777,13 +777,38 @@ fn route_groups(spec: &ApiSpec) -> BTreeMap<String, Vec<&RestRoute>> {
 }
 
 fn route_group_name(route: &RestRoute) -> String {
-    route
-        .path
-        .split('/')
-        .find(|segment| !segment.is_empty() && !segment.starts_with(':'))
+    route_group_segments(route).join("_")
+}
+
+fn route_group_segments(route: &RestRoute) -> Vec<String> {
+    let segments = route
+        .server
+        .as_ref()
+        .and_then(|server| server.group.as_deref())
+        .map(group_segments)
+        .filter(|segments| !segments.is_empty())
+        .unwrap_or_else(|| {
+            route
+                .path
+                .split('/')
+                .find(|segment| !segment.is_empty() && !segment.starts_with(':'))
+                .map(|segment| vec![to_snake_case(segment)])
+                .unwrap_or_default()
+        });
+
+    if segments.is_empty() {
+        vec!["base".to_string()]
+    } else {
+        segments
+    }
+}
+
+fn group_segments(group: &str) -> Vec<String> {
+    group
+        .split(|ch: char| ch == '/' || ch == '\\' || ch == '.' || ch == ':')
         .map(to_snake_case)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "base".to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect()
 }
 
 fn route_has_jwt(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
@@ -2175,6 +2200,47 @@ mod tests {
             openapi.contains("builder.add_operation(\"/internal/users/:id\", HttpMethod::Patch")
         );
         assert!(openapi.contains(".require_security(\"bearerAuth\")"));
+    }
+
+    #[test]
+    fn route_group_uses_multilevel_server_group_before_path_fallback() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @server (
+                    group: admin/user
+                )
+                @handler getProfile
+                get /profiles/:id (GetProfileReq) returns (UserResp)
+            }
+
+            type (
+                GetProfileReq {
+                    id u64 `path:"id"`
+                }
+                UserResp {
+                    id u64 `json:"id"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        assert_eq!(route_group_name(&spec.rest_routes[0]), "admin_user");
+        assert_eq!(
+            route_group_segments(&spec.rest_routes[0]),
+            vec!["admin".to_string(), "user".to_string()]
+        );
+
+        let routes = render_route_mod(&spec);
+        assert!(routes.contains("mod admin_user;"));
+        assert!(routes.contains(".merge(admin_user::routes())"));
+
+        let route_groups = render_route_group_mods(&spec);
+        assert_eq!(route_groups[0].0, "admin_user");
+        assert!(route_groups[0]
+            .1
+            .contains(".route(\"/profiles/{id}\", get(handler::admin_user::get_profile))"));
     }
 
     #[test]

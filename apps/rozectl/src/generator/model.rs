@@ -515,13 +515,29 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
                         .expect("valid toml dependency value")
                 }
                 ModelOrm::Toasty => {
-                    r#"{ version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }"#
+                    r#"{ version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde", "rust_decimal"] }"#
                         .parse::<toml_edit::Item>()
                         .expect("valid toml dependency value")
                 }
             }
         };
         dependencies.insert(dependency_name, item);
+    }
+    if orm == ModelOrm::Toasty {
+        if let Some(item) = dependencies.get_mut("toasty") {
+            ensure_dependency_feature(item, "rust_decimal");
+        }
+    }
+
+    if orm == ModelOrm::Toasty && !dependencies.contains_key("rust_decimal") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            r#"{ version = "1", features = ["serde"] }"#
+                .parse::<toml_edit::Item>()
+                .expect("valid toml dependency value")
+        };
+        dependencies.insert("rust_decimal", item);
     }
 
     if !dependencies.contains_key("serde_json") {
@@ -534,6 +550,27 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
     }
     fs::write(&manifest_path, document.to_string())
         .with_context(|| format!("failed to write {}", manifest_path.display()))
+}
+
+fn ensure_dependency_feature(item: &mut toml_edit::Item, feature: &str) {
+    let Some(value) = item.as_value_mut() else {
+        return;
+    };
+    let Some(table) = value.as_inline_table_mut() else {
+        return;
+    };
+    let Some(features) = table.get_mut("features") else {
+        return;
+    };
+    let Some(array) = features.as_array_mut() else {
+        return;
+    };
+    if !array
+        .iter()
+        .any(|value| value.as_str().is_some_and(|value| value == feature))
+    {
+        array.push(feature);
+    }
 }
 
 fn workspace_dependency_item() -> toml_edit::Item {
@@ -3883,6 +3920,7 @@ fn is_numeric_type(ty: &str) -> bool {
             | "usize"
             | "f32"
             | "f64"
+            | "rust_decimal::Decimal"
     )
 }
 
@@ -4996,14 +5034,36 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         };
     }
 
+    if normalized.contains("smallserial") {
+        return if normalized.contains("unsigned") {
+            "u16".to_string()
+        } else {
+            "i16".to_string()
+        };
+    }
+
     if normalized.contains("serial") {
         return "i64".to_string();
     }
 
+    if normalized.contains("smallint") || normalized.contains("int2") {
+        return if normalized.contains("unsigned") {
+            "u16".to_string()
+        } else {
+            "i16".to_string()
+        };
+    }
+
+    if normalized.contains("tinyint") {
+        return if normalized.contains("unsigned") {
+            "u8".to_string()
+        } else {
+            "i8".to_string()
+        };
+    }
+
     if normalized.contains("int")
         || normalized.contains("mediumint")
-        || normalized.contains("smallint")
-        || normalized.contains("tinyint")
         || normalized.contains("integer")
     {
         return if normalized.contains("unsigned") {
@@ -5013,12 +5073,14 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         };
     }
 
-    if normalized.contains("double")
-        || normalized.contains("decimal")
+    if normalized.contains("decimal")
         || normalized.contains("numeric")
-        || normalized.contains("float")
-        || normalized.contains("real")
         || normalized.contains("money")
+    {
+        return "rust_decimal::Decimal".to_string();
+    }
+
+    if normalized.contains("double") || normalized.contains("float") || normalized.contains("real")
     {
         return "f64".to_string();
     }
@@ -5481,6 +5543,58 @@ mod tests {
     }
 
     #[test]
+    fn postgres_smallint_and_numeric_generate_runtime_safe_types() {
+        let source = r#"
+        CREATE TABLE coupons (
+            id BIGSERIAL PRIMARY KEY,
+            status SMALLINT NOT NULL,
+            discount_amount NUMERIC(12,2) NOT NULL,
+            min_order_amount DECIMAL(12,2) NULL
+        );
+        "#;
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let model = &models[0];
+
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "status")
+                .expect("status field")
+                .ty,
+            "i16"
+        );
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "discount_amount")
+                .expect("discount amount field")
+                .ty,
+            "rust_decimal::Decimal"
+        );
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "min_order_amount")
+                .expect("min order amount field")
+                .ty,
+            "Option<rust_decimal::Decimal>"
+        );
+
+        let rendered = render_toasty_model_module(model);
+        assert!(rendered.contains("pub status: i16"));
+        assert!(rendered.contains("pub discount_amount: rust_decimal::Decimal"));
+        assert!(rendered.contains("pub min_order_amount: Option<rust_decimal::Decimal>"));
+        assert!(rendered.contains("pub status_in: Vec<i16>"));
+        assert!(rendered.contains("pub status_min: Option<i16>"));
+        assert!(rendered.contains("pub discount_amount_min: Option<rust_decimal::Decimal>"));
+        assert!(rendered.contains("Coupon::fields().status().eq(value)"));
+        assert!(rendered.contains("Coupon::fields().discount_amount().ge(value)"));
+    }
+
+    #[test]
     fn toasty_generation_updates_manifest_dependency() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5545,6 +5659,7 @@ impl ServiceContext {
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains("toasty = { workspace = true }"));
+        assert!(manifest.contains("rust_decimal = { workspace = true }"));
         assert!(!manifest.contains("sea-orm.workspace = true"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("toasty::Model"));
@@ -5578,6 +5693,47 @@ impl ServiceContext {
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));
         assert!(!ext.contains(MODEL_GENERATED_MARKER));
+    }
+
+    #[test]
+    fn toasty_generation_adds_decimal_feature_to_existing_manifest_dependency() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-toasty-existing-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "coupon-service"
+edition = "2021"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            CREATE TABLE coupons (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                amount NUMERIC(12,2) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Sql,
+            ModelOrm::Toasty,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains(r#""rust_decimal""#));
+        assert!(manifest.contains(r#"rust_decimal = { version = "1", features = ["serde"] }"#));
     }
 
     #[test]
@@ -6362,8 +6518,9 @@ edition = "2021"
 version = "0.0.0"
 
 [dependencies]
+rust_decimal = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde"] }
+toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde", "rust_decimal"] }
 "#,
         );
         fs::write(out.join("src/lib.rs"), "pub mod model;\n").expect("lib");

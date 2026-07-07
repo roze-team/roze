@@ -2463,6 +2463,15 @@ pub fn create_api_project(
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
     let source = api_template(service);
+    create_api_project_from_source(service, out, options, source)
+}
+
+pub fn create_api_project_from_source(
+    service: &str,
+    out: &Path,
+    options: GenerateOptions,
+    source: String,
+) -> anyhow::Result<()> {
     let api_path = out.join(format!("{}.api", service));
     let spec = crate::parser::parse_api(&source)?;
     fs::create_dir_all(out)?;
@@ -2482,6 +2491,15 @@ pub fn create_rpc_project(
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
     let source = rpc_template(service);
+    create_rpc_project_from_source(service, out, options, source)
+}
+
+pub fn create_rpc_project_from_source(
+    service: &str,
+    out: &Path,
+    options: GenerateOptions,
+    source: String,
+) -> anyhow::Result<()> {
     let api_path = out.join(format!("{}.api", service));
     let spec = crate::parser::parse_api(&source)?;
     fs::create_dir_all(out)?;
@@ -2683,7 +2701,11 @@ pub(super) fn generate_rpc_project(
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
-    fs::write(out.join("src/logic/mod.rs"), rpc::render_logic_mod(spec))?;
+    write_logic_group_mod(
+        &out.join("src/logic/mod.rs"),
+        rpc::render_logic_mod(spec),
+        options.mode,
+    )?;
     for (method, content) in rpc::render_logic_files(spec) {
         write_preserved_logic(
             &out.join("src/logic").join(format!("{method}.rs")),
@@ -5261,6 +5283,63 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config module")
             .contains("registry_namespace"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_update_preserves_custom_logic_module_declarations() {
+        let spec = parse_api(
+            r#"
+            service promotion-rpc {
+                rpc ListCoupons (ListCouponsReq) returns (ListCouponsResp)
+            }
+
+            type ListCouponsReq {
+                page: u64
+            }
+
+            type ListCouponsResp {
+                total: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rpc-update-logic-mod-test");
+        let out = root.join("promotion");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+        fs::write(out.join("src/logic/coupon_map.rs"), "// custom helper\n")
+            .expect("write custom helper");
+        fs::write(
+            out.join("src/logic/mod.rs"),
+            "mod list_coupons;\npub use list_coupons::list_coupons;\nmod coupon_map;\n",
+        )
+        .expect("write custom logic mod");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update generation");
+
+        let logic_mod = fs::read_to_string(out.join("src/logic/mod.rs")).expect("read logic mod");
+        assert!(logic_mod.contains("mod list_coupons;"));
+        assert!(logic_mod.contains("pub use list_coupons::list_coupons;"));
+        assert!(logic_mod.contains("mod coupon_map;"));
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/coupon_map.rs")).expect("read helper"),
+            "// custom helper\n"
+        );
 
         fs::remove_dir_all(root).expect("remove test output");
     }
