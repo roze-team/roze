@@ -1243,7 +1243,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{sea_query::{{Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, SelectorTrait, Set, TransactionError, TransactionTrait, UpdateResult}};"
+        "use sea_orm::{{sea_query::{{extension::postgres::PgExpr, Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, SelectorTrait, Set, TransactionError, TransactionTrait, UpdateResult}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -2679,7 +2679,7 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
@@ -2750,7 +2750,7 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
@@ -9029,6 +9029,7 @@ mod tests {
         assert!(rendered.contains("pub async fn pluck_name(self) -> anyhow::Result<Vec<String>>"));
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains("extension::postgres::PgExpr"));
         assert!(rendered.contains("select_only().column(Column::Id).into_tuple::<i64>()"));
         assert!(rendered.contains("pub async fn sum_id(self) -> anyhow::Result<i64>"));
         assert!(rendered.contains("pub async fn min_id(self) -> anyhow::Result<Option<i64>>"));
@@ -9064,10 +9065,13 @@ mod tests {
             "UserPredicate::NameContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameIContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
+            "UserPredicate::NameIContains(value) => Condition::all().add(Expr::col(Column::Name).ilike(contains_like_pattern(value))),"
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameContains(value) => Condition::all().add(Column::Nickname.like(contains_like_pattern(value))),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NicknameIContains(value) => Condition::all().add(Expr::col(Column::Nickname).ilike(contains_like_pattern(value))),"
         ));
         assert!(rendered.contains("Column::Id.is_in(values.clone())"));
         assert!(rendered.contains("Column::Id.gte(*value)"));

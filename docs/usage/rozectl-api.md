@@ -1065,6 +1065,8 @@ SQL repositories additionally generate:
   single-table queries and mutations
 - predicate helpers such as `name_contains`, `name_icontains`, `id_in`,
   `status_between`, `nickname_is_null`, `and`, `or`, and `not`
+- `*_icontains` predicates render database-level `ILIKE` on supported SQL
+  backends instead of applying keyword filtering after pagination
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
 - entity relation methods for `.ent` edges, such as
