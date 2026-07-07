@@ -1929,8 +1929,11 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
             if inner_ty == "String" {
                 for suffix in [
                     "Contains",
+                    "NotContains",
                     "IContains",
+                    "NotIContains",
                     "EqualFold",
+                    "NotEqualFold",
                     "StartsWith",
                     "EndsWith",
                 ] {
@@ -1986,8 +1989,11 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
             if field_ty == "String" {
                 for suffix in [
                     "Contains",
+                    "NotContains",
                     "IContains",
+                    "NotIContains",
                     "EqualFold",
+                    "NotEqualFold",
                     "StartsWith",
                     "EndsWith",
                 ] {
@@ -2691,14 +2697,32 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))).not(),",
+                    predicate_variant_name(field, "NotContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))).not(),",
+                    predicate_variant_name(field, "NotIContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))),",
                     predicate_variant_name(field, "EqualFold")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))).not(),",
+                    predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
@@ -2768,14 +2792,32 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))).not(),",
+                    predicate_variant_name(field, "NotContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))).not(),",
+                    predicate_variant_name(field, "NotIContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))),",
                     predicate_variant_name(field, "EqualFold")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))).not(),",
+                    predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
@@ -3497,13 +3539,31 @@ fn render_toasty_query_types(out: &mut String, model: &ModelSpec, pascal: &str) 
                 writeln!(
                     out,
                     "    {}(String),",
+                    predicate_variant_name(field, "NotContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
                     "    {}(String),",
+                    predicate_variant_name(field, "NotIContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
                     predicate_variant_name(field, "EqualFold")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
@@ -3570,13 +3630,31 @@ fn render_toasty_query_types(out: &mut String, model: &ModelSpec, pascal: &str) 
                 writeln!(
                     out,
                     "    {}(String),",
+                    predicate_variant_name(field, "NotContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
                     "    {}(String),",
+                    predicate_variant_name(field, "NotIContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
                     predicate_variant_name(field, "EqualFold")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
@@ -3697,8 +3775,11 @@ fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: 
             if inner_ty == "String" {
                 for (suffix, helper_suffix) in [
                     ("Contains", "contains"),
+                    ("NotContains", "not_contains"),
                     ("IContains", "icontains"),
+                    ("NotIContains", "not_icontains"),
                     ("EqualFold", "equal_fold"),
+                    ("NotEqualFold", "not_equal_fold"),
                     ("StartsWith", "starts_with"),
                     ("EndsWith", "ends_with"),
                 ] {
@@ -3753,8 +3834,11 @@ fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: 
             if field_ty == "String" {
                 for (suffix, helper_suffix) in [
                     ("Contains", "contains"),
+                    ("NotContains", "not_contains"),
                     ("IContains", "icontains"),
+                    ("NotIContains", "not_icontains"),
                     ("EqualFold", "equal_fold"),
+                    ("NotEqualFold", "not_equal_fold"),
                     ("StartsWith", "starts_with"),
                     ("EndsWith", "ends_with"),
                 ] {
@@ -4369,14 +4453,32 @@ fn render_toasty_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &st
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(contains_like_pattern(value)).not(),",
+                    predicate_variant_name(field, "NotContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(contains_like_pattern(value)),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(contains_like_pattern(value)).not(),",
+                    predicate_variant_name(field, "NotIContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(escape_like_pattern(value)),",
                     predicate_variant_name(field, "EqualFold")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(escape_like_pattern(value)).not(),",
+                    predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
@@ -4446,14 +4548,32 @@ fn render_toasty_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &st
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(contains_like_pattern(value)).not(),",
+                    predicate_variant_name(field, "NotContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(contains_like_pattern(value)),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(contains_like_pattern(value)).not(),",
+                    predicate_variant_name(field, "NotIContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
                     "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(escape_like_pattern(value)),",
                     predicate_variant_name(field, "EqualFold")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(escape_like_pattern(value)).not(),",
+                    predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
@@ -9098,19 +9218,28 @@ mod tests {
         assert!(rendered.contains("IdIn(Vec<i64>)"));
         assert!(rendered.contains("IdBetween(i64, i64)"));
         assert!(rendered.contains("NameContains(String)"));
+        assert!(rendered.contains("NameNotContains(String)"));
         assert!(rendered.contains("NameIContains(String)"));
+        assert!(rendered.contains("NameNotIContains(String)"));
         assert!(rendered.contains("NameEqualFold(String)"));
+        assert!(rendered.contains("NameNotEqualFold(String)"));
         assert!(rendered.contains("NicknameIsNull"));
         assert!(rendered.contains("NicknameIsNotNull"));
         assert!(
             rendered.contains("pub fn name_contains(value: impl Into<String>) -> UserPredicate")
         );
+        assert!(rendered
+            .contains("pub fn name_not_contains(value: impl Into<String>) -> UserPredicate"));
         assert!(
             rendered.contains("pub fn name_icontains(value: impl Into<String>) -> UserPredicate")
         );
+        assert!(rendered
+            .contains("pub fn name_not_icontains(value: impl Into<String>) -> UserPredicate"));
         assert!(
             rendered.contains("pub fn name_equal_fold(value: impl Into<String>) -> UserPredicate")
         );
+        assert!(rendered
+            .contains("pub fn name_not_equal_fold(value: impl Into<String>) -> UserPredicate"));
         assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
         assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
@@ -9119,10 +9248,19 @@ mod tests {
             "UserPredicate::NameContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
         ));
         assert!(rendered.contains(
+            "UserPredicate::NameNotContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))).not(),"
+        ));
+        assert!(rendered.contains(
             "UserPredicate::NameIContains(value) => Condition::all().add(Expr::col(Column::Name).ilike(contains_like_pattern(value))),"
         ));
         assert!(rendered.contains(
+            "UserPredicate::NameNotIContains(value) => Condition::all().add(Expr::col(Column::Name).ilike(contains_like_pattern(value))).not(),"
+        ));
+        assert!(rendered.contains(
             "UserPredicate::NameEqualFold(value) => Condition::all().add(Expr::col(Column::Name).ilike(escape_like_pattern(value))),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NameNotEqualFold(value) => Condition::all().add(Expr::col(Column::Name).ilike(escape_like_pattern(value))).not(),"
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameContains(value) => Condition::all().add(Column::Nickname.like(contains_like_pattern(value))),"
@@ -9266,19 +9404,28 @@ mod tests {
         assert!(rendered.contains("IdIn(Vec<u64>)"));
         assert!(rendered.contains("IdBetween(u64, u64)"));
         assert!(rendered.contains("NameContains(String)"));
+        assert!(rendered.contains("NameNotContains(String)"));
         assert!(rendered.contains("NameIContains(String)"));
+        assert!(rendered.contains("NameNotIContains(String)"));
         assert!(rendered.contains("NameEqualFold(String)"));
+        assert!(rendered.contains("NameNotEqualFold(String)"));
         assert!(rendered.contains("NicknameIsNull"));
         assert!(rendered.contains("NicknameIsNotNull"));
         assert!(
             rendered.contains("pub fn name_contains(value: impl Into<String>) -> UserPredicate")
         );
+        assert!(rendered
+            .contains("pub fn name_not_contains(value: impl Into<String>) -> UserPredicate"));
         assert!(
             rendered.contains("pub fn name_icontains(value: impl Into<String>) -> UserPredicate")
         );
+        assert!(rendered
+            .contains("pub fn name_not_icontains(value: impl Into<String>) -> UserPredicate"));
         assert!(
             rendered.contains("pub fn name_equal_fold(value: impl Into<String>) -> UserPredicate")
         );
+        assert!(rendered
+            .contains("pub fn name_not_equal_fold(value: impl Into<String>) -> UserPredicate"));
         assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
         assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
@@ -9288,10 +9435,19 @@ mod tests {
             "UserPredicate::NameContains(value) => User::fields().name().like(contains_like_pattern(value)),"
         ));
         assert!(rendered.contains(
+            "UserPredicate::NameNotContains(value) => User::fields().name().like(contains_like_pattern(value)).not(),"
+        ));
+        assert!(rendered.contains(
             "UserPredicate::NameIContains(value) => User::fields().name().ilike(contains_like_pattern(value)),"
         ));
         assert!(rendered.contains(
+            "UserPredicate::NameNotIContains(value) => User::fields().name().ilike(contains_like_pattern(value)).not(),"
+        ));
+        assert!(rendered.contains(
             "UserPredicate::NameEqualFold(value) => User::fields().name().ilike(escape_like_pattern(value)),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NameNotEqualFold(value) => User::fields().name().ilike(escape_like_pattern(value)).not(),"
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameContains(value) => User::fields().nickname().like(contains_like_pattern(value)),"
