@@ -37,6 +37,7 @@ enum RozeSource {
 enum ModelFormat {
     #[default]
     Auto,
+    Ent,
     Dsl,
     Sql,
     Mongo,
@@ -105,6 +106,7 @@ impl From<ModelFormat> for generator::model::ModelFormat {
     fn from(value: ModelFormat) -> Self {
         match value {
             ModelFormat::Auto => Self::Auto,
+            ModelFormat::Ent => Self::Ent,
             ModelFormat::Dsl => Self::Dsl,
             ModelFormat::Sql => Self::Sql,
             ModelFormat::Mongo => Self::Mongo,
