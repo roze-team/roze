@@ -2719,6 +2719,14 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    writeln!(out, "    pub fn order_all<I>(mut self, orders: I) -> Self").unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Order>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(out, "        self.orders.extend(orders);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
     writeln!(out, "    pub fn limit(mut self, limit: u64) -> Self {{").unwrap();
     writeln!(out, "        self.limit = Some(limit);").unwrap();
     writeln!(out, "        self").unwrap();
@@ -4683,6 +4691,14 @@ fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal:
     )
     .unwrap();
     writeln!(out, "        self.orders.push(order);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn order_all<I>(mut self, orders: I) -> Self").unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Order>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(out, "        self.orders.extend(orders);").unwrap();
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
@@ -9614,6 +9630,8 @@ mod tests {
         assert!(rendered.contains("pub fn where_any<I>(mut self, predicates: I) -> Self"));
         assert!(rendered.contains("self.predicates.push(UserPredicate::Or(predicates));"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
+        assert!(rendered.contains("pub fn order_all<I>(mut self, orders: I) -> Self"));
+        assert!(rendered.contains("self.orders.extend(orders);"));
         assert!(rendered.contains("pub async fn all(self) -> anyhow::Result<Vec<Model>>"));
         assert!(rendered.contains("pub async fn ids(self) -> anyhow::Result<Vec<i64>>"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> anyhow::Result<Vec<String>>"));
@@ -9827,6 +9845,8 @@ mod tests {
         assert!(rendered.contains("pub fn where_any<I>(mut self, predicates: I) -> Self"));
         assert!(rendered.contains("self.predicates.push(UserPredicate::Or(predicates));"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
+        assert!(rendered.contains("pub fn order_all<I>(mut self, orders: I) -> Self"));
+        assert!(rendered.contains("self.orders.extend(orders);"));
         assert!(rendered.contains("pub async fn all(self) -> toasty::Result<Vec<User>>"));
         assert!(rendered.contains("pub async fn ids(self) -> toasty::Result<Vec<u64>>"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> toasty::Result<Vec<String>>"));
