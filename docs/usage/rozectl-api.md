@@ -1018,8 +1018,8 @@ SQL repositories additionally generate:
   `--update`
 - `schema.ent`, the generated or user-authored entity schema used as the model
   codegen source
-- `{Model}Predicate`, `{Model}Order`, `{Model}Query`, and `{Model}Page` types
-  for ent-style single-table queries
+- `{Model}Predicate`, `{Model}Order`, `{Model}Query`, `{Model}Create`, and
+  `{Model}Page` types for ent-style single-table queries and inserts
 - predicate helpers such as `name_contains`, `name_icontains`, `id_in`,
   `status_between`, `nickname_is_null`, `and`, `or`, and `not`
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
@@ -1060,6 +1060,14 @@ let page = ctx
     .paginate(page, page_size)
     .page()
     .await?;
+
+let created = ctx
+    .model()
+    .user()
+    .create()
+    .set_name("alice".to_string())
+    .save()
+    .await?;
 ```
 
 Toasty service code can use the same model client to access the generated
@@ -1070,6 +1078,11 @@ let mut db = ctx.model().toasty_db()?;
 let items = UserRepository::query(&mut db)
     .where_(user::name_contains(keyword))
     .all()
+    .await?;
+
+let created = UserRepository::create(&mut db)
+    .set_name("alice".to_string())
+    .save()
     .await?;
 ```
 

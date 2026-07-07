@@ -934,10 +934,10 @@ fn render_model_mod(models: &[ModelSpec], orm: ModelOrm, include_client: bool) -
         ));
         match orm {
             ModelOrm::SeaOrm => out.push_str(&format!(
-                "pub use {module}::{{{pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
+                "pub use {module}::{{{pascal}Create, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
             )),
             ModelOrm::Toasty => out.push_str(&format!(
-                "pub use {module}::{{{pascal}, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository}};\n"
+                "pub use {module}::{{{pascal}, {pascal}Create, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository}};\n"
             )),
         }
     }
@@ -1193,7 +1193,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{sea_query::{{Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, TransactionError, TransactionTrait, UpdateResult}};"
+        "use sea_orm::{{sea_query::{{Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, Set, TransactionError, TransactionTrait, UpdateResult}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -1254,6 +1254,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "impl ActiveModelBehavior for ActiveModel {{}}").unwrap();
     writeln!(&mut out).unwrap();
     render_sea_orm_query_types(&mut out, model, &pascal);
+    render_sea_orm_create_builder(&mut out, model, &pascal);
     render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
@@ -1290,6 +1291,14 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_sea_orm_scope_methods(&mut out, model);
+    writeln!(
+        &mut out,
+        "    pub fn create(&self) -> {pascal}Create<'_, 'a> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        {pascal}Create::new(self)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
     render_sea_orm_query_methods(&mut out, model, &pascal, primary, &primary_ty);
     render_sea_orm_index_methods(&mut out, model);
     writeln!(
@@ -1916,6 +1925,115 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
     writeln!(out).unwrap();
 
     render_sea_orm_query_builder_impl(out, model, pascal);
+}
+
+fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "pub struct {pascal}Create<'repo, 'ctx> {{").unwrap();
+    writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        let field_ident = model_field_ident(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
+        } else {
+            writeln!(out, "    {field_ident}: Option<{}>,", field.ty).unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl<'repo, 'ctx> {pascal}Create<'repo, 'ctx> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(repo: &'repo {pascal}Repository<'ctx>) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    writeln!(out, "            repo,").unwrap();
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        let field_ident = model_field_ident(field);
+        let setter = create_setter_name(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: Option<{inner_ty}>) -> Self {{"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: {}) -> Self {{",
+                field.ty
+            )
+            .unwrap();
+        }
+        writeln!(out, "        self.{field_ident} = Some(value);").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    writeln!(
+        out,
+        "    pub async fn save(self) -> anyhow::Result<Model> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.repo.write_db()?;").unwrap();
+    writeln!(out, "        let active = ActiveModel {{").unwrap();
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        let field_ident = model_field_ident(field);
+        if optional_inner_type(&field.ty).is_some() {
+            if field.default_value.is_some() {
+                writeln!(
+                    out,
+                    "            {field_ident}: self.{field_ident}.map(Set).unwrap_or_default(),"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "            {field_ident}: Set(self.{field_ident}.unwrap_or(None)),"
+                )
+                .unwrap();
+            }
+        } else if field.default_value.is_some() {
+            writeln!(
+                out,
+                "            {field_ident}: self.{field_ident}.map(Set).unwrap_or_default(),"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "            {field_ident}: Set(self.{field_ident}.ok_or_else(|| anyhow::anyhow!(\"missing required field `{field_ident}` for {pascal} create\"))?),"
+            )
+            .unwrap();
+        }
+    }
+    if model.fields.iter().any(|field| field.auto_increment) {
+        writeln!(out, "            ..std::default::Default::default()").unwrap();
+    }
+    writeln!(out, "        }};").unwrap();
+    writeln!(out, "        let inserted = active.insert(db).await?;").unwrap();
+    if model.cache {
+        writeln!(
+            out,
+            "        self.repo.invalidate_model_cache(&inserted).await?;"
+        )
+        .unwrap();
+    }
+    writeln!(out, "        Ok(inserted)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
 }
 
 fn render_sea_orm_query_methods(
@@ -2649,6 +2767,10 @@ fn predicate_helper_name(field: &ModelField, suffix: &str) -> String {
     rust_identifier(&format!("{}_{}", field.name, suffix))
 }
 
+fn create_setter_name(field: &ModelField) -> String {
+    rust_identifier(&format!("set_{}", field.name))
+}
+
 fn toasty_value_from_ref(field: &ModelField, value: &str) -> String {
     if is_copy_filter_type(&field.ty) {
         format!("*{value}")
@@ -2975,6 +3097,103 @@ fn render_toasty_model_query_method(out: &mut String, pascal: &str) {
     )
     .unwrap();
     writeln!(out, "        {pascal}Query::new(db)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "pub struct {pascal}Create<'a> {{").unwrap();
+    writeln!(out, "    db: &'a mut dyn toasty::Executor,").unwrap();
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        let field_ident = model_field_ident(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
+        } else {
+            writeln!(out, "    {field_ident}: Option<{}>,", field.ty).unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl<'a> {pascal}Create<'a> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(db: &'a mut dyn toasty::Executor) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    writeln!(out, "            db,").unwrap();
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        let field_ident = model_field_ident(field);
+        let setter = create_setter_name(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: Option<{inner_ty}>) -> Self {{"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: {}) -> Self {{",
+                field.ty
+            )
+            .unwrap();
+        }
+        writeln!(out, "        self.{field_ident} = Some(value);").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    writeln!(
+        out,
+        "    pub async fn save(self) -> toasty::Result<{pascal}> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let mut create = {pascal}::create();").unwrap();
+    for field in model.fields.iter().filter(|field| !field.auto_increment) {
+        let field_ident = model_field_ident(field);
+        if optional_inner_type(&field.ty).is_some() {
+            if field.default_value.is_some() {
+                writeln!(
+                    out,
+                    "        if let Some(value) = self.{field_ident} {{ create = create.{field_ident}(value); }}"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "        create = create.{field_ident}(self.{field_ident}.unwrap_or(None));"
+                )
+                .unwrap();
+            }
+        } else if field.default_value.is_some() {
+            writeln!(
+                out,
+                "        if let Some(value) = self.{field_ident} {{ create = create.{field_ident}(value); }}"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "        let {field_ident} = self.{field_ident}.ok_or_else(|| toasty::Error::invalid_record_count(\"missing required field `{field_ident}` for {pascal} create\"))?;"
+            )
+            .unwrap();
+            writeln!(out, "        create = create.{field_ident}({field_ident});").unwrap();
+        }
+    }
+    writeln!(out, "        create.exec(self.db).await").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -3479,6 +3698,7 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
     render_toasty_query_types(&mut out, model, &pascal);
+    render_toasty_create_builder(&mut out, model, &pascal);
     render_like_pattern_helpers(&mut out, model);
     render_toasty_model_query_method(&mut out, &pascal);
     writeln!(&mut out, "pub struct {}Repository;", pascal).unwrap();
@@ -3486,6 +3706,14 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "impl {}Repository {{", pascal).unwrap();
     writeln!(&mut out, "    pub fn table_name() -> &'static str {{").unwrap();
     writeln!(&mut out, "        \"{}\"", table_name).unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn create(db: &mut dyn toasty::Executor) -> {pascal}Create<'_> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        {pascal}Create::new(db)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_toasty_transaction_method(&mut out);
@@ -6105,7 +6333,7 @@ fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
                 attrs.nullable = true;
                 i += 1;
             }
-            "auto_increment" | "identity" => {
+            "auto_increment" | "autoincrement" | "identity" => {
                 attrs.auto_increment = true;
                 i += 1;
             }
@@ -6518,6 +6746,7 @@ fn is_sql_attr_keyword(token: &str) -> bool {
             | "default"
             | "comment"
             | "auto_increment"
+            | "autoincrement"
             | "primary"
             | "key"
             | "unique"
@@ -6977,6 +7206,15 @@ mod tests {
         assert!(rendered.contains("pub struct UserQuery"));
         assert!(rendered.contains("pub enum UserOrder"));
         assert!(rendered.contains("pub enum UserPredicate"));
+        assert!(rendered.contains("pub struct UserCreate"));
+        assert!(rendered.contains("pub fn create(&self) -> UserCreate<'_, 'a>"));
+        assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
+        assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
+        assert!(rendered.contains("let active = ActiveModel {"));
+        assert!(rendered.contains(
+            "name: Set(self.name.ok_or_else(|| anyhow::anyhow!(\"missing required field `name` for User create\"))?),"
+        ));
+        assert!(rendered.contains("nickname: Set(self.nickname.unwrap_or(None)),"));
         assert!(rendered.contains("pub fn query(&self) -> UserQuery<'_, 'a>"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
@@ -7077,6 +7315,14 @@ mod tests {
         assert!(rendered.contains("pub struct UserQuery"));
         assert!(rendered.contains("pub enum UserOrder"));
         assert!(rendered.contains("pub enum UserPredicate"));
+        assert!(rendered.contains("pub struct UserCreate"));
+        assert!(rendered.contains("pub fn create(db: &mut dyn toasty::Executor) -> UserCreate<'_>"));
+        assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
+        assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
+        assert!(rendered.contains(
+            "let name = self.name.ok_or_else(|| toasty::Error::invalid_record_count(\"missing required field `name` for User create\"))?;"
+        ));
+        assert!(rendered.contains("create = create.nickname(self.nickname.unwrap_or(None));"));
         assert!(rendered.contains("pub fn query(db: &mut dyn toasty::Executor) -> UserQuery<'_>"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
@@ -7205,6 +7451,7 @@ mod tests {
         assert!(rendered.contains("pub r#type: String"));
         assert!(rendered.contains("TypeEq(String)"));
         assert!(rendered.contains("pub fn type_eq(value: String) -> AftersalesOrderPredicate"));
+        assert!(rendered.contains("pub fn set_type(mut self, value: String) -> Self"));
         assert!(rendered.contains("AftersalesOrder::fields().r#type().eq(value.clone())"));
         assert!(rendered.contains(".r#type(model.r#type)"));
         assert!(rendered.contains("let r#type = model.r#type.clone();"));
@@ -7344,7 +7591,7 @@ impl ServiceContext {
         assert!(mod_rs.contains("pub mod client;"));
         assert!(mod_rs.contains("pub use client::ModelClient;"));
         assert!(mod_rs.contains(
-            "pub use user::{User, UserOrder, UserPage, UserPredicate, UserQuery, UserRepository};"
+            "pub use user::{User, UserCreate, UserOrder, UserPage, UserPredicate, UserQuery, UserRepository};"
         ));
         assert!(mod_rs.contains("pub mod user_fields;"));
         assert!(mod_rs.contains("pub use user_fields::{UserField, USER_TABLE};"));
