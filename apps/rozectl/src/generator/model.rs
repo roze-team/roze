@@ -1193,7 +1193,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{sea_query::{{Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, Set, TransactionError, TransactionTrait, UpdateResult}};"
+        "use sea_orm::{{sea_query::{{Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, SelectorTrait, Set, TransactionError, TransactionTrait, UpdateResult}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -2509,7 +2509,7 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
 
     render_sea_orm_predicate_expr(out, model, pascal);
     render_sea_orm_build_select_methods(out, model, pascal);
-    render_sea_orm_query_execute_methods(out, pascal);
+    render_sea_orm_query_execute_methods(out, model, pascal);
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
@@ -2742,7 +2742,7 @@ fn render_sea_orm_build_select_methods(out: &mut String, model: &ModelSpec, pasc
     writeln!(out).unwrap();
 }
 
-fn render_sea_orm_query_execute_methods(out: &mut String, pascal: &str) {
+fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
     use std::fmt::Write as _;
 
     writeln!(
@@ -2777,6 +2777,48 @@ fn render_sea_orm_query_execute_methods(out: &mut String, pascal: &str) {
     writeln!(out, "        Ok(self.build_select().all(db).await?)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+
+    let primary_field = model
+        .fields
+        .iter()
+        .find(|field| field.name == model.primary)
+        .expect("primary field present");
+    let primary_column = to_pascal_case(&primary_field.name);
+    writeln!(
+        out,
+        "    pub async fn ids(self) -> anyhow::Result<Vec<{}>> {{",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        Ok(self.build_select().select_only().column(Column::{primary_column}).into_tuple::<{}>().all(db).await?)",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    for field in &model.fields {
+        let method = rust_identifier(&format!("pluck_{}", field.name));
+        let column = to_pascal_case(&field.name);
+        writeln!(
+            out,
+            "    pub async fn {method}(self) -> anyhow::Result<Vec<{}>> {{",
+            field.ty
+        )
+        .unwrap();
+        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        Ok(self.build_select().select_only().column(Column::{column}).into_tuple::<{}>().all(db).await?)",
+            field.ty
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
 
     writeln!(
         out,
@@ -3915,7 +3957,7 @@ fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal:
     writeln!(out).unwrap();
     render_toasty_predicate_expr(out, model, pascal);
     render_toasty_build_query_methods(out, model, pascal);
-    render_toasty_query_execute_methods(out, pascal);
+    render_toasty_query_execute_methods(out, model, pascal);
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
@@ -4164,7 +4206,7 @@ fn render_toasty_build_query_methods(out: &mut String, model: &ModelSpec, pascal
     writeln!(out).unwrap();
 }
 
-fn render_toasty_query_execute_methods(out: &mut String, pascal: &str) {
+fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
     use std::fmt::Write as _;
 
     writeln!(
@@ -4197,6 +4239,44 @@ fn render_toasty_query_execute_methods(out: &mut String, pascal: &str) {
     writeln!(out, "        query.exec(self.db).await").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    let primary_field = model
+        .fields
+        .iter()
+        .find(|field| field.name == model.primary)
+        .expect("primary field present");
+    let primary_ident = model_field_ident(primary_field);
+    writeln!(
+        out,
+        "    pub async fn ids(self) -> toasty::Result<Vec<{}>> {{",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "        let query = self.build_query();").unwrap();
+    writeln!(
+        out,
+        "        query.select({pascal}::fields().{primary_ident}()).exec(self.db).await"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    for field in &model.fields {
+        let method = rust_identifier(&format!("pluck_{}", field.name));
+        let field_ident = model_field_ident(field);
+        writeln!(
+            out,
+            "    pub async fn {method}(self) -> toasty::Result<Vec<{}>> {{",
+            field.ty
+        )
+        .unwrap();
+        writeln!(out, "        let query = self.build_query();").unwrap();
+        writeln!(
+            out,
+            "        query.select({pascal}::fields().{field_ident}()).exec(self.db).await"
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
     writeln!(
         out,
         "    pub async fn first(self) -> toasty::Result<Option<{pascal}>> {{"
@@ -7921,6 +8001,11 @@ mod tests {
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
         assert!(rendered.contains("pub async fn all(self) -> anyhow::Result<Vec<Model>>"));
+        assert!(rendered.contains("pub async fn ids(self) -> anyhow::Result<Vec<i64>>"));
+        assert!(rendered.contains("pub async fn pluck_name(self) -> anyhow::Result<Vec<String>>"));
+        assert!(rendered
+            .contains("pub async fn pluck_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains("select_only().column(Column::Id).into_tuple::<i64>()"));
         assert!(rendered.contains("pub async fn first(self) -> anyhow::Result<Option<Model>>"));
         assert!(rendered.contains("pub async fn only(mut self) -> anyhow::Result<Model>"));
         assert!(rendered.contains("pub async fn page(self) -> anyhow::Result<UserPage>"));
@@ -8056,6 +8141,11 @@ mod tests {
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
         assert!(rendered.contains("pub async fn all(self) -> toasty::Result<Vec<User>>"));
+        assert!(rendered.contains("pub async fn ids(self) -> toasty::Result<Vec<u64>>"));
+        assert!(rendered.contains("pub async fn pluck_name(self) -> toasty::Result<Vec<String>>"));
+        assert!(rendered
+            .contains("pub async fn pluck_nickname(self) -> toasty::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains("query.select(User::fields().id()).exec(self.db).await"));
         assert!(rendered.contains("pub async fn first(self) -> toasty::Result<Option<User>>"));
         assert!(rendered.contains("pub async fn only(self) -> toasty::Result<User>"));
         assert!(rendered.contains("pub async fn page(self) -> toasty::Result<UserPage>"));

@@ -1062,6 +1062,9 @@ let page = ctx
     .page()
     .await?;
 
+let ids = ctx.model().user().query().ids().await?;
+let names = ctx.model().user().query().pluck_name().await?;
+
 let created = ctx
     .model()
     .user()
@@ -1107,6 +1110,9 @@ let items = UserRepository::query(&mut db)
     .where_(user::name_contains(keyword))
     .all()
     .await?;
+
+let ids = UserRepository::query(&mut db).ids().await?;
+let names = UserRepository::query(&mut db).pluck_name().await?;
 
 let created = UserRepository::create(&mut db)
     .set_name("alice".to_string())
