@@ -2086,6 +2086,7 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_sea_orm_edge_builder_setters(out, model, true);
 
     writeln!(
         out,
@@ -2140,6 +2141,37 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+}
+
+fn render_sea_orm_edge_builder_setters(out: &mut String, model: &ModelSpec, is_create: bool) {
+    use std::fmt::Write as _;
+
+    for edge in &model.edges {
+        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        if field.auto_increment || (!is_create && field.name == model.primary) {
+            continue;
+        }
+        let setter = create_setter_name_by_name(&edge.name);
+        let target_pascal = to_pascal_case(&edge.target);
+        let ref_ident = model_field_ident_by_name(&edge.ref_field);
+        let value = edge_builder_value_expr(field, &format!("target.{ref_ident}"));
+        writeln!(
+            out,
+            "    pub fn {setter}(mut self, target: &crate::model::{target_pascal}Model) -> Self {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        self.{} = Some({value});",
+            model_field_ident(field)
+        )
+        .unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
 }
 
 fn render_sea_orm_update_builder(
@@ -2204,6 +2236,7 @@ fn render_sea_orm_update_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_sea_orm_edge_builder_setters(out, model, false);
 
     writeln!(
         out,
@@ -2345,7 +2378,6 @@ fn render_sea_orm_update_many_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
-
     writeln!(
         out,
         "    pub async fn save(self) -> anyhow::Result<Vec<Model>> {{"
@@ -2942,7 +2974,6 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
-
     writeln!(
         out,
         "    pub async fn first(self) -> anyhow::Result<Option<Model>> {{"
@@ -3309,7 +3340,26 @@ fn render_edge_value_binding(out: &mut String, field: &ModelField) {
 }
 
 fn create_setter_name(field: &ModelField) -> String {
-    rust_identifier(&format!("set_{}", field.name))
+    create_setter_name_by_name(&field.name)
+}
+
+fn create_setter_name_by_name(name: &str) -> String {
+    rust_identifier(&format!("set_{name}"))
+}
+
+fn edge_builder_value_expr(field: &ModelField, value: &str) -> String {
+    if let Some(inner_ty) = optional_inner_type(&field.ty) {
+        let inner = if is_copy_filter_type(inner_ty) {
+            value.to_string()
+        } else {
+            format!("{value}.clone()")
+        };
+        format!("Some({inner})")
+    } else if is_copy_filter_type(&field.ty) {
+        value.to_string()
+    } else {
+        format!("{value}.clone()")
+    }
 }
 
 fn toasty_value_from_ref(field: &ModelField, value: &str) -> String {
@@ -3748,6 +3798,7 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_toasty_edge_builder_setters(out, model, true);
 
     writeln!(
         out,
@@ -3790,6 +3841,37 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+}
+
+fn render_toasty_edge_builder_setters(out: &mut String, model: &ModelSpec, is_create: bool) {
+    use std::fmt::Write as _;
+
+    for edge in &model.edges {
+        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        if field.auto_increment || (!is_create && field.name == model.primary) {
+            continue;
+        }
+        let setter = create_setter_name_by_name(&edge.name);
+        let target_pascal = to_pascal_case(&edge.target);
+        let ref_ident = model_field_ident_by_name(&edge.ref_field);
+        let value = edge_builder_value_expr(field, &format!("target.{ref_ident}"));
+        writeln!(
+            out,
+            "    pub fn {setter}(mut self, target: &crate::model::{target_pascal}) -> Self {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        self.{} = Some({value});",
+            model_field_ident(field)
+        )
+        .unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
 }
 
 fn render_toasty_update_builder(
@@ -3854,6 +3936,7 @@ fn render_toasty_update_builder(
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
+    render_toasty_edge_builder_setters(out, model, false);
 
     writeln!(
         out,
@@ -6265,6 +6348,11 @@ fn validate_model_generated_names(model: &ModelSpec) -> anyhow::Result<()> {
     }
 
     let mut generated_edges = HashMap::<String, String>::new();
+    let field_setters = model
+        .fields
+        .iter()
+        .map(create_setter_name)
+        .collect::<HashSet<_>>();
     for edge in &model.edges {
         let generated = rust_identifier(&to_snake_case(&edge.name));
         if !is_valid_model_rust_ident(&generated) {
@@ -6281,6 +6369,14 @@ fn validate_model_generated_names(model: &ModelSpec) -> anyhow::Result<()> {
                 edge.name
             );
         }
+        let setter = create_setter_name_by_name(&edge.name);
+        if field_setters.contains(&setter) {
+            bail!(
+                "model `{}` edge `{}` generates field setter conflict `{setter}`",
+                model.name,
+                edge.name
+            );
+        }
     }
 
     Ok(())
@@ -6292,6 +6388,11 @@ fn validate_edges(
 ) -> anyhow::Result<()> {
     for edge in &model.edges {
         validate_model_field(&model.name, "edge", &edge.field, &model.fields)?;
+        let field = model
+            .fields
+            .iter()
+            .find(|field| field.name == edge.field)
+            .expect("edge field validated");
         let target_name = to_pascal_case(&edge.target);
         let target = model_indexes.get(&target_name).ok_or_else(|| {
             anyhow::anyhow!(
@@ -6302,8 +6403,32 @@ fn validate_edges(
             )
         })?;
         validate_model_field(&target.name, "edge ref", &edge.ref_field, &target.fields)?;
+        let ref_field = target
+            .fields
+            .iter()
+            .find(|field| field.name == edge.ref_field)
+            .expect("edge ref field validated");
+        let local_ty = edge_storage_type(field);
+        if local_ty != ref_field.ty {
+            bail!(
+                "model `{}` edge `{}` field `{}` type `{}` does not match target `{}` ref `{}` type `{}`",
+                model.name,
+                edge.name,
+                edge.field,
+                local_ty,
+                target.name,
+                edge.ref_field,
+                ref_field.ty
+            );
+        }
     }
     Ok(())
+}
+
+fn edge_storage_type(field: &ModelField) -> String {
+    optional_inner_type(&field.ty)
+        .unwrap_or(field.ty.as_str())
+        .to_string()
 }
 
 fn model_field_source_label(field: &ModelField) -> String {
@@ -7184,7 +7309,48 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         field.comment = Some(comment);
     }
 
+    normalize_sql_edge_field_types(&mut models);
     validate_model_specs(models)
+}
+
+fn normalize_sql_edge_field_types(models: &mut [ModelSpec]) {
+    let model_types = models
+        .iter()
+        .map(|model| {
+            (
+                to_pascal_case(&model.name),
+                model
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    for model in models {
+        let edges = model.edges.clone();
+        for edge in edges {
+            let Some(target_fields) = model_types.get(&to_pascal_case(&edge.target)) else {
+                continue;
+            };
+            let Some(ref_ty) = target_fields.get(&edge.ref_field) else {
+                continue;
+            };
+            let Some(field) = model
+                .fields
+                .iter_mut()
+                .find(|field| field.name == edge.field)
+            else {
+                continue;
+            };
+            field.ty = if optional_inner_type(&field.ty).is_some() {
+                format!("Option<{ref_ty}>")
+            } else {
+                ref_ty.clone()
+            };
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8520,6 +8686,9 @@ mod tests {
         assert!(sea_orm_order.contains("pub async fn query_user"));
         assert!(sea_orm_order.contains("pub async fn query_profile"));
         assert!(sea_orm_order
+            .contains("pub fn set_user(mut self, target: &crate::model::UserModel) -> Self"));
+        assert!(sea_orm_order.contains("self.user_id = Some(target.id);"));
+        assert!(sea_orm_order
             .contains("repo.query().where_(crate::model::user::id_eq(value)).first().await"));
         assert!(sea_orm_order
             .contains("let Some(value) = self.profile_id.as_ref() else { return Ok(None); };"));
@@ -8527,6 +8696,10 @@ mod tests {
         let toasty_order = render_toasty_model_module(order);
         assert!(toasty_order.contains("pub async fn query_user"));
         assert!(toasty_order.contains("pub async fn query_profile"));
+        assert!(
+            toasty_order.contains("pub fn set_user(mut self, target: &crate::model::User) -> Self")
+        );
+        assert!(toasty_order.contains("self.user_id = Some(target.id);"));
         assert!(toasty_order.contains("crate::model::UserRepository::query(db).where_(crate::model::user::id_eq(value)).first().await"));
         assert!(toasty_order
             .contains("let Some(value) = self.profile_id.as_ref() else { return Ok(None); };"));
