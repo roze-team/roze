@@ -1883,10 +1883,26 @@ fn sea_orm_option_value_from_ref(field: &ModelField, value: &str) -> String {
     let Some(inner_ty) = optional_inner_type(&field.ty) else {
         return sea_orm_value_from_ref(field, value);
     };
+    option_inner_value_from_ref(inner_ty, value)
+}
+
+fn option_inner_value_from_ref(inner_ty: &str, value: &str) -> String {
     if is_copy_filter_type(inner_ty) {
         format!("*{value}")
     } else {
         format!("{value}.clone()")
+    }
+}
+
+fn option_some_value_from_ref(inner_ty: &str, value: &str) -> String {
+    format!("Some({})", option_inner_value_from_ref(inner_ty, value))
+}
+
+fn option_some_vec_from_ref(inner_ty: &str, values: &str) -> String {
+    if is_copy_filter_type(inner_ty) {
+        format!("{values}.iter().map(|value| Some(*value)).collect::<Vec<_>>()")
+    } else {
+        format!("{values}.iter().cloned().map(Some).collect::<Vec<_>>()")
     }
 }
 
@@ -1926,6 +1942,34 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
             .unwrap();
             writeln!(out, "    {},", predicate_variant_name(field, "IsNull")).unwrap();
             writeln!(out, "    {},", predicate_variant_name(field, "IsNotNull")).unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{inner_ty}>),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{inner_ty}>),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(inner_ty) {
+                for suffix in ["Gt", "Gte", "Lt", "Lte"] {
+                    writeln!(
+                        out,
+                        "    {}({inner_ty}),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "    {}({inner_ty}, {inner_ty}),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
             if inner_ty == "String" {
                 for suffix in [
                     "Contains",
@@ -2666,8 +2710,9 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
     writeln!(out, "        match predicate {{").unwrap();
     for field in model_query_fields(model) {
         let column = to_pascal_case(&field.name);
-        if optional_inner_type(&field.ty).is_some() {
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
             let eq_value = sea_orm_option_value_from_ref(field, "value");
+            let values = option_some_vec_from_ref(inner_ty, "values");
             writeln!(
                 out,
                 "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.eq(Some({eq_value}))),",
@@ -2692,6 +2737,37 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
                 predicate_variant_name(field, "IsNotNull")
             )
             .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => Condition::all().add(Column::{column}.is_in({values})),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => Condition::all().add(Column::{column}.is_not_in({values})),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(inner_ty) {
+                for (suffix, op) in [("Gt", "gt"), ("Gte", "gte"), ("Lt", "lt"), ("Lte", "lte")] {
+                    let value = option_some_value_from_ref(inner_ty, "value");
+                    writeln!(
+                        out,
+                        "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.{op}({value})),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                let start = option_some_value_from_ref(inner_ty, "start");
+                let end = option_some_value_from_ref(inner_ty, "end");
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(start, end) => Condition::all().add(Column::{column}.between({start}, {end})),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
             if is_string_filter_type(field) {
                 writeln!(
                     out,
@@ -3500,11 +3576,7 @@ fn toasty_option_value_from_ref(field: &ModelField, value: &str) -> String {
     let Some(inner_ty) = optional_inner_type(&field.ty) else {
         return toasty_value_from_ref(field, value);
     };
-    if is_copy_filter_type(inner_ty) {
-        format!("*{value}")
-    } else {
-        format!("{value}.clone()")
-    }
+    option_inner_value_from_ref(inner_ty, value)
 }
 
 fn update_slot_value_from_ref(field: &ModelField, value: &str) -> String {
@@ -3557,6 +3629,34 @@ fn render_toasty_query_types(out: &mut String, model: &ModelSpec, pascal: &str) 
             .unwrap();
             writeln!(out, "    {},", predicate_variant_name(field, "IsNull")).unwrap();
             writeln!(out, "    {},", predicate_variant_name(field, "IsNotNull")).unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{inner_ty}>),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{inner_ty}>),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(inner_ty) {
+                for suffix in ["Gt", "Gte", "Lt", "Lte"] {
+                    writeln!(
+                        out,
+                        "    {}({inner_ty}),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "    {}({inner_ty}, {inner_ty}),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
             if inner_ty == "String" {
                 writeln!(
                     out,
@@ -3824,6 +3924,35 @@ fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: 
                 predicate_variant_name(field, "IsNotNull")
             )
             .unwrap();
+            for (suffix, helper_suffix) in [("In", "in"), ("NotIn", "not_in")] {
+                writeln!(
+                    out,
+                    "pub fn {}(values: Vec<{inner_ty}>) -> {pascal}Predicate {{ {pascal}Predicate::{}(values) }}",
+                    predicate_helper_name(field, helper_suffix),
+                    predicate_variant_name(field, suffix)
+                )
+                .unwrap();
+            }
+            if is_numeric_type(inner_ty) {
+                for (suffix, helper_suffix) in
+                    [("Gt", "gt"), ("Gte", "gte"), ("Lt", "lt"), ("Lte", "lte")]
+                {
+                    writeln!(
+                        out,
+                        "pub fn {}(value: {inner_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(value) }}",
+                        predicate_helper_name(field, helper_suffix),
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "pub fn {}(start: {inner_ty}, end: {inner_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(start, end) }}",
+                    predicate_helper_name(field, "between"),
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
             if inner_ty == "String" {
                 for (suffix, helper_suffix) in [
                     ("Contains", "contains"),
@@ -4474,8 +4603,9 @@ fn render_toasty_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &st
     writeln!(out, "        match predicate {{").unwrap();
     for field in model_query_fields(model) {
         let field_ident = model_field_ident(field);
-        if optional_inner_type(&field.ty).is_some() {
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
             let eq_value = toasty_option_value_from_ref(field, "value");
+            let values = option_some_vec_from_ref(inner_ty, "values");
             writeln!(
                 out,
                 "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().eq(Some({eq_value})),",
@@ -4500,6 +4630,37 @@ fn render_toasty_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &st
                 predicate_variant_name(field, "IsNotNull")
             )
             .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => {pascal}::fields().{field_ident}().in_list({values}),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => {pascal}::fields().{field_ident}().in_list({values}).not(),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(inner_ty) {
+                for (suffix, op) in [("Gt", "gt"), ("Gte", "ge"), ("Lt", "lt"), ("Lte", "le")] {
+                    let value = option_some_value_from_ref(inner_ty, "value");
+                    writeln!(
+                        out,
+                        "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().{op}({value}),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                let start = option_some_value_from_ref(inner_ty, "start");
+                let end = option_some_value_from_ref(inner_ty, "end");
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(start, end) => {pascal}::fields().{field_ident}().ge({start}).and({pascal}::fields().{field_ident}().le({end})),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
             if is_string_filter_type(field) {
                 writeln!(
                     out,
@@ -9305,6 +9466,8 @@ mod tests {
         assert!(rendered.contains("NameNotEqualFold(String)"));
         assert!(rendered.contains("NameNotStartsWith(String)"));
         assert!(rendered.contains("NameNotEndsWith(String)"));
+        assert!(rendered.contains("NicknameIn(Vec<String>)"));
+        assert!(rendered.contains("NicknameNotIn(Vec<String>)"));
         assert!(rendered.contains("NicknameIsNull"));
         assert!(rendered.contains("NicknameIsNotNull"));
         assert!(
@@ -9326,6 +9489,8 @@ mod tests {
             .contains("pub fn name_not_starts_with(value: impl Into<String>) -> UserPredicate"));
         assert!(rendered
             .contains("pub fn name_not_ends_with(value: impl Into<String>) -> UserPredicate"));
+        assert!(rendered.contains("pub fn nickname_in(values: Vec<String>) -> UserPredicate"));
+        assert!(rendered.contains("pub fn nickname_not_in(values: Vec<String>) -> UserPredicate"));
         assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
         assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
@@ -9356,6 +9521,12 @@ mod tests {
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameContains(value) => Condition::all().add(Column::Nickname.like(contains_like_pattern(value))),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NicknameIn(values) => Condition::all().add(Column::Nickname.is_in(values.iter().cloned().map(Some).collect::<Vec<_>>())),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NicknameNotIn(values) => Condition::all().add(Column::Nickname.is_not_in(values.iter().cloned().map(Some).collect::<Vec<_>>())),"
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameIContains(value) => Condition::all().add(Expr::col(Column::Nickname).ilike(contains_like_pattern(value))),"
@@ -9503,6 +9674,8 @@ mod tests {
         assert!(rendered.contains("NameNotEqualFold(String)"));
         assert!(rendered.contains("NameNotStartsWith(String)"));
         assert!(rendered.contains("NameNotEndsWith(String)"));
+        assert!(rendered.contains("NicknameIn(Vec<String>)"));
+        assert!(rendered.contains("NicknameNotIn(Vec<String>)"));
         assert!(rendered.contains("NicknameIsNull"));
         assert!(rendered.contains("NicknameIsNotNull"));
         assert!(
@@ -9524,6 +9697,8 @@ mod tests {
             .contains("pub fn name_not_starts_with(value: impl Into<String>) -> UserPredicate"));
         assert!(rendered
             .contains("pub fn name_not_ends_with(value: impl Into<String>) -> UserPredicate"));
+        assert!(rendered.contains("pub fn nickname_in(values: Vec<String>) -> UserPredicate"));
+        assert!(rendered.contains("pub fn nickname_not_in(values: Vec<String>) -> UserPredicate"));
         assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
         assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
@@ -9555,6 +9730,12 @@ mod tests {
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameContains(value) => User::fields().nickname().like(contains_like_pattern(value)),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NicknameIn(values) => User::fields().nickname().in_list(values.iter().cloned().map(Some).collect::<Vec<_>>()),"
+        ));
+        assert!(rendered.contains(
+            "UserPredicate::NicknameNotIn(values) => User::fields().nickname().in_list(values.iter().cloned().map(Some).collect::<Vec<_>>()).not(),"
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameIContains(value) => User::fields().nickname().ilike(contains_like_pattern(value)),"

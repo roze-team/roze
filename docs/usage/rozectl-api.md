@@ -1074,6 +1074,8 @@ SQL repositories additionally generate:
 - `*_not_contains`, `*_not_icontains`, `*_not_equal_fold`,
   `*_not_starts_with`, and `*_not_ends_with` predicates generate negated
   LIKE/ILIKE filters before count and pagination
+- nullable fields also get non-null value predicates such as `nickname_in`,
+  `nickname_not_in`, and nullable numeric `gt/gte/lt/lte/between`
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
 - entity relation methods for `.ent` edges, such as
