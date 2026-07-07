@@ -419,7 +419,7 @@ fn write_model_project(
         )?;
     }
 
-    update_model_dependencies(out, orm)?;
+    update_model_dependencies(out, orm, models_need_rust_decimal(models))?;
     if orm == ModelOrm::Toasty {
         update_toasty_service_context(out, models)?;
     }
@@ -477,7 +477,11 @@ fn update_main_rs(out: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", main_path.display()))
 }
 
-fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
+fn update_model_dependencies(
+    out: &Path,
+    orm: ModelOrm,
+    needs_rust_decimal: bool,
+) -> anyhow::Result<()> {
     let manifest_path = out.join("Cargo.toml");
     if !manifest_path.is_file() {
         return Ok(());
@@ -510,7 +514,11 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
         } else {
             match orm {
                 ModelOrm::SeaOrm => {
-                    r#"{ version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }"#
+                    if needs_rust_decimal {
+                        r#"{ version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "with-rust_decimal"] }"#
+                    } else {
+                        r#"{ version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite"] }"#
+                    }
                         .parse::<toml_edit::Item>()
                         .expect("valid toml dependency value")
                 }
@@ -523,13 +531,19 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
         };
         dependencies.insert(dependency_name, item);
     }
+    if orm == ModelOrm::SeaOrm && needs_rust_decimal {
+        if let Some(item) = dependencies.get_mut("sea-orm") {
+            ensure_dependency_feature(item, "with-rust_decimal");
+        }
+    }
     if orm == ModelOrm::Toasty {
         if let Some(item) = dependencies.get_mut("toasty") {
             ensure_dependency_feature(item, "rust_decimal");
         }
     }
 
-    if orm == ModelOrm::Toasty && !dependencies.contains_key("rust_decimal") {
+    if (orm == ModelOrm::Toasty || needs_rust_decimal) && !dependencies.contains_key("rust_decimal")
+    {
         let item = if uses_workspace {
             workspace_dependency_item()
         } else {
@@ -550,6 +564,20 @@ fn update_model_dependencies(out: &Path, orm: ModelOrm) -> anyhow::Result<()> {
     }
     fs::write(&manifest_path, document.to_string())
         .with_context(|| format!("failed to write {}", manifest_path.display()))
+}
+
+fn models_need_rust_decimal(models: &[ModelSpec]) -> bool {
+    models.iter().any(|model| {
+        model
+            .fields
+            .iter()
+            .any(|field| type_contains_rust_decimal(&field.ty))
+    })
+}
+
+fn type_contains_rust_decimal(ty: &str) -> bool {
+    ty == "rust_decimal::Decimal"
+        || optional_inner_type(ty).is_some_and(|inner| inner == "rust_decimal::Decimal")
 }
 
 fn ensure_dependency_feature(item: &mut toml_edit::Item, feature: &str) {
@@ -1012,7 +1040,8 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "impl ActiveModelBehavior for ActiveModel {{}}").unwrap();
     writeln!(&mut out).unwrap();
-    render_query_types(&mut out, model, &pascal, "Model");
+    render_query_types(&mut out, model, &pascal, "Model", false);
+    render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
     writeln!(&mut out, "}}").unwrap();
@@ -1484,7 +1513,13 @@ fn render_sea_orm_transaction_method(out: &mut String) {
     writeln!(out).unwrap();
 }
 
-fn render_query_types(out: &mut String, model: &ModelSpec, pascal: &str, item_ty: &str) {
+fn render_query_types(
+    out: &mut String,
+    model: &ModelSpec,
+    pascal: &str,
+    item_ty: &str,
+    include_icontains: bool,
+) {
     use std::fmt::Write as _;
     writeln!(
         out,
@@ -1525,6 +1560,22 @@ fn render_query_types(out: &mut String, model: &ModelSpec, pascal: &str, item_ty
                 query_field_suffix_ident(field, "is_null")
             )
             .unwrap();
+            if inner_ty == "String" {
+                writeln!(
+                    out,
+                    "    pub {}: Option<String>,",
+                    query_field_suffix_ident(field, "contains")
+                )
+                .unwrap();
+                if include_icontains {
+                    writeln!(
+                        out,
+                        "    pub {}: Option<String>,",
+                        query_field_suffix_ident(field, "icontains")
+                    )
+                    .unwrap();
+                }
+            }
         } else {
             writeln!(
                 out,
@@ -1556,6 +1607,22 @@ fn render_query_types(out: &mut String, model: &ModelSpec, pascal: &str, item_ty
                 )
                 .unwrap();
             }
+            if field.ty == "String" {
+                writeln!(
+                    out,
+                    "    pub {}: Option<String>,",
+                    query_field_suffix_ident(field, "contains")
+                )
+                .unwrap();
+                if include_icontains {
+                    writeln!(
+                        out,
+                        "    pub {}: Option<String>,",
+                        query_field_suffix_ident(field, "icontains")
+                    )
+                    .unwrap();
+                }
+            }
         }
     }
     writeln!(out, "}}").unwrap();
@@ -1566,6 +1633,36 @@ fn render_query_types(out: &mut String, model: &ModelSpec, pascal: &str, item_ty
     writeln!(out, "    pub total: u64,").unwrap();
     writeln!(out, "    pub page: u64,").unwrap();
     writeln!(out, "    pub page_size: u64,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_like_pattern_helpers(out: &mut String, model: &ModelSpec) {
+    if !model.fields.iter().any(is_string_filter_type) {
+        return;
+    }
+
+    use std::fmt::Write as _;
+    writeln!(out, "fn escape_like_pattern(value: &str) -> String {{").unwrap();
+    writeln!(
+        out,
+        "    let mut escaped = String::with_capacity(value.len());"
+    )
+    .unwrap();
+    writeln!(out, "    for ch in value.chars() {{").unwrap();
+    writeln!(out, "        match ch {{").unwrap();
+    writeln!(out, "            '\\\\' | '%' | '_' => {{").unwrap();
+    writeln!(out, "                escaped.push('\\\\');").unwrap();
+    writeln!(out, "                escaped.push(ch);").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "            _ => escaped.push(ch),").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    escaped").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn contains_like_pattern(value: &str) -> String {{").unwrap();
+    writeln!(out, "    format!(\"%{{}}%\", escape_like_pattern(value))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
@@ -1635,6 +1732,7 @@ fn render_sea_orm_query_methods(
         let in_ident = query_field_suffix_ident(field, "in");
         let min_ident = query_field_suffix_ident(field, "min");
         let max_ident = query_field_suffix_ident(field, "max");
+        let contains_ident = query_field_suffix_ident(field, "contains");
         if optional_inner_type(&field.ty).is_some() {
             writeln!(
                 out,
@@ -1647,6 +1745,13 @@ fn render_sea_orm_query_methods(
                 "        if req.{is_null_ident} {{ select = select.filter(Column::{column}.is_null()); }}"
             )
             .unwrap();
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ select = select.filter(Column::{column}.like(contains_like_pattern(value))); }}"
+                )
+                .unwrap();
+            }
         } else {
             writeln!(
                 out,
@@ -1668,6 +1773,13 @@ fn render_sea_orm_query_methods(
                 writeln!(
                     out,
                     "        if let Some(value) = req.{max_ident} {{ select = select.filter(Column::{column}.lte(value)); }}"
+                )
+                .unwrap();
+            }
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ select = select.filter(Column::{column}.like(contains_like_pattern(value))); }}"
                 )
                 .unwrap();
             }
@@ -1998,6 +2110,10 @@ fn model_query_fields(model: &ModelSpec) -> Vec<&ModelField> {
         .collect()
 }
 
+fn is_string_filter_type(field: &ModelField) -> bool {
+    field.ty == "String" || optional_inner_type(&field.ty).is_some_and(|inner| inner == "String")
+}
+
 fn tenant_field(model: &ModelSpec) -> Option<&ModelField> {
     model
         .tenant
@@ -2084,7 +2200,8 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
-    render_query_types(&mut out, model, &pascal, &pascal);
+    render_query_types(&mut out, model, &pascal, &pascal, true);
+    render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository;", pascal).unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "impl {}Repository {{", pascal).unwrap();
@@ -2273,6 +2390,8 @@ fn render_toasty_query_methods(
         let in_ident = query_field_suffix_ident(field, "in");
         let min_ident = query_field_suffix_ident(field, "min");
         let max_ident = query_field_suffix_ident(field, "max");
+        let contains_ident = query_field_suffix_ident(field, "contains");
+        let icontains_ident = query_field_suffix_ident(field, "icontains");
         if optional_inner_type(&field.ty).is_some() {
             let value_expr = option_filter_value_expr(field, field_ident.as_str());
             writeln!(
@@ -2285,6 +2404,18 @@ fn render_toasty_query_methods(
                 "        if req.{is_null_ident} {{ query = query.and({pascal}::fields().{field_ident}().is_none()); }}"
             )
             .unwrap();
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().like(contains_like_pattern(value))); }}"
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "        if let Some(value) = req.{icontains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().ilike(contains_like_pattern(value))); }}"
+                )
+                .unwrap();
+            }
         } else {
             let value_expr = option_filter_value_expr(field, field_ident.as_str());
             writeln!(
@@ -2308,6 +2439,18 @@ fn render_toasty_query_methods(
                 writeln!(
                     out,
                     "        if let Some(value) = {max_value_expr} {{ query = query.and({pascal}::fields().{field_ident}().le(value)); }}"
+                )
+                .unwrap();
+            }
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().like(contains_like_pattern(value))); }}"
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "        if let Some(value) = req.{icontains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().ilike(contains_like_pattern(value))); }}"
                 )
                 .unwrap();
             }
@@ -5381,6 +5524,17 @@ mod tests {
         assert!(rendered.contains("pub id_min: Option<i64>"));
         assert!(rendered.contains("pub nickname: Option<String>"));
         assert!(rendered.contains("pub nickname_is_null: bool"));
+        assert!(rendered.contains("pub name_contains: Option<String>"));
+        assert!(rendered.contains("pub nickname_contains: Option<String>"));
+        assert!(!rendered.contains("pub name_icontains: Option<String>"));
+        assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
+        assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
+        assert!(rendered.contains(
+            "if let Some(value) = req.name_contains.as_deref() { select = select.filter(Column::Name.like(contains_like_pattern(value))); }"
+        ));
+        assert!(rendered.contains(
+            "if let Some(value) = req.nickname_contains.as_deref() { select = select.filter(Column::Nickname.like(contains_like_pattern(value))); }"
+        ));
         assert!(rendered.contains("Column::Id.is_in(req.id_in)"));
         assert!(rendered.contains("Column::Id.gte(value)"));
         assert!(rendered.contains("Column::Nickname.eq(Some(value))"));
@@ -5455,6 +5609,25 @@ mod tests {
         assert!(rendered.contains("pub id_min: Option<u64>"));
         assert!(rendered.contains("pub nickname: Option<String>"));
         assert!(rendered.contains("pub nickname_is_null: bool"));
+        assert!(rendered.contains("pub name_contains: Option<String>"));
+        assert!(rendered.contains("pub name_icontains: Option<String>"));
+        assert!(rendered.contains("pub nickname_contains: Option<String>"));
+        assert!(rendered.contains("pub nickname_icontains: Option<String>"));
+        assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
+        assert!(rendered.contains("escaped.push('\\\\');"));
+        assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
+        assert!(rendered.contains(
+            "if let Some(value) = req.name_contains.as_deref() { query = query.and(User::fields().name().like(contains_like_pattern(value))); }"
+        ));
+        assert!(rendered.contains(
+            "if let Some(value) = req.name_icontains.as_deref() { query = query.and(User::fields().name().ilike(contains_like_pattern(value))); }"
+        ));
+        assert!(rendered.contains(
+            "if let Some(value) = req.nickname_contains.as_deref() { query = query.and(User::fields().nickname().like(contains_like_pattern(value))); }"
+        ));
+        assert!(rendered.contains(
+            "if let Some(value) = req.nickname_icontains.as_deref() { query = query.and(User::fields().nickname().ilike(contains_like_pattern(value))); }"
+        ));
         assert!(rendered.contains("if let Some(value) = req.id {"));
         assert!(rendered.contains("if let Some(value) = req.id_min {"));
         assert!(!rendered.contains("req.id.clone()"));
@@ -5878,6 +6051,49 @@ toasty.workspace = true
         assert!(manifest.contains("sea-orm = { workspace = true }"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("sea_orm::"));
+    }
+
+    #[test]
+    fn sea_orm_decimal_generation_updates_manifest_dependency_features() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-sea-orm-decimal-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "coupon-service"
+edition = "2021"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-postgres"] }
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            CREATE TABLE coupons (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                amount NUMERIC(12,2) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Sql,
+            ModelOrm::SeaOrm,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains(r#""with-rust_decimal""#));
+        assert!(manifest.contains(r#"rust_decimal = { version = "1", features = ["serde"] }"#));
+        let module = fs::read_to_string(out.join("src/model/coupon.rs")).expect("module read");
+        assert!(module.contains("pub amount: rust_decimal::Decimal"));
     }
 
     #[test]
