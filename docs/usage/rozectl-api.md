@@ -1065,14 +1065,15 @@ SQL repositories additionally generate:
   single-table queries and mutations
 - predicate helpers such as `name_contains`, `name_not_contains`,
   `name_icontains`, `name_not_icontains`, `name_equal_fold`,
-  `name_not_equal_fold`, `id_in`, `status_between`, `nickname_is_null`, `and`,
-  `or`, and `not`
+  `name_not_equal_fold`, `name_not_starts_with`, `name_not_ends_with`,
+  `id_in`, `status_between`, `nickname_is_null`, `and`, `or`, and `not`
 - `*_icontains` predicates render database-level `ILIKE` on supported SQL
   backends instead of applying keyword filtering after pagination
 - `*_equal_fold` predicates provide ent-style case-insensitive equality with
   the same LIKE pattern escaping and no wildcard expansion
-- `*_not_contains`, `*_not_icontains`, and `*_not_equal_fold` predicates
-  generate negated LIKE/ILIKE filters before count and pagination
+- `*_not_contains`, `*_not_icontains`, `*_not_equal_fold`,
+  `*_not_starts_with`, and `*_not_ends_with` predicates generate negated
+  LIKE/ILIKE filters before count and pagination
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
 - entity relation methods for `.ent` edges, such as
