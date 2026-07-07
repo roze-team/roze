@@ -2265,6 +2265,19 @@ fn render_sea_orm_edge_builder_setters(out: &mut String, model: &ModelSpec, is_c
         writeln!(out, "        self").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
+        if !edge.required && optional_inner_type(&field.ty).is_some() && edge.name != field.name {
+            let clear = rust_identifier(&format!("clear_{}", edge.name));
+            writeln!(out, "    pub fn {clear}(mut self) -> Self {{").unwrap();
+            writeln!(
+                out,
+                "        self.{} = Some(None);",
+                model_field_ident(field)
+            )
+            .unwrap();
+            writeln!(out, "        self").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
     }
 }
 
@@ -4245,6 +4258,19 @@ fn render_toasty_edge_builder_setters(out: &mut String, model: &ModelSpec, is_cr
         writeln!(out, "        self").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
+        if !edge.required && optional_inner_type(&field.ty).is_some() && edge.name != field.name {
+            let clear = rust_identifier(&format!("clear_{}", edge.name));
+            writeln!(out, "    pub fn {clear}(mut self) -> Self {{").unwrap();
+            writeln!(
+                out,
+                "        self.{} = Some(None);",
+                model_field_ident(field)
+            )
+            .unwrap();
+            writeln!(out, "        self").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
     }
 }
 
@@ -9139,6 +9165,52 @@ mod tests {
 
         let rendered = render_model_module(profile);
         assert!(rendered.contains("pub async fn find_by_user_id"));
+        assert!(!rendered.contains("pub fn clear_user(mut self) -> Self"));
+    }
+
+    #[test]
+    fn ent_nullable_edges_generate_clear_edge_builders() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field id: i64 {
+                primary
+            }
+            field user_id: i64? {
+            }
+            edge user {
+                to User
+                field user_id
+                ref id
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        let sea_orm = render_model_module(profile);
+        assert!(
+            sea_orm.contains("pub fn set_user(mut self, target: &crate::model::UserModel) -> Self")
+        );
+        assert!(sea_orm.contains("self.user_id = Some(Some(target.id));"));
+        assert!(sea_orm.contains("pub fn clear_user(mut self) -> Self"));
+        assert!(sea_orm.contains("self.user_id = Some(None);"));
+
+        let toasty = render_toasty_model_module(profile);
+        assert!(toasty.contains("pub fn set_user(mut self, target: &crate::model::User) -> Self"));
+        assert!(toasty.contains("self.user_id = Some(Some(target.id));"));
+        assert!(toasty.contains("pub fn clear_user(mut self) -> Self"));
+        assert!(toasty.contains("self.user_id = Some(None);"));
     }
 
     #[test]

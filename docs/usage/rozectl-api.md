@@ -1085,6 +1085,8 @@ SQL repositories additionally generate:
 - create and update builders also get ent-style edge setters such as
   `.set_user(&user)`, which assigns the configured local foreign-key field from
   the target edge ref field
+- nullable edges also get clear helpers such as `.clear_user()`, which sets the
+  configured local foreign-key field to `NULL`
 - create, update, and update-many builders get `clear_<field>()` helpers for
   nullable fields, for example `.clear_nickname()`
 - service projects with `src/svc/mod.rs` also get `src/model/client.rs`,
