@@ -993,6 +993,32 @@ SeaORM-style modules. Model generation first writes a complete
 `src/model/schema.ent` file, then generates Rust model code from that `.ent`
 schema. SQL, DSL, and database inspection are import paths into `.ent`; `.ent`
 is the model codegen source.
+`.ent` schemas can declare entity relationships with edge blocks:
+
+```text
+entity Order {
+  table "orders"
+
+  field id: i64 {
+    primary
+    auto_increment
+  }
+
+  field user_id: i64 {}
+
+  edge user {
+    to User
+    field user_id
+    ref id
+    required
+  }
+}
+```
+
+SQL `FOREIGN KEY (...) REFERENCES ...` constraints and inline `REFERENCES`
+column attributes are imported as `.ent` edges. Single-column foreign keys are
+supported; composite foreign keys are rejected with a clear error until the
+relation generator grows composite edge semantics.
 SQL `JSON`/`JSONB` columns generate `String` so default Toasty models remain
 compilable; ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
 `BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.

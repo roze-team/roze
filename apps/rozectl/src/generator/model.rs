@@ -66,6 +66,7 @@ pub struct ModelSpec {
     pub cache_keys: Vec<String>,
     pub cache_prefix: Option<String>,
     pub indexes: Vec<ModelIndex>,
+    pub edges: Vec<ModelEdge>,
     pub fields: Vec<ModelField>,
 }
 
@@ -74,6 +75,16 @@ pub struct ModelIndex {
     pub name: String,
     pub fields: Vec<String>,
     pub unique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEdge {
+    pub name: String,
+    pub target: String,
+    pub field: String,
+    pub ref_field: String,
+    pub unique: bool,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +181,21 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             writeln!(out, "    fields {}", index.fields.join(", ")).unwrap();
             if index.unique {
                 writeln!(out, "    unique").unwrap();
+            }
+            writeln!(out, "  }}").unwrap();
+            writeln!(out).unwrap();
+        }
+
+        for edge in &model.edges {
+            writeln!(out, "  edge {} {{", edge.name).unwrap();
+            writeln!(out, "    to {}", to_pascal_case(&edge.target)).unwrap();
+            writeln!(out, "    field {}", edge.field).unwrap();
+            writeln!(out, "    ref {}", edge.ref_field).unwrap();
+            if edge.unique {
+                writeln!(out, "    unique").unwrap();
+            }
+            if edge.required {
+                writeln!(out, "    required").unwrap();
             }
             writeln!(out, "  }}").unwrap();
             writeln!(out).unwrap();
@@ -399,6 +425,7 @@ fn model_from_mongo_documents(
         cache_keys,
         cache_prefix: None,
         indexes,
+        edges: Vec::new(),
         fields,
     }
 }
@@ -5912,6 +5939,7 @@ fn build_inspected_model(
                 unique: true,
             })
             .collect(),
+        edges: Vec::new(),
         soft_delete: infer_soft_delete_field(&fields),
         tenant: infer_tenant_field(&fields),
         fields,
@@ -6041,6 +6069,7 @@ fn validate_tenant_field(
 fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>> {
     let mut generated_modules = HashMap::<String, String>::new();
     let mut generated_types = HashMap::<String, String>::new();
+    let mut model_indexes = HashMap::<String, &ModelSpec>::new();
 
     for model in &models {
         validate_model_generated_names(model)?;
@@ -6060,6 +6089,11 @@ fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>
                 model.name
             );
         }
+        model_indexes.insert(ty, model);
+    }
+
+    for model in &models {
+        validate_edges(model, &model_indexes)?;
     }
 
     Ok(models)
@@ -6113,6 +6147,45 @@ fn validate_model_generated_names(model: &ModelSpec) -> anyhow::Result<()> {
         }
     }
 
+    let mut generated_edges = HashMap::<String, String>::new();
+    for edge in &model.edges {
+        let generated = rust_identifier(&to_snake_case(&edge.name));
+        if !is_valid_model_rust_ident(&generated) {
+            bail!(
+                "model `{}` edge `{}` generates invalid Rust field `{generated}`",
+                model.name,
+                edge.name
+            );
+        }
+        if let Some(previous) = generated_edges.insert(generated.clone(), edge.name.clone()) {
+            bail!(
+                "duplicate generated model edge `{generated}` in model `{}`: {previous} and {}",
+                model.name,
+                edge.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_edges(
+    model: &ModelSpec,
+    model_indexes: &HashMap<String, &ModelSpec>,
+) -> anyhow::Result<()> {
+    for edge in &model.edges {
+        validate_model_field(&model.name, "edge", &edge.field, &model.fields)?;
+        let target_name = to_pascal_case(&edge.target);
+        let target = model_indexes.get(&target_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "model `{}` edge `{}` target `{}` not found",
+                model.name,
+                edge.name,
+                edge.target
+            )
+        })?;
+        validate_model_field(&target.name, "edge ref", &edge.ref_field, &target.fields)?;
+    }
     Ok(())
 }
 
@@ -6326,6 +6399,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         let mut soft_delete = None;
         let mut tenant = None;
         let mut indexes = Vec::new();
+        let mut edges = Vec::new();
         let mut fields = Vec::new();
 
         while i < lines.len() {
@@ -6392,9 +6466,13 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 indexes.push(parse_ent_index(inner, &lines, &mut i, inner_line_no + 1)?);
                 continue;
             }
+            if inner.starts_with("edge ") && inner.ends_with('{') {
+                edges.push(parse_ent_edge(inner, &lines, &mut i, inner_line_no + 1)?);
+                continue;
+            }
 
             bail!(
-                "line {}: expected `table`, `schema`, `primary`, `cache`, `cache_key`, `cache_prefix`, `cache_ttl_secs`, `negative_cache_ttl_secs`, `soft_delete`, `tenant`, `field` or `index`",
+                "line {}: expected `table`, `schema`, `primary`, `cache`, `cache_key`, `cache_prefix`, `cache_ttl_secs`, `negative_cache_ttl_secs`, `soft_delete`, `tenant`, `field`, `index` or `edge`",
                 inner_line_no + 1
             );
         }
@@ -6448,6 +6526,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             cache_keys,
             cache_prefix,
             indexes,
+            edges,
             fields,
         });
     }
@@ -6578,6 +6657,81 @@ fn parse_ent_index(
     }
 
     bail!("line {line_no}: unclosed index block")
+}
+
+fn parse_ent_edge(
+    header: &str,
+    lines: &[(usize, &str)],
+    i: &mut usize,
+    line_no: usize,
+) -> anyhow::Result<ModelEdge> {
+    let name = header
+        .trim_start_matches("edge ")
+        .trim_end_matches('{')
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        bail!("line {line_no}: edge name is required");
+    }
+    let mut target = None;
+    let mut field = None;
+    let mut ref_field = None;
+    let mut unique = false;
+    let mut required = false;
+
+    while *i < lines.len() {
+        let (inner_line_no, raw) = lines[*i];
+        *i += 1;
+        let inner = strip_comment(raw).trim();
+        if inner.is_empty() {
+            continue;
+        }
+        if inner == "}" {
+            let Some(target) = target else {
+                bail!("line {line_no}: edge `{name}` must declare `to`");
+            };
+            let Some(field) = field else {
+                bail!("line {line_no}: edge `{name}` must declare `field`");
+            };
+            let Some(ref_field) = ref_field else {
+                bail!("line {line_no}: edge `{name}` must declare `ref`");
+            };
+            return Ok(ModelEdge {
+                name,
+                target,
+                field,
+                ref_field,
+                unique,
+                required,
+            });
+        }
+        if let Some(value) = inner.strip_prefix("to ") {
+            target = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("field ") {
+            field = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("ref ") {
+            ref_field = Some(value.trim().to_string());
+            continue;
+        }
+        if inner == "unique" {
+            unique = true;
+            continue;
+        }
+        if inner == "required" {
+            required = true;
+            continue;
+        }
+        bail!(
+            "line {}: expected `to`, `field`, `ref`, `unique`, `required` or `}}`",
+            inner_line_no + 1
+        );
+    }
+
+    bail!("line {line_no}: unclosed edge block")
 }
 
 fn parse_ent_ident_list(value: &str) -> Vec<String> {
@@ -6803,6 +6957,7 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             cache_keys,
             cache_prefix,
             indexes,
+            edges: Vec::new(),
             fields,
         });
     }
@@ -6973,6 +7128,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
     let mut inline_primary_fields = Vec::new();
     let mut unique_cache_keys = Vec::new();
     let mut indexes = Vec::new();
+    let mut foreign_keys = Vec::new();
 
     for entry in split_sql_items(body) {
         let entry = entry.trim();
@@ -7021,15 +7177,20 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
             && (entry.to_ascii_lowercase().contains("foreign key")
                 || entry.to_ascii_lowercase().contains("references"))
         {
-            bail!("line {}: foreign keys are not supported", start_line);
+            foreign_keys.push(parse_sql_foreign_key(entry, start_line)?);
+            continue;
         }
 
-        if starts_with_ci(entry, "foreign key") || entry.to_ascii_lowercase().contains("references")
-        {
-            bail!("line {}: foreign keys are not supported", start_line);
+        if starts_with_ci(entry, "foreign key") {
+            foreign_keys.push(parse_sql_foreign_key(entry, start_line)?);
+            continue;
         }
 
-        fields.push(parse_sql_field(entry, start_line)?);
+        let field = parse_sql_field(entry, start_line)?;
+        if let Some(foreign_key) = field.foreign_key.clone() {
+            foreign_keys.push(foreign_key);
+        }
+        fields.push(field);
         let last = fields.last().expect("field pushed");
         if last.inline_primary_key {
             inline_primary_fields.push(last.name.clone());
@@ -7067,6 +7228,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         );
     }
 
+    let parsed_fields = fields.clone();
     let primary_name = primary.clone();
     let fields = fields
         .into_iter()
@@ -7089,6 +7251,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
     let name = model_name_from_table(&table);
     let cache_keys = normalize_cache_keys(&primary, unique_cache_keys, &fields);
     let indexes = validate_and_normalize_indexes(&name, indexes, &fields)?;
+    let edges = normalize_sql_edges(foreign_keys, &parsed_fields, &indexes);
     Ok(ModelSpec {
         name,
         schema_name,
@@ -7102,6 +7265,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         cache_keys,
         cache_prefix: None,
         indexes,
+        edges,
         fields,
     })
 }
@@ -7145,6 +7309,14 @@ struct ParsedSqlField {
     inline_primary_key: bool,
     default_value: Option<String>,
     comment: Option<String>,
+    foreign_key: Option<ParsedSqlForeignKey>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSqlForeignKey {
+    field: String,
+    target_table: String,
+    target_field: String,
 }
 
 fn parse_sql_field(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlField> {
@@ -7188,6 +7360,10 @@ fn parse_sql_field(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlFi
         inline_primary_key: sql_attrs.inline_primary_key,
         default_value: sql_attrs.default_value,
         comment: sql_attrs.comment,
+        foreign_key: sql_attrs.foreign_key.map(|mut foreign_key| {
+            foreign_key.field = strip_sql_identifier(&name);
+            foreign_key
+        }),
     })
 }
 
@@ -7198,6 +7374,7 @@ struct SqlAttrs {
     inline_primary_key: bool,
     default_value: Option<String>,
     comment: Option<String>,
+    foreign_key: Option<ParsedSqlForeignKey>,
 }
 
 fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
@@ -7248,6 +7425,14 @@ fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
                 }
                 i += 1 + consumed;
             }
+            "references" => {
+                if let Some((foreign_key, consumed)) = parse_sql_inline_references(tokens, i) {
+                    attrs.foreign_key = Some(foreign_key);
+                    i += consumed;
+                } else {
+                    i += 1;
+                }
+            }
             "=" => {
                 i += 1;
             }
@@ -7262,6 +7447,153 @@ fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
     }
 
     attrs
+}
+
+fn parse_sql_foreign_key(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlForeignKey> {
+    let lower = entry.to_ascii_lowercase();
+    let fk_idx = lower
+        .find("foreign key")
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected FOREIGN KEY", start_line))?;
+    let fk_part = &entry[fk_idx..];
+    let columns = parse_key_columns(fk_part, start_line)?;
+    if columns.len() != 1 {
+        bail!(
+            "line {}: composite foreign keys are not supported",
+            start_line
+        );
+    }
+    let open = fk_part
+        .find('(')
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `(` in FOREIGN KEY", start_line))?;
+    let close = find_matching_paren(fk_part, open)
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `)` in FOREIGN KEY", start_line))?;
+    let rest = fk_part[close + 1..].trim();
+    let (_, references) = split_once_ci(rest, "references").ok_or_else(|| {
+        anyhow::anyhow!("line {}: expected REFERENCES in FOREIGN KEY", start_line)
+    })?;
+    let (target_table, target_field) = parse_sql_references_target(references, start_line)?;
+    Ok(ParsedSqlForeignKey {
+        field: columns[0].clone(),
+        target_table,
+        target_field,
+    })
+}
+
+fn parse_sql_inline_references(
+    tokens: &[String],
+    references_idx: usize,
+) -> Option<(ParsedSqlForeignKey, usize)> {
+    let rest = tokens.get(references_idx + 1..)?.join(" ");
+    let (target_table, target_field) = parse_sql_references_target(&rest, 0).ok()?;
+    Some((
+        ParsedSqlForeignKey {
+            field: String::new(),
+            target_table,
+            target_field,
+        },
+        tokens.len().saturating_sub(references_idx),
+    ))
+}
+
+fn parse_sql_references_target(
+    references: &str,
+    start_line: usize,
+) -> anyhow::Result<(String, String)> {
+    let references = references.trim();
+    if references.is_empty() {
+        bail!("line {}: missing REFERENCES target", start_line);
+    }
+
+    if let Some(open) = references.find('(') {
+        let close = find_matching_paren(references, open).ok_or_else(|| {
+            anyhow::anyhow!("line {}: expected `)` in REFERENCES target", start_line)
+        })?;
+        let table = references[..open].trim();
+        let columns = split_sql_items(&references[open + 1..close]);
+        if columns.len() != 1 {
+            bail!(
+                "line {}: composite foreign keys are not supported",
+                start_line
+            );
+        }
+        return Ok((
+            strip_sql_identifier(table),
+            strip_sql_identifier(&columns[0]),
+        ));
+    }
+
+    let table = references.split_whitespace().next().unwrap_or_default();
+    if table.is_empty() {
+        bail!("line {}: missing REFERENCES table", start_line);
+    }
+    Ok((strip_sql_identifier(table), "id".to_string()))
+}
+
+fn normalize_sql_edges(
+    foreign_keys: Vec<ParsedSqlForeignKey>,
+    fields: &[ParsedSqlField],
+    indexes: &[ModelIndex],
+) -> Vec<ModelEdge> {
+    let mut seen = HashSet::new();
+    let mut used_names = HashSet::new();
+    let mut edges = Vec::new();
+
+    for foreign_key in foreign_keys {
+        let key = format!(
+            "{}:{}:{}",
+            foreign_key.field, foreign_key.target_table, foreign_key.target_field
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        let target = model_name_from_table(&foreign_key.target_table);
+        let base_name = sql_edge_name(&foreign_key, &target);
+        let name = unique_edge_name(base_name, &foreign_key.field, &mut used_names);
+        let required = fields
+            .iter()
+            .find(|field| field.name == foreign_key.field)
+            .map(|field| !field.nullable)
+            .unwrap_or(false);
+        let unique = indexes
+            .iter()
+            .any(|index| index.unique && index.fields == [foreign_key.field.clone()]);
+        edges.push(ModelEdge {
+            name,
+            target,
+            field: foreign_key.field,
+            ref_field: foreign_key.target_field,
+            unique,
+            required,
+        });
+    }
+
+    edges
+}
+
+fn sql_edge_name(foreign_key: &ParsedSqlForeignKey, target: &str) -> String {
+    let field = foreign_key.field.trim();
+    if let Some(name) = field.strip_suffix("_id").filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    to_snake_case(target)
+}
+
+fn unique_edge_name(base: String, field: &str, used_names: &mut HashSet<String>) -> String {
+    if used_names.insert(base.clone()) {
+        return base;
+    }
+    let fallback = format!("{}_by_{}", base, field);
+    if used_names.insert(fallback.clone()) {
+        return fallback;
+    }
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{}_{}", fallback, suffix);
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 fn collect_sql_clause(tokens: &[String], start: usize) -> (String, usize) {
@@ -8008,18 +8340,64 @@ mod tests {
     }
 
     #[test]
-    fn rejects_foreign_keys() {
+    fn imports_foreign_keys_as_ent_edges() {
         let source = r#"
         CREATE TABLE users (
             id bigint NOT NULL AUTO_INCREMENT,
-            org_id bigint NOT NULL,
+            name varchar(64) NOT NULL,
+            PRIMARY KEY (id)
+        );
+
+        CREATE TABLE profiles (
+            id bigint NOT NULL AUTO_INCREMENT,
+            nickname varchar(64) NOT NULL,
+            PRIMARY KEY (id)
+        );
+
+        CREATE TABLE orders (
+            id bigint NOT NULL AUTO_INCREMENT,
+            user_id bigint NOT NULL,
+            profile_id bigint REFERENCES profiles(id),
             PRIMARY KEY (id),
-            CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs(id)
+            CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id)
         );
         "#;
 
-        let err = parse_models_with_format(source, ModelFormat::Sql).expect_err("parse error");
-        assert!(err.to_string().contains("foreign keys are not supported"));
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let order = models
+            .iter()
+            .find(|model| model.name == "Order")
+            .expect("order model");
+        assert!(order.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: false,
+            required: true,
+        }));
+        assert!(order.edges.contains(&ModelEdge {
+            name: "profile".to_string(),
+            target: "Profile".to_string(),
+            field: "profile_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: false,
+            required: false,
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    to User"));
+        assert!(ent.contains("    field user_id"));
+        assert!(ent.contains("    ref id"));
+        assert!(ent.contains("    required"));
+
+        let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("parse ent");
+        let reparsed_order = reparsed
+            .iter()
+            .find(|model| model.name == "Order")
+            .expect("reparsed order model");
+        assert_eq!(reparsed_order.edges, order.edges);
     }
 
     #[test]
@@ -8041,6 +8419,7 @@ mod tests {
                 fields: vec!["tenant_id".to_string(), "name".to_string()],
                 unique: true,
             }],
+            edges: Vec::new(),
             fields: vec![
                 ModelField {
                     name: "id".to_string(),
