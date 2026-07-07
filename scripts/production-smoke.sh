@@ -32,6 +32,7 @@ cargo test -p rozectl
 if [[ "$RUN_IGNORED" == "1" ]]; then
   cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored
   cargo test -p rozectl generated_rpc_project_compiles -- --ignored
+  cargo test -p rozectl generated_stream_project_compiles -- --ignored
 fi
 
 cargo test -p roze-cache
@@ -42,6 +43,7 @@ cargo test -p roze-kafka
 cargo test -p roze-nats
 cargo test -p roze-gateway
 cargo test -p roze-health
+cargo test -p roze-service
 cargo test -p roze-bootstrap
 cargo test -p roze-shutdown
 

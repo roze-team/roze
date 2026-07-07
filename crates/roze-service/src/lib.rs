@@ -170,6 +170,16 @@ impl LifecycleState {
         )
     }
 
+    pub async fn wait_for_phase(&self, phase: LifecyclePhase, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            while self.phase() != phase {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     fn mark(&self, phase: LifecyclePhase) {
         self.phase.store(phase_code(phase), Ordering::SeqCst);
     }
@@ -656,5 +666,109 @@ mod tests {
 
         assert!(observed_draining.load(Ordering::SeqCst));
         assert_eq!(handle.phase(), LifecyclePhase::Stopped);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_wait_for_phase_observes_transition() {
+        let lifecycle = LifecycleState::new();
+        let cloned = lifecycle.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            cloned.mark(LifecyclePhase::Running);
+        });
+
+        assert!(
+            lifecycle
+                .wait_for_phase(LifecyclePhase::Running, Duration::from_millis(50))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "production-soak: set ROZE_LIFECYCLE_SOAK_SECONDS/ROZE_LIFECYCLE_SOAK_CYCLES for long runs"]
+    async fn production_soak_service_group_lifecycle() {
+        let seconds = std::env::var("ROZE_LIFECYCLE_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300);
+        let max_cycles = std::env::var("ROZE_LIFECYCLE_SOAK_CYCLES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let mut cycles = 0_u64;
+        let mut worker_exits = 0_u64;
+        let mut stop_hooks = 0_u64;
+
+        while Instant::now() < deadline && cycles < max_cycles {
+            let mut group = ServiceGroup::with_config(ServiceGroupConfig {
+                shutdown_timeout: Duration::from_millis(250),
+                stop_on_first_error: true,
+            });
+            let handle = group.handle();
+            let exits = Arc::new(AtomicUsize::new(0));
+            let stops = Arc::new(AtomicUsize::new(0));
+
+            for index in 0..4 {
+                struct SoakService {
+                    name: String,
+                    exits: Arc<AtomicUsize>,
+                    stops: Arc<AtomicUsize>,
+                }
+
+                impl RuntimeService for SoakService {
+                    fn name(&self) -> &str {
+                        &self.name
+                    }
+
+                    fn start(&self, shutdown: ShutdownListener) -> ServiceFuture<'_> {
+                        Box::pin(async move {
+                            shutdown.wait().await;
+                            self.exits.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }
+
+                    fn stop(&self) -> ServiceFuture<'_> {
+                        Box::pin(async move {
+                            self.stops.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }
+                }
+
+                group.add(SoakService {
+                    name: format!("worker-{index}"),
+                    exits: exits.clone(),
+                    stops: stops.clone(),
+                });
+            }
+
+            let lifecycle = handle.lifecycle();
+            let join = tokio::spawn(group.start_with_shutdown(std::future::pending()));
+            assert!(
+                lifecycle
+                    .wait_for_phase(LifecyclePhase::Running, Duration::from_secs(1))
+                    .await,
+                "service group did not enter running phase"
+            );
+            handle.shutdown();
+            join.await
+                .expect("service group task should join")
+                .expect("service group should stop cleanly");
+
+            assert_eq!(handle.phase(), LifecyclePhase::Stopped);
+            assert_eq!(exits.load(Ordering::SeqCst), 4);
+            assert_eq!(stops.load(Ordering::SeqCst), 4);
+
+            cycles += 1;
+            worker_exits += exits.load(Ordering::SeqCst) as u64;
+            stop_hooks += stops.load(Ordering::SeqCst) as u64;
+        }
+
+        println!(
+            "roze_lifecycle_soak cycles={cycles} worker_exits={worker_exits} stop_hooks={stop_hooks}"
+        );
+        assert!(cycles > 0, "soak must run at least one lifecycle cycle");
     }
 }

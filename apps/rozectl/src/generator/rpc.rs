@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 use crate::pb::{package}::{{{server_mod}::{service}Server}};
 use roze_rpc::rpc::RpcServer;
+use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {{
@@ -39,13 +40,35 @@ async fn main() -> anyhow::Result<()> {{
         rpc.advertise_addr.unwrap_or(rpc.addr),
     )
     .await?;
+    let service_name = config.name.clone();
+    let rpc_addr = rpc.addr;
     let ctx = svc::ServiceContext::new(config).await?;
-    RpcServer::new(rpc.addr)
-        .builder()
-        .add_service({service}Server::new(server::RpcService::new(ctx)))
-        .serve(rpc.addr)
-        .await?;
+    let health = ctx.health.clone();
+    let mut group = ServiceGroup::new();
+    group.add_fn(service_name, move |shutdown| {{
+        let ctx = ctx.clone();
+        async move {{
+            RpcServer::new(rpc_addr)
+                .builder()
+                .add_service({service}Server::new(server::RpcService::new(ctx)))
+                .serve_with_shutdown(rpc_addr, async move {{
+                    shutdown.wait().await;
+                }})
+                .await
+                .map_err(|error| anyhow::anyhow!("RPC service failed: {{error}}"))
+        }}
+    }});
+    group.add_fn("health-drain", move |shutdown| {{
+        let health = health.clone();
+        async move {{
+            shutdown.wait().await;
+            health.mark_draining();
+            Ok(())
+        }}
+    }});
+    let result = group.start().await;
     registration.shutdown().await?;
+    result?;
 
     Ok(())
 }}
@@ -1154,6 +1177,35 @@ mod tests {
         assert!(client.contains("let request_template = req;"));
         assert!(client.contains("client_request(request_template, &context"));
         assert!(client.contains("client_request(request_template.clone(), &context"));
+    }
+
+    #[test]
+    fn rpc_main_uses_service_group_lifecycle() {
+        let spec = parse_api(
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (GetUserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type GetUserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("api");
+
+        let rendered = render_main(&spec);
+        assert!(rendered.contains("use roze_service::ServiceGroup;"));
+        assert!(rendered.contains("let health = ctx.health.clone();"));
+        assert!(rendered.contains("group.add_fn(service_name"));
+        assert!(rendered.contains(".serve_with_shutdown(rpc_addr"));
+        assert!(rendered.contains("health.mark_draining();"));
+        assert!(rendered.contains("let result = group.start().await;"));
+        assert!(rendered.contains("result?;"));
     }
 
     #[test]

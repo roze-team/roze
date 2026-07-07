@@ -803,10 +803,10 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
 
     let content = fs::read_to_string(&svc_path)
         .with_context(|| format!("failed to read {}", svc_path.display()))?;
-    if content.contains("toasty_db") || !content.contains("pub struct ServiceContext") {
+    if !content.contains("pub struct ServiceContext") {
         return Ok(());
     }
-    let content = content.replace("#[derive(Clone, Debug)]", "#[derive(Clone)]");
+    let mut updated = content.replace("#[derive(Clone, Debug)]", "#[derive(Clone)]");
 
     let model_list = models
         .iter()
@@ -817,27 +817,63 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
         return Ok(());
     }
 
-    let Some(mut updated) = insert_after_module(
-        &content,
-        "    pub db_connections: Option<roze_db::DatabaseConnections>,\n",
-        "    pub toasty_db: Option<toasty::Db>,\n",
-    ) else {
-        return Ok(());
-    };
-    updated = insert_after_module(
-        &updated,
-        "        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;\n",
-        &format!(
-            "        let toasty_db = match config.database.as_ref() {{\n            Some(database) => Some(toasty::Db::builder().models(toasty::models!({model_list})).connect(&database.url).await?),\n            None => None,\n        }};\n"
-        ),
-    )
-    .unwrap_or(updated);
-    updated = insert_after_module(
-        &updated,
-        "            db_connections,\n",
-        "            toasty_db,\n",
-    )
-    .unwrap_or(updated);
+    if !updated.contains("pub toasty_db: Option<toasty::Db>") {
+        updated = insert_after_module(
+            &updated,
+            "    pub db_connections: Option<roze_db::DatabaseConnections>,\n",
+            "    pub toasty_db: Option<toasty::Db>,\n",
+        )
+        .or_else(|| {
+            insert_after_module(
+                &updated,
+                "    pub health: roze_health::HealthRegistry,\n",
+                "    pub toasty_db: Option<toasty::Db>,\n",
+            )
+        })
+        .unwrap_or(updated);
+    }
+    if !updated.contains("let toasty_db = match config.database.as_ref()") {
+        updated = insert_after_module(
+            &updated,
+            "        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;\n",
+            &format!(
+                "        let toasty_db = match config.database.as_ref() {{\n            Some(database) => Some(toasty::Db::builder().models(toasty::models!({model_list})).connect(&database.url).await?),\n            None => None,\n        }};\n"
+            ),
+        )
+        .or_else(|| {
+            insert_after_module(
+                &updated,
+                "        let health = roze_health::HealthRegistry::new();\n",
+                &format!(
+                    "        let toasty_db = match config.database.as_ref() {{\n            Some(database) => Some(toasty::Db::builder().models(toasty::models!({model_list})).connect(&database.url).await?),\n            None => None,\n        }};\n"
+                ),
+            )
+        })
+        .unwrap_or(updated);
+    }
+    if !updated.contains("            toasty_db,\n") {
+        updated = insert_after_module(
+            &updated,
+            "            db_connections,\n",
+            "            toasty_db,\n",
+        )
+        .or_else(|| {
+            insert_after_module(
+                &updated,
+                "            health,\n",
+                "            toasty_db,\n",
+            )
+        })
+        .unwrap_or(updated);
+    }
+    if !updated.contains("if toasty_db.is_some()") {
+        updated = insert_before_module(
+            &updated,
+            "        health.mark_ready();\n",
+            "        if toasty_db.is_some() {\n            health.register_static(roze_health::HealthCheck::healthy(\"toasty\"));\n        }\n",
+        )
+        .unwrap_or(updated);
+    }
     let accessor = r#"    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
         self.toasty_db
             .clone()
@@ -845,7 +881,11 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
     }
 
 "#;
-    updated = insert_after_read_db_method(&updated, accessor).unwrap_or(updated);
+    if !updated.contains("pub fn toasty_db(&self)") {
+        updated = insert_after_read_db_method(&updated, accessor)
+            .or_else(|| insert_before_module(&updated, "    pub fn jwt_config", accessor))
+            .unwrap_or(updated);
+    }
 
     fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
 }
@@ -911,6 +951,15 @@ fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<Stri
     updated.push_str(&content[..idx + needle.len()]);
     updated.push_str(insert);
     updated.push_str(&content[idx + needle.len()..]);
+    Some(updated)
+}
+
+fn insert_before_module(content: &str, needle: &str, insert: &str) -> Option<String> {
+    let idx = content.find(needle)?;
+    let mut updated = String::with_capacity(content.len() + insert.len());
+    updated.push_str(&content[..idx]);
+    updated.push_str(insert);
+    updated.push_str(&content[idx..]);
     Some(updated)
 }
 
@@ -1821,7 +1870,7 @@ fn render_like_pattern_helpers(out: &mut String, model: &ModelSpec) {
     }
 
     use std::fmt::Write as _;
-    writeln!(out, "fn escape_like_pattern(value: &str) -> String {{").unwrap();
+    writeln!(out, "pub fn escape_like_pattern(value: &str) -> String {{").unwrap();
     writeln!(
         out,
         "    let mut escaped = String::with_capacity(value.len());"
@@ -1839,7 +1888,11 @@ fn render_like_pattern_helpers(out: &mut String, model: &ModelSpec) {
     writeln!(out, "    escaped").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
-    writeln!(out, "fn contains_like_pattern(value: &str) -> String {{").unwrap();
+    writeln!(
+        out,
+        "pub fn contains_like_pattern(value: &str) -> String {{"
+    )
+    .unwrap();
     writeln!(out, "    format!(\"%{{}}%\", escape_like_pattern(value))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -7412,7 +7465,24 @@ fn sum_return_type(ty: &str) -> Option<&str> {
 
 fn is_copy_filter_type(ty: &str) -> bool {
     let ty = optional_inner_type(ty).unwrap_or(ty);
-    ty == "bool" || is_numeric_type(ty)
+    matches!(
+        ty,
+        "bool"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
 }
 
 fn normalize_table_reference(
@@ -9974,10 +10044,10 @@ mod tests {
         assert!(rendered.contains("NicknameAsc,"));
         assert!(rendered.contains("NicknameDesc,"));
         assert!(rendered.contains("pub fn nickname_asc() -> UserOrder"));
-        assert!(rendered.contains(
-            "UserOrder::NicknameAsc => select = select.order_by_asc(Column::Nickname),"
-        ));
-        assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
+        assert!(rendered
+            .contains("UserOrder::NicknameAsc => select = select.order_by_asc(Column::Nickname),"));
+        assert!(rendered.contains("pub fn escape_like_pattern(value: &str) -> String"));
+        assert!(rendered.contains("pub fn contains_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
         assert!(rendered.contains(
             "UserPredicate::NameContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
@@ -10228,7 +10298,8 @@ mod tests {
         assert!(rendered.contains(
             "UserOrder::NicknameAsc => { query.order_by(User::fields().nickname().asc()); }"
         ));
-        assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
+        assert!(rendered.contains("pub fn escape_like_pattern(value: &str) -> String"));
+        assert!(rendered.contains("pub fn contains_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("escaped.push('\\\\');"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
         assert!(rendered.contains(

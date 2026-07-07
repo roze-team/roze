@@ -362,6 +362,10 @@ standard `ApiResponse` wrapper. Generated `ServiceContext` owns a
 startup are registered as readiness checks, and the registry tracks startup,
 ready, and draining phases. Applications can add more dynamic checks with
 `HealthRegistry::register_dependency` or `HealthRegistry::register_check`.
+New generated REST and RPC entrypoints run under `roze_service::ServiceGroup`.
+When shutdown starts, the generated lifecycle task marks the shared
+`HealthRegistry` as draining, so REST `/readyz` stops reporting ready while the
+process exits through the unified shutdown path.
 
 Generate client SDKs:
 
@@ -1067,6 +1071,9 @@ SQL repositories additionally generate:
   `name_icontains`, `name_not_icontains`, `name_equal_fold`,
   `name_not_equal_fold`, `name_not_starts_with`, `name_not_ends_with`,
   `id_in`, `status_between`, `nickname_is_null`, `and`, `or`, and `not`
+- public `escape_like_pattern` and `contains_like_pattern` helpers for custom
+  repository filters built with the same wildcard escaping as generated
+  `contains` and `icontains` predicates
 - `*_icontains` predicates render database-level `ILIKE` on supported SQL
   backends instead of applying keyword filtering after pagination
 - `*_equal_fold` predicates provide ent-style case-insensitive equality with

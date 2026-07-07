@@ -96,6 +96,9 @@ ROZE_MQ_SOAK_SECONDS=86400 ROZE_MQ_SOAK_MESSAGES=100000000 \
 
 ROZE_CONFIG_CENTER_SOAK_SECONDS=86400 ROZE_CONFIG_CENTER_SOAK_UPDATES=100000000 \
   bash scripts/production-soak-config-center.sh
+
+ROZE_LIFECYCLE_SOAK_SECONDS=86400 ROZE_LIFECYCLE_SOAK_CYCLES=100000000 \
+  bash scripts/production-soak-lifecycle.sh
 ```
 
 These commands are evidence inputs. The final report still needs the measured

@@ -15,7 +15,8 @@ mod route;
 mod svc;
 mod types;
 
-use roze_http::rest::RestServer;
+use roze_http::rest::{RestServer, RestService};
+use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,13 +38,29 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let service_name = config.name.clone();
     let ctx = svc::ServiceContext::new(config).await?;
+    let health = ctx.health.clone();
     let middleware_config = roze_middleware::CommonMiddlewareConfig::from(&rest.middlewares);
     let app = roze_middleware::apply_common_with_config(route::router(ctx), middleware_config);
-    RestServer::new(rest.addr, app).serve().await?;
+    let mut group = ServiceGroup::new();
+    group.add(RestService::new(
+        service_name,
+        RestServer::new(rest.addr, app),
+    ));
+    group.add_fn("health-drain", move |shutdown| {
+        let health = health.clone();
+        async move {
+            shutdown.wait().await;
+            health.mark_draining();
+            Ok(())
+        }
+    });
+    let result = group.start().await;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
     }
+    result?;
 
     Ok(())
 }
@@ -2099,6 +2116,34 @@ mod tests {
         assert!(openapi.contains("builder.add_operation(\"/ping-head\", HttpMethod::Head"));
         assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
+    }
+
+    #[test]
+    fn rest_main_uses_service_group_lifecycle() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id u64 `path:"id"`
+            }
+
+            type UserResp {
+                id u64
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let rendered = render_rest_main(&spec);
+        assert!(rendered.contains("use roze_service::ServiceGroup;"));
+        assert!(rendered.contains("let health = ctx.health.clone();"));
+        assert!(rendered.contains("RestService::new("));
+        assert!(rendered.contains("health.mark_draining();"));
+        assert!(rendered.contains("let result = group.start().await;"));
+        assert!(rendered.contains("result?;"));
     }
 
     #[test]

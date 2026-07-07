@@ -119,6 +119,7 @@ bash scripts/release-gate.sh
 - `bash scripts/rozectl-smoke.sh`
 - `bash scripts/production-soak-mq.sh 300` passes before starting a long MQ evidence run.
 - `bash scripts/production-soak-config-center.sh 300` passes before starting a long Config Center evidence run.
+- `bash scripts/production-soak-lifecycle.sh 300` passes before starting a long Lifecycle evidence run.
 - `cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored`
 - `cargo test -p rozectl generated_rpc_project_compiles -- --ignored`
 - `cargo test -p rozectl generated_stream_project_compiles -- --ignored`
