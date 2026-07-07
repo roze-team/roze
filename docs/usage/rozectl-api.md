@@ -1006,6 +1006,10 @@ entity Order {
 
   field user_id: i64 {}
 
+  field code: string {
+    unique
+  }
+
   edge user {
     to User
     field user_id
@@ -1019,6 +1023,9 @@ SQL `FOREIGN KEY (...) REFERENCES ...` constraints and inline `REFERENCES`
 column attributes are imported as `.ent` edges. Single-column foreign keys are
 supported; composite foreign keys are rejected with a clear error until the
 relation generator grows composite edge semantics.
+`.ent` fields can declare `unique`; Roze normalizes that into a single-field
+unique index and generates the same unique lookup helpers as an explicit
+`index ... { unique }` block.
 SQL `JSON`/`JSONB` columns generate `String` so default Toasty models remain
 compilable; ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
 `BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.

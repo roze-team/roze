@@ -150,6 +150,10 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
         writeln!(out).unwrap();
 
         for field in &model.fields {
+            let field_unique = model
+                .indexes
+                .iter()
+                .any(|index| is_default_field_unique_index(index, &field.name));
             writeln!(
                 out,
                 "  field {}: {} {{",
@@ -166,6 +170,9 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             if field.auto_increment {
                 writeln!(out, "    auto_increment").unwrap();
             }
+            if field_unique {
+                writeln!(out, "    unique").unwrap();
+            }
             if let Some(default_value) = &field.default_value {
                 writeln!(out, "    default {}", quote_ent_string(default_value)).unwrap();
             }
@@ -177,6 +184,13 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
         }
 
         for index in &model.indexes {
+            if index
+                .fields
+                .first()
+                .is_some_and(|field| is_default_field_unique_index(index, field))
+            {
+                continue;
+            }
             writeln!(out, "  index {} {{", index.name).unwrap();
             writeln!(out, "    fields {}", index.fields.join(", ")).unwrap();
             if index.unique {
@@ -6232,6 +6246,12 @@ fn validate_and_normalize_indexes(
     Ok(normalized)
 }
 
+fn is_default_field_unique_index(index: &ModelIndex, field_name: &str) -> bool {
+    index.unique
+        && index.fields == [field_name.to_string()]
+        && index.name == format!("uniq_{field_name}")
+}
+
 fn validate_soft_delete_field(
     model_name: &str,
     field_name: &str,
@@ -6643,6 +6663,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         let mut indexes = Vec::new();
         let mut edges = Vec::new();
         let mut fields = Vec::new();
+        let mut unique_fields = Vec::new();
 
         while i < lines.len() {
             let (inner_line_no, raw) = lines[i];
@@ -6696,10 +6717,13 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 continue;
             }
             if inner.starts_with("field ") && inner.ends_with('{') {
-                let (field, is_primary) =
+                let (field, is_primary, is_unique) =
                     parse_ent_field(inner, &lines, &mut i, inner_line_no + 1)?;
                 if is_primary {
                     primary = Some(field.name.clone());
+                }
+                if is_unique {
+                    unique_fields.push(field.name.clone());
                 }
                 fields.push(field);
                 continue;
@@ -6728,6 +6752,23 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         }
         if cache_keys.is_empty() {
             cache_keys.push(primary.clone());
+        }
+        let mut field_unique_indexes = Vec::new();
+        for field in unique_fields {
+            if !indexes
+                .iter()
+                .any(|index| index.unique && index.fields == [field.clone()])
+            {
+                field_unique_indexes.push(ModelIndex {
+                    name: format!("uniq_{field}"),
+                    fields: vec![field],
+                    unique: true,
+                });
+            }
+        }
+        if !field_unique_indexes.is_empty() {
+            field_unique_indexes.extend(indexes);
+            indexes = field_unique_indexes;
         }
         for key in &cache_keys {
             let Some(field) = fields.iter().find(|field| &field.name == key) else {
@@ -6785,7 +6826,7 @@ fn parse_ent_field(
     lines: &[(usize, &str)],
     i: &mut usize,
     line_no: usize,
-) -> anyhow::Result<(ModelField, bool)> {
+) -> anyhow::Result<(ModelField, bool, bool)> {
     let value = header
         .trim_start_matches("field ")
         .trim_end_matches('{')
@@ -6800,6 +6841,7 @@ fn parse_ent_field(
     let mut default_value = None;
     let mut comment = None;
     let mut primary = false;
+    let mut unique = false;
 
     while *i < lines.len() {
         let (inner_line_no, raw) = lines[*i];
@@ -6819,10 +6861,15 @@ fn parse_ent_field(
                     comment,
                 },
                 primary,
+                unique,
             ));
         }
         if inner == "primary" {
             primary = true;
+            continue;
+        }
+        if inner == "unique" {
+            unique = true;
             continue;
         }
         if inner == "auto_increment" {
@@ -6842,7 +6889,7 @@ fn parse_ent_field(
             continue;
         }
         bail!(
-            "line {}: expected `primary`, `source`, `auto_increment`, `default`, `comment` or `}}`",
+            "line {}: expected `primary`, `unique`, `source`, `auto_increment`, `default`, `comment` or `}}`",
             inner_line_no + 1
         );
     }
@@ -8546,9 +8593,11 @@ mod tests {
             id bigint NOT NULL AUTO_INCREMENT,
             tenant_id varchar(64) NOT NULL,
             name varchar(255) NOT NULL COMMENT 'display name',
+            email varchar(255) NOT NULL,
             nickname varchar(255) NULL DEFAULT 'guest',
             deleted tinyint(1) NOT NULL DEFAULT 0,
             PRIMARY KEY (id),
+            UNIQUE KEY uniq_email (email),
             UNIQUE KEY uniq_users_tenant_name (tenant_id, name)
         );
         "#;
@@ -8564,15 +8613,20 @@ mod tests {
         assert!(ent.contains("field id: u64 {"));
         assert!(ent.contains("primary"));
         assert!(ent.contains("auto_increment"));
+        assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("unique"));
         assert!(ent.contains("field nickname: string? {"));
         assert!(ent.contains("default \"'guest'\""));
         assert!(ent.contains("comment \"display name\""));
+        assert!(!ent.contains("index uniq_email {"));
         assert!(ent.contains("index uniq_users_tenant_name {"));
         assert!(ent.contains("fields tenant_id, name"));
         assert!(ent.contains("unique"));
 
         let ent_models = parse_models_with_format(&ent, ModelFormat::Ent).expect("parse ent");
         assert_eq!(ent_models, sql_models);
+        let rendered = render_model_module(&ent_models[0]);
+        assert!(rendered.contains("pub async fn find_by_email"));
     }
 
     #[test]
