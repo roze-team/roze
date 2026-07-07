@@ -1064,6 +1064,7 @@ let page = ctx
 
 let ids = ctx.model().user().query().ids().await?;
 let names = ctx.model().user().query().pluck_name().await?;
+let id_sum = ctx.model().user().query().sum_id().await?;
 
 let created = ctx
     .model()
@@ -1113,6 +1114,7 @@ let items = UserRepository::query(&mut db)
 
 let ids = UserRepository::query(&mut db).ids().await?;
 let names = UserRepository::query(&mut db).pluck_name().await?;
+let id_sum = UserRepository::query(&mut db).sum_id().await?;
 
 let created = UserRepository::create(&mut db)
     .set_name("alice".to_string())

@@ -2820,6 +2820,29 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         writeln!(out).unwrap();
     }
 
+    for field in model
+        .fields
+        .iter()
+        .filter(|field| sum_return_type(&field.ty).is_some())
+    {
+        let method = rust_identifier(&format!("sum_{}", field.name));
+        let pluck_method = rust_identifier(&format!("pluck_{}", field.name));
+        let sum_ty = sum_return_type(&field.ty).expect("sum type");
+        writeln!(
+            out,
+            "    pub async fn {method}(self) -> anyhow::Result<{sum_ty}> {{"
+        )
+        .unwrap();
+        writeln!(out, "        let values = self.{pluck_method}().await?;").unwrap();
+        if optional_inner_type(&field.ty).is_some() {
+            writeln!(out, "        Ok(values.into_iter().flatten().sum())").unwrap();
+        } else {
+            writeln!(out, "        Ok(values.into_iter().sum())").unwrap();
+        }
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
     writeln!(
         out,
         "    pub async fn first(self) -> anyhow::Result<Option<Model>> {{"
@@ -4274,6 +4297,29 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
             "        query.select({pascal}::fields().{field_ident}()).exec(self.db).await"
         )
         .unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    for field in model
+        .fields
+        .iter()
+        .filter(|field| sum_return_type(&field.ty).is_some())
+    {
+        let method = rust_identifier(&format!("sum_{}", field.name));
+        let pluck_method = rust_identifier(&format!("pluck_{}", field.name));
+        let sum_ty = sum_return_type(&field.ty).expect("sum type");
+        writeln!(
+            out,
+            "    pub async fn {method}(self) -> toasty::Result<{sum_ty}> {{"
+        )
+        .unwrap();
+        writeln!(out, "        let values = self.{pluck_method}().await?;").unwrap();
+        if optional_inner_type(&field.ty).is_some() {
+            writeln!(out, "        Ok(values.into_iter().flatten().sum())").unwrap();
+        } else {
+            writeln!(out, "        Ok(values.into_iter().sum())").unwrap();
+        }
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
     }
@@ -6091,6 +6137,11 @@ fn is_numeric_type(ty: &str) -> bool {
             | "f64"
             | "rust_decimal::Decimal"
     )
+}
+
+fn sum_return_type(ty: &str) -> Option<&str> {
+    let sum_ty = optional_inner_type(ty).unwrap_or(ty);
+    is_numeric_type(sum_ty).then_some(sum_ty)
 }
 
 fn is_copy_filter_type(ty: &str) -> bool {
@@ -8006,6 +8057,8 @@ mod tests {
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
         assert!(rendered.contains("select_only().column(Column::Id).into_tuple::<i64>()"));
+        assert!(rendered.contains("pub async fn sum_id(self) -> anyhow::Result<i64>"));
+        assert!(rendered.contains("Ok(values.into_iter().sum())"));
         assert!(rendered.contains("pub async fn first(self) -> anyhow::Result<Option<Model>>"));
         assert!(rendered.contains("pub async fn only(mut self) -> anyhow::Result<Model>"));
         assert!(rendered.contains("pub async fn page(self) -> anyhow::Result<UserPage>"));
@@ -8146,6 +8199,8 @@ mod tests {
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> toasty::Result<Vec<Option<String>>>"));
         assert!(rendered.contains("query.select(User::fields().id()).exec(self.db).await"));
+        assert!(rendered.contains("pub async fn sum_id(self) -> toasty::Result<u64>"));
+        assert!(rendered.contains("Ok(values.into_iter().sum())"));
         assert!(rendered.contains("pub async fn first(self) -> toasty::Result<Option<User>>"));
         assert!(rendered.contains("pub async fn only(self) -> toasty::Result<User>"));
         assert!(rendered.contains("pub async fn page(self) -> toasty::Result<UserPage>"));
@@ -8330,6 +8385,13 @@ mod tests {
         assert!(rendered.contains("DiscountAmountGte(rust_decimal::Decimal)"));
         assert!(rendered.contains("Coupon::fields().status().eq(*value)"));
         assert!(rendered.contains("Coupon::fields().discount_amount().ge(value.clone())"));
+        assert!(rendered.contains(
+            "pub async fn sum_discount_amount(self) -> toasty::Result<rust_decimal::Decimal>"
+        ));
+        assert!(rendered.contains(
+            "pub async fn sum_min_order_amount(self) -> toasty::Result<rust_decimal::Decimal>"
+        ));
+        assert!(rendered.contains("Ok(values.into_iter().flatten().sum())"));
     }
 
     #[test]
