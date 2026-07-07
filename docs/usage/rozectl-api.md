@@ -1051,6 +1051,10 @@ SQL repositories additionally generate:
   `status_between`, `nickname_is_null`, `and`, `or`, and `not`
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
+- entity relation methods for `.ent` edges, such as
+  `order.query_user(&ctx.model().user()).await?` on SeaORM and
+  `order.query_user(&mut db).await?` on Toasty; nullable foreign-key edges
+  return `Ok(None)` when the local edge field is `None`
 - service projects with `src/svc/mod.rs` also get `src/model/client.rs`,
   `ModelClient`, and `ServiceContext::model()` as the ent-style model entry
   point

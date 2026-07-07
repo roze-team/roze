@@ -1271,6 +1271,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_sea_orm_edge_methods(&mut out, model);
     writeln!(
         &mut out,
         "#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]"
@@ -1998,6 +1999,40 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
     render_sea_orm_query_builder_impl(out, model, pascal);
 }
 
+fn render_sea_orm_edge_methods(out: &mut String, model: &ModelSpec) {
+    use std::fmt::Write as _;
+
+    if model.edges.is_empty() {
+        return;
+    }
+
+    writeln!(out, "impl Model {{").unwrap();
+    for edge in &model.edges {
+        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        let method = edge_query_method_name(edge);
+        let target_pascal = to_pascal_case(&edge.target);
+        let target_module = to_snake_case(&edge.target);
+        let ref_helper = predicate_helper_name_by_name(&edge.ref_field, "eq");
+        writeln!(
+            out,
+            "    pub async fn {method}(&self, repo: &crate::model::{target_pascal}Repository<'_>) -> anyhow::Result<Option<crate::model::{target_pascal}Model>> {{"
+        )
+        .unwrap();
+        render_edge_value_binding(out, field);
+        writeln!(
+            out,
+            "        repo.query().where_(crate::model::{target_module}::{ref_helper}(value)).first().await"
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
 fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &str) {
     use std::fmt::Write as _;
 
@@ -2338,9 +2373,10 @@ fn render_sea_orm_update_many_builder(
     for field in model.fields.iter().filter(|field| field.name != primary) {
         let field_ident = model_field_ident(field);
         let setter = create_setter_name(field);
+        let value_expr = update_slot_value_from_ref(field, "value");
         writeln!(
             out,
-            "            if let Some(value) = self.{field_ident}.as_ref() {{ update = update.{setter}(value.clone()); }}"
+            "            if let Some(value) = self.{field_ident}.as_ref() {{ update = update.{setter}({value_expr}); }}"
         )
         .unwrap();
     }
@@ -3241,6 +3277,37 @@ fn predicate_helper_name(field: &ModelField, suffix: &str) -> String {
     rust_identifier(&format!("{}_{}", field.name, suffix))
 }
 
+fn predicate_helper_name_by_name(field_name: &str, suffix: &str) -> String {
+    rust_identifier(&format!("{field_name}_{suffix}"))
+}
+
+fn edge_query_method_name(edge: &ModelEdge) -> String {
+    rust_identifier(&format!("query_{}", edge.name))
+}
+
+fn render_edge_value_binding(out: &mut String, field: &ModelField) {
+    use std::fmt::Write as _;
+
+    let field_ident = model_field_ident(field);
+    if let Some(inner_ty) = optional_inner_type(&field.ty) {
+        let value = if is_copy_filter_type(inner_ty) {
+            "*value".to_string()
+        } else {
+            "value.clone()".to_string()
+        };
+        writeln!(
+            out,
+            "        let Some(value) = self.{field_ident}.as_ref() else {{ return Ok(None); }};"
+        )
+        .unwrap();
+        writeln!(out, "        let value = {value};").unwrap();
+    } else if is_copy_filter_type(&field.ty) {
+        writeln!(out, "        let value = self.{field_ident};").unwrap();
+    } else {
+        writeln!(out, "        let value = self.{field_ident}.clone();").unwrap();
+    }
+}
+
 fn create_setter_name(field: &ModelField) -> String {
     rust_identifier(&format!("set_{}", field.name))
 }
@@ -3259,6 +3326,24 @@ fn toasty_option_value_from_ref(field: &ModelField, value: &str) -> String {
     };
     if is_copy_filter_type(inner_ty) {
         format!("*{value}")
+    } else {
+        format!("{value}.clone()")
+    }
+}
+
+fn update_slot_value_from_ref(field: &ModelField, value: &str) -> String {
+    if optional_inner_type(&field.ty).is_some() {
+        toasty_option_value_from_ref(field, value)
+    } else {
+        toasty_value_from_ref(field, value)
+    }
+}
+
+fn toasty_owned_model_value(field: &ModelField, value: &str) -> String {
+    if is_copy_filter_type(&field.ty)
+        || optional_inner_type(&field.ty).is_some_and(is_copy_filter_type)
+    {
+        value.to_string()
     } else {
         format!("{value}.clone()")
     }
@@ -3421,6 +3506,40 @@ fn render_toasty_query_types(out: &mut String, model: &ModelSpec, pascal: &str) 
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
     render_toasty_query_builder_impl(out, model, pascal);
+}
+
+fn render_toasty_edge_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    if model.edges.is_empty() {
+        return;
+    }
+
+    writeln!(out, "impl {pascal} {{").unwrap();
+    for edge in &model.edges {
+        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        let method = edge_query_method_name(edge);
+        let target_pascal = to_pascal_case(&edge.target);
+        let target_module = to_snake_case(&edge.target);
+        let ref_helper = predicate_helper_name_by_name(&edge.ref_field, "eq");
+        writeln!(
+            out,
+            "    pub async fn {method}(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Option<crate::model::{target_pascal}>> {{"
+        )
+        .unwrap();
+        render_edge_value_binding(out, field);
+        writeln!(
+            out,
+            "        crate::model::{target_pascal}Repository::query(db).where_(crate::model::{target_module}::{ref_helper}(value)).first().await"
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
 }
 
 fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: &str) {
@@ -3890,9 +4009,10 @@ fn render_toasty_update_many_builder(
     writeln!(out, "        for mut model in items {{").unwrap();
     for field in model.fields.iter().filter(|field| field.name != primary) {
         let field_ident = model_field_ident(field);
+        let value_expr = update_slot_value_from_ref(field, "value");
         writeln!(
             out,
-            "            if let Some(value) = self.{field_ident}.as_ref() {{ model.{field_ident} = value.clone(); }}"
+            "            if let Some(value) = self.{field_ident}.as_ref() {{ model.{field_ident} = {value_expr}; }}"
         )
         .unwrap();
     }
@@ -4572,6 +4692,7 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_toasty_edge_methods(&mut out, model, &pascal);
     render_toasty_query_types(&mut out, model, &pascal);
     render_toasty_create_builder(&mut out, model, &pascal);
     render_toasty_update_builder(&mut out, model, &pascal, primary, &primary_ty);
@@ -4703,12 +4824,8 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
             continue;
         }
         let field_ident = model_field_ident(field);
-        writeln!(
-            &mut out,
-            "        let {} = model.{}.clone();",
-            field_ident, field_ident
-        )
-        .unwrap();
+        let value_expr = toasty_owned_model_value(field, &format!("model.{field_ident}"));
+        writeln!(&mut out, "        let {field_ident} = {value_expr};").unwrap();
     }
     write!(&mut out, "        model.update()").unwrap();
     for field in &model.fields {
@@ -8398,6 +8515,21 @@ mod tests {
             .find(|model| model.name == "Order")
             .expect("reparsed order model");
         assert_eq!(reparsed_order.edges, order.edges);
+
+        let sea_orm_order = render_model_module(order);
+        assert!(sea_orm_order.contains("pub async fn query_user"));
+        assert!(sea_orm_order.contains("pub async fn query_profile"));
+        assert!(sea_orm_order
+            .contains("repo.query().where_(crate::model::user::id_eq(value)).first().await"));
+        assert!(sea_orm_order
+            .contains("let Some(value) = self.profile_id.as_ref() else { return Ok(None); };"));
+
+        let toasty_order = render_toasty_model_module(order);
+        assert!(toasty_order.contains("pub async fn query_user"));
+        assert!(toasty_order.contains("pub async fn query_profile"));
+        assert!(toasty_order.contains("crate::model::UserRepository::query(db).where_(crate::model::user::id_eq(value)).first().await"));
+        assert!(toasty_order
+            .contains("let Some(value) = self.profile_id.as_ref() else { return Ok(None); };"));
     }
 
     #[test]
@@ -9872,19 +10004,39 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
 
         generate_model_project(
             r#"
-            model User {
-                table: users
-                primary: id
-                cache: false
-                field id i64
-                field type String
-                field name String
-                field nickname Option<String>
+            entity User {
+                table "users"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field type: string {
+                }
+                field name: string {
+                }
+                field nickname: string? {
+                }
+            }
+
+            entity Order {
+                table "orders"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field user_id: i64 {
+                }
+                edge user {
+                    to User
+                    field user_id
+                    ref id
+                    required
+                }
             }
             "#,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
-            ModelFormat::Dsl,
+            ModelFormat::Ent,
             ModelOrm::Toasty,
         )
         .expect("generate");
@@ -9936,18 +10088,37 @@ impl ServiceContext {
 
         generate_model_project(
             r#"
-            model User {
-                table: users
-                primary: id
-                cache: false
-                field id i64
-                field name String
-                field nickname Option<String>
+            entity User {
+                table "users"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field name: string {
+                }
+                field nickname: string? {
+                }
+            }
+
+            entity Order {
+                table "orders"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field user_id: i64 {
+                }
+                edge user {
+                    to User
+                    field user_id
+                    ref id
+                    required
+                }
             }
             "#,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
-            ModelFormat::Dsl,
+            ModelFormat::Ent,
             ModelOrm::SeaOrm,
         )
         .expect("generate");
