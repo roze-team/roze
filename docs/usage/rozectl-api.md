@@ -1076,6 +1076,8 @@ SQL repositories additionally generate:
   LIKE/ILIKE filters before count and pagination
 - nullable fields also get non-null value predicates such as `nickname_in`,
   `nickname_not_in`, and nullable numeric `gt/gte/lt/lte/between`
+- order helpers are generated for every queryable field, including nullable
+  fields such as `nickname_asc` and `nickname_desc`
 - query builders with `where_`, `order`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `first`, `only`, and `page`
 - entity relation methods for `.ent` edges, such as

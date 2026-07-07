@@ -1915,7 +1915,7 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
     )
     .unwrap();
     writeln!(out, "pub enum {pascal}Order {{").unwrap();
-    for field in sea_orm_filter_fields(model) {
+    for field in model_order_fields(model) {
         let variant = to_pascal_case(&field.name);
         writeln!(out, "    {variant}Asc,").unwrap();
         writeln!(out, "    {variant}Desc,").unwrap();
@@ -3010,7 +3010,7 @@ fn render_sea_orm_build_select_methods(out: &mut String, model: &ModelSpec, pasc
     .unwrap();
     writeln!(out, "        for order in &self.orders {{").unwrap();
     writeln!(out, "            match order {{").unwrap();
-    for field in sea_orm_filter_fields(model) {
+    for field in model_order_fields(model) {
         let variant = to_pascal_case(&field.name);
         writeln!(
             out,
@@ -3473,21 +3473,16 @@ fn render_soft_delete_assignment(out: &mut String, field: &ModelField, column: &
     }
 }
 
-fn sea_orm_filter_fields(model: &ModelSpec) -> Vec<&ModelField> {
-    model
-        .fields
-        .iter()
-        .filter(|field| Some(field.name.as_str()) != model.soft_delete.as_deref())
-        .filter(|field| !is_optional_type(&field.ty))
-        .collect()
-}
-
 fn model_query_fields(model: &ModelSpec) -> Vec<&ModelField> {
     model
         .fields
         .iter()
         .filter(|field| Some(field.name.as_str()) != model.soft_delete.as_deref())
         .collect()
+}
+
+fn model_order_fields(model: &ModelSpec) -> Vec<&ModelField> {
+    model_query_fields(model)
 }
 
 fn updatable_model_fields<'a>(model: &'a ModelSpec, primary: &str) -> Vec<&'a ModelField> {
@@ -3645,7 +3640,7 @@ fn render_toasty_query_types(out: &mut String, model: &ModelSpec, pascal: &str) 
 
     writeln!(out, "#[derive(Clone, Copy, Debug, PartialEq, Eq)]").unwrap();
     writeln!(out, "pub enum {pascal}Order {{").unwrap();
-    for field in sea_orm_filter_fields(model) {
+    for field in model_order_fields(model) {
         let variant = to_pascal_case(&field.name);
         writeln!(out, "    {variant}Asc,").unwrap();
         writeln!(out, "    {variant}Desc,").unwrap();
@@ -4096,7 +4091,7 @@ fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: 
         "pub fn not(predicate: {pascal}Predicate) -> {pascal}Predicate {{ {pascal}Predicate::Not(Box::new(predicate)) }}"
     )
     .unwrap();
-    for field in sea_orm_filter_fields(model) {
+    for field in model_order_fields(model) {
         let helper = model_field_ident(field);
         let variant = to_pascal_case(&field.name);
         writeln!(
@@ -4958,7 +4953,7 @@ fn render_toasty_build_query_methods(out: &mut String, model: &ModelSpec, pascal
     .unwrap();
     writeln!(out, "        for order in &self.orders {{").unwrap();
     writeln!(out, "            match order {{").unwrap();
-    for field in sea_orm_filter_fields(model) {
+    for field in model_order_fields(model) {
         let variant = to_pascal_case(&field.name);
         let field_ident = model_field_ident(field);
         writeln!(
@@ -9603,6 +9598,12 @@ mod tests {
         assert!(rendered.contains("pub fn nickname_not_in(values: Vec<String>) -> UserPredicate"));
         assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
         assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
+        assert!(rendered.contains("NicknameAsc,"));
+        assert!(rendered.contains("NicknameDesc,"));
+        assert!(rendered.contains("pub fn nickname_asc() -> UserOrder"));
+        assert!(rendered.contains(
+            "UserOrder::NicknameAsc => select = select.order_by_asc(Column::Nickname),"
+        ));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
         assert!(rendered.contains(
@@ -9813,6 +9814,12 @@ mod tests {
         assert!(rendered.contains("pub fn nickname_not_in(values: Vec<String>) -> UserPredicate"));
         assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
         assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
+        assert!(rendered.contains("NicknameAsc,"));
+        assert!(rendered.contains("NicknameDesc,"));
+        assert!(rendered.contains("pub fn nickname_asc() -> UserOrder"));
+        assert!(rendered.contains(
+            "UserOrder::NicknameAsc => { query.order_by(User::fields().nickname().asc()); }"
+        ));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("escaped.push('\\\\');"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
