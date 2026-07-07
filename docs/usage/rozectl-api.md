@@ -1079,6 +1079,23 @@ let updated = ctx
     .await?;
 
 ctx.model().user().delete_one(user_id).exec().await?;
+
+let updated_many = ctx
+    .model()
+    .user()
+    .update_many()
+    .where_(user::name_contains("alice"))
+    .set_name("alice-renamed".to_string())
+    .save()
+    .await?;
+
+let deleted_many = ctx
+    .model()
+    .user()
+    .delete_many()
+    .where_(user::name_contains("old"))
+    .exec()
+    .await?;
 ```
 
 Toasty service code can use the same model client to access the generated
@@ -1102,6 +1119,17 @@ let updated = UserRepository::update_one(&mut db, user_id)
     .await?;
 
 UserRepository::delete_one(&mut db, user_id).exec().await?;
+
+let updated_many = UserRepository::update_many(&mut db)
+    .where_(user::name_contains("alice"))
+    .set_name("alice-renamed".to_string())
+    .save()
+    .await?;
+
+let deleted_many = UserRepository::delete_many(&mut db)
+    .where_(user::name_contains("old"))
+    .exec()
+    .await?;
 ```
 
 Toasty transaction callbacks use the generated repository helper and can call

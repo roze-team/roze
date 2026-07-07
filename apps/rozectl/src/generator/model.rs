@@ -934,10 +934,10 @@ fn render_model_mod(models: &[ModelSpec], orm: ModelOrm, include_client: bool) -
         ));
         match orm {
             ModelOrm::SeaOrm => out.push_str(&format!(
-                "pub use {module}::{{{pascal}Create, {pascal}Delete, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, {pascal}Update, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
+                "pub use {module}::{{{pascal}Create, {pascal}Delete, {pascal}DeleteMany, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, {pascal}Update, {pascal}UpdateMany, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
             )),
             ModelOrm::Toasty => out.push_str(&format!(
-                "pub use {module}::{{{pascal}, {pascal}Create, {pascal}Delete, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, {pascal}Update}};\n"
+                "pub use {module}::{{{pascal}, {pascal}Create, {pascal}Delete, {pascal}DeleteMany, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, {pascal}Update, {pascal}UpdateMany}};\n"
             )),
         }
     }
@@ -1257,6 +1257,8 @@ fn render_model_module(model: &ModelSpec) -> String {
     render_sea_orm_create_builder(&mut out, model, &pascal);
     render_sea_orm_update_builder(&mut out, model, &pascal, primary, &primary_ty);
     render_sea_orm_delete_builder(&mut out, &pascal, primary, &primary_ty);
+    render_sea_orm_update_many_builder(&mut out, model, &pascal, primary, &primary_ty);
+    render_sea_orm_delete_many_builder(&mut out, &pascal, primary, &primary_ty);
     render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
@@ -1323,6 +1325,22 @@ fn render_model_module(model: &ModelSpec) -> String {
         "        {pascal}Delete::new(self, {primary_ident})"
     )
     .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn update_many(&self) -> {pascal}UpdateMany<'_, 'a> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        {pascal}UpdateMany::new(self)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn delete_many(&self) -> {pascal}DeleteMany<'_, 'a> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        {pascal}DeleteMany::new(self)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_sea_orm_query_methods(&mut out, model, &pascal, primary, &primary_ty);
@@ -2189,6 +2207,175 @@ fn render_sea_orm_delete_builder(out: &mut String, pascal: &str, primary: &str, 
         "        self.repo.delete_by_{primary}(self.{primary_ident}).await"
     )
     .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_update_many_builder(
+    out: &mut String,
+    model: &ModelSpec,
+    pascal: &str,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+
+    let primary_ident = rust_identifier(primary);
+    writeln!(out, "pub struct {pascal}UpdateMany<'repo, 'ctx> {{").unwrap();
+    writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
+    writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        let field_ident = model_field_ident(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
+        } else {
+            writeln!(out, "    {field_ident}: Option<{}>,", field.ty).unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl<'repo, 'ctx> {pascal}UpdateMany<'repo, 'ctx> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(repo: &'repo {pascal}Repository<'ctx>) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    writeln!(out, "            repo,").unwrap();
+    writeln!(out, "            predicates: Vec::new(),").unwrap();
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.predicates.push(predicate);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        let field_ident = model_field_ident(field);
+        let setter = create_setter_name(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: Option<{inner_ty}>) -> Self {{"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: {}) -> Self {{",
+                field.ty
+            )
+            .unwrap();
+        }
+        writeln!(out, "        self.{field_ident} = Some(value);").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    writeln!(
+        out,
+        "    pub async fn save(self) -> anyhow::Result<Vec<Model>> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let mut query = self.repo.query();").unwrap();
+    writeln!(
+        out,
+        "        for predicate in &self.predicates {{ query = query.where_(predicate.clone()); }}"
+    )
+    .unwrap();
+    writeln!(out, "        let items = query.all().await?;").unwrap();
+    writeln!(
+        out,
+        "        let mut updated = Vec::with_capacity(items.len());"
+    )
+    .unwrap();
+    writeln!(out, "        for item in items {{").unwrap();
+    let primary_value = sea_orm_reusable_value_expr(primary_ty, &format!("item.{primary_ident}"));
+    writeln!(
+        out,
+        "            let mut update = self.repo.update_one({primary_value});"
+    )
+    .unwrap();
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        let field_ident = model_field_ident(field);
+        let setter = create_setter_name(field);
+        writeln!(
+            out,
+            "            if let Some(value) = self.{field_ident}.as_ref() {{ update = update.{setter}(value.clone()); }}"
+        )
+        .unwrap();
+    }
+    writeln!(out, "            updated.push(update.save().await?);").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        Ok(updated)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_delete_many_builder(
+    out: &mut String,
+    pascal: &str,
+    primary: &str,
+    primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+
+    let primary_ident = rust_identifier(primary);
+    writeln!(out, "pub struct {pascal}DeleteMany<'repo, 'ctx> {{").unwrap();
+    writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
+    writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "impl<'repo, 'ctx> {pascal}DeleteMany<'repo, 'ctx> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(repo: &'repo {pascal}Repository<'ctx>) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{ repo, predicates: Vec::new() }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.predicates.push(predicate);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub async fn exec(self) -> anyhow::Result<u64> {{").unwrap();
+    writeln!(out, "        let mut query = self.repo.query();").unwrap();
+    writeln!(
+        out,
+        "        for predicate in &self.predicates {{ query = query.where_(predicate.clone()); }}"
+    )
+    .unwrap();
+    writeln!(out, "        let items = query.all().await?;").unwrap();
+    writeln!(out, "        let mut rows_affected = 0u64;").unwrap();
+    writeln!(out, "        for item in items {{").unwrap();
+    let primary_value = sea_orm_reusable_value_expr(primary_ty, &format!("item.{primary_ident}"));
+    writeln!(
+        out,
+        "            let result = self.repo.delete_one({primary_value}).exec().await?;"
+    )
+    .unwrap();
+    writeln!(out, "            rows_affected += result.rows_affected;").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        Ok(rows_affected)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -3477,6 +3664,189 @@ fn render_toasty_delete_builder(out: &mut String, pascal: &str, primary: &str, p
     writeln!(out).unwrap();
 }
 
+fn render_toasty_update_many_builder(
+    out: &mut String,
+    model: &ModelSpec,
+    pascal: &str,
+    primary: &str,
+    _primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "pub struct {pascal}UpdateMany<'a> {{").unwrap();
+    writeln!(out, "    db: &'a mut dyn toasty::Executor,").unwrap();
+    writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        let field_ident = model_field_ident(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(out, "    {field_ident}: Option<Option<{inner_ty}>>,").unwrap();
+        } else {
+            writeln!(out, "    {field_ident}: Option<{}>,", field.ty).unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl<'a> {pascal}UpdateMany<'a> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(db: &'a mut dyn toasty::Executor) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    writeln!(out, "            db,").unwrap();
+    writeln!(out, "            predicates: Vec::new(),").unwrap();
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        writeln!(out, "            {}: None,", model_field_ident(field)).unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.predicates.push(predicate);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        let field_ident = model_field_ident(field);
+        let setter = create_setter_name(field);
+        if let Some(inner_ty) = optional_inner_type(&field.ty) {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: Option<{inner_ty}>) -> Self {{"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "    pub fn {setter}(mut self, value: {}) -> Self {{",
+                field.ty
+            )
+            .unwrap();
+        }
+        writeln!(out, "        self.{field_ident} = Some(value);").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    writeln!(
+        out,
+        "    pub async fn save(self) -> toasty::Result<Vec<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let items = {{").unwrap();
+    writeln!(
+        out,
+        "            let mut query = {pascal}Repository::query(&mut *self.db);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            for predicate in &self.predicates {{ query = query.where_(predicate.clone()); }}"
+    )
+    .unwrap();
+    writeln!(out, "            query.all().await?").unwrap();
+    writeln!(out, "        }};").unwrap();
+    writeln!(
+        out,
+        "        let mut updated = Vec::with_capacity(items.len());"
+    )
+    .unwrap();
+    writeln!(out, "        for mut model in items {{").unwrap();
+    for field in model.fields.iter().filter(|field| field.name != primary) {
+        let field_ident = model_field_ident(field);
+        writeln!(
+            out,
+            "            if let Some(value) = self.{field_ident}.as_ref() {{ model.{field_ident} = value.clone(); }}"
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "            updated.push({pascal}Repository::update(&mut *self.db, model).await?);"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        Ok(updated)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_delete_many_builder(
+    out: &mut String,
+    pascal: &str,
+    _primary: &str,
+    _primary_ty: &str,
+) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "pub struct {pascal}DeleteMany<'a> {{").unwrap();
+    writeln!(out, "    db: &'a mut dyn toasty::Executor,").unwrap();
+    writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "impl<'a> {pascal}DeleteMany<'a> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(db: &'a mut dyn toasty::Executor) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{ db, predicates: Vec::new() }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.predicates.push(predicate);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub async fn exec(self) -> toasty::Result<u64> {{").unwrap();
+    writeln!(
+        out,
+        "        let mut count_query = {pascal}Repository::query(&mut *self.db);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        for predicate in &self.predicates {{ count_query = count_query.where_(predicate.clone()); }}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let rows_affected = count_query.count().await?;"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = {pascal}Repository::query(&mut *self.db);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        for predicate in &self.predicates {{ query = query.where_(predicate.clone()); }}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        query.build_filter_query().delete().exec(&mut *self.db).await?;"
+    )
+    .unwrap();
+    writeln!(out, "        Ok(rows_affected)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
 fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal: &str) {
     use std::fmt::Write as _;
 
@@ -3979,6 +4349,8 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     render_toasty_create_builder(&mut out, model, &pascal);
     render_toasty_update_builder(&mut out, model, &pascal, primary, &primary_ty);
     render_toasty_delete_builder(&mut out, &pascal, primary, &primary_ty);
+    render_toasty_update_many_builder(&mut out, model, &pascal, primary, &primary_ty);
+    render_toasty_delete_many_builder(&mut out, &pascal, primary, &primary_ty);
     render_like_pattern_helpers(&mut out, model);
     render_toasty_model_query_method(&mut out, &pascal);
     writeln!(&mut out, "pub struct {}Repository;", pascal).unwrap();
@@ -4010,6 +4382,22 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     )
     .unwrap();
     writeln!(&mut out, "        {pascal}Delete::new(db, {primary_ident})").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn update_many(db: &mut dyn toasty::Executor) -> {pascal}UpdateMany<'_> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        {pascal}UpdateMany::new(db)").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn delete_many(db: &mut dyn toasty::Executor) -> {pascal}DeleteMany<'_> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        {pascal}DeleteMany::new(db)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_toasty_transaction_method(&mut out);
@@ -7505,9 +7893,13 @@ mod tests {
         assert!(rendered.contains("pub struct UserCreate"));
         assert!(rendered.contains("pub struct UserUpdate"));
         assert!(rendered.contains("pub struct UserDelete"));
+        assert!(rendered.contains("pub struct UserUpdateMany"));
+        assert!(rendered.contains("pub struct UserDeleteMany"));
         assert!(rendered.contains("pub fn create(&self) -> UserCreate<'_, 'a>"));
         assert!(rendered.contains("pub fn update_one(&self, id: i64) -> UserUpdate<'_, 'a>"));
         assert!(rendered.contains("pub fn delete_one(&self, id: i64) -> UserDelete<'_, 'a>"));
+        assert!(rendered.contains("pub fn update_many(&self) -> UserUpdateMany<'_, 'a>"));
+        assert!(rendered.contains("pub fn delete_many(&self) -> UserDeleteMany<'_, 'a>"));
         assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
         assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
         assert!(rendered.contains("let active = ActiveModel {"));
@@ -7519,6 +7911,12 @@ mod tests {
         assert!(rendered.contains("id: Set(self.id),"));
         assert!(rendered.contains("if let Some(value) = self.name { active.name = Set(value); }"));
         assert!(rendered.contains("self.repo.delete_by_id(self.id).await"));
+        assert!(rendered.contains(
+            "for predicate in &self.predicates { query = query.where_(predicate.clone()); }"
+        ));
+        assert!(rendered.contains("let mut update = self.repo.update_one(item.id);"));
+        assert!(rendered.contains("updated.push(update.save().await?);"));
+        assert!(rendered.contains("let result = self.repo.delete_one(item.id).exec().await?;"));
         assert!(rendered.contains("pub fn query(&self) -> UserQuery<'_, 'a>"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
@@ -7622,6 +8020,8 @@ mod tests {
         assert!(rendered.contains("pub struct UserCreate"));
         assert!(rendered.contains("pub struct UserUpdate"));
         assert!(rendered.contains("pub struct UserDelete"));
+        assert!(rendered.contains("pub struct UserUpdateMany"));
+        assert!(rendered.contains("pub struct UserDeleteMany"));
         assert!(rendered.contains("pub fn create(db: &mut dyn toasty::Executor) -> UserCreate<'_>"));
         assert!(rendered.contains(
             "pub fn update_one(db: &mut dyn toasty::Executor, id: u64) -> UserUpdate<'_>"
@@ -7629,6 +8029,10 @@ mod tests {
         assert!(rendered.contains(
             "pub fn delete_one(db: &mut dyn toasty::Executor, id: u64) -> UserDelete<'_>"
         ));
+        assert!(rendered
+            .contains("pub fn update_many(db: &mut dyn toasty::Executor) -> UserUpdateMany<'_>"));
+        assert!(rendered
+            .contains("pub fn delete_many(db: &mut dyn toasty::Executor) -> UserDeleteMany<'_>"));
         assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
         assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
         assert!(rendered.contains(
@@ -7638,6 +8042,16 @@ mod tests {
         assert!(rendered.contains("let mut model = User::get_by_id(self.db, &self.id).await?;"));
         assert!(rendered.contains("if let Some(value) = self.name { model.name = value; }"));
         assert!(rendered.contains("UserRepository::delete_by_id(self.db, &self.id).await"));
+        assert!(rendered.contains("let mut query = UserRepository::query(&mut *self.db);"));
+        assert!(rendered.contains(
+            "for predicate in &self.predicates { query = query.where_(predicate.clone()); }"
+        ));
+        assert!(
+            rendered.contains("updated.push(UserRepository::update(&mut *self.db, model).await?);")
+        );
+        assert!(
+            rendered.contains("query.build_filter_query().delete().exec(&mut *self.db).await?;")
+        );
         assert!(rendered.contains("pub fn query(db: &mut dyn toasty::Executor) -> UserQuery<'_>"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
@@ -7907,7 +8321,7 @@ impl ServiceContext {
         assert!(mod_rs.contains("pub mod client;"));
         assert!(mod_rs.contains("pub use client::ModelClient;"));
         assert!(mod_rs.contains(
-            "pub use user::{User, UserCreate, UserDelete, UserOrder, UserPage, UserPredicate, UserQuery, UserRepository, UserUpdate};"
+            "pub use user::{User, UserCreate, UserDelete, UserDeleteMany, UserOrder, UserPage, UserPredicate, UserQuery, UserRepository, UserUpdate, UserUpdateMany};"
         ));
         assert!(mod_rs.contains("pub mod user_fields;"));
         assert!(mod_rs.contains("pub use user_fields::{UserField, USER_TABLE};"));
