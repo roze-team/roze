@@ -767,10 +767,10 @@ fn render_model_mod(models: &[ModelSpec], orm: ModelOrm) -> String {
         ));
         match orm {
             ModelOrm::SeaOrm => out.push_str(&format!(
-                "pub use {module}::{{{pascal}Page, {pascal}Query, {pascal}Repository, {pascal}SortField, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
+                "pub use {module}::{{{pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, ActiveModel as {pascal}ActiveModel, Entity as {pascal}Entity, Model as {pascal}Model}};\n"
             )),
             ModelOrm::Toasty => out.push_str(&format!(
-                "pub use {module}::{{{pascal}, {pascal}Page, {pascal}Query, {pascal}Repository, {pascal}SortField}};\n"
+                "pub use {module}::{{{pascal}, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository}};\n"
             )),
         }
     }
@@ -932,14 +932,6 @@ fn model_field_ident_by_name(name: &str) -> String {
     rust_identifier(name)
 }
 
-fn query_field_ident(field: &ModelField) -> String {
-    model_field_ident(field)
-}
-
-fn query_field_suffix_ident(field: &ModelField, suffix: &str) -> String {
-    rust_identifier(&format!("{}_{}", field.name, suffix))
-}
-
 fn render_mongo_model_mod(models: &[ModelSpec]) -> String {
     let mut out = String::from("#![allow(dead_code, unused_imports)]\n\n");
     for model in models {
@@ -980,7 +972,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{sea_query::Expr, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, Select, TransactionError, TransactionTrait, UpdateResult}};"
+        "use sea_orm::{{sea_query::{{Condition, Expr}}, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, TransactionError, TransactionTrait, UpdateResult}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -1040,7 +1032,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "impl ActiveModelBehavior for ActiveModel {{}}").unwrap();
     writeln!(&mut out).unwrap();
-    render_query_types(&mut out, model, &pascal, "Model", false);
+    render_sea_orm_query_types(&mut out, model, &pascal);
     render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
@@ -1077,21 +1069,6 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_sea_orm_scope_methods(&mut out, model);
-    writeln!(
-        &mut out,
-        "    pub async fn count(&self) -> anyhow::Result<u64> {{"
-    )
-    .unwrap();
-    writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
-    if model.soft_delete.is_some() {
-        writeln!(&mut out, "        let mut select = Entity::find();").unwrap();
-        writeln!(&mut out, "        select = self.apply_live_scope(select);").unwrap();
-    } else {
-        writeln!(&mut out, "        let select = Entity::find();").unwrap();
-    }
-    writeln!(&mut out, "        Ok(select.count(db).await?)").unwrap();
-    writeln!(&mut out, "    }}").unwrap();
-    writeln!(&mut out).unwrap();
     render_sea_orm_query_methods(&mut out, model, &pascal, primary, &primary_ty);
     render_sea_orm_index_methods(&mut out, model);
     writeln!(
@@ -1513,130 +1490,6 @@ fn render_sea_orm_transaction_method(out: &mut String) {
     writeln!(out).unwrap();
 }
 
-fn render_query_types(
-    out: &mut String,
-    model: &ModelSpec,
-    pascal: &str,
-    item_ty: &str,
-    include_icontains: bool,
-) {
-    use std::fmt::Write as _;
-    writeln!(
-        out,
-        "#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]"
-    )
-    .unwrap();
-    writeln!(out, "pub enum {pascal}SortField {{").unwrap();
-    for field in sea_orm_filter_fields(model) {
-        writeln!(out, "    {},", to_pascal_case(&field.name)).unwrap();
-    }
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "#[derive(Clone, Debug, Default, Serialize, Deserialize)]"
-    )
-    .unwrap();
-    writeln!(out, "pub struct {pascal}Query {{").unwrap();
-    writeln!(out, "    pub page: u64,").unwrap();
-    writeln!(out, "    pub page_size: u64,").unwrap();
-    writeln!(out, "    pub sort_by: Option<{pascal}SortField>,").unwrap();
-    writeln!(out, "    pub sort_desc: bool,").unwrap();
-    if model.soft_delete.is_some() {
-        writeln!(out, "    pub include_deleted: bool,").unwrap();
-    }
-    for field in model_query_fields(model) {
-        if let Some(inner_ty) = optional_inner_type(&field.ty) {
-            writeln!(
-                out,
-                "    pub {}: Option<{}>,",
-                query_field_ident(field),
-                inner_ty
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    pub {}: bool,",
-                query_field_suffix_ident(field, "is_null")
-            )
-            .unwrap();
-            if inner_ty == "String" {
-                writeln!(
-                    out,
-                    "    pub {}: Option<String>,",
-                    query_field_suffix_ident(field, "contains")
-                )
-                .unwrap();
-                if include_icontains {
-                    writeln!(
-                        out,
-                        "    pub {}: Option<String>,",
-                        query_field_suffix_ident(field, "icontains")
-                    )
-                    .unwrap();
-                }
-            }
-        } else {
-            writeln!(
-                out,
-                "    pub {}: Option<{}>,",
-                query_field_ident(field),
-                field.ty
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    pub {}: Vec<{}>,",
-                query_field_suffix_ident(field, "in"),
-                field.ty
-            )
-            .unwrap();
-            if is_numeric_type(&field.ty) {
-                writeln!(
-                    out,
-                    "    pub {}: Option<{}>,",
-                    query_field_suffix_ident(field, "min"),
-                    field.ty
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "    pub {}: Option<{}>,",
-                    query_field_suffix_ident(field, "max"),
-                    field.ty
-                )
-                .unwrap();
-            }
-            if field.ty == "String" {
-                writeln!(
-                    out,
-                    "    pub {}: Option<String>,",
-                    query_field_suffix_ident(field, "contains")
-                )
-                .unwrap();
-                if include_icontains {
-                    writeln!(
-                        out,
-                        "    pub {}: Option<String>,",
-                        query_field_suffix_ident(field, "icontains")
-                    )
-                    .unwrap();
-                }
-            }
-        }
-    }
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
-    writeln!(out, "pub struct {pascal}Page {{").unwrap();
-    writeln!(out, "    pub items: Vec<{item_ty}>,").unwrap();
-    writeln!(out, "    pub total: u64,").unwrap();
-    writeln!(out, "    pub page: u64,").unwrap();
-    writeln!(out, "    pub page_size: u64,").unwrap();
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
-}
-
 fn render_like_pattern_helpers(out: &mut String, model: &ModelSpec) {
     if !model.fields.iter().any(is_string_filter_type) {
         return;
@@ -1693,6 +1546,157 @@ fn render_sea_orm_scope_methods(out: &mut String, model: &ModelSpec) {
     writeln!(out).unwrap();
 }
 
+fn sea_orm_value_from_ref(field: &ModelField, value: &str) -> String {
+    if is_copy_filter_type(&field.ty) {
+        format!("*{value}")
+    } else {
+        format!("{value}.clone()")
+    }
+}
+
+fn sea_orm_option_value_from_ref(field: &ModelField, value: &str) -> String {
+    let Some(inner_ty) = optional_inner_type(&field.ty) else {
+        return sea_orm_value_from_ref(field, value);
+    };
+    if is_copy_filter_type(inner_ty) {
+        format!("*{value}")
+    } else {
+        format!("{value}.clone()")
+    }
+}
+
+fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]"
+    )
+    .unwrap();
+    writeln!(out, "pub enum {pascal}Order {{").unwrap();
+    for field in sea_orm_filter_fields(model) {
+        let variant = to_pascal_case(&field.name);
+        writeln!(out, "    {variant}Asc,").unwrap();
+        writeln!(out, "    {variant}Desc,").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
+    writeln!(out, "pub enum {pascal}Predicate {{").unwrap();
+    for field in model_query_fields(model) {
+        let field_ty = &field.ty;
+        if let Some(inner_ty) = optional_inner_type(field_ty) {
+            writeln!(
+                out,
+                "    {}({inner_ty}),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}({inner_ty}),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(out, "    {},", predicate_variant_name(field, "IsNull")).unwrap();
+            writeln!(out, "    {},", predicate_variant_name(field, "IsNotNull")).unwrap();
+            if inner_ty == "String" {
+                for suffix in ["Contains", "IContains", "StartsWith", "EndsWith"] {
+                    writeln!(
+                        out,
+                        "    {}(String),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+            }
+        } else {
+            writeln!(
+                out,
+                "    {}({field_ty}),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}({field_ty}),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{field_ty}>),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{field_ty}>),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(field_ty) {
+                for suffix in ["Gt", "Gte", "Lt", "Lte"] {
+                    writeln!(
+                        out,
+                        "    {}({field_ty}),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "    {}({field_ty}, {field_ty}),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
+            if field_ty == "String" {
+                for suffix in ["Contains", "IContains", "StartsWith", "EndsWith"] {
+                    writeln!(
+                        out,
+                        "    {}(String),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    writeln!(out, "    And(Vec<{pascal}Predicate>),").unwrap();
+    writeln!(out, "    Or(Vec<{pascal}Predicate>),").unwrap();
+    writeln!(out, "    Not(Box<{pascal}Predicate>),").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    render_toasty_predicate_helpers(out, model, pascal);
+
+    writeln!(out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
+    writeln!(out, "pub struct {pascal}Page {{").unwrap();
+    writeln!(out, "    pub items: Vec<Model>,").unwrap();
+    writeln!(out, "    pub total: u64,").unwrap();
+    writeln!(out, "    pub page: u64,").unwrap();
+    writeln!(out, "    pub page_size: u64,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "pub struct {pascal}Query<'repo, 'ctx> {{").unwrap();
+    writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
+    writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
+    writeln!(out, "    orders: Vec<{pascal}Order>,").unwrap();
+    writeln!(out, "    limit: Option<u64>,").unwrap();
+    writeln!(out, "    offset: Option<u64>,").unwrap();
+    writeln!(out, "    page: Option<(u64, u64)>,").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out, "    include_deleted: bool,").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    render_sea_orm_query_builder_impl(out, model, pascal);
+}
+
 fn render_sea_orm_query_methods(
     out: &mut String,
     model: &ModelSpec,
@@ -1701,95 +1705,457 @@ fn render_sea_orm_query_methods(
     primary_ty: &str,
 ) {
     use std::fmt::Write as _;
+    writeln!(out, "    pub fn query(&self) -> {pascal}Query<'_, 'a> {{").unwrap();
+    writeln!(out, "        {pascal}Query::new(self)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
     writeln!(
         out,
-        "    pub async fn query(&self, req: {pascal}Query) -> anyhow::Result<{pascal}Page> {{"
+        "    pub async fn count(&self) -> anyhow::Result<u64> {{"
     )
     .unwrap();
-    writeln!(out, "        let db = self.read_db()?;").unwrap();
+    writeln!(out, "        self.query().count().await").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
     writeln!(
         out,
-        "        let page = if req.page == 0 {{ 1 }} else {{ req.page }};"
+        "    pub async fn list_page(&self, page: u64, page_size: u64) -> anyhow::Result<{pascal}Page> {{"
     )
     .unwrap();
     writeln!(
         out,
-        "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
+        "        self.query().paginate(page, page_size).page().await"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    if let Some(tenant_field) = tenant_field(model) {
+        writeln!(out).unwrap();
+        let tenant_ident = model_field_ident(tenant_field);
+        let primary_helper = predicate_helper_name(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == primary)
+                .expect("primary field present"),
+            "eq",
+        );
+        let tenant_helper = predicate_helper_name(tenant_field, "eq");
+        writeln!(
+            out,
+            "    pub async fn find_by_{primary}_for_{}(&self, {primary}: {primary_ty}, {}: {}) -> anyhow::Result<Option<Model>> {{",
+            tenant_field.name, tenant_ident, tenant_field.ty
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        self.query().where_({primary_helper}({primary})).where_({tenant_helper}({tenant_ident})).first().await"
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "impl<'repo, 'ctx> {pascal}Query<'repo, 'ctx> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(repo: &'repo {pascal}Repository<'ctx>) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    writeln!(out, "            repo,").unwrap();
+    writeln!(out, "            predicates: Vec::new(),").unwrap();
+    writeln!(out, "            orders: Vec::new(),").unwrap();
+    writeln!(out, "            limit: None,").unwrap();
+    writeln!(out, "            offset: None,").unwrap();
+    writeln!(out, "            page: None,").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out, "            include_deleted: false,").unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.predicates.push(predicate);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn order(mut self, order: {pascal}Order) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.orders.push(order);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn limit(mut self, limit: u64) -> Self {{").unwrap();
+    writeln!(out, "        self.limit = Some(limit);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn offset(mut self, offset: u64) -> Self {{").unwrap();
+    writeln!(out, "        self.offset = Some(offset);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn paginate(mut self, page: u64, page_size: u64) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.page = Some((page, page_size));").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out).unwrap();
+        writeln!(out, "    pub fn with_deleted(mut self) -> Self {{").unwrap();
+        writeln!(out, "        self.include_deleted = true;").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out).unwrap();
+
+    render_sea_orm_predicate_expr(out, model, pascal);
+    render_sea_orm_build_select_methods(out, model, pascal);
+    render_sea_orm_query_execute_methods(out, pascal);
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    fn predicate_condition(predicate: &{pascal}Predicate) -> Condition {{"
+    )
+    .unwrap();
+    writeln!(out, "        match predicate {{").unwrap();
+    for field in model_query_fields(model) {
+        let column = to_pascal_case(&field.name);
+        if optional_inner_type(&field.ty).is_some() {
+            let eq_value = sea_orm_option_value_from_ref(field, "value");
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.eq(Some({eq_value}))),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.ne(Some({eq_value}))),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{} => Condition::all().add(Column::{column}.is_null()),",
+                predicate_variant_name(field, "IsNull")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{} => Condition::all().add(Column::{column}.is_not_null()),",
+                predicate_variant_name(field, "IsNotNull")
+            )
+            .unwrap();
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    predicate_variant_name(field, "Contains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    predicate_variant_name(field, "IContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"{{}}%\", escape_like_pattern(value)))),",
+                    predicate_variant_name(field, "StartsWith")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"%{{}}\", escape_like_pattern(value)))),",
+                    predicate_variant_name(field, "EndsWith")
+                )
+                .unwrap();
+            }
+        } else {
+            let value = sea_orm_value_from_ref(field, "value");
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.eq({value})),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.ne({value})),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => Condition::all().add(Column::{column}.is_in(values.clone())),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => Condition::all().add(Column::{column}.is_not_in(values.clone())),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(&field.ty) {
+                for (suffix, op) in [("Gt", "gt"), ("Gte", "gte"), ("Lt", "lt"), ("Lte", "lte")] {
+                    let value = sea_orm_value_from_ref(field, "value");
+                    writeln!(
+                        out,
+                        "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.{op}({value})),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                let start = sea_orm_value_from_ref(field, "start");
+                let end = sea_orm_value_from_ref(field, "end");
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(start, end) => Condition::all().add(Column::{column}.between({start}, {end})),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    predicate_variant_name(field, "Contains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    predicate_variant_name(field, "IContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"{{}}%\", escape_like_pattern(value)))),",
+                    predicate_variant_name(field, "StartsWith")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"%{{}}\", escape_like_pattern(value)))),",
+                    predicate_variant_name(field, "EndsWith")
+                )
+                .unwrap();
+            }
+        }
+    }
+    writeln!(
+        out,
+        "            {pascal}Predicate::And(predicates) => predicates.iter().fold(Condition::all(), |condition, predicate| condition.add(Self::predicate_condition(predicate))),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            {pascal}Predicate::Or(predicates) => predicates.iter().fold(Condition::any(), |condition, predicate| condition.add(Self::predicate_condition(predicate))),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            {pascal}Predicate::Not(predicate) => Condition::all().add(Self::predicate_condition(predicate)).not(),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_build_select_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    fn build_filter_select(&self) -> Select<Entity> {{"
     )
     .unwrap();
     writeln!(out, "        let mut select = Entity::find();").unwrap();
     if model.soft_delete.is_some() {
         writeln!(
             out,
-            "        if !req.include_deleted {{ select = self.apply_live_scope(select); }}"
+            "        if !self.include_deleted {{ select = self.repo.apply_live_scope(select); }}"
         )
         .unwrap();
     }
-    for field in model_query_fields(model) {
-        let column = to_pascal_case(&field.name);
-        let field_ident = query_field_ident(field);
-        let is_null_ident = query_field_suffix_ident(field, "is_null");
-        let in_ident = query_field_suffix_ident(field, "in");
-        let min_ident = query_field_suffix_ident(field, "min");
-        let max_ident = query_field_suffix_ident(field, "max");
-        let contains_ident = query_field_suffix_ident(field, "contains");
-        if optional_inner_type(&field.ty).is_some() {
-            writeln!(
-                out,
-                "        if let Some(value) = req.{} {{ select = select.filter(Column::{column}.eq(Some(value))); }}",
-                field_ident
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "        if req.{is_null_ident} {{ select = select.filter(Column::{column}.is_null()); }}"
-            )
-            .unwrap();
-            if is_string_filter_type(field) {
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ select = select.filter(Column::{column}.like(contains_like_pattern(value))); }}"
-                )
-                .unwrap();
-            }
-        } else {
-            writeln!(
-                out,
-                "        if let Some(value) = req.{} {{ select = select.filter(Column::{column}.eq(value)); }}",
-                field_ident
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "        if !req.{in_ident}.is_empty() {{ select = select.filter(Column::{column}.is_in(req.{in_ident})); }}"
-            )
-            .unwrap();
-            if is_numeric_type(&field.ty) {
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{min_ident} {{ select = select.filter(Column::{column}.gte(value)); }}"
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{max_ident} {{ select = select.filter(Column::{column}.lte(value)); }}"
-                )
-                .unwrap();
-            }
-            if is_string_filter_type(field) {
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ select = select.filter(Column::{column}.like(contains_like_pattern(value))); }}"
-                )
-                .unwrap();
-            }
-        }
-    }
-    writeln!(out, "        let total = select.clone().count(db).await?;").unwrap();
-    render_sea_orm_sort(out, model, pascal);
     writeln!(
         out,
-        "        let paginator = select.paginate(db, page_size);"
+        "        for predicate in &self.predicates {{ select = select.filter(Self::predicate_condition(predicate)); }}"
+    )
+    .unwrap();
+    writeln!(out, "        select").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    fn apply_order(&self, mut select: Select<Entity>) -> Select<Entity> {{"
+    )
+    .unwrap();
+    writeln!(out, "        for order in &self.orders {{").unwrap();
+    writeln!(out, "            match order {{").unwrap();
+    for field in sea_orm_filter_fields(model) {
+        let variant = to_pascal_case(&field.name);
+        writeln!(
+            out,
+            "                {pascal}Order::{variant}Asc => select = select.order_by_asc(Column::{variant}),"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                {pascal}Order::{variant}Desc => select = select.order_by_desc(Column::{variant}),"
+        )
+        .unwrap();
+    }
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        select").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    fn build_select(&self) -> Select<Entity> {{").unwrap();
+    writeln!(
+        out,
+        "        let mut select = self.apply_order(self.build_filter_select());"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if let Some(limit) = self.limit {{ select = select.limit(limit); }}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if let Some(offset) = self.offset {{ select = select.offset(offset); }}"
+    )
+    .unwrap();
+    writeln!(out, "        select").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_sea_orm_query_execute_methods(out: &mut String, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    pub async fn count(self) -> anyhow::Result<u64> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        Ok(self.build_filter_select().count(db).await?)"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub async fn exists(self) -> anyhow::Result<bool> {{"
+    )
+    .unwrap();
+    writeln!(out, "        Ok(self.count().await? > 0)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub async fn all(self) -> anyhow::Result<Vec<Model>> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(out, "        Ok(self.build_select().all(db).await?)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub async fn first(self) -> anyhow::Result<Option<Model>> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(out, "        Ok(self.build_select().one(db).await?)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub async fn only(mut self) -> anyhow::Result<Model> {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.limit = Some(2);").unwrap();
+    writeln!(out, "        let mut items = self.all().await?;").unwrap();
+    writeln!(out, "        match items.len() {{").unwrap();
+    writeln!(out, "            1 => Ok(items.remove(0)),").unwrap();
+    writeln!(
+        out,
+        "            0 => anyhow::bail!(\"expected exactly one {pascal} row, found none\"),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            _ => anyhow::bail!(\"expected exactly one {pascal} row, found multiple\"),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub async fn page(self) -> anyhow::Result<{pascal}Page> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let (page, page_size) = self.page.unwrap_or((1, 20));"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page = if page == 0 {{ 1 }} else {{ page }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page_size = if page_size == 0 {{ 20 }} else {{ page_size.min(500) }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let total = self.build_filter_select().count(db).await?;"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let paginator = self.build_select().paginate(db, page_size);"
     )
     .unwrap();
     writeln!(
@@ -1803,75 +2169,6 @@ fn render_sea_orm_query_methods(
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "    pub async fn list_page(&self, page: u64, page_size: u64) -> anyhow::Result<{pascal}Page> {{"
-    )
-    .unwrap();
-    if model.soft_delete.is_some() {
-        writeln!(
-            out,
-            "        self.query({pascal}Query {{ page, page_size, include_deleted: false, ..Default::default() }}).await"
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "        self.query({pascal}Query {{ page, page_size, ..Default::default() }}).await"
-        )
-        .unwrap();
-    }
-    writeln!(out, "    }}").unwrap();
-    if let Some(tenant_field) = tenant_field(model) {
-        writeln!(out).unwrap();
-        let tenant_column = to_pascal_case(&tenant_field.name);
-        let primary_column = to_pascal_case(primary);
-        let tenant_ident = model_field_ident(tenant_field);
-        writeln!(
-            out,
-            "    pub async fn find_by_{primary}_for_{}(&self, {primary}: {primary_ty}, {}: {}) -> anyhow::Result<Option<Model>> {{",
-            tenant_field.name, tenant_ident, tenant_field.ty
-        )
-        .unwrap();
-        writeln!(out, "        let db = self.read_db()?;").unwrap();
-        writeln!(
-            out,
-            "        let mut select = Entity::find().filter(Column::{primary_column}.eq({primary})).filter(Column::{tenant_column}.eq({}));",
-            tenant_ident
-        )
-        .unwrap();
-        if model.soft_delete.is_some() {
-            writeln!(out, "        select = self.apply_live_scope(select);").unwrap();
-        }
-        writeln!(out, "        Ok(select.one(db).await?)").unwrap();
-        writeln!(out, "    }}").unwrap();
-    }
-    writeln!(out).unwrap();
-}
-
-fn render_sea_orm_sort(out: &mut String, model: &ModelSpec, pascal: &str) {
-    use std::fmt::Write as _;
-    let fields = sea_orm_filter_fields(model);
-    if fields.is_empty() {
-        return;
-    }
-    writeln!(out, "        match req.sort_by {{").unwrap();
-    for field in fields {
-        let variant = to_pascal_case(&field.name);
-        writeln!(
-            out,
-            "            Some({pascal}SortField::{variant}) if req.sort_desc => select = select.order_by_desc(Column::{variant}),"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "            Some({pascal}SortField::{variant}) => select = select.order_by_asc(Column::{variant}),"
-        )
-        .unwrap();
-    }
-    writeln!(out, "            None => {{}}").unwrap();
-    writeln!(out, "        }}").unwrap();
 }
 
 fn render_sea_orm_index_methods(out: &mut String, model: &ModelSpec) {
@@ -1886,12 +2183,12 @@ fn render_sea_orm_index_methods(out: &mut String, model: &ModelSpec) {
             .map(|field| format!("{}: {}", model_field_ident(field), field.ty))
             .collect::<Vec<_>>()
             .join(", ");
-        let filters = fields
+        let predicates = fields
             .iter()
             .map(|field| {
                 format!(
-                    ".filter(Column::{}.eq({}))",
-                    to_pascal_case(&field.name),
+                    ".where_({}({}))",
+                    predicate_helper_name(field, "eq"),
                     model_field_ident(field)
                 )
             })
@@ -1903,12 +2200,7 @@ fn render_sea_orm_index_methods(out: &mut String, model: &ModelSpec) {
                 "    pub async fn find_by_{suffix}(&self, {args}) -> anyhow::Result<Option<Model>> {{"
             )
             .unwrap();
-            writeln!(out, "        let db = self.read_db()?;").unwrap();
-            writeln!(out, "        let mut select = Entity::find(){filters};").unwrap();
-            if model.soft_delete.is_some() {
-                writeln!(out, "        select = self.apply_live_scope(select);").unwrap();
-            }
-            writeln!(out, "        Ok(select.one(db).await?)").unwrap();
+            writeln!(out, "        self.query(){predicates}.first().await").unwrap();
             writeln!(out, "    }}").unwrap();
         } else {
             writeln!(
@@ -1916,12 +2208,7 @@ fn render_sea_orm_index_methods(out: &mut String, model: &ModelSpec) {
                 "    pub async fn list_by_{suffix}(&self, {args}) -> anyhow::Result<Vec<Model>> {{"
             )
             .unwrap();
-            writeln!(out, "        let db = self.read_db()?;").unwrap();
-            writeln!(out, "        let mut select = Entity::find(){filters};").unwrap();
-            if model.soft_delete.is_some() {
-                writeln!(out, "        select = self.apply_live_scope(select);").unwrap();
-            }
-            writeln!(out, "        Ok(select.all(db).await?)").unwrap();
+            writeln!(out, "        self.query(){predicates}.all().await").unwrap();
             writeln!(out, "    }}").unwrap();
         }
     }
@@ -2133,6 +2420,776 @@ fn index_method_suffix(index: &ModelIndex) -> String {
     index.fields.join("_and_")
 }
 
+fn predicate_variant_name(field: &ModelField, suffix: &str) -> String {
+    format!("{}{}", to_pascal_case(&field.name), suffix)
+}
+
+fn predicate_helper_name(field: &ModelField, suffix: &str) -> String {
+    rust_identifier(&format!("{}_{}", field.name, suffix))
+}
+
+fn toasty_value_from_ref(field: &ModelField, value: &str) -> String {
+    if is_copy_filter_type(&field.ty) {
+        format!("*{value}")
+    } else {
+        format!("{value}.clone()")
+    }
+}
+
+fn toasty_option_value_from_ref(field: &ModelField, value: &str) -> String {
+    let Some(inner_ty) = optional_inner_type(&field.ty) else {
+        return toasty_value_from_ref(field, value);
+    };
+    if is_copy_filter_type(inner_ty) {
+        format!("*{value}")
+    } else {
+        format!("{value}.clone()")
+    }
+}
+
+fn render_toasty_query_types(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "#[derive(Clone, Copy, Debug, PartialEq, Eq)]").unwrap();
+    writeln!(out, "pub enum {pascal}Order {{").unwrap();
+    for field in sea_orm_filter_fields(model) {
+        let variant = to_pascal_case(&field.name);
+        writeln!(out, "    {variant}Asc,").unwrap();
+        writeln!(out, "    {variant}Desc,").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "#[derive(Clone, Debug)]").unwrap();
+    writeln!(out, "pub enum {pascal}Predicate {{").unwrap();
+    for field in model_query_fields(model) {
+        let field_ty = &field.ty;
+        if let Some(inner_ty) = optional_inner_type(field_ty) {
+            writeln!(
+                out,
+                "    {}({inner_ty}),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}({inner_ty}),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(out, "    {},", predicate_variant_name(field, "IsNull")).unwrap();
+            writeln!(out, "    {},", predicate_variant_name(field, "IsNotNull")).unwrap();
+            if inner_ty == "String" {
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "Contains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "IContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "StartsWith")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "EndsWith")
+                )
+                .unwrap();
+            }
+        } else {
+            writeln!(
+                out,
+                "    {}({field_ty}),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}({field_ty}),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{field_ty}>),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    {}(Vec<{field_ty}>),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(field_ty) {
+                for suffix in ["Gt", "Gte", "Lt", "Lte"] {
+                    writeln!(
+                        out,
+                        "    {}({field_ty}),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "    {}({field_ty}, {field_ty}),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
+            if field_ty == "String" {
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "Contains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "IContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "StartsWith")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "    {}(String),",
+                    predicate_variant_name(field, "EndsWith")
+                )
+                .unwrap();
+            }
+        }
+    }
+    writeln!(out, "    And(Vec<{pascal}Predicate>),").unwrap();
+    writeln!(out, "    Or(Vec<{pascal}Predicate>),").unwrap();
+    writeln!(out, "    Not(Box<{pascal}Predicate>),").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    render_toasty_predicate_helpers(out, model, pascal);
+
+    writeln!(out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
+    writeln!(out, "pub struct {pascal}Page {{").unwrap();
+    writeln!(out, "    pub items: Vec<{pascal}>,").unwrap();
+    writeln!(out, "    pub total: u64,").unwrap();
+    writeln!(out, "    pub page: u64,").unwrap();
+    writeln!(out, "    pub page_size: u64,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "pub struct {pascal}Query<'a> {{").unwrap();
+    writeln!(out, "    db: &'a mut dyn toasty::Executor,").unwrap();
+    writeln!(out, "    predicates: Vec<{pascal}Predicate>,").unwrap();
+    writeln!(out, "    orders: Vec<{pascal}Order>,").unwrap();
+    writeln!(out, "    limit: Option<usize>,").unwrap();
+    writeln!(out, "    offset: Option<usize>,").unwrap();
+    writeln!(out, "    page: Option<(u64, u64)>,").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out, "    include_deleted: bool,").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    render_toasty_query_builder_impl(out, model, pascal);
+}
+
+fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    for field in model_query_fields(model) {
+        let field_ty = &field.ty;
+        if let Some(inner_ty) = optional_inner_type(field_ty) {
+            let eq = predicate_helper_name(field, "eq");
+            let ne = predicate_helper_name(field, "ne");
+            writeln!(
+                out,
+                "pub fn {eq}(value: {inner_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(value) }}",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "pub fn {ne}(value: {inner_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(value) }}",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "pub fn {}() -> {pascal}Predicate {{ {pascal}Predicate::{} }}",
+                predicate_helper_name(field, "is_null"),
+                predicate_variant_name(field, "IsNull")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "pub fn {}() -> {pascal}Predicate {{ {pascal}Predicate::{} }}",
+                predicate_helper_name(field, "is_not_null"),
+                predicate_variant_name(field, "IsNotNull")
+            )
+            .unwrap();
+            if inner_ty == "String" {
+                for (suffix, helper_suffix) in [
+                    ("Contains", "contains"),
+                    ("IContains", "icontains"),
+                    ("StartsWith", "starts_with"),
+                    ("EndsWith", "ends_with"),
+                ] {
+                    writeln!(
+                        out,
+                        "pub fn {}(value: impl Into<String>) -> {pascal}Predicate {{ {pascal}Predicate::{}(value.into()) }}",
+                        predicate_helper_name(field, helper_suffix),
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+            }
+        } else {
+            for (suffix, helper_suffix) in [("Eq", "eq"), ("Ne", "ne")] {
+                writeln!(
+                    out,
+                    "pub fn {}(value: {field_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(value) }}",
+                    predicate_helper_name(field, helper_suffix),
+                    predicate_variant_name(field, suffix)
+                )
+                .unwrap();
+            }
+            for (suffix, helper_suffix) in [("In", "in"), ("NotIn", "not_in")] {
+                writeln!(
+                    out,
+                    "pub fn {}(values: Vec<{field_ty}>) -> {pascal}Predicate {{ {pascal}Predicate::{}(values) }}",
+                    predicate_helper_name(field, helper_suffix),
+                    predicate_variant_name(field, suffix)
+                )
+                .unwrap();
+            }
+            if is_numeric_type(field_ty) {
+                for (suffix, helper_suffix) in
+                    [("Gt", "gt"), ("Gte", "gte"), ("Lt", "lt"), ("Lte", "lte")]
+                {
+                    writeln!(
+                        out,
+                        "pub fn {}(value: {field_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(value) }}",
+                        predicate_helper_name(field, helper_suffix),
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "pub fn {}(start: {field_ty}, end: {field_ty}) -> {pascal}Predicate {{ {pascal}Predicate::{}(start, end) }}",
+                    predicate_helper_name(field, "between"),
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
+            if field_ty == "String" {
+                for (suffix, helper_suffix) in [
+                    ("Contains", "contains"),
+                    ("IContains", "icontains"),
+                    ("StartsWith", "starts_with"),
+                    ("EndsWith", "ends_with"),
+                ] {
+                    writeln!(
+                        out,
+                        "pub fn {}(value: impl Into<String>) -> {pascal}Predicate {{ {pascal}Predicate::{}(value.into()) }}",
+                        predicate_helper_name(field, helper_suffix),
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    writeln!(
+        out,
+        "pub fn and(predicates: Vec<{pascal}Predicate>) -> {pascal}Predicate {{ {pascal}Predicate::And(predicates) }}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub fn or(predicates: Vec<{pascal}Predicate>) -> {pascal}Predicate {{ {pascal}Predicate::Or(predicates) }}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub fn not(predicate: {pascal}Predicate) -> {pascal}Predicate {{ {pascal}Predicate::Not(Box::new(predicate)) }}"
+    )
+    .unwrap();
+    for field in sea_orm_filter_fields(model) {
+        let helper = model_field_ident(field);
+        let variant = to_pascal_case(&field.name);
+        writeln!(
+            out,
+            "pub fn {helper}_asc() -> {pascal}Order {{ {pascal}Order::{variant}Asc }}"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub fn {helper}_desc() -> {pascal}Order {{ {pascal}Order::{variant}Desc }}"
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_model_query_method(out: &mut String, pascal: &str) {
+    use std::fmt::Write as _;
+    writeln!(out, "impl {pascal} {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn query(db: &mut dyn toasty::Executor) -> {pascal}Query<'_> {{"
+    )
+    .unwrap();
+    writeln!(out, "        {pascal}Query::new(db)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "impl<'a> {pascal}Query<'a> {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn new(db: &'a mut dyn toasty::Executor) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    writeln!(out, "            db,").unwrap();
+    writeln!(out, "            predicates: Vec::new(),").unwrap();
+    writeln!(out, "            orders: Vec::new(),").unwrap();
+    writeln!(out, "            limit: None,").unwrap();
+    writeln!(out, "            offset: None,").unwrap();
+    writeln!(out, "            page: None,").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out, "            include_deleted: false,").unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.predicates.push(predicate);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn order(mut self, order: {pascal}Order) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.orders.push(order);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn limit(mut self, limit: usize) -> Self {{").unwrap();
+    writeln!(out, "        self.limit = Some(limit);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn offset(mut self, offset: usize) -> Self {{").unwrap();
+    writeln!(out, "        self.offset = Some(offset);").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn paginate(mut self, page: u64, page_size: u64) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.page = Some((page, page_size));").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    if model.soft_delete.is_some() {
+        writeln!(out).unwrap();
+        writeln!(out, "    pub fn with_deleted(mut self) -> Self {{").unwrap();
+        writeln!(out, "        self.include_deleted = true;").unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
+    writeln!(out).unwrap();
+    render_toasty_predicate_expr(out, model, pascal);
+    render_toasty_build_query_methods(out, model, pascal);
+    render_toasty_query_execute_methods(out, pascal);
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    fn predicate_expr(predicate: &{pascal}Predicate) -> toasty::stmt::Expr<bool> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match predicate {{").unwrap();
+    for field in model_query_fields(model) {
+        let field_ident = model_field_ident(field);
+        if optional_inner_type(&field.ty).is_some() {
+            let eq_value = toasty_option_value_from_ref(field, "value");
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().eq(Some({eq_value})),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ne(Some({eq_value})),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{} => {pascal}::fields().{field_ident}().is_none(),",
+                predicate_variant_name(field, "IsNull")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{} => {pascal}::fields().{field_ident}().is_some(),",
+                predicate_variant_name(field, "IsNotNull")
+            )
+            .unwrap();
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(contains_like_pattern(value)),",
+                    predicate_variant_name(field, "Contains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(contains_like_pattern(value)),",
+                    predicate_variant_name(field, "IContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(format!(\"{{}}%\", escape_like_pattern(value))),",
+                    predicate_variant_name(field, "StartsWith")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(format!(\"%{{}}\", escape_like_pattern(value))),",
+                    predicate_variant_name(field, "EndsWith")
+                )
+                .unwrap();
+            }
+        } else {
+            let value = toasty_value_from_ref(field, "value");
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().eq({value}),",
+                predicate_variant_name(field, "Eq")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ne({value}),",
+                predicate_variant_name(field, "Ne")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => {pascal}::fields().{field_ident}().in_list(values.clone()),",
+                predicate_variant_name(field, "In")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            {pascal}Predicate::{}(values) => {pascal}::fields().{field_ident}().in_list(values.clone()).not(),",
+                predicate_variant_name(field, "NotIn")
+            )
+            .unwrap();
+            if is_numeric_type(&field.ty) {
+                for (suffix, op) in [("Gt", "gt"), ("Gte", "ge"), ("Lt", "lt"), ("Lte", "le")] {
+                    let value = toasty_value_from_ref(field, "value");
+                    writeln!(
+                        out,
+                        "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().{op}({value}),",
+                        predicate_variant_name(field, suffix)
+                    )
+                    .unwrap();
+                }
+                let start = toasty_value_from_ref(field, "start");
+                let end = toasty_value_from_ref(field, "end");
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(start, end) => {pascal}::fields().{field_ident}().ge({start}).and({pascal}::fields().{field_ident}().le({end})),",
+                    predicate_variant_name(field, "Between")
+                )
+                .unwrap();
+            }
+            if is_string_filter_type(field) {
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(contains_like_pattern(value)),",
+                    predicate_variant_name(field, "Contains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().ilike(contains_like_pattern(value)),",
+                    predicate_variant_name(field, "IContains")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(format!(\"{{}}%\", escape_like_pattern(value))),",
+                    predicate_variant_name(field, "StartsWith")
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "            {pascal}Predicate::{}(value) => {pascal}::fields().{field_ident}().like(format!(\"%{{}}\", escape_like_pattern(value))),",
+                    predicate_variant_name(field, "EndsWith")
+                )
+                .unwrap();
+            }
+        }
+    }
+    writeln!(
+        out,
+        "            {pascal}Predicate::And(predicates) => toasty::stmt::Expr::and_all(predicates.iter().map(Self::predicate_expr)),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            {pascal}Predicate::Or(predicates) => predicates.iter().map(Self::predicate_expr).reduce(|left, right| left.or(right)).unwrap_or_else(|| toasty::stmt::Expr::and_all(std::iter::empty::<toasty::stmt::Expr<bool>>()).not()),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            {pascal}Predicate::Not(predicate) => Self::predicate_expr(predicate).not(),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_build_query_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    fn build_filter_query(&self) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = toasty::stmt::Query::<toasty::stmt::List<{pascal}>>::all();"
+    )
+    .unwrap();
+    if let Some(field) = soft_delete_field(model) {
+        let field_ident = model_field_ident(field);
+        if field.ty == "bool" {
+            writeln!(
+                out,
+                "        if !self.include_deleted {{ query = query.and({pascal}::fields().{field_ident}().eq(false)); }}"
+            )
+            .unwrap();
+        } else if optional_inner_type(&field.ty).is_some() {
+            writeln!(
+                out,
+                "        if !self.include_deleted {{ query = query.and({pascal}::fields().{field_ident}().is_none()); }}"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        out,
+        "        for predicate in &self.predicates {{ query = query.and(Self::predicate_expr(predicate)); }}"
+    )
+    .unwrap();
+    writeln!(out, "        query").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    fn apply_order(&self, mut query: toasty::stmt::Query<toasty::stmt::List<{pascal}>>) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(out, "        for order in &self.orders {{").unwrap();
+    writeln!(out, "            match order {{").unwrap();
+    for field in sea_orm_filter_fields(model) {
+        let variant = to_pascal_case(&field.name);
+        let field_ident = model_field_ident(field);
+        writeln!(
+            out,
+            "                {pascal}Order::{variant}Asc => {{ query.order_by({pascal}::fields().{field_ident}().asc()); }}"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                {pascal}Order::{variant}Desc => {{ query.order_by({pascal}::fields().{field_ident}().desc()); }}"
+        )
+        .unwrap();
+    }
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        query").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    fn build_query(&self) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = self.apply_order(self.build_filter_query());"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if let Some(limit) = self.limit {{ query.limit(limit); }}"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if let Some(offset) = self.offset {{ query.offset(offset); }}"
+    )
+    .unwrap();
+    writeln!(out, "        query").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_toasty_query_execute_methods(out: &mut String, pascal: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(
+        out,
+        "    pub async fn count(self) -> toasty::Result<u64> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let query = self.build_filter_query().count();"
+    )
+    .unwrap();
+    writeln!(out, "        query.exec(self.db).await").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn exists(self) -> toasty::Result<bool> {{"
+    )
+    .unwrap();
+    writeln!(out, "        Ok(!self.limit(1).all().await?.is_empty())").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn all(self) -> toasty::Result<Vec<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(out, "        let query = self.build_query();").unwrap();
+    writeln!(out, "        query.exec(self.db).await").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn first(self) -> toasty::Result<Option<{pascal}>> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        Ok(self.limit(1).all().await?.into_iter().next())"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn only(self) -> toasty::Result<{pascal}> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut items = self.limit(2).all().await?.into_iter();"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let Some(item) = items.next() else {{ return Err(toasty::Error::record_not_found(\"{pascal} query returned no records\")); }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if items.next().is_some() {{ return Err(toasty::Error::invalid_record_count(\"{pascal} query returned more than one record\")); }}"
+    )
+    .unwrap();
+    writeln!(out, "        Ok(item)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn page(self) -> toasty::Result<{pascal}Page> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let (page, page_size) = self.page.unwrap_or((1, 20));"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page = if page == 0 {{ 1 }} else {{ page }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let page_size = if page_size == 0 {{ 20 }} else {{ page_size.min(500) }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let total = self.build_filter_query().count().exec(self.db).await?;"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut query = self.apply_order(self.build_filter_query());"
+    )
+    .unwrap();
+    writeln!(out, "        query.limit(page_size as usize);").unwrap();
+    writeln!(
+        out,
+        "        query.offset(page.saturating_sub(1).saturating_mul(page_size) as usize);"
+    )
+    .unwrap();
+    writeln!(out, "        let items = query.exec(self.db).await?;").unwrap();
+    writeln!(
+        out,
+        "        Ok({pascal}Page {{ items, total, page, page_size }})"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
 fn render_toasty_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
@@ -2200,8 +3257,9 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
-    render_query_types(&mut out, model, &pascal, &pascal, true);
+    render_toasty_query_types(&mut out, model, &pascal);
     render_like_pattern_helpers(&mut out, model);
+    render_toasty_model_query_method(&mut out, &pascal);
     writeln!(&mut out, "pub struct {}Repository;", pascal).unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "impl {}Repository {{", pascal).unwrap();
@@ -2358,250 +3416,56 @@ fn render_toasty_query_methods(
     use std::fmt::Write as _;
     writeln!(
         out,
-        "    fn build_filter_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
+        "    pub fn query(db: &mut dyn toasty::Executor) -> {pascal}Query<'_> {{"
     )
     .unwrap();
-    writeln!(
-        out,
-        "        let mut query = toasty::stmt::Query::<toasty::stmt::List<{pascal}>>::all();"
-    )
-    .unwrap();
-    if let Some(field) = soft_delete_field(model) {
-        let field_ident = model_field_ident(field);
-        if field.ty == "bool" {
-            writeln!(
-                out,
-                "        if !req.include_deleted {{ query = query.and({pascal}::fields().{}().eq(false)); }}",
-                field_ident
-            )
-            .unwrap();
-        } else if optional_inner_type(&field.ty).is_some() {
-            writeln!(
-                out,
-                "        if !req.include_deleted {{ query = query.and({pascal}::fields().{}().is_none()); }}",
-                field_ident
-            )
-            .unwrap();
-        }
-    }
-    for field in model_query_fields(model) {
-        let field_ident = query_field_ident(field);
-        let is_null_ident = query_field_suffix_ident(field, "is_null");
-        let in_ident = query_field_suffix_ident(field, "in");
-        let min_ident = query_field_suffix_ident(field, "min");
-        let max_ident = query_field_suffix_ident(field, "max");
-        let contains_ident = query_field_suffix_ident(field, "contains");
-        let icontains_ident = query_field_suffix_ident(field, "icontains");
-        if optional_inner_type(&field.ty).is_some() {
-            let value_expr = option_filter_value_expr(field, field_ident.as_str());
-            writeln!(
-                out,
-                "        if let Some(value) = {value_expr} {{ query = query.and({pascal}::fields().{field_ident}().eq(Some(value))); }}"
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "        if req.{is_null_ident} {{ query = query.and({pascal}::fields().{field_ident}().is_none()); }}"
-            )
-            .unwrap();
-            if is_string_filter_type(field) {
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().like(contains_like_pattern(value))); }}"
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{icontains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().ilike(contains_like_pattern(value))); }}"
-                )
-                .unwrap();
-            }
-        } else {
-            let value_expr = option_filter_value_expr(field, field_ident.as_str());
-            writeln!(
-                out,
-                "        if let Some(value) = {value_expr} {{ query = query.and({pascal}::fields().{field_ident}().eq(value)); }}"
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "        if !req.{in_ident}.is_empty() {{ query = query.and({pascal}::fields().{field_ident}().in_list(req.{in_ident}.clone())); }}"
-            )
-            .unwrap();
-            if is_numeric_type(&field.ty) {
-                let min_value_expr = option_filter_value_expr(field, min_ident.as_str());
-                let max_value_expr = option_filter_value_expr(field, max_ident.as_str());
-                writeln!(
-                    out,
-                    "        if let Some(value) = {min_value_expr} {{ query = query.and({pascal}::fields().{field_ident}().ge(value)); }}"
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "        if let Some(value) = {max_value_expr} {{ query = query.and({pascal}::fields().{field_ident}().le(value)); }}"
-                )
-                .unwrap();
-            }
-            if is_string_filter_type(field) {
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{contains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().like(contains_like_pattern(value))); }}"
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "        if let Some(value) = req.{icontains_ident}.as_deref() {{ query = query.and({pascal}::fields().{field_ident}().ilike(contains_like_pattern(value))); }}"
-                )
-                .unwrap();
-            }
-        }
-    }
-    writeln!(out, "        query").unwrap();
+    writeln!(out, "        {pascal}::query(db)").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "    fn apply_sort(mut query: toasty::stmt::Query<toasty::stmt::List<{pascal}>>, req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
-    )
-    .unwrap();
-    render_toasty_sort(out, model, pascal);
-    writeln!(out, "        query").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "    fn build_query(req: &{pascal}Query) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>> {{"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        Self::apply_sort(Self::build_filter_query(req), req)"
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
     writeln!(
         out,
         "    pub async fn count(db: &mut dyn toasty::Executor) -> toasty::Result<u64> {{"
     )
     .unwrap();
-    if model.soft_delete.is_some() {
-        writeln!(
-            out,
-            "        Self::build_filter_query(&{pascal}Query {{ include_deleted: false, ..Default::default() }}).count().exec(db).await"
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "        Self::build_filter_query(&{pascal}Query::default()).count().exec(db).await"
-        )
-        .unwrap();
-    }
+    writeln!(out, "        {pascal}::query(db).count().await").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "    pub async fn query_with_filter<F>(db: &mut dyn toasty::Executor, req: {pascal}Query, apply_filter: F) -> toasty::Result<{pascal}Page>"
-    )
-    .unwrap();
-    writeln!(out, "    where").unwrap();
-    writeln!(
-        out,
-        "        F: Fn(toasty::stmt::Query<toasty::stmt::List<{pascal}>>) -> toasty::stmt::Query<toasty::stmt::List<{pascal}>>,"
-    )
-    .unwrap();
-    writeln!(out, "    {{").unwrap();
-    writeln!(
-        out,
-        "        let page = if req.page == 0 {{ 1 }} else {{ req.page }};"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        let total = apply_filter(Self::build_filter_query(&req)).count().exec(db).await?;"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        let mut query = Self::apply_sort(apply_filter(Self::build_filter_query(&req)), &req);"
-    )
-    .unwrap();
-    writeln!(out, "        query.limit(page_size as usize);").unwrap();
-    writeln!(
-        out,
-        "        query.offset(page.saturating_sub(1).saturating_mul(page_size) as usize);"
-    )
-    .unwrap();
-    writeln!(out, "        let items = query.exec(db).await?;").unwrap();
-    writeln!(
-        out,
-        "        Ok({pascal}Page {{ items, total, page, page_size }})"
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "    pub async fn query(db: &mut dyn toasty::Executor, req: {pascal}Query) -> toasty::Result<{pascal}Page> {{"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        let page = if req.page == 0 {{ 1 }} else {{ req.page }};"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        let page_size = if req.page_size == 0 {{ 20 }} else {{ req.page_size.min(500) }};"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        let total = Self::build_filter_query(&req).count().exec(db).await?;"
-    )
-    .unwrap();
-    writeln!(out, "        let mut query = Self::build_query(&req);").unwrap();
-    writeln!(out, "        query.limit(page_size as usize);").unwrap();
-    writeln!(
-        out,
-        "        query.offset(page.saturating_sub(1).saturating_mul(page_size) as usize);"
-    )
-    .unwrap();
-    writeln!(out, "        let items = query.exec(db).await?;").unwrap();
-    writeln!(
-        out,
-        "        Ok({pascal}Page {{ items, total, page, page_size }})"
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
     writeln!(
         out,
         "    pub async fn list_page(db: &mut dyn toasty::Executor, page: u64, page_size: u64) -> toasty::Result<{pascal}Page> {{"
     )
     .unwrap();
-    if model.soft_delete.is_some() {
-        writeln!(
-            out,
-            "        Self::query(db, {pascal}Query {{ page, page_size, include_deleted: false, ..Default::default() }}).await"
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "        Self::query(db, {pascal}Query {{ page, page_size, ..Default::default() }}).await"
-        )
-        .unwrap();
-    }
+    writeln!(
+        out,
+        "        {pascal}::query(db).paginate(page, page_size).page().await"
+    )
+    .unwrap();
     writeln!(out, "    }}").unwrap();
     if let Some(tenant_field) = tenant_field(model) {
         let tenant_ident = model_field_ident(tenant_field);
+        let tenant_predicate = predicate_helper_name(tenant_field, "eq");
+        let primary_predicate = predicate_helper_name(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == primary)
+                .expect("primary field present"),
+            "eq",
+        );
+        let primary_value = if is_copy_filter_type(primary_ty) {
+            format!("*{primary}")
+        } else {
+            format!("{primary}.clone()")
+        };
+        let tenant_value = if let Some(inner_ty) = optional_inner_type(&tenant_field.ty) {
+            if is_copy_filter_type(inner_ty) {
+                format!("*{tenant_ident}")
+            } else {
+                format!("{tenant_ident}.clone()")
+            }
+        } else if is_copy_filter_type(&tenant_field.ty) {
+            format!("*{tenant_ident}")
+        } else {
+            format!("{tenant_ident}.clone()")
+        };
         writeln!(out).unwrap();
         writeln!(
             out,
@@ -2611,28 +3475,12 @@ fn render_toasty_query_methods(
         .unwrap();
         writeln!(
             out,
-            "        let page = Self::query(db, {pascal}Query {{ {primary}: Some({primary}.clone()), {}: Some({}.clone()), page: 1, page_size: 1, {}..Default::default() }}).await?;",
-            tenant_ident,
-            tenant_ident,
-            if model.soft_delete.is_some() {
-                "include_deleted: false, "
-            } else {
-                ""
-            }
+            "        {pascal}::query(db).where_({primary_predicate}({primary_value})).where_({tenant_predicate}({tenant_value})).first().await"
         )
         .unwrap();
-        writeln!(out, "        Ok(page.items.into_iter().next())").unwrap();
         writeln!(out, "    }}").unwrap();
     }
     writeln!(out).unwrap();
-}
-
-fn option_filter_value_expr(field: &ModelField, ident: &str) -> String {
-    if is_copy_filter_type(&field.ty) {
-        format!("req.{ident}")
-    } else {
-        format!("req.{ident}.clone()")
-    }
 }
 
 fn sea_orm_reusable_value_expr(ty: &str, ident: &str) -> String {
@@ -2641,33 +3489,6 @@ fn sea_orm_reusable_value_expr(ty: &str, ident: &str) -> String {
     } else {
         format!("{ident}.clone()")
     }
-}
-
-fn render_toasty_sort(out: &mut String, model: &ModelSpec, pascal: &str) {
-    use std::fmt::Write as _;
-    let fields = sea_orm_filter_fields(model);
-    if fields.is_empty() {
-        return;
-    }
-    writeln!(out, "        match req.sort_by {{").unwrap();
-    for field in fields {
-        let variant = to_pascal_case(&field.name);
-        let field_ident = model_field_ident(field);
-        writeln!(
-            out,
-            "            Some({pascal}SortField::{variant}) if req.sort_desc => {{ query.order_by({pascal}::fields().{}().desc()); }}",
-            field_ident
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "            Some({pascal}SortField::{variant}) => {{ query.order_by({pascal}::fields().{}().asc()); }}",
-            field_ident
-        )
-        .unwrap();
-    }
-    writeln!(out, "            None => {{}}").unwrap();
-    writeln!(out, "        }}").unwrap();
 }
 
 fn render_toasty_index_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
@@ -2682,14 +3503,26 @@ fn render_toasty_index_methods(out: &mut String, model: &ModelSpec, pascal: &str
             .map(|field| format!("{}: &{}", model_field_ident(field), field.ty))
             .collect::<Vec<_>>()
             .join(", ");
-        let assignments = fields
+        let predicates = fields
             .iter()
             .map(|field| {
                 let field_ident = model_field_ident(field);
-                format!("{field_ident}: Some({field_ident}.clone()),")
+                let helper = predicate_helper_name(field, "eq");
+                let value = if let Some(inner_ty) = optional_inner_type(&field.ty) {
+                    if is_copy_filter_type(inner_ty) {
+                        format!("*{field_ident}")
+                    } else {
+                        format!("{field_ident}.clone()")
+                    }
+                } else if is_copy_filter_type(&field.ty) {
+                    format!("*{field_ident}")
+                } else {
+                    format!("{field_ident}.clone()")
+                };
+                format!(".where_({helper}({value}))")
             })
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("");
         writeln!(out).unwrap();
         if index.unique {
             writeln!(
@@ -2697,17 +3530,7 @@ fn render_toasty_index_methods(out: &mut String, model: &ModelSpec, pascal: &str
                 "    pub async fn find_by_{suffix}(db: &mut dyn toasty::Executor, {args}) -> toasty::Result<Option<{pascal}>> {{"
             )
             .unwrap();
-            writeln!(
-                out,
-                "        let page = Self::query(db, {pascal}Query {{ {assignments} page: 1, page_size: 1, {}..Default::default() }}).await?;",
-                if model.soft_delete.is_some() {
-                    "include_deleted: false, "
-                } else {
-                    ""
-                }
-            )
-            .unwrap();
-            writeln!(out, "        Ok(page.items.into_iter().next())").unwrap();
+            writeln!(out, "        {pascal}::query(db){predicates}.first().await").unwrap();
             writeln!(out, "    }}").unwrap();
         } else {
             writeln!(
@@ -2715,17 +3538,7 @@ fn render_toasty_index_methods(out: &mut String, model: &ModelSpec, pascal: &str
                 "    pub async fn list_by_{suffix}(db: &mut dyn toasty::Executor, {args}) -> toasty::Result<Vec<{pascal}>> {{"
             )
             .unwrap();
-            writeln!(
-                out,
-                "        let query = {pascal}Query {{ {assignments} {}..Default::default() }};",
-                if model.soft_delete.is_some() {
-                    "include_deleted: false, "
-                } else {
-                    ""
-                }
-            )
-            .unwrap();
-            writeln!(out, "        Self::build_query(&query).exec(db).await").unwrap();
+            writeln!(out, "        {pascal}::query(db){predicates}.all().await").unwrap();
             writeln!(out, "    }}").unwrap();
         }
     }
@@ -5518,33 +6331,54 @@ mod tests {
         assert!(rendered.contains("pub async fn transaction<F, T>(&self, func: F)"));
         assert!(rendered.contains("db.transaction::<_, T, DbErr>(func)"));
         assert!(rendered.contains("pub struct UserQuery"));
-        assert!(rendered.contains("pub enum UserSortField"));
-        assert!(rendered.contains("pub async fn query(&self, req: UserQuery)"));
-        assert!(rendered.contains("pub id_in: Vec<i64>"));
-        assert!(rendered.contains("pub id_min: Option<i64>"));
-        assert!(rendered.contains("pub nickname: Option<String>"));
-        assert!(rendered.contains("pub nickname_is_null: bool"));
-        assert!(rendered.contains("pub name_contains: Option<String>"));
-        assert!(rendered.contains("pub nickname_contains: Option<String>"));
-        assert!(!rendered.contains("pub name_icontains: Option<String>"));
+        assert!(rendered.contains("pub enum UserOrder"));
+        assert!(rendered.contains("pub enum UserPredicate"));
+        assert!(rendered.contains("pub fn query(&self) -> UserQuery<'_, 'a>"));
+        assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
+        assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
+        assert!(rendered.contains("pub async fn all(self) -> anyhow::Result<Vec<Model>>"));
+        assert!(rendered.contains("pub async fn first(self) -> anyhow::Result<Option<Model>>"));
+        assert!(rendered.contains("pub async fn only(mut self) -> anyhow::Result<Model>"));
+        assert!(rendered.contains("pub async fn page(self) -> anyhow::Result<UserPage>"));
+        assert!(!rendered.contains("pub enum UserSortField"));
+        assert!(!rendered.contains("pub async fn query(&self, req: UserQuery)"));
+        assert!(!rendered.contains("pub id_in: Vec<i64>"));
+        assert!(!rendered.contains("pub name_contains: Option<String>"));
+        assert!(rendered.contains("IdIn(Vec<i64>)"));
+        assert!(rendered.contains("IdBetween(i64, i64)"));
+        assert!(rendered.contains("NameContains(String)"));
+        assert!(rendered.contains("NameIContains(String)"));
+        assert!(rendered.contains("NicknameIsNull"));
+        assert!(rendered.contains("NicknameIsNotNull"));
+        assert!(
+            rendered.contains("pub fn name_contains(value: impl Into<String>) -> UserPredicate")
+        );
+        assert!(
+            rendered.contains("pub fn name_icontains(value: impl Into<String>) -> UserPredicate")
+        );
+        assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
+        assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
         assert!(rendered.contains(
-            "if let Some(value) = req.name_contains.as_deref() { select = select.filter(Column::Name.like(contains_like_pattern(value))); }"
+            "UserPredicate::NameContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
         ));
         assert!(rendered.contains(
-            "if let Some(value) = req.nickname_contains.as_deref() { select = select.filter(Column::Nickname.like(contains_like_pattern(value))); }"
+            "UserPredicate::NameIContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
         ));
-        assert!(rendered.contains("Column::Id.is_in(req.id_in)"));
-        assert!(rendered.contains("Column::Id.gte(value)"));
-        assert!(rendered.contains("Column::Nickname.eq(Some(value))"));
+        assert!(rendered.contains(
+            "UserPredicate::NicknameContains(value) => Condition::all().add(Column::Nickname.like(contains_like_pattern(value))),"
+        ));
+        assert!(rendered.contains("Column::Id.is_in(values.clone())"));
+        assert!(rendered.contains("Column::Id.gte(*value)"));
+        assert!(rendered.contains("Column::Nickname.eq(Some(value.clone()))"));
         assert!(rendered.contains("Column::Nickname.is_null()"));
         assert!(rendered.contains("order_by_desc(Column::Id)"));
         let sea_orm_count_pos = rendered
-            .find("let total = select.clone().count(db).await?;")
+            .find("let total = self.build_filter_select().count(db).await?;")
             .expect("sea-orm count uses filter-only select");
         let sea_orm_sort_pos = rendered
-            .find("select = select.order_by_desc(Column::Id)")
+            .find("let paginator = self.build_select().paginate(db, page_size);")
             .expect("sea-orm page query applies generated sort");
         assert!(sea_orm_count_pos < sea_orm_sort_pos);
         assert!(!rendered.contains("let total = paginator.num_items().await?;"));
@@ -5557,6 +6391,12 @@ mod tests {
         assert!(rendered.contains("let existing = self.find_by_id_uncached(id).await?;"));
         assert!(rendered.contains("let delete_key = id;"));
         assert!(rendered.contains("Column::Id.eq(id)"));
+        assert!(rendered.contains(
+            "self.query().where_(id_eq(id)).where_(tenant_id_eq(tenant_id)).first().await"
+        ));
+        assert!(
+            rendered.contains("self.query().where_(tenant_id_eq(tenant_id)).where_(name_eq(name))")
+        );
         assert!(!rendered.contains("id.clone()"));
     }
 
@@ -5591,52 +6431,63 @@ mod tests {
         assert!(rendered
             .contains("pub async fn find_by_email(db: &mut dyn toasty::Executor, email: &String)"));
         assert!(rendered.contains("pub struct UserQuery"));
-        assert!(rendered.contains("pub enum UserSortField"));
+        assert!(rendered.contains("pub enum UserOrder"));
+        assert!(rendered.contains("pub enum UserPredicate"));
+        assert!(rendered.contains("pub fn query(db: &mut dyn toasty::Executor) -> UserQuery<'_>"));
+        assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
+        assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
+        assert!(rendered.contains("pub async fn all(self) -> toasty::Result<Vec<User>>"));
+        assert!(rendered.contains("pub async fn first(self) -> toasty::Result<Option<User>>"));
+        assert!(rendered.contains("pub async fn only(self) -> toasty::Result<User>"));
+        assert!(rendered.contains("pub async fn page(self) -> toasty::Result<UserPage>"));
+        assert!(rendered.contains("fn build_filter_query(&self)"));
+        assert!(rendered.contains(
+            "fn apply_order(&self, mut query: toasty::stmt::Query<toasty::stmt::List<User>>)"
+        ));
+        assert!(rendered
+            .contains("let total = self.build_filter_query().count().exec(self.db).await?;"));
+        assert!(!rendered.contains("pub async fn query_with_filter"));
         assert!(
-            rendered.contains("pub async fn query(db: &mut dyn toasty::Executor, req: UserQuery)")
+            !rendered.contains("pub async fn query(db: &mut dyn toasty::Executor, req: UserQuery)")
         );
-        assert!(rendered.contains("fn build_filter_query(req: &UserQuery)"));
-        assert!(rendered.contains("fn apply_sort(mut query: toasty::stmt::Query<toasty::stmt::List<User>>, req: &UserQuery)"));
-        assert!(rendered.contains("Self::build_filter_query(&req).count().exec(db).await?"));
-        assert!(rendered.contains("pub async fn query_with_filter<F>(db: &mut dyn toasty::Executor, req: UserQuery, apply_filter: F)"));
-        assert!(rendered.contains(
-            "let total = apply_filter(Self::build_filter_query(&req)).count().exec(db).await?;"
-        ));
-        assert!(rendered.contains(
-            "let mut query = Self::apply_sort(apply_filter(Self::build_filter_query(&req)), &req);"
-        ));
-        assert!(rendered.contains("pub id_in: Vec<u64>"));
-        assert!(rendered.contains("pub id_min: Option<u64>"));
-        assert!(rendered.contains("pub nickname: Option<String>"));
-        assert!(rendered.contains("pub nickname_is_null: bool"));
-        assert!(rendered.contains("pub name_contains: Option<String>"));
-        assert!(rendered.contains("pub name_icontains: Option<String>"));
-        assert!(rendered.contains("pub nickname_contains: Option<String>"));
-        assert!(rendered.contains("pub nickname_icontains: Option<String>"));
+        assert!(!rendered.contains("pub id_in: Vec<u64>"));
+        assert!(!rendered.contains("pub name_contains: Option<String>"));
+        assert!(rendered.contains("IdIn(Vec<u64>)"));
+        assert!(rendered.contains("IdBetween(u64, u64)"));
+        assert!(rendered.contains("NameContains(String)"));
+        assert!(rendered.contains("NameIContains(String)"));
+        assert!(rendered.contains("NicknameIsNull"));
+        assert!(rendered.contains("NicknameIsNotNull"));
+        assert!(
+            rendered.contains("pub fn name_contains(value: impl Into<String>) -> UserPredicate")
+        );
+        assert!(
+            rendered.contains("pub fn name_icontains(value: impl Into<String>) -> UserPredicate")
+        );
+        assert!(rendered.contains("pub fn nickname_is_null() -> UserPredicate"));
+        assert!(rendered.contains("pub fn id_desc() -> UserOrder"));
         assert!(rendered.contains("fn escape_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("escaped.push('\\\\');"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
         assert!(rendered.contains(
-            "if let Some(value) = req.name_contains.as_deref() { query = query.and(User::fields().name().like(contains_like_pattern(value))); }"
+            "UserPredicate::NameContains(value) => User::fields().name().like(contains_like_pattern(value)),"
         ));
         assert!(rendered.contains(
-            "if let Some(value) = req.name_icontains.as_deref() { query = query.and(User::fields().name().ilike(contains_like_pattern(value))); }"
+            "UserPredicate::NameIContains(value) => User::fields().name().ilike(contains_like_pattern(value)),"
         ));
         assert!(rendered.contains(
-            "if let Some(value) = req.nickname_contains.as_deref() { query = query.and(User::fields().nickname().like(contains_like_pattern(value))); }"
+            "UserPredicate::NicknameContains(value) => User::fields().nickname().like(contains_like_pattern(value)),"
         ));
         assert!(rendered.contains(
-            "if let Some(value) = req.nickname_icontains.as_deref() { query = query.and(User::fields().nickname().ilike(contains_like_pattern(value))); }"
+            "UserPredicate::NicknameIContains(value) => User::fields().nickname().ilike(contains_like_pattern(value)),"
         ));
-        assert!(rendered.contains("if let Some(value) = req.id {"));
-        assert!(rendered.contains("if let Some(value) = req.id_min {"));
-        assert!(!rendered.contains("req.id.clone()"));
-        assert!(!rendered.contains("req.id_min.clone()"));
-        assert!(rendered.contains("User::fields().id().in_list(req.id_in.clone())"));
-        assert!(rendered.contains("User::fields().id().ge(value)"));
-        assert!(rendered.contains("if let Some(value) = req.nickname.clone()"));
-        assert!(rendered.contains("User::fields().nickname().eq(Some(value))"));
-        assert!(rendered.contains("User::fields().nickname().is_none()"));
+        assert!(rendered.contains("UserPredicate::IdEq(value) => User::fields().id().eq(*value)"));
+        assert!(rendered.contains(
+            "UserPredicate::IdIn(values) => User::fields().id().in_list(values.clone())"
+        ));
+        assert!(rendered.contains("User::fields().nickname().eq(Some(value.clone()))"));
+        assert!(rendered
+            .contains("UserPredicate::NicknameIsNull => User::fields().nickname().is_none()"));
         assert!(rendered.contains("query.order_by(User::fields().id().desc())"));
         assert!(rendered.contains("pub async fn insert_many"));
         assert!(rendered.contains("pub async fn soft_delete_by_id"));
@@ -5659,15 +6510,19 @@ mod tests {
         let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
         let rendered = render_toasty_model_module(&models[0]);
 
-        let count_pos = rendered
-            .find("let total = Self::build_filter_query(&req).count().exec(db).await?;")
+        let page_method = rendered
+            .find("pub async fn page(self) -> toasty::Result<ProductPage>")
+            .expect("page method generated");
+        let page_body = &rendered[page_method..];
+        let count_pos = page_body
+            .find("let total = self.build_filter_query().count().exec(self.db).await?;")
             .expect("count uses filter-only query");
-        let sorted_query_pos = rendered
-            .find("let mut query = Self::build_query(&req);")
+        let sorted_query_pos = page_body
+            .find("let mut query = self.apply_order(self.build_filter_query());")
             .expect("page query applies generated sort");
 
         assert!(count_pos < sorted_query_pos);
-        assert!(!rendered.contains("Self::build_query(&req).count()"));
+        assert!(!rendered.contains("build_query().count()"));
         assert!(rendered.contains("Product::fields().sort_order().asc()"));
         assert!(rendered.contains("Product::fields().sort_order().desc()"));
     }
@@ -5685,7 +6540,7 @@ mod tests {
         let rendered = render_toasty_model_module(&models[0]);
 
         assert!(rendered.contains(
-            "if !req.include_deleted { query = query.and(Coupon::fields().deleted_at().is_none()); }"
+            "if !self.include_deleted { query = query.and(Coupon::fields().deleted_at().is_none()); }"
         ));
         assert!(!rendered.contains("deleted_at().eq(None::<i64>)"));
     }
@@ -5704,14 +6559,13 @@ mod tests {
         let rendered = render_toasty_model_module(&models[0]);
 
         assert!(rendered.contains("pub r#type: String"));
-        assert!(rendered.contains("pub r#type: Option<String>"));
-        assert!(rendered.contains("req.r#type.clone()"));
-        assert!(rendered.contains("AftersalesOrder::fields().r#type().eq(value)"));
+        assert!(rendered.contains("TypeEq(String)"));
+        assert!(rendered.contains("pub fn type_eq(value: String) -> AftersalesOrderPredicate"));
+        assert!(rendered.contains("AftersalesOrder::fields().r#type().eq(value.clone())"));
         assert!(rendered.contains(".r#type(model.r#type)"));
         assert!(rendered.contains("let r#type = model.r#type.clone();"));
         assert!(rendered.contains(".r#type(r#type)"));
         assert!(!rendered.contains("pub type:"));
-        assert!(!rendered.contains("req.type.clone()"));
         assert!(!rendered.contains("fields().type()"));
     }
 
@@ -5760,11 +6614,11 @@ mod tests {
         assert!(rendered.contains("pub status: i16"));
         assert!(rendered.contains("pub discount_amount: rust_decimal::Decimal"));
         assert!(rendered.contains("pub min_order_amount: Option<rust_decimal::Decimal>"));
-        assert!(rendered.contains("pub status_in: Vec<i16>"));
-        assert!(rendered.contains("pub status_min: Option<i16>"));
-        assert!(rendered.contains("pub discount_amount_min: Option<rust_decimal::Decimal>"));
-        assert!(rendered.contains("Coupon::fields().status().eq(value)"));
-        assert!(rendered.contains("Coupon::fields().discount_amount().ge(value)"));
+        assert!(rendered.contains("StatusIn(Vec<i16>)"));
+        assert!(rendered.contains("StatusBetween(i16, i16)"));
+        assert!(rendered.contains("DiscountAmountGte(rust_decimal::Decimal)"));
+        assert!(rendered.contains("Coupon::fields().status().eq(*value)"));
+        assert!(rendered.contains("Coupon::fields().discount_amount().ge(value.clone())"));
     }
 
     #[test]
@@ -5843,8 +6697,9 @@ impl ServiceContext {
         assert!(fields.contains("pub enum UserField"));
         assert!(fields.contains("Self::Name => \"name\""));
         let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
-        assert!(mod_rs
-            .contains("pub use user::{User, UserPage, UserQuery, UserRepository, UserSortField};"));
+        assert!(mod_rs.contains(
+            "pub use user::{User, UserOrder, UserPage, UserPredicate, UserQuery, UserRepository};"
+        ));
         assert!(mod_rs.contains("pub mod user_fields;"));
         assert!(mod_rs.contains("pub use user_fields::{UserField, USER_TABLE};"));
         assert!(mod_rs.contains("pub mod user_ext;"));
