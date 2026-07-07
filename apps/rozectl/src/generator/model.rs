@@ -3571,6 +3571,14 @@ fn predicate_helper_name_by_name(field_name: &str, suffix: &str) -> String {
     rust_identifier(&format!("{field_name}_{suffix}"))
 }
 
+fn edge_has_helper_name(edge: &ModelEdge) -> String {
+    rust_identifier(&format!("has_{}", edge.name))
+}
+
+fn edge_not_has_helper_name(edge: &ModelEdge) -> String {
+    rust_identifier(&format!("not_has_{}", edge.name))
+}
+
 fn edge_query_method_name(edge: &ModelEdge) -> String {
     rust_identifier(&format!("query_{}", edge.name))
 }
@@ -4134,6 +4142,28 @@ fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: 
         "pub fn not(predicate: {pascal}Predicate) -> {pascal}Predicate {{ {pascal}Predicate::Not(Box::new(predicate)) }}"
     )
     .unwrap();
+    for edge in &model.edges {
+        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        if edge.required || optional_inner_type(&field.ty).is_none() {
+            continue;
+        }
+        let has = edge_has_helper_name(edge);
+        let not_has = edge_not_has_helper_name(edge);
+        let is_not_null = predicate_helper_name(field, "is_not_null");
+        let is_null = predicate_helper_name(field, "is_null");
+        writeln!(
+            out,
+            "pub fn {has}() -> {pascal}Predicate {{ {is_not_null}() }}"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub fn {not_has}() -> {pascal}Predicate {{ {is_null}() }}"
+        )
+        .unwrap();
+    }
     for field in model_order_fields(model) {
         let helper = model_field_ident(field);
         let variant = to_pascal_case(&field.name);
@@ -9286,12 +9316,16 @@ mod tests {
         assert!(sea_orm.contains("self.user_id = Some(Some(target.id));"));
         assert!(sea_orm.contains("pub fn clear_user(mut self) -> Self"));
         assert!(sea_orm.contains("self.user_id = Some(None);"));
+        assert!(sea_orm.contains("pub fn has_user() -> ProfilePredicate { user_id_is_not_null() }"));
+        assert!(sea_orm.contains("pub fn not_has_user() -> ProfilePredicate { user_id_is_null() }"));
 
         let toasty = render_toasty_model_module(profile);
         assert!(toasty.contains("pub fn set_user(mut self, target: &crate::model::User) -> Self"));
         assert!(toasty.contains("self.user_id = Some(Some(target.id));"));
         assert!(toasty.contains("pub fn clear_user(mut self) -> Self"));
         assert!(toasty.contains("self.user_id = Some(None);"));
+        assert!(toasty.contains("pub fn has_user() -> ProfilePredicate { user_id_is_not_null() }"));
+        assert!(toasty.contains("pub fn not_has_user() -> ProfilePredicate { user_id_is_null() }"));
     }
 
     #[test]
