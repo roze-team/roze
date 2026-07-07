@@ -1018,6 +1018,7 @@ entity Order {
     to User
     field user_id
     ref id
+    unique
     required
   }
 }
@@ -1027,6 +1028,8 @@ SQL `FOREIGN KEY (...) REFERENCES ...` constraints and inline `REFERENCES`
 column attributes are imported as `.ent` edges. Single-column foreign keys are
 supported; composite foreign keys are rejected with a clear error until the
 relation generator grows composite edge semantics.
+`.ent` edges can declare `unique`; Roze normalizes that into a single-field
+unique index on the local edge field and generates unique lookup helpers.
 `.ent` fields can declare `unique`; Roze normalizes that into a single-field
 unique index and generates the same unique lookup helpers as an explicit
 `index ... { unique }` block.

@@ -154,7 +154,11 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             let field_unique = model
                 .indexes
                 .iter()
-                .any(|index| is_default_field_unique_index(index, &field.name));
+                .any(|index| is_default_field_unique_index(index, &field.name))
+                && !model
+                    .edges
+                    .iter()
+                    .any(|edge| edge.unique && edge.field == field.name);
             writeln!(
                 out,
                 "  field {}: {} {{",
@@ -6192,6 +6196,25 @@ fn normalize_cache_keys(
     keys
 }
 
+fn normalize_edge_unique_cache_keys(
+    cache_keys: &mut Vec<String>,
+    edges: &[ModelEdge],
+    fields: &[ModelField],
+) {
+    for edge in edges.iter().filter(|edge| edge.unique) {
+        if cache_keys.iter().any(|key| key == &edge.field) {
+            continue;
+        }
+        let Some(field) = fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        if is_optional_type(&field.ty) {
+            continue;
+        }
+        cache_keys.push(edge.field.clone());
+    }
+}
+
 fn validate_model_field(
     model_name: &str,
     directive: &str,
@@ -6254,6 +6277,28 @@ fn validate_and_normalize_indexes(
         }
     }
     Ok(normalized)
+}
+
+fn normalize_edge_unique_indexes(indexes: &mut Vec<ModelIndex>, edges: &[ModelEdge]) {
+    let mut edge_indexes = Vec::new();
+    for edge in edges.iter().filter(|edge| edge.unique) {
+        if indexes
+            .iter()
+            .chain(edge_indexes.iter())
+            .any(|index| index.unique && index.fields == [edge.field.clone()])
+        {
+            continue;
+        }
+        edge_indexes.push(ModelIndex {
+            name: format!("uniq_{}", edge.field),
+            fields: vec![edge.field.clone()],
+            unique: true,
+        });
+    }
+    if !edge_indexes.is_empty() {
+        edge_indexes.extend(std::mem::take(indexes));
+        *indexes = edge_indexes;
+    }
 }
 
 fn is_default_field_unique_index(index: &ModelIndex, field_name: &str) -> bool {
@@ -6780,6 +6825,8 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             field_unique_indexes.extend(indexes);
             indexes = field_unique_indexes;
         }
+        normalize_edge_unique_indexes(&mut indexes, &edges);
+        normalize_edge_unique_cache_keys(&mut cache_keys, &edges, &fields);
         for key in &cache_keys {
             let Some(field) = fields.iter().find(|field| &field.name == key) else {
                 bail!("entity `{name}` cache key field `{key}` not found in fields");
@@ -8593,6 +8640,58 @@ mod tests {
         assert!(toasty.contains("pub fn set_created_at(mut self, value: i64) -> Self"));
         assert!(!toasty.contains("pub struct UserUpdate<'a> {\n    db: &'a mut dyn toasty::Executor,\n    id: i64,\n    created_at: Option<i64>,"));
         assert!(!toasty.contains("model.created_at = value;"));
+    }
+
+    #[test]
+    fn ent_unique_edges_generate_unique_fk_indexes() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field id: i64 {
+                primary
+            }
+            field user_id: i64 {
+            }
+            edge user {
+                to User
+                field user_id
+                ref id
+                unique
+                required
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile
+            .edges
+            .iter()
+            .any(|edge| edge.name == "user" && edge.unique));
+        assert!(profile
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["user_id"]));
+        assert!(profile.cache_keys.iter().any(|key| key == "user_id"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    unique"));
+        assert!(!ent.contains("field user_id: i64 {\n    unique"));
+        assert!(!ent.contains("index uniq_user_id {"));
+
+        let rendered = render_model_module(profile);
+        assert!(rendered.contains("pub async fn find_by_user_id"));
     }
 
     #[test]
