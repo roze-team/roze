@@ -1080,7 +1080,8 @@ SQL repositories additionally generate:
   fields such as `nickname_asc` and `nickname_desc`
 - query builders with `where_`, `where_all`, `where_any`, `where_not`,
   `where_none`, `order`, `order_all`, `limit`, `offset`, `paginate`, `all`,
-  `count`, `exists`, `first`, `only`, and `page`
+  `count`, `exists`, `ids`, `first_id`, `only_id`, `first`, `only`, and
+  `page`
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - entity relation methods for `.ent` edges, such as

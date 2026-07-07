@@ -3188,6 +3188,39 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn first_id(mut self) -> anyhow::Result<Option<{}>> {{",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "        self.limit = Some(1);").unwrap();
+    writeln!(out, "        Ok(self.ids().await?.into_iter().next())").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn only_id(mut self) -> anyhow::Result<{}> {{",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "        self.limit = Some(2);").unwrap();
+    writeln!(out, "        let mut ids = self.ids().await?;").unwrap();
+    writeln!(out, "        match ids.len() {{").unwrap();
+    writeln!(out, "            1 => Ok(ids.remove(0)),").unwrap();
+    writeln!(
+        out,
+        "            0 => anyhow::bail!(\"expected exactly one {pascal} id, found none\"),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            _ => anyhow::bail!(\"expected exactly one {pascal} id, found multiple\"),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
 
     for field in &model.fields {
         let method = rust_identifier(&format!("pluck_{}", field.name));
@@ -5316,6 +5349,39 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
         "        query.select({pascal}::fields().{primary_ident}()).exec(self.db).await"
     )
     .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn first_id(mut self) -> toasty::Result<Option<{}>> {{",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "        self.limit = Some(1);").unwrap();
+    writeln!(out, "        Ok(self.ids().await?.into_iter().next())").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub async fn only_id(mut self) -> toasty::Result<{}> {{",
+        primary_field.ty
+    )
+    .unwrap();
+    writeln!(out, "        self.limit = Some(2);").unwrap();
+    writeln!(out, "        let mut ids = self.ids().await?;").unwrap();
+    writeln!(out, "        match ids.len() {{").unwrap();
+    writeln!(out, "            1 => Ok(ids.remove(0)),").unwrap();
+    writeln!(
+        out,
+        "            0 => Err(toasty::Error::invalid_record_count(\"{pascal} query returned no id\")),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            _ => Err(toasty::Error::invalid_record_count(\"{pascal} query returned more than one id\")),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
     for field in &model.fields {
@@ -9846,6 +9912,9 @@ mod tests {
         assert!(rendered.contains("self.orders.extend(orders);"));
         assert!(rendered.contains("pub async fn all(self) -> anyhow::Result<Vec<Model>>"));
         assert!(rendered.contains("pub async fn ids(self) -> anyhow::Result<Vec<i64>>"));
+        assert!(rendered.contains("pub async fn first_id(mut self) -> anyhow::Result<Option<i64>>"));
+        assert!(rendered.contains("pub async fn only_id(mut self) -> anyhow::Result<i64>"));
+        assert!(rendered.contains("expected exactly one User id, found multiple"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> anyhow::Result<Vec<String>>"));
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
@@ -10087,6 +10156,9 @@ mod tests {
         assert!(rendered.contains("self.orders.extend(orders);"));
         assert!(rendered.contains("pub async fn all(self) -> toasty::Result<Vec<User>>"));
         assert!(rendered.contains("pub async fn ids(self) -> toasty::Result<Vec<u64>>"));
+        assert!(rendered.contains("pub async fn first_id(mut self) -> toasty::Result<Option<u64>>"));
+        assert!(rendered.contains("pub async fn only_id(mut self) -> toasty::Result<u64>"));
+        assert!(rendered.contains("User query returned more than one id"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> toasty::Result<Vec<String>>"));
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> toasty::Result<Vec<Option<String>>>"));
