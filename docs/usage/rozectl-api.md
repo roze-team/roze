@@ -1078,9 +1078,9 @@ SQL repositories additionally generate:
   `nickname_not_in`, and nullable numeric `gt/gte/lt/lte/between`
 - order helpers are generated for every queryable field, including nullable
   fields such as `nickname_asc` and `nickname_desc`
-- query builders with `where_`, `where_all`, `where_any`, `order`,
-  `order_all`, `limit`, `offset`, `paginate`, `all`, `count`, `exists`,
-  `first`, `only`, and `page`
+- query builders with `where_`, `where_all`, `where_any`, `where_not`,
+  `where_none`, `order`, `order_all`, `limit`, `offset`, `paginate`, `all`,
+  `count`, `exists`, `first`, `only`, and `page`
 - entity relation methods for `.ent` edges, such as
   `order.query_user(&ctx.model().user()).await?` on SeaORM and
   `order.query_user(&mut db).await?` on Toasty; nullable foreign-key edges

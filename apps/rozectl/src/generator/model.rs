@@ -2712,6 +2712,42 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
     writeln!(out).unwrap();
     writeln!(
         out,
+        "    pub fn where_not(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        self.predicates.push({pascal}Predicate::Not(Box::new(predicate)));"
+    )
+    .unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_none<I>(mut self, predicates: I) -> Self"
+    )
+    .unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Predicate>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(
+        out,
+        "        let predicates = predicates.into_iter().collect::<Vec<_>>();"
+    )
+    .unwrap();
+    writeln!(out, "        if !predicates.is_empty() {{").unwrap();
+    writeln!(
+        out,
+        "            self.predicates.push({pascal}Predicate::Not(Box::new({pascal}Predicate::Or(predicates))));"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "    pub fn order(mut self, order: {pascal}Order) -> Self {{"
     )
     .unwrap();
@@ -4709,6 +4745,42 @@ fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal:
     writeln!(
         out,
         "            self.predicates.push({pascal}Predicate::Or(predicates));"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_not(mut self, predicate: {pascal}Predicate) -> Self {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        self.predicates.push({pascal}Predicate::Not(Box::new(predicate)));"
+    )
+    .unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn where_none<I>(mut self, predicates: I) -> Self"
+    )
+    .unwrap();
+    writeln!(out, "    where").unwrap();
+    writeln!(out, "        I: IntoIterator<Item = {pascal}Predicate>,").unwrap();
+    writeln!(out, "    {{").unwrap();
+    writeln!(
+        out,
+        "        let predicates = predicates.into_iter().collect::<Vec<_>>();"
+    )
+    .unwrap();
+    writeln!(out, "        if !predicates.is_empty() {{").unwrap();
+    writeln!(
+        out,
+        "            self.predicates.push({pascal}Predicate::Not(Box::new({pascal}Predicate::Or(predicates))));"
     )
     .unwrap();
     writeln!(out, "        }}").unwrap();
@@ -9663,6 +9735,12 @@ mod tests {
         assert!(rendered.contains("self.predicates.extend(predicates);"));
         assert!(rendered.contains("pub fn where_any<I>(mut self, predicates: I) -> Self"));
         assert!(rendered.contains("self.predicates.push(UserPredicate::Or(predicates));"));
+        assert!(rendered.contains("pub fn where_not(mut self, predicate: UserPredicate) -> Self"));
+        assert!(rendered.contains("self.predicates.push(UserPredicate::Not(Box::new(predicate)));"));
+        assert!(rendered.contains("pub fn where_none<I>(mut self, predicates: I) -> Self"));
+        assert!(rendered.contains(
+            "self.predicates.push(UserPredicate::Not(Box::new(UserPredicate::Or(predicates))));"
+        ));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
         assert!(rendered.contains("pub fn order_all<I>(mut self, orders: I) -> Self"));
         assert!(rendered.contains("self.orders.extend(orders);"));
@@ -9878,6 +9956,12 @@ mod tests {
         assert!(rendered.contains("self.predicates.extend(predicates);"));
         assert!(rendered.contains("pub fn where_any<I>(mut self, predicates: I) -> Self"));
         assert!(rendered.contains("self.predicates.push(UserPredicate::Or(predicates));"));
+        assert!(rendered.contains("pub fn where_not(mut self, predicate: UserPredicate) -> Self"));
+        assert!(rendered.contains("self.predicates.push(UserPredicate::Not(Box::new(predicate)));"));
+        assert!(rendered.contains("pub fn where_none<I>(mut self, predicates: I) -> Self"));
+        assert!(rendered.contains(
+            "self.predicates.push(UserPredicate::Not(Box::new(UserPredicate::Or(predicates))));"
+        ));
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
         assert!(rendered.contains("pub fn order_all<I>(mut self, orders: I) -> Self"));
         assert!(rendered.contains("self.orders.extend(orders);"));
