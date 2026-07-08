@@ -1631,7 +1631,7 @@ fn render_order_shortcut_methods(out: &mut String, model: &ModelSpec, pascal: &s
     use std::fmt::Write as _;
 
     for field in model_order_fields(model) {
-        let field_name = rust_identifier(&field.name);
+        let field_name = to_snake_case(&field.name);
         let asc_method = rust_identifier(&format!("order_by_{field_name}_asc"));
         let desc_method = rust_identifier(&format!("order_by_{field_name}_desc"));
         let variant = to_pascal_case(&field.name);
@@ -15140,6 +15140,10 @@ mod tests {
         assert!(rendered.contains("TypeEq(String)"));
         assert!(rendered.contains("pub fn type_eq(value: String) -> AftersalesOrderPredicate"));
         assert!(rendered.contains("pub fn set_type(mut self, value: String) -> Self"));
+        assert!(rendered.contains("pub fn order_by_type_asc(mut self) -> Self"));
+        assert!(rendered.contains("pub fn order_by_type_desc(mut self) -> Self"));
+        assert!(rendered.contains("pub fn r#type_asc() -> AftersalesOrderOrder"));
+        assert!(rendered.contains("pub fn r#type_desc() -> AftersalesOrderOrder"));
         assert!(rendered.contains("model.r#type = value;"));
         assert!(rendered.contains("AftersalesOrder::fields().r#type().eq(value.clone())"));
         assert!(rendered.contains(".r#type(model.r#type)"));
@@ -15147,6 +15151,7 @@ mod tests {
         assert!(rendered.contains(".r#type(r#type)"));
         assert!(!rendered.contains("pub type:"));
         assert!(!rendered.contains("fields().type()"));
+        assert!(!rendered.contains("order_by_r#type"));
     }
 
     #[test]
@@ -16363,6 +16368,8 @@ impl ServiceContext {
                 cache false
                 field id: i64 {
                     primary
+                }
+                field type: string {
                 }
                 field name: string {
                 }
