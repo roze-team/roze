@@ -3361,6 +3361,25 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
     for field in model
         .fields
         .iter()
+        .filter(|field| avg_return_type(&field.ty).is_some())
+    {
+        let method = rust_identifier(&format!("avg_{}", field.name));
+        let pluck_method = rust_identifier(&format!("pluck_{}", field.name));
+        let avg_ty = avg_return_type(&field.ty).expect("avg type");
+        writeln!(
+            out,
+            "    pub async fn {method}(self) -> anyhow::Result<Option<{avg_ty}>> {{"
+        )
+        .unwrap();
+        writeln!(out, "        let values = self.{pluck_method}().await?;").unwrap();
+        render_avg_body(out, &field.ty, "anyhow");
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    for field in model
+        .fields
+        .iter()
         .filter(|field| sum_return_type(&field.ty).is_some())
     {
         let min_method = rust_identifier(&format!("min_{}", field.name));
@@ -5562,6 +5581,25 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
     for field in model
         .fields
         .iter()
+        .filter(|field| avg_return_type(&field.ty).is_some())
+    {
+        let method = rust_identifier(&format!("avg_{}", field.name));
+        let pluck_method = rust_identifier(&format!("pluck_{}", field.name));
+        let avg_ty = avg_return_type(&field.ty).expect("avg type");
+        writeln!(
+            out,
+            "    pub async fn {method}(self) -> toasty::Result<Option<{avg_ty}>> {{"
+        )
+        .unwrap();
+        writeln!(out, "        let values = self.{pluck_method}().await?;").unwrap();
+        render_avg_body(out, &field.ty, "toasty");
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    for field in model
+        .fields
+        .iter()
         .filter(|field| sum_return_type(&field.ty).is_some())
     {
         let min_method = rust_identifier(&format!("min_{}", field.name));
@@ -5674,6 +5712,51 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+}
+
+fn render_avg_body(out: &mut String, ty: &str, _result_kind: &str) {
+    use std::fmt::Write as _;
+
+    let value_ty = optional_inner_type(ty).unwrap_or(ty);
+    let iterator = if optional_inner_type(ty).is_some() {
+        "values.into_iter().flatten()"
+    } else {
+        "values.into_iter()"
+    };
+
+    if value_ty == "rust_decimal::Decimal" {
+        writeln!(
+            out,
+            "        let mut sum = rust_decimal::Decimal::from(0u64);"
+        )
+        .unwrap();
+        writeln!(out, "        let mut count = 0u64;").unwrap();
+        writeln!(out, "        for value in {iterator} {{").unwrap();
+        writeln!(out, "            sum += value;").unwrap();
+        writeln!(out, "            count += 1;").unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "        if count == 0 {{").unwrap();
+        writeln!(out, "            Ok(None)").unwrap();
+        writeln!(out, "        }} else {{").unwrap();
+        writeln!(
+            out,
+            "            Ok(Some(sum / rust_decimal::Decimal::from(count)))"
+        )
+        .unwrap();
+        writeln!(out, "        }}").unwrap();
+    } else {
+        writeln!(out, "        let mut sum = 0.0_f64;").unwrap();
+        writeln!(out, "        let mut count = 0u64;").unwrap();
+        writeln!(out, "        for value in {iterator} {{").unwrap();
+        writeln!(out, "            sum += value as f64;").unwrap();
+        writeln!(out, "            count += 1;").unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "        if count == 0 {{").unwrap();
+        writeln!(out, "            Ok(None)").unwrap();
+        writeln!(out, "        }} else {{").unwrap();
+        writeln!(out, "            Ok(Some(sum / count as f64))").unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
 }
 
 fn render_toasty_model_module(model: &ModelSpec) -> String {
@@ -7541,6 +7624,17 @@ fn is_numeric_type(ty: &str) -> bool {
 fn sum_return_type(ty: &str) -> Option<&str> {
     let sum_ty = optional_inner_type(ty).unwrap_or(ty);
     is_numeric_type(sum_ty).then_some(sum_ty)
+}
+
+fn avg_return_type(ty: &str) -> Option<&str> {
+    let avg_ty = optional_inner_type(ty).unwrap_or(ty);
+    if avg_ty == "rust_decimal::Decimal" {
+        Some(avg_ty)
+    } else if is_numeric_type(avg_ty) {
+        Some("f64")
+    } else {
+        None
+    }
 }
 
 fn is_copy_filter_type(ty: &str) -> bool {
@@ -10078,6 +10172,7 @@ mod tests {
         assert!(rendered.contains("extension::postgres::PgExpr"));
         assert!(rendered.contains("select_only().column(Column::Id).into_tuple::<i64>()"));
         assert!(rendered.contains("pub async fn sum_id(self) -> anyhow::Result<i64>"));
+        assert!(rendered.contains("pub async fn avg_id(self) -> anyhow::Result<Option<f64>>"));
         assert!(rendered.contains("pub async fn min_id(self) -> anyhow::Result<Option<i64>>"));
         assert!(rendered.contains("pub async fn max_id(self) -> anyhow::Result<Option<i64>>"));
         assert!(rendered.contains("Ok(values.into_iter().sum())"));
@@ -10328,6 +10423,7 @@ mod tests {
         ));
         assert!(rendered.contains("query.select(User::fields().id()).exec(self.db).await"));
         assert!(rendered.contains("pub async fn sum_id(self) -> toasty::Result<u64>"));
+        assert!(rendered.contains("pub async fn avg_id(self) -> toasty::Result<Option<f64>>"));
         assert!(rendered.contains("pub async fn min_id(self) -> toasty::Result<Option<u64>>"));
         assert!(rendered.contains("pub async fn max_id(self) -> toasty::Result<Option<u64>>"));
         assert!(rendered.contains("Ok(values.into_iter().sum())"));
@@ -10580,6 +10676,12 @@ mod tests {
         ));
         assert!(rendered.contains(
             "pub async fn sum_min_order_amount(self) -> toasty::Result<rust_decimal::Decimal>"
+        ));
+        assert!(rendered.contains(
+            "pub async fn avg_discount_amount(self) -> toasty::Result<Option<rust_decimal::Decimal>>"
+        ));
+        assert!(rendered.contains(
+            "pub async fn avg_min_order_amount(self) -> toasty::Result<Option<rust_decimal::Decimal>>"
         ));
         assert!(rendered.contains(
             "pub async fn min_discount_amount(self) -> toasty::Result<Option<rust_decimal::Decimal>>"
