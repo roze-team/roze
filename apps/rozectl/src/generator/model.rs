@@ -3294,6 +3294,27 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
 
+        if group_count_return_type(&field.ty).is_some() {
+            let count_method = rust_identifier(&format!("count_by_{}", field.name));
+            writeln!(
+                out,
+                "    pub async fn {count_method}(self) -> anyhow::Result<Vec<({}, u64)>> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        let mut groups = std::collections::BTreeMap::new();"
+            )
+            .unwrap();
+            writeln!(out, "        for value in self.{method}().await? {{").unwrap();
+            writeln!(out, "            *groups.entry(value).or_insert(0) += 1;").unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "        Ok(groups.into_iter().collect())").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
+
         if field.name != model.primary {
             let first_method = rust_identifier(&format!("first_{}", field.name));
             let only_method = rust_identifier(&format!("only_{}", field.name));
@@ -5514,6 +5535,27 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
 
+        if group_count_return_type(&field.ty).is_some() {
+            let count_method = rust_identifier(&format!("count_by_{}", field.name));
+            writeln!(
+                out,
+                "    pub async fn {count_method}(self) -> toasty::Result<Vec<({}, u64)>> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        let mut groups = std::collections::BTreeMap::new();"
+            )
+            .unwrap();
+            writeln!(out, "        for value in self.{method}().await? {{").unwrap();
+            writeln!(out, "            *groups.entry(value).or_insert(0) += 1;").unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "        Ok(groups.into_iter().collect())").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
+
         if field.name != model.primary {
             let first_method = rust_identifier(&format!("first_{}", field.name));
             let only_method = rust_identifier(&format!("only_{}", field.name));
@@ -7635,6 +7677,29 @@ fn avg_return_type(ty: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn group_count_return_type(ty: &str) -> Option<&str> {
+    let group_ty = optional_inner_type(ty).unwrap_or(ty);
+    matches!(
+        group_ty,
+        "String"
+            | "bool"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "rust_decimal::Decimal"
+    )
+    .then_some(ty)
 }
 
 fn is_copy_filter_type(ty: &str) -> bool {
@@ -10160,12 +10225,20 @@ mod tests {
         assert!(rendered.contains("pub async fn only_id(mut self) -> anyhow::Result<i64>"));
         assert!(rendered.contains("expected exactly one User id, found multiple"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> anyhow::Result<Vec<String>>"));
+        assert!(
+            rendered.contains("pub async fn count_by_id(self) -> anyhow::Result<Vec<(i64, u64)>>")
+        );
+        assert!(rendered
+            .contains("pub async fn count_by_name(self) -> anyhow::Result<Vec<(String, u64)>>"));
         assert!(rendered
             .contains("pub async fn first_name(mut self) -> anyhow::Result<Option<String>>"));
         assert!(rendered.contains("pub async fn only_name(mut self) -> anyhow::Result<String>"));
         assert!(rendered.contains("expected exactly one User.name value, found multiple"));
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains(
+            "pub async fn count_by_nickname(self) -> anyhow::Result<Vec<(Option<String>, u64)>>"
+        ));
         assert!(rendered.contains(
             "pub async fn first_nickname(mut self) -> anyhow::Result<Option<Option<String>>>"
         ));
@@ -10412,12 +10485,20 @@ mod tests {
         assert!(rendered.contains("pub async fn only_id(mut self) -> toasty::Result<u64>"));
         assert!(rendered.contains("User query returned more than one id"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> toasty::Result<Vec<String>>"));
+        assert!(
+            rendered.contains("pub async fn count_by_id(self) -> toasty::Result<Vec<(u64, u64)>>")
+        );
+        assert!(rendered
+            .contains("pub async fn count_by_name(self) -> toasty::Result<Vec<(String, u64)>>"));
         assert!(rendered
             .contains("pub async fn first_name(mut self) -> toasty::Result<Option<String>>"));
         assert!(rendered.contains("pub async fn only_name(mut self) -> toasty::Result<String>"));
         assert!(rendered.contains("User.name query returned more than one value"));
         assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> toasty::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains(
+            "pub async fn count_by_nickname(self) -> toasty::Result<Vec<(Option<String>, u64)>>"
+        ));
         assert!(rendered.contains(
             "pub async fn first_nickname(mut self) -> toasty::Result<Option<Option<String>>>"
         ));
