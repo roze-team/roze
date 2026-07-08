@@ -12,7 +12,7 @@ observability, rollback, auth, and dependency governance. Do not treat Roze or
 Roze is a small Rust service framework scaffold with:
 
 - `crates/roze-core`: base types, errors, results, and shared response helpers.
-- `crates/roze-http`: Axum server helpers and graceful shutdown wrappers.
+- `crates/roze-http`: Roze native HTTP server helpers and graceful shutdown wrappers.
 - `crates/roze-middleware`: HTTP middleware helpers; route rate-limit and breaker state use DashMap for concurrent hot paths.
 - `crates/roze-validation`: request parameter validation helpers.
 - `crates/roze-config`: YAML/TOML/env configuration loading.
@@ -65,7 +65,7 @@ The direction is Rust-native microservice ergonomics with explicit generated bou
 
 - IDL first: `.api` files define request/response types and routes.
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
-- REST: `axum`, `tower`, and `tower-http` with `roze-result::ApiResponse`, `roze-error::RozeError`, and Roze middleware boundaries.
+- REST: `roze_http`, `tower`, and `tower-http` with `roze-result::ApiResponse`, `roze-error::RozeError`, and Roze middleware boundaries.
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
 - ORM: Toasty is the default generated SQL model scaffold; `--orm sea-orm`
   switches model generation to SeaORM. Shared ORM request contracts live in

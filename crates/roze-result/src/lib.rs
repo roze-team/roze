@@ -1,4 +1,3 @@
-use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,15 +27,6 @@ impl<T> ApiResponse<T> {
 
 pub type ApiResult<T> = Result<ApiResponse<T>, ()>;
 
-impl<T> IntoResponse for ApiResponse<T>
-where
-    T: Serialize + Send,
-{
-    fn into_response(self) -> Response {
-        axum::Json(self).into_response()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,11 +37,5 @@ mod tests {
         assert_eq!(resp.code, 0);
         assert_eq!(resp.msg, "OK");
         assert_eq!(resp.data, Some(123));
-    }
-
-    #[test]
-    fn converts_to_axum_response() {
-        let resp = axum::response::IntoResponse::into_response(ApiResponse::ok(123));
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }
 }

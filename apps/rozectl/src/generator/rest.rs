@@ -82,29 +82,29 @@ fn config_path() -> std::path::PathBuf {
 pub fn render_handlers(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(unused_imports)]\n\n");
     out.push_str(
-        "use axum::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, routing::{delete, get, head, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+        "use roze_http::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, routing::{delete, get, head, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    Router::new()\n");
     out.push_str(&format!(
         "        .route(\"{}\", get(health))\n",
-        axum_route_path(&full_route_path(spec, "/healthz"))
+        roze_http_route_path(&full_route_path(spec, "/healthz"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(readiness))\n",
-        axum_route_path(&full_route_path(spec, "/readyz"))
+        roze_http_route_path(&full_route_path(spec, "/readyz"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(startup))\n",
-        axum_route_path(&full_route_path(spec, "/startupz"))
+        roze_http_route_path(&full_route_path(spec, "/startupz"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(metrics))\n",
-        axum_route_path(&full_route_path(spec, "/metrics"))
+        roze_http_route_path(&full_route_path(spec, "/metrics"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(openapi_doc))\n",
-        axum_route_path(&full_route_path(spec, "/openapi.json"))
+        roze_http_route_path(&full_route_path(spec, "/openapi.json"))
     ));
 
     for route in &spec.rest_routes {
@@ -119,7 +119,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         };
         out.push_str(&format!(
             "        .route(\"{}\", {}({}))\n",
-            axum_route_path(&full_route_path_for_route(spec, route)),
+            roze_http_route_path(&full_route_path_for_route(spec, route)),
             routing_fn,
             handler
         ));
@@ -180,7 +180,7 @@ pub fn render_handler_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use axum::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, Json};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+        "use roze_http::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, Json};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
     if spec.rest_routes.iter().any(|route| {
         route_request_spec(spec, route).is_some_and(|spec| spec.has_header)
@@ -212,29 +212,29 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use std::time::Duration;\n\nuse axum::{extract::State, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+        "use std::time::Duration;\n\nuse roze_http::{extract::State, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and(ctx.config.governance.timeout_ms)\n        .map(Duration::from_millis);\n    let router = Router::new()\n");
     out.push_str(&format!(
         "        .route(\"{}\", get(health))\n",
-        axum_route_path(&full_route_path(spec, "/healthz"))
+        roze_http_route_path(&full_route_path(spec, "/healthz"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(readiness))\n",
-        axum_route_path(&full_route_path(spec, "/readyz"))
+        roze_http_route_path(&full_route_path(spec, "/readyz"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(startup))\n",
-        axum_route_path(&full_route_path(spec, "/startupz"))
+        roze_http_route_path(&full_route_path(spec, "/startupz"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(metrics))\n",
-        axum_route_path(&full_route_path(spec, "/metrics"))
+        roze_http_route_path(&full_route_path(spec, "/metrics"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(openapi_doc))\n",
-        axum_route_path(&full_route_path(spec, "/openapi.json"))
+        roze_http_route_path(&full_route_path(spec, "/openapi.json"))
     ));
 
     for group in route_groups(spec).keys() {
@@ -269,7 +269,7 @@ pub fn render_route_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
     route_groups(spec)
         .into_iter()
         .map(|(group, routes)| {
-            let mut out = String::from("use axum::{routing::{delete, get, head, patch, post, put}, Router};\n\nuse crate::handler;\nuse crate::svc::ServiceContext;\n\npub fn routes() -> Router<ServiceContext> {\n    Router::new()\n");
+            let mut out = String::from("use roze_http::{routing::{delete, get, head, patch, post, put}, Router};\n\nuse crate::handler;\nuse crate::svc::ServiceContext;\n\npub fn routes() -> Router<ServiceContext> {\n    Router::new()\n");
             for route in routes {
                 let handler = resolved_handler_name(route);
                 let routing_fn = match route.method {
@@ -282,7 +282,7 @@ pub fn render_route_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
                 };
                 out.push_str(&format!(
                     "        .route(\"{}\", {}(handler::{}::{}))\n",
-                    axum_route_path(&full_route_path_for_route(spec, route)),
+                    roze_http_route_path(&full_route_path_for_route(spec, route)),
                     routing_fn,
                     group,
                     handler
@@ -1594,7 +1594,7 @@ pub fn full_route_path_for_openapi(spec: &ApiSpec, route: &RestRoute) -> String 
     full_route_path_for_route(spec, route)
 }
 
-fn axum_route_path(path: &str) -> String {
+fn roze_http_route_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
             segment

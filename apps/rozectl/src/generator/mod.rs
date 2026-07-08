@@ -1237,7 +1237,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = {{ version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }}
+roze_http = {{ version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }}
 serde_json = "1"
 tokio = {{ version = "1", features = ["macros", "net", "rt-multi-thread"] }}
 "#
@@ -1249,7 +1249,7 @@ fn render_mock_main(spec: &ApiSpec) -> String {
     let mut out = String::new();
     writeln!(
         &mut out,
-        "use axum::{{routing::{{delete, get, head, patch, post, put}}, Json, Router}};"
+        "use roze_http::{{routing::{{delete, get, head, patch, post, put}}, Json, Router}};"
     )
     .unwrap();
     writeln!(&mut out).unwrap();
@@ -1260,8 +1260,8 @@ fn render_mock_main(spec: &ApiSpec) -> String {
     } else {
         writeln!(&mut out, "    let app = Router::new()").unwrap();
         for (idx, route) in spec.rest_routes.iter().enumerate() {
-            let path = mock_axum_path(&rest::full_route_path_for_route(spec, route));
-            let method = mock_axum_method(&route.method);
+            let path = mock_roze_http_path(&rest::full_route_path_for_route(spec, route));
+            let method = mock_roze_http_method(&route.method);
             let handler = mock_handler_ident(route, idx);
             writeln!(&mut out, "        .route({path:?}, {method}({handler}))").unwrap();
         }
@@ -1281,7 +1281,7 @@ fn render_mock_main(spec: &ApiSpec) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "    axum::serve(listener, app).await.expect(\"serve mock server\");"
+        "    roze_http::serve(listener, app).await.expect(\"serve mock server\");"
     )
     .unwrap();
     writeln!(&mut out, "}}").unwrap();
@@ -1603,7 +1603,7 @@ fn http_smoke_sample_string(ty: &str) -> String {
     }
 }
 
-fn mock_axum_method(method: &crate::parser::HttpMethod) -> &'static str {
+fn mock_roze_http_method(method: &crate::parser::HttpMethod) -> &'static str {
     match method {
         crate::parser::HttpMethod::Get => "get",
         crate::parser::HttpMethod::Head => "head",
@@ -1614,7 +1614,7 @@ fn mock_axum_method(method: &crate::parser::HttpMethod) -> &'static str {
     }
 }
 
-fn mock_axum_path(path: &str) -> String {
+fn mock_roze_http_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
             if let Some(param) = segment.strip_prefix(':') {
@@ -1632,7 +1632,7 @@ fn mock_handler_ident(route: &crate::parser::RestRoute, idx: usize) -> String {
         .handler
         .as_deref()
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{}_{}", mock_axum_method(&route.method), route.path));
+        .unwrap_or_else(|| format!("{}_{}", mock_roze_http_method(&route.method), route.path));
     format!("{}_{}", sanitize_rust_ident(&base), idx)
 }
 
@@ -2601,10 +2601,36 @@ fn generate_rest_project(
     fs::create_dir_all(out.join("src/route"))?;
     fs::create_dir_all(out.join("src/svc"))?;
     fs::create_dir_all(out.join("src/types"))?;
+    fs::create_dir_all(out.join("ops"))?;
     fs::create_dir_all(out.join(".cargo"))?;
     write_cargo_toml(spec, out, options, ProjectKind::Rest)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rest))?;
+    fs::write(
+        out.join("ops/production-evidence.md"),
+        production_evidence_runbook(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/governance-baseline.yaml"),
+        governance_baseline_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/prometheus-rules.yaml"),
+        prometheus_rules_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/grafana-dashboard.json"),
+        grafana_dashboard_json(spec, ProjectKind::Rest),
+    )?;
+    fs::write(out.join("ops/slo.yaml"), slo_yaml(spec, ProjectKind::Rest))?;
+    fs::write(
+        out.join("ops/failure-injection-plan.yaml"),
+        failure_injection_plan_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/release-rollout.yaml"),
+        release_rollout_yaml(spec, ProjectKind::Rest),
+    )?;
     write_preserved(
         &out.join("config.yaml"),
         config_yaml(spec, ProjectKind::Rest),
@@ -2690,6 +2716,7 @@ pub(super) fn generate_rpc_project(
     fs::create_dir_all(out.join("src/server"))?;
     fs::create_dir_all(out.join("src/svc"))?;
     fs::create_dir_all(out.join("src/types"))?;
+    fs::create_dir_all(out.join("ops"))?;
     fs::create_dir_all(out.join("proto"))?;
     fs::create_dir_all(out.join(".cargo"))?;
     remove_path_if_exists(&out.join("src/client.rs"))?;
@@ -2700,6 +2727,31 @@ pub(super) fn generate_rpc_project(
     write_cargo_toml(spec, out, options, ProjectKind::Rpc)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rpc))?;
+    fs::write(
+        out.join("ops/production-evidence.md"),
+        production_evidence_runbook(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/governance-baseline.yaml"),
+        governance_baseline_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/prometheus-rules.yaml"),
+        prometheus_rules_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/grafana-dashboard.json"),
+        grafana_dashboard_json(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(out.join("ops/slo.yaml"), slo_yaml(spec, ProjectKind::Rpc))?;
+    fs::write(
+        out.join("ops/failure-injection-plan.yaml"),
+        failure_injection_plan_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/release-rollout.yaml"),
+        release_rollout_yaml(spec, ProjectKind::Rpc),
+    )?;
     fs::write(out.join("build.rs"), build_rs())?;
     write_preserved(
         &out.join("config.yaml"),
@@ -3180,11 +3232,11 @@ version = "0.1.0""#
             if in_workspace {
                 r#"anyhow.workspace = true
 config.workspace = true
-axum.workspace = true"#
+roze_http.workspace = true"#
             } else {
                 r#"anyhow = "1"
 config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
-axum = { version = "0.8", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }"#
+roze_http = { version = "0.8", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }"#
             },
             if in_workspace {
                 r#"serde.workspace = true
@@ -3378,6 +3430,10 @@ cargo run
 ## Config
 
 `config.yaml` is loaded from the crate directory first, then falls back to the current working directory.
+
+## Production Evidence
+
+Use `ops/production-evidence.md` before promoting this service beyond a controlled production path.
 "#,
             name = spec.service,
             rest_routes = spec
@@ -3405,6 +3461,10 @@ cargo run
 ## Config
 
 `config.yaml` is loaded from the crate directory first, then falls back to the current working directory.
+
+## Production Evidence
+
+Use `ops/production-evidence.md` before promoting this service beyond a controlled production path.
 "#,
             name = spec.service,
             rpc_methods = spec
@@ -3415,6 +3475,809 @@ cargo run
                 .join("\n"),
         ),
     }
+}
+
+fn production_evidence_runbook(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "REST",
+        ProjectKind::Rpc => "RPC",
+    };
+    let workload = match kind {
+        ProjectKind::Rest => {
+            if spec.rest_routes.is_empty() {
+                "health/readiness/startup probes, metrics scrape, and representative REST traffic"
+                    .to_string()
+            } else {
+                format!(
+                    "health/readiness/startup probes, metrics scrape, and representative REST traffic for {} route(s)",
+                    spec.rest_routes.len()
+                )
+            }
+        }
+        ProjectKind::Rpc => {
+            if spec.rpc_methods.is_empty() {
+                "startup, client RPC calls, graceful shutdown, and dependency failure drills"
+                    .to_string()
+            } else {
+                format!(
+                    "startup, client RPC calls for {} method(s), graceful shutdown, and dependency failure drills",
+                    spec.rpc_methods.len()
+                )
+            }
+        }
+    };
+    let failure_injection = match kind {
+        ProjectKind::Rest => {
+            "shutdown signal, dependency timeout, invalid config reload, slow handler, readiness failure"
+        }
+        ProjectKind::Rpc => {
+            "shutdown signal, dependency timeout, upstream deadline exceeded, invalid config reload"
+        }
+    };
+
+    format!(
+        r#"# Production Evidence Runbook: {name}
+
+Generated by `rozectl` for the {boundary} boundary.
+
+Roze services are not production-stable by declaration alone. Keep this file
+with the service and attach completed reports under `docs/evidence/` or your
+team evidence store before broad rollout.
+
+## Required Gates
+
+- `cargo fmt --all -- --check`
+- `cargo test`
+- Generated project compile check in the Roze workspace
+- Runtime smoke against `/healthz`, `/readyz`, `/startupz`, and `/metrics` for REST services
+- Graceful shutdown and lifecycle snapshot evidence
+- Resource trend capture: CPU, memory, file descriptors, connections, and restart count
+- Failure timeline with recovery outcome
+
+## Architecture Borrowed And Extended
+
+This generated service follows the strong parts of go-zero style architecture:
+
+- Simple IDL-first boundaries and one generated ownership layout
+- Failure-oriented resilience: timeout, rate limit, circuit breaker, load shedding, retry budget, and deadline propagation must be configured before broad rollout
+- Service governance: discovery, load balancing, tracing, metrics, health checks, and structured logs must be observable in one dashboard
+- Developer-friendly extension points: keep business logic in `logic`, dependencies in `svc`, transport glue in generated modules
+- Easy extension without forking generated ownership: add middleware, dependencies, and background tasks through Roze extension points
+
+Roze extends that baseline with generated evidence gates. Production readiness
+requires reproducible reports, lifecycle snapshots, failure timelines, and
+resource trends instead of relying on maturity claims alone.
+
+The machine-readable governance baseline is generated at
+`ops/governance-baseline.yaml`; wire CI or platform checks to that file before
+promotion.
+Prometheus alert templates are generated at `ops/prometheus-rules.yaml`; review
+metric names against your registry, then attach the enabled rules to the
+evidence report.
+Grafana dashboard templates are generated at `ops/grafana-dashboard.json`; use
+them to attach latency, throughput, error, and resilience panels to the report.
+SLO and error-budget defaults are generated at `ops/slo.yaml`; tune them with
+the service owner before launch and attach burn-rate evidence to the report.
+Failure-injection plans are generated at `ops/failure-injection-plan.yaml`; run
+them in staging before promotion and copy observed recovery into the report.
+Release rollout gates are generated at `ops/release-rollout.yaml`; use them for
+canary, blue-green, rollback, and post-release evidence before broad rollout.
+
+## Evidence Scaffold
+
+From the Roze workspace, generate a report scaffold with:
+
+```bash
+bash scripts/production-evidence.sh \
+  --area generated-services \
+  --duration 24h \
+  --workload "{workload}" \
+  --failure-injection "{failure_injection}" \
+  --command "cargo run"
+```
+
+For lifecycle soak evidence, copy the complete `roze_lifecycle_soak` summary
+line into:
+
+```bash
+bash scripts/production-evidence.sh \
+  --area lifecycle \
+  --duration 24h \
+  --workload "start, drain, shutdown, failed task, timeout hooks" \
+  --failure-injection "stuck task, signal shutdown, hook timeout" \
+  --command "ROZE_LIFECYCLE_SOAK_SECONDS=86400 ROZE_LIFECYCLE_SOAK_CYCLES=100000000 bash scripts/production-soak-lifecycle.sh" \
+  --lifecycle-summary "roze_lifecycle_soak cycles=... worker_exits=... stop_hooks=... running_snapshots=... stopped_snapshots=... max_service_count=..."
+```
+
+The lifecycle summary is rejected unless all fields are numeric and internally
+consistent.
+
+## Promotion Rule
+
+Do not mark this service broadly production-stable until the generated-services
+report, lifecycle report, logs, metrics, traces, and rollback notes are complete.
+"#,
+        name = spec.service,
+        boundary = boundary,
+        workload = workload,
+        failure_injection = failure_injection,
+    )
+}
+
+fn governance_baseline_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+
+    format!(
+        r#"# Generated by rozectl. Keep this file machine-readable for CI and platform checks.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+architecture:
+  borrowed_from_go_zero:
+    - simple_idl_first_boundaries
+    - high_availability_under_concurrency
+    - failure_oriented_resilience
+    - developer_friendly_generated_ownership
+    - easy_extension_points
+  roze_extensions:
+    - generated_production_evidence_runbook
+    - generated_prometheus_alert_rules
+    - generated_grafana_dashboard
+    - generated_slo_error_budget
+    - generated_failure_injection_plan
+    - generated_release_rollout_gates
+    - lifecycle_snapshot_evidence
+    - failure_timeline_required
+    - resource_trend_required
+governance_required:
+  timeout:
+    required: true
+    evidence: p95_p99_latency_and_deadline_propagation
+  rate_limit:
+    required: true
+    evidence: allowed_rejected_request_counters
+  circuit_breaker:
+    required: true
+    evidence: open_half_open_closed_transition_metrics
+  load_shedding:
+    required: true
+    evidence: shed_request_rate_and_recovery_window
+  retry_budget:
+    required: true
+    evidence: retry_attempts_capped_by_budget
+  deadline_propagation:
+    required: true
+    evidence: cancellation_reaches_logic_and_dependencies
+  service_discovery:
+    required: true
+    evidence: registry_health_and_endpoint_change_events
+  load_balancing:
+    required: true
+    evidence: upstream_distribution_and_outlier_behavior
+  tracing:
+    required: true
+    evidence: end_to_end_trace_query
+  metrics:
+    required: true
+    evidence: prometheus_dashboard_and_alerts
+    generated_rules: ops/prometheus-rules.yaml
+    generated_dashboard: ops/grafana-dashboard.json
+  structured_logs:
+    required: true
+    evidence: correlation_id_query
+evidence_required:
+  generated_services_report: true
+  lifecycle_report: true
+  slo_error_budget_report: true
+  failure_injection_plan: true
+  release_rollout_plan: true
+  lifecycle_summary_consistency: true
+  failure_injection_timeline: true
+  rollback_notes: true
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+    )
+}
+
+fn prometheus_rules_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Review metric names against your Prometheus registry before enabling.
+groups:
+  - name: {name}-{boundary}-production
+    rules:
+      - alert: RozeGeneratedServiceDown
+        expr: up{{service="{name}"}} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} is down"
+          description: "No scrape target is up for generated service {name}."
+
+      - alert: RozeGeneratedServiceHighErrorRate
+        expr: |
+          sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m]))
+          /
+          clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+          > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} error rate is above 1%"
+          description: "Generated service error budget is burning; inspect traces, logs, and failure timeline."
+
+      - alert: RozeGeneratedServiceHighP99Latency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le)
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} p99 latency is above 1s"
+          description: "Check timeout, load shedding, downstream latency, and retry budget evidence."
+
+      - alert: RozeGeneratedServiceRateLimitRejecting
+        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="rate_limit",decision="rejected"}}[5m])) > 0
+        for: 5m
+        labels:
+          severity: info
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} is rejecting requests by rate limit"
+          description: "Verify client behavior, configured limits, and allowed/rejected counter evidence."
+
+      - alert: RozeGeneratedServiceCircuitBreakerOpen
+        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="breaker",decision="open"}}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} circuit breaker is open"
+          description: "Inspect downstream health, breaker transition metrics, and recovery objective."
+
+      - alert: RozeGeneratedServiceLoadShedding
+        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="load_shedding",decision="shed"}}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} is shedding load"
+          description: "Compare resource trends, p99 latency, and configured shedding thresholds."
+
+      - alert: RozeGeneratedServiceRestarting
+        expr: increase(process_start_time_seconds{{service="{name}"}}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: {name}
+          boundary: {boundary}
+        annotations:
+          summary: "{name} restarted"
+          description: "Record restart count and attach logs to the production evidence report."
+"#,
+        name = spec.service,
+        boundary = boundary,
+        latency_metric = latency_metric,
+        request_metric = request_metric,
+    )
+}
+
+fn grafana_dashboard_json(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+
+    format!(
+        r#"{{
+  "title": "Roze Generated Service - {name}",
+  "tags": ["roze", "generated-service", "{boundary}", "production-evidence"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "templating": {{
+    "list": [
+      {{
+        "name": "service",
+        "type": "constant",
+        "query": "{name}",
+        "current": {{
+          "text": "{name}",
+          "value": "{name}"
+        }}
+      }}
+    ]
+  }},
+  "panels": [
+    {{
+      "id": 1,
+      "title": "Request Rate",
+      "type": "timeseries",
+      "gridPos": {{"x": 0, "y": 0, "w": 12, "h": 8}},
+      "targets": [
+        {{"expr": "sum(rate({request_metric}{{service=\"$service\"}}[5m]))", "legendFormat": "rps"}}
+      ]
+    }},
+    {{
+      "id": 2,
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": {{"x": 12, "y": 0, "w": 12, "h": 8}},
+      "targets": [
+        {{"expr": "sum(rate({request_metric}{{service=\"$service\",status=~\"5..\"}}[5m])) / clamp_min(sum(rate({request_metric}{{service=\"$service\"}}[5m])), 1)", "legendFormat": "5xx ratio"}}
+      ]
+    }},
+    {{
+      "id": 3,
+      "title": "P99 Latency",
+      "type": "timeseries",
+      "gridPos": {{"x": 0, "y": 8, "w": 12, "h": 8}},
+      "targets": [
+        {{"expr": "histogram_quantile(0.99, sum(rate({latency_metric}{{service=\"$service\"}}[5m])) by (le))", "legendFormat": "p99"}}
+      ]
+    }},
+    {{
+      "id": 4,
+      "title": "Resilience Decisions",
+      "type": "timeseries",
+      "gridPos": {{"x": 12, "y": 8, "w": 12, "h": 8}},
+      "targets": [
+        {{"expr": "sum(rate(roze_resilience_decisions_total{{service=\"$service\"}}[5m])) by (kind, decision)", "legendFormat": "{{{{kind}}}}/{{{{decision}}}}"}}
+      ]
+    }},
+    {{
+      "id": 5,
+      "title": "Restarts",
+      "type": "timeseries",
+      "gridPos": {{"x": 0, "y": 16, "w": 12, "h": 8}},
+      "targets": [
+        {{"expr": "increase(process_start_time_seconds{{service=\"$service\"}}[15m])", "legendFormat": "restart"}}
+      ]
+    }}
+  ]
+}}
+"#,
+        name = spec.service,
+        boundary = boundary,
+        latency_metric = latency_metric,
+        request_metric = request_metric,
+    )
+}
+
+fn slo_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Tune targets with the service owner before launch.
+service: {name}
+boundary: {boundary}
+window: 30d
+objectives:
+  availability:
+    target: 99.9
+    unit: percent
+    sli: up{{service="{name}"}} == 1
+    evidence: uptime_ratio_and_restart_count
+  success_rate:
+    target: 99.0
+    unit: percent
+    sli: 1 - (5xx_requests / total_requests)
+    prometheus: sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+    evidence: error_rate_and_error_budget_burn
+  latency_p99:
+    target: 1
+    unit: second
+    sli: p99_request_latency
+    prometheus: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
+    evidence: p99_latency_trend_and_timeout_budget
+  resilience_rejection_rate:
+    target: 0.5
+    unit: percent
+    sli: rate_limit_breaker_and_shedding_rejections
+    prometheus: sum(rate(roze_resilience_decisions_total{{service="{name}",decision=~"rejected|open|shed"}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+    evidence: governance_rejection_rate_and_recovery_window
+burn_rate_alerts:
+  fast:
+    window: 5m
+    threshold: 14.4
+  slow:
+    window: 1h
+    threshold: 6
+promotion_required:
+  generated_services_report: true
+  lifecycle_report: true
+  alert_rules_attached: true
+  dashboard_attached: true
+  rollback_notes: true
+"#,
+        name = spec.service,
+        boundary = boundary,
+        latency_metric = latency_metric,
+        request_metric = request_metric,
+    )
+}
+
+fn failure_injection_plan_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let traffic_driver = match kind {
+        ProjectKind::Rest => "representative_http_requests_and_probe_scrapes",
+        ProjectKind::Rpc => "representative_rpc_calls_and_client_deadline_tests",
+    };
+    let shutdown_signal = match kind {
+        ProjectKind::Rest => {
+            "send_sigterm_or_ctrl_c_while_requests_and_probe_scrapes_are_in_flight"
+        }
+        ProjectKind::Rpc => "send_sigterm_or_ctrl_c_while_rpc_calls_are_in_flight",
+    };
+    let slow_dependency = match kind {
+        ProjectKind::Rest => "delay_downstream_or_handler_path_beyond_configured_http_timeout",
+        ProjectKind::Rpc => "delay_downstream_or_method_path_beyond_client_and_server_deadlines",
+    };
+    let dependency_5xx = match kind {
+        ProjectKind::Rest => {
+            "return_5xx_from_dependency_or_handler_path_until_error_rate_alert_fires"
+        }
+        ProjectKind::Rpc => {
+            "return_unavailable_or_internal_from_dependency_until_error_rate_alert_fires"
+        }
+    };
+
+    format!(
+        r#"# Generated by rozectl. Run these drills in staging before broad production rollout.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+traffic_driver: {traffic_driver}
+objective:
+  verify:
+    - timeout
+    - rate_limit
+    - circuit_breaker
+    - load_shedding
+    - retry_budget
+    - deadline_propagation
+    - graceful_shutdown
+    - readiness_draining
+    - restart_recovery
+scenarios:
+  - scenario: shutdown_signal
+    inject: {shutdown_signal}
+    expected:
+      - readiness_false_before_process_exit
+      - in_flight_work_drained_or_cancelled_by_deadline
+      - lifecycle_snapshot_reaches_stopped
+    evidence:
+      metrics_query: up{{service="{name}"}}
+      trace_query: shutdown_and_cancelled_request_traces
+      log_query: service_group_shutdown_and_draining_logs
+      recovery_time: required
+      rollback_notes: required
+
+  - scenario: slow_dependency
+    inject: {slow_dependency}
+    expected:
+      - configured_timeout_observed
+      - deadline_propagation_reaches_logic_and_dependencies
+      - p99_latency_alert_or_budget_entry_created
+    evidence:
+      metrics_query: roze_resilience_decisions_total{{service="{name}",kind=~"timeout|deadline"}}
+      trace_query: slow_dependency_trace_with_deadline
+      log_query: timeout_or_deadline_exceeded_logs
+      recovery_time: required
+      rollback_notes: required
+
+  - scenario: dependency_5xx
+    inject: {dependency_5xx}
+    expected:
+      - circuit_breaker_transitions_open_half_open_closed
+      - error_rate_alert_fires
+      - retry_budget_caps_amplification
+    evidence:
+      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="breaker"}}
+      trace_query: failing_dependency_trace_with_breaker_state
+      log_query: breaker_transition_logs
+      recovery_time: required
+      rollback_notes: required
+
+  - scenario: rate_limit_pressure
+    inject: drive_request_rate_above_configured_limit
+    expected:
+      - rate_limit_rejects_excess_traffic
+      - allowed_and_rejected_counters_are_visible
+      - accepted_requests_remain_within_latency_budget
+    evidence:
+      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="rate_limit"}}
+      trace_query: rejected_request_trace_or_sampling_record
+      log_query: rate_limit_decision_logs
+      recovery_time: required
+      rollback_notes: required
+
+  - scenario: load_shedding_pressure
+    inject: raise_concurrency_or_latency_until_shedding_threshold_is_crossed
+    expected:
+      - load_shedding_decisions_are_recorded
+      - process_resource_trend_remains_bounded
+      - service_recovers_without_restart_after_pressure_drops
+    evidence:
+      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="load_shedding"}}
+      trace_query: shed_request_trace_or_sampling_record
+      log_query: load_shedding_decision_logs
+      recovery_time: required
+      rollback_notes: required
+
+  - scenario: invalid_config_reload
+    inject: push_invalid_governance_or_dependency_config
+    expected:
+      - invalid_config_is_rejected
+      - last_known_good_config_remains_active
+      - operator_action_is_auditable
+    evidence:
+      metrics_query: roze_config_reload_total{{service="{name}",result=~"rejected|rollback"}}
+      trace_query: config_reload_trace_if_available
+      log_query: invalid_config_reload_logs
+      recovery_time: required
+      rollback_notes: required
+
+  - scenario: restart_recovery
+    inject: restart_one_service_instance_under_representative_traffic
+    expected:
+      - startup_probe_returns_ready_after_dependencies_pass
+      - readiness_returns_after_recovery
+      - restart_count_is_recorded_in_evidence_report
+    evidence:
+      metrics_query: increase(process_start_time_seconds{{service="{name}"}}[15m])
+      trace_query: startup_and_first_successful_request_trace
+      log_query: startup_readiness_and_dependency_check_logs
+      recovery_time: required
+      rollback_notes: required
+promotion_required:
+  all_scenarios_executed: true
+  recovery_time_recorded: true
+  metrics_traces_logs_attached: true
+  rollback_notes_attached: true
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        traffic_driver = traffic_driver,
+        shutdown_signal = shutdown_signal,
+        slow_dependency = slow_dependency,
+        dependency_5xx = dependency_5xx,
+    )
+}
+
+fn release_rollout_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let smoke_probe = match kind {
+        ProjectKind::Rest => "healthz_readyz_startupz_metrics_and_representative_http_request",
+        ProjectKind::Rpc => "startup_readiness_metric_scrape_and_representative_rpc_call",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Keep release evidence with the production report.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+strategy:
+  default: canary_then_progressive
+  alternatives:
+    - blue_green
+    - manual_rollback
+preflight_required:
+  generated_services_report: true
+  lifecycle_report: true
+  slo_error_budget_report: true
+  failure_injection_plan_completed: true
+  alert_rules_attached: true
+  dashboard_attached: true
+  rollback_owner_named: true
+  config_diff_reviewed: true
+  migration_plan_reviewed: true
+gates:
+  - gate: preflight
+    action: run_compile_tests_smoke_and_config_diff
+    smoke_probe: {smoke_probe}
+    pass:
+      - cargo_fmt_check_passed
+      - cargo_test_passed
+      - smoke_probe_passed
+      - no_unreviewed_config_or_schema_diff
+    evidence:
+      metrics_query: up{{service="{name}"}}
+      trace_query: representative_success_trace
+      log_query: startup_and_config_load_logs
+
+  - gate: canary_1_percent
+    action: route_1_percent_or_single_instance_to_new_version
+    hold: 15m
+    pass:
+      - availability_slo_not_burning_fast
+      - error_rate_below_1_percent
+      - p99_latency_within_slo
+      - no_new_panic_or_unhandled_error_logs
+    rollback:
+      automatic_when:
+        - error_rate_above_1_percent_for_5m
+        - p99_latency_above_slo_for_5m
+        - circuit_breaker_open_for_2m
+      manual_when:
+        - business_metric_regression_observed
+        - operator_detects_unexpected_dependency_pressure
+    evidence:
+      metrics_query: sum(rate({request_metric}{{service="{name}"}}[5m]))
+      latency_query: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
+      trace_query: canary_success_and_error_trace_samples
+      log_query: canary_version_logs_with_correlation_id
+
+  - gate: canary_10_percent
+    action: increase_new_version_traffic_to_10_percent
+    hold: 30m
+    pass:
+      - burn_rate_within_slo_yaml_thresholds
+      - resilience_rejection_rate_within_budget
+      - resource_trends_stable
+      - dependency_error_rate_not_amplified
+    rollback:
+      automatic_when:
+        - slo_fast_burn_threshold_exceeded
+        - load_shedding_sustained_for_5m
+        - retry_budget_exhausted
+    evidence:
+      metrics_query: roze_resilience_decisions_total{{service="{name}"}}
+      trace_query: dependency_and_retry_trace_samples
+      log_query: rate_limit_breaker_shedding_logs
+
+  - gate: progressive_50_percent
+    action: increase_new_version_traffic_to_50_percent
+    hold: 1h
+    pass:
+      - p95_and_p99_latency_trends_stable
+      - process_memory_and_connection_trends_stable
+      - no_restart_loop
+      - readiness_remains_true
+    rollback:
+      automatic_when:
+        - process_restarts_within_15m
+        - readiness_false_for_2m
+        - resource_trend_unbounded
+    evidence:
+      metrics_query: process_resident_memory_bytes{{service="{name}"}}
+      trace_query: high_latency_trace_samples
+      log_query: readiness_and_restart_logs
+
+  - gate: full_rollout
+    action: shift_100_percent_traffic_to_new_version
+    hold: 2h
+    pass:
+      - availability_success_latency_and_resilience_slos_stable
+      - alerts_clear_or_acknowledged
+      - rollback_window_still_available
+      - owner_signoff_recorded
+    rollback:
+      automatic_when:
+        - critical_alert_fires
+        - error_budget_fast_burn_detected
+      manual_when:
+        - product_or_customer_signal_regression
+    evidence:
+      metrics_query: up{{service="{name}"}}
+      trace_query: full_rollout_trace_samples
+      log_query: full_rollout_version_logs
+
+  - gate: post_release_observation
+    action: observe_new_version_after_full_rollout
+    hold: 24h
+    pass:
+      - slow_burn_rate_within_budget
+      - no_delayed_dependency_or_resource_regression
+      - incident_and_rollback_notes_attached
+    evidence:
+      metrics_query: sum(rate({request_metric}{{service="{name}"}}[1h]))
+      latency_query: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[1h])) by (le))
+      trace_query: post_release_trace_samples
+      log_query: post_release_error_and_warning_logs
+blue_green:
+  required:
+    - old_and_new_versions_registered_separately
+    - readiness_checked_before_switch
+    - instant_switch_command_recorded
+    - rollback_switch_command_recorded
+rollback_required:
+  owner: required
+  max_decision_time: 5m
+  evidence:
+    - rollback_reason
+    - rollback_command_or_platform_event
+    - recovery_time
+    - customer_impact
+    - followup_issue
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        request_metric = request_metric,
+        latency_metric = latency_metric,
+        smoke_probe = smoke_probe,
+    )
 }
 
 fn build_rs() -> String {
@@ -5079,6 +5942,166 @@ mod tests {
     }
 
     #[test]
+    fn generated_projects_include_production_evidence_runbooks() {
+        let rest_spec = parse_api(
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid rest api");
+        let rpc_spec = parse_api(
+            r#"
+            service user {
+                rpc GetUser (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let root = temp_test_root("rozectl-production-evidence-runbooks");
+        let rest_out = root.join("rest");
+        let rpc_out = root.join("rpc");
+
+        generate_rest_project(
+            &rest_spec,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("generate rest project");
+        generate_rpc_project(
+            &rpc_spec,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("generate rpc project");
+
+        let rest_readme = fs::read_to_string(rest_out.join("README.md")).expect("read rest readme");
+        let rest_runbook = fs::read_to_string(rest_out.join("ops/production-evidence.md"))
+            .expect("read rest runbook");
+        let rest_governance = fs::read_to_string(rest_out.join("ops/governance-baseline.yaml"))
+            .expect("read rest governance baseline");
+        let rest_rules = fs::read_to_string(rest_out.join("ops/prometheus-rules.yaml"))
+            .expect("read rest prometheus rules");
+        let rest_dashboard = fs::read_to_string(rest_out.join("ops/grafana-dashboard.json"))
+            .expect("read rest grafana dashboard");
+        let rest_slo = fs::read_to_string(rest_out.join("ops/slo.yaml")).expect("read rest slo");
+        let rest_failure_plan =
+            fs::read_to_string(rest_out.join("ops/failure-injection-plan.yaml"))
+                .expect("read rest failure injection plan");
+        let rest_release_rollout = fs::read_to_string(rest_out.join("ops/release-rollout.yaml"))
+            .expect("read rest release rollout plan");
+        let rpc_readme = fs::read_to_string(rpc_out.join("README.md")).expect("read rpc readme");
+        let rpc_runbook = fs::read_to_string(rpc_out.join("ops/production-evidence.md"))
+            .expect("read rpc runbook");
+        let rpc_governance = fs::read_to_string(rpc_out.join("ops/governance-baseline.yaml"))
+            .expect("read rpc governance baseline");
+        let rpc_rules = fs::read_to_string(rpc_out.join("ops/prometheus-rules.yaml"))
+            .expect("read rpc prometheus rules");
+        let rpc_dashboard = fs::read_to_string(rpc_out.join("ops/grafana-dashboard.json"))
+            .expect("read rpc grafana dashboard");
+        let rpc_slo = fs::read_to_string(rpc_out.join("ops/slo.yaml")).expect("read rpc slo");
+        let rpc_failure_plan = fs::read_to_string(rpc_out.join("ops/failure-injection-plan.yaml"))
+            .expect("read rpc failure injection plan");
+        let rpc_release_rollout = fs::read_to_string(rpc_out.join("ops/release-rollout.yaml"))
+            .expect("read rpc release rollout plan");
+
+        assert!(rest_readme.contains("ops/production-evidence.md"));
+        assert!(rpc_readme.contains("ops/production-evidence.md"));
+        assert!(rest_runbook.contains("Generated by `rozectl` for the REST boundary."));
+        assert!(rpc_runbook.contains("Generated by `rozectl` for the RPC boundary."));
+        assert!(rest_runbook.contains("## Architecture Borrowed And Extended"));
+        assert!(rest_runbook.contains("timeout, rate limit, circuit breaker, load shedding"));
+        assert!(rest_runbook.contains("generated evidence gates"));
+        assert!(rest_runbook.contains("--area generated-services"));
+        assert!(rest_runbook.contains("--lifecycle-summary"));
+        assert!(rest_runbook.contains("The lifecycle summary is rejected"));
+        assert!(rest_runbook.contains("ops/governance-baseline.yaml"));
+        assert!(rest_runbook.contains("ops/prometheus-rules.yaml"));
+        assert!(rest_runbook.contains("ops/grafana-dashboard.json"));
+        assert!(rest_runbook.contains("ops/slo.yaml"));
+        assert!(rest_runbook.contains("ops/failure-injection-plan.yaml"));
+        assert!(rest_runbook.contains("ops/release-rollout.yaml"));
+        assert!(rest_governance.contains("boundary: rest"));
+        assert!(rest_governance.contains("endpoint_count: 1"));
+        assert!(rest_governance.contains("failure_oriented_resilience"));
+        assert!(rest_governance.contains("generated_prometheus_alert_rules"));
+        assert!(rest_governance.contains("generated_grafana_dashboard"));
+        assert!(rest_governance.contains("generated_slo_error_budget"));
+        assert!(rest_governance.contains("generated_failure_injection_plan"));
+        assert!(rest_governance.contains("generated_release_rollout_gates"));
+        assert!(rest_governance.contains("circuit_breaker:"));
+        assert!(rest_governance.contains("generated_rules: ops/prometheus-rules.yaml"));
+        assert!(rest_governance.contains("generated_dashboard: ops/grafana-dashboard.json"));
+        assert!(rest_governance.contains("lifecycle_summary_consistency: true"));
+        assert!(rest_governance.contains("slo_error_budget_report: true"));
+        assert!(rest_governance.contains("failure_injection_plan: true"));
+        assert!(rest_governance.contains("release_rollout_plan: true"));
+        assert!(rest_rules.contains("RozeGeneratedServiceHighErrorRate"));
+        assert!(rest_rules.contains("RozeGeneratedServiceHighP99Latency"));
+        assert!(rest_rules.contains("RozeGeneratedServiceCircuitBreakerOpen"));
+        assert!(rest_rules.contains("RozeGeneratedServiceLoadShedding"));
+        assert!(rest_rules.contains("roze_http_request_duration_seconds_bucket"));
+        assert!(rest_dashboard.contains("\"title\": \"Roze Generated Service - user-api\""));
+        assert!(rest_dashboard.contains("\"Request Rate\""));
+        assert!(rest_dashboard.contains("\"P99 Latency\""));
+        assert!(rest_dashboard.contains("roze_resilience_decisions_total"));
+        assert!(rest_slo.contains("target: 99.9"));
+        assert!(rest_slo.contains("latency_p99:"));
+        assert!(rest_slo.contains("error_budget_burn"));
+        assert!(rest_slo.contains("dashboard_attached: true"));
+        assert!(rest_failure_plan.contains("boundary: rest"));
+        assert!(rest_failure_plan.contains("scenario: shutdown_signal"));
+        assert!(rest_failure_plan.contains("scenario: dependency_5xx"));
+        assert!(rest_failure_plan.contains("circuit_breaker"));
+        assert!(rest_failure_plan.contains("load_shedding"));
+        assert!(rest_failure_plan.contains("recovery_time: required"));
+        assert!(rest_release_rollout.contains("boundary: rest"));
+        assert!(rest_release_rollout.contains("gate: canary_1_percent"));
+        assert!(rest_release_rollout.contains("gate: progressive_50_percent"));
+        assert!(rest_release_rollout.contains("blue_green:"));
+        assert!(rest_release_rollout.contains("rollback_required:"));
+        assert!(rest_release_rollout.contains("roze_http_requests_total"));
+        assert!(rpc_runbook.contains("client RPC calls for 1 method(s)"));
+        assert!(rpc_governance.contains("boundary: rpc"));
+        assert!(rpc_governance.contains("endpoint_count: 1"));
+        assert!(rpc_governance.contains("deadline_propagation:"));
+        assert!(rpc_rules.contains("roze_rpc_method_duration_seconds_bucket"));
+        assert!(rpc_dashboard.contains("roze_rpc_method_duration_seconds_bucket"));
+        assert!(rpc_slo.contains("boundary: rpc"));
+        assert!(rpc_slo.contains("roze_rpc_method_duration_seconds_bucket"));
+        assert!(rpc_failure_plan.contains("boundary: rpc"));
+        assert!(rpc_failure_plan.contains("representative_rpc_calls_and_client_deadline_tests"));
+        assert!(rpc_failure_plan.contains("scenario: slow_dependency"));
+        assert!(rpc_failure_plan.contains("deadline_propagation"));
+        assert!(rpc_failure_plan.contains("rollback_notes: required"));
+        assert!(rpc_release_rollout.contains("boundary: rpc"));
+        assert!(rpc_release_rollout.contains("representative_rpc_call"));
+        assert!(rpc_release_rollout.contains("gate: full_rollout"));
+        assert!(rpc_release_rollout.contains("roze_rpc_requests_total"));
+        assert!(rpc_release_rollout.contains("max_decision_time: 5m"));
+
+        fs::remove_dir_all(root).expect("remove runbook test root");
+    }
+
+    #[test]
     fn update_preserves_business_files_and_refreshes_generated_files() {
         let spec = parse_api(
             r#"
@@ -5234,7 +6257,7 @@ mod tests {
         .expect("write custom config module");
         fs::write(
             out.join("src/handler/admin/auth_me.rs"),
-            "use axum::http::HeaderMap;\n\npub async fn auth_me(headers: HeaderMap) -> roze_result::Result<()> {\n    let _ = headers;\n    Ok(())\n}\n",
+            "use roze_http::http::HeaderMap;\n\npub async fn auth_me(headers: HeaderMap) -> roze_result::Result<()> {\n    let _ = headers;\n    Ok(())\n}\n",
         )
         .expect("write custom handler adapter");
         fs::write(

@@ -121,9 +121,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let ctx = svc::ServiceContext::new(config.clone()).await?;
-    let app = roze_middleware::apply_common(
-        handler::router(ctx).merge(build_admin_router(registry.clone(), config_history.clone())),
-    );
+    let _config_history = config_history;
+    let app = roze_middleware::apply_common(handler::router(ctx));
     RestServer::new(rest.addr, app).serve().await?;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
@@ -159,20 +158,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn build_admin_router(
-    registry: Option<Arc<dyn roze_rpc::registry::Registry>>,
-    history: roze_admin::ConfigReloadHistory,
-) -> axum::Router {
-    let mut state = roze_admin::AdminState::new().with_config_history(history);
-    if let Some(registry) = registry {
-        state = state.with_registry(roze_admin::RegistryAdmin::new(registry));
-    }
-    if let Some(auth) = roze_admin::AdminAuthConfig::from_env() {
-        state = state.with_auth(auth);
-    }
-    roze_admin::admin_router(state)
 }
 
 fn config_path() -> std::path::PathBuf {

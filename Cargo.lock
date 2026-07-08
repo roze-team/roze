@@ -272,58 +272,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
-dependencies = [
- "axum-core",
- "bytes",
- "form_urlencoded",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "itoa",
- "matchit",
- "memchr",
- "mime",
- "percent-encoding",
- "pin-project-lite",
- "serde_core",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tower",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "axum-core"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
-dependencies = [
- "bytes",
- "futures-core",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "sync_wrapper",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2305,9 +2253,9 @@ dependencies = [
 
 [[package]]
 name = "matchit"
-version = "0.8.4"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+checksum = "2f926ade0c4e170215ae43342bf13b9310a437609c81f29f86c5df6657582ef9"
 
 [[package]]
 name = "md-5"
@@ -2334,12 +2282,6 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
-
-[[package]]
-name = "mime"
-version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "miniz_oxide"
@@ -3555,8 +3497,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
+ "http",
  "roze-config",
+ "roze-http",
  "roze-mq",
  "roze-rpc",
  "serde",
@@ -3671,8 +3614,8 @@ name = "roze-dtm-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "config",
+ "http",
  "roze-config",
  "roze-dtm",
  "roze-health",
@@ -3682,6 +3625,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -3689,7 +3633,7 @@ dependencies = [
 name = "roze-error"
 version = "0.1.0"
 dependencies = [
- "axum",
+ "http",
  "roze-grpc",
  "serde",
  "thiserror",
@@ -3715,8 +3659,8 @@ name = "roze-example"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "config",
+ "http",
  "roze-cache",
  "roze-config",
  "roze-context",
@@ -3740,6 +3684,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "validator",
 ]
@@ -3749,14 +3694,17 @@ name = "roze-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
+ "bytes",
  "futures-util",
+ "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "reqwest 0.13.4",
  "roze-auth",
  "roze-config",
  "roze-context",
+ "roze-http",
  "roze-jwt",
  "roze-metrics",
  "roze-resilience",
@@ -3775,7 +3723,6 @@ name = "roze-gateway-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "config",
  "roze-admin",
  "roze-config",
@@ -3815,10 +3762,17 @@ name = "roze-http"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "matchit",
  "roze-error",
- "roze-service",
- "roze-shutdown",
+ "roze-result",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "tokio",
  "tower",
  "tracing",
@@ -3899,7 +3853,6 @@ dependencies = [
 name = "roze-middleware"
 version = "0.1.0"
 dependencies = [
- "axum",
  "roze-auth",
  "roze-config",
  "roze-context",
@@ -4051,7 +4004,6 @@ dependencies = [
 name = "roze-result"
 version = "0.1.0"
 dependencies = [
- "axum",
  "serde",
 ]
 
@@ -4086,8 +4038,8 @@ name = "roze-sample-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "config",
+ "http",
  "roze-cache",
  "roze-config",
  "roze-context",
@@ -4107,6 +4059,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "validator",
 ]
@@ -4634,17 +4587,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a93142f0367a4cc53ae0fead1bcda39e85beccfad3dcd717656cacab94b12985"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "serde_path_to_error"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
-dependencies = [
- "itoa",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -5630,7 +5572,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
- "axum",
  "base64",
  "bytes",
  "h2",
@@ -5951,8 +5892,8 @@ name = "user-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "config",
+ "http",
  "roze-admin",
  "roze-cache",
  "roze-config",
@@ -5974,6 +5915,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "validator",
 ]

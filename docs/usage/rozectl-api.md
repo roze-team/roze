@@ -1,7 +1,7 @@
 # rozectl generator
 
 `rozectl api generate` reads a Roze `.api` contract and generates a
-Rust-native Axum REST service. The generated project keeps framework-owned files
+Rust-native Roze native HTTP REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
 method-level logic, service context extensions, config module extensions,
 custom handler adapters, custom middleware, and `config.yaml` when `--update`
@@ -253,7 +253,7 @@ cd mock-server
 cargo run
 ```
 
-The generated mock server is a standalone Axum project. It registers the REST
+The generated mock server is a standalone Roze native HTTP project. It registers the REST
 routes declared in `.api` and returns default JSON values derived from each
 route response type. Pass `--force` to overwrite mock server files in an
 existing output directory.
@@ -368,6 +368,33 @@ tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops
 reporting ready while the process exits through the unified shutdown path.
 Generated stream consumers listen to the same shutdown signal and stop worker
 tasks before returning.
+
+Generated REST and RPC services also include `ops/production-evidence.md`,
+`ops/governance-baseline.yaml`, `ops/prometheus-rules.yaml`, and
+`ops/grafana-dashboard.json`, `ops/slo.yaml`, and
+`ops/failure-injection-plan.yaml`, and `ops/release-rollout.yaml`. The runbook
+records the generated service boundary, required production gates,
+`scripts/production-evidence.sh --area generated-services`, and lifecycle
+summary collection with `--lifecycle-summary`. The YAML baseline is
+machine-readable for CI/platform checks and captures the go-zero inspired
+architecture baseline Roze expects before broad rollout: simple IDL-first
+ownership, timeout, rate limit, circuit breaker, load shedding, retry budget,
+deadline propagation, discovery, load balancing, tracing, metrics, health
+checks, structured logs, and explicit extension points. The Prometheus rules
+cover service down, error rate, p99 latency, rate-limit rejection, breaker open,
+load shedding, and restarts. The Grafana dashboard covers request rate, error
+rate, p99 latency, resilience decisions, and restarts. Roze extends that
+baseline with generated evidence gates. The SLO file defines default
+availability, success-rate, p99-latency, resilience-rejection, burn-rate, and
+promotion requirements. The failure-injection plan defines staging drills for
+shutdown, slow dependencies, 5xx dependency failures, rate-limit pressure,
+load-shedding pressure, invalid config reload, and restart recovery, with the
+metrics, traces, logs, recovery time, and rollback notes required for each
+scenario. The release rollout plan defines preflight, canary, progressive
+rollout, full rollout, post-release observation, blue-green checks, and rollback
+evidence. Treat the runbook, YAML baseline, alert rules, dashboard, SLO file,
+failure-injection plan, and release rollout plan as the default promotion
+checklist for each generated service.
 
 Generate client SDKs:
 
@@ -653,7 +680,7 @@ long-running logic.
 Business logic should not pass or construct `trace_id` values. Use
 `tracing::info!`, `tracing::warn!`, and `tracing::error!` directly in
 `src/logic/**`; the request Span created by Roze middleware carries the
-`trace_id`. Use `ServiceContext` for global resources and Axum `Extension<T>`
+`trace_id`. Use `ServiceContext` for global resources and Roze native HTTP `Extension<T>`
 for per-request user/session objects injected by custom middleware.
 
 `cors: true` enables CORS. Without `cors_config`, generated services use a
@@ -1039,8 +1066,37 @@ unique index on the local edge field and generates unique lookup helpers.
 `.ent` fields can declare `unique`; Roze normalizes that into a single-field
 unique index and generates the same unique lookup helpers as an explicit
 `index ... { unique }` block.
+`.ent` fields can declare `index`; Roze normalizes that into a single-field
+non-unique index and generates `list_by_<field>` helpers for Toasty and SeaORM
+repositories.
 `.ent` fields can declare `immutable`; Roze keeps them available on create
 builders but omits them from update, update-many, and edge update setters.
+`.ent` fields can declare `optional`; Roze treats that as the nullable
+equivalent of writing the field type with `?`, such as `string?`.
+`.ent` fields can declare `sensitive`; Roze omits `Debug` derives for those
+model rows and generates a manual `Debug` implementation that renders the
+field as `<sensitive>`.
+`.ent` string fields can declare `not_empty`, `min_len <n>`, `max_len <n>`,
+`enum <value>, <value>`, `contains <value>`, `starts_with <value>`, and
+`ends_with <value>`, plus `not_contains <value>`, `not_starts_with <value>`,
+and `not_ends_with <value>`; Roze validates those constraints in generated
+create, update-one, and update-many builders before writing through Toasty or
+SeaORM.
+`.ent` primitive numeric fields can declare `positive`, `non_negative`,
+`negative`, `non_positive`, `min <n>`, `max <n>`, and
+`range <min>, <max>`; Roze validates those bounds in the same generated
+mutation builders.
+`.ent` `i64`/`u64` timestamp fields can declare `default now_secs`,
+`default now_millis`, `default now_micros`, or `default now_nanos`; generated
+create builders fill the field when the caller did not set it explicitly.
+`.ent` fields can declare `client_default <value>` for generated create builder
+defaults on `String`, `bool`, primitive numeric fields, and `now_*` timestamp
+values; unlike `default`, this is applied by generated Rust builders rather
+than relying on a database default.
+`.ent` updateable `i64`/`u64` timestamp fields can declare
+`update_default now_secs`, `update_default now_millis`,
+`update_default now_micros`, or `update_default now_nanos`; generated update
+builders fill the field when the caller did not set it explicitly.
 SQL `JSON`/`JSONB` columns generate `String` so default Toasty models remain
 compilable; ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
 `BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.
@@ -1088,8 +1144,9 @@ SQL repositories additionally generate:
 - order helpers are generated for every queryable field, including nullable
   fields such as `nickname_asc` and `nickname_desc`
 - query builders with `where_`, `where_all`, `where_any`, `where_not`,
-  `where_none`, `order`, `order_all`, `limit`, `offset`, `paginate`, `all`,
-  `count`, `exists`, `ids`, `first_id`, `only_id`, `pluck_<field>`,
+  `where_none`, `order`, `order_all`, `order_by_<field>_asc`,
+  `order_by_<field>_desc`, `limit`, `offset`, `paginate`, `all`, `count`,
+  `exists`, `ids`, `first_id`, `only_id`, `pluck_<field>`,
   `unique_<field>`, `count_by_<field>`, `first_<field>`, `only_<field>`,
   `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`, `first`,
   `only`, and `page`
@@ -1146,6 +1203,7 @@ let page = ctx
     .await?;
 
 let ids = ctx.model().user().query().ids().await?;
+let newest = ctx.model().user().query().order_by_id_desc().limit(10).all().await?;
 let names = ctx.model().user().query().pluck_name().await?;
 let unique_names = ctx.model().user().query().unique_name().await?;
 let name_counts = ctx.model().user().query().count_by_name().await?;
@@ -1203,6 +1261,7 @@ let items = UserRepository::query(&mut db)
     .await?;
 
 let ids = UserRepository::query(&mut db).ids().await?;
+let newest = UserRepository::query(&mut db).order_by_id_desc().limit(10).all().await?;
 let names = UserRepository::query(&mut db).pluck_name().await?;
 let unique_names = UserRepository::query(&mut db).unique_name().await?;
 let name_counts = UserRepository::query(&mut db).count_by_name().await?;

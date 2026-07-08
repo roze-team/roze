@@ -6,10 +6,17 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-axum.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+matchit.workspace = true
 roze-error = { path = "../roze-error" }
-roze-service = { path = "../roze-service" }
-roze-shutdown = { path = "../roze-shutdown" }
-tokio.workspace = true
+roze-result = { path = "../roze-result" }
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tower.workspace = true
 tracing.workspace = true

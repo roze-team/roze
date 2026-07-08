@@ -7,7 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 config.workspace = true
-axum.workspace = true
+http.workspace = true
 roze-config = { path = "../../crates/roze-config" }
 roze-admin = { path = "../../crates/roze-admin" }
 roze-error = { path = "../../crates/roze-error" }
@@ -30,6 +30,7 @@ serde_json.workspace = true
 sea-orm.workspace = true
 validator.workspace = true
 tokio.workspace = true
+tower.workspace = true
 tracing.workspace = true
 
 [build-dependencies]

@@ -1,7 +1,4 @@
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -144,21 +141,19 @@ pub fn normalize_locale(raw: &str) -> Option<String> {
     None
 }
 
-impl IntoResponse for RozeError {
-    fn into_response(self) -> Response {
-        let status = self.status_code();
+impl RozeError {
+    pub fn response_body(&self) -> ErrorResponse {
         let message = current_locale()
             .map(|locale| self.message_i18n(locale))
             .unwrap_or_else(|| self.message());
         let ids = current_request_ids();
-        let body = ErrorResponse {
+        ErrorResponse {
             code: self.code(),
             msg: message,
             data: None,
             request_id: ids.as_ref().map(|ids| ids.request_id.clone()),
             trace_id: ids.as_ref().map(|ids| ids.trace_id.clone()),
-        };
-        (status, axum::Json(body)).into_response()
+        }
     }
 }
 
@@ -240,18 +235,19 @@ mod tests {
     }
 
     #[test]
-    fn converts_to_axum_error_response() {
-        let resp = axum::response::IntoResponse::into_response(RozeError::Unauthorized);
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    fn builds_error_response_body() {
+        let err = RozeError::Unauthorized;
+        assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(err.response_body().code, 401);
     }
 
     #[tokio::test]
-    async fn converts_to_localized_axum_error_response() {
-        let resp = scope_locale(Some("zh-CN".to_string()), async {
-            axum::response::IntoResponse::into_response(RozeError::Unauthorized)
+    async fn builds_localized_error_response_body() {
+        let body = scope_locale(Some("zh-CN".to_string()), async {
+            RozeError::Unauthorized.response_body()
         })
         .await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body.code, 401);
     }
 
     #[test]

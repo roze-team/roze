@@ -1,9 +1,19 @@
-use std::{future::Future, net::SocketAddr, time::Duration};
+use std::{convert::Infallible, error::Error, future::Future, net::SocketAddr, time::Duration};
 
-use axum::Router;
-use roze_service::{RuntimeService, ServiceFuture};
+use bytes::Bytes;
+use http::{header, Request, Response, StatusCode};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::{server::conn::http1, service::service_fn};
+use hyper_util::rt::TokioIo;
+use serde::Serialize;
 use tokio::net::TcpListener;
+use tower::{Service, ServiceExt};
 use tracing::info;
+
+pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
+pub type Body = BoxBody<Bytes, BoxError>;
+pub type IncomingRequest = Request<Body>;
+pub type HttpResponse = Response<Body>;
 
 #[derive(Debug, Clone)]
 pub struct RestConfig {
@@ -11,14 +21,15 @@ pub struct RestConfig {
     pub graceful_shutdown_timeout: Duration,
 }
 
-pub struct RestServer {
+pub struct RestServer<S> {
     config: RestConfig,
-    endpoint: Router,
+    service: S,
 }
 
-pub struct RestService {
+#[allow(dead_code)]
+pub struct RestService<S> {
     name: String,
-    server: std::sync::Mutex<Option<RestServer>>,
+    server: std::sync::Mutex<Option<RestServer<S>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,32 +46,32 @@ impl RestLayerStack {
         &self.config
     }
 
-    pub fn layer(&self, router: Router) -> Router {
-        router
+    pub fn layer<S>(&self, service: S) -> S {
+        service
     }
 
-    pub fn into_layer(self) -> RestRouterLayer {
-        RestRouterLayer {
+    pub fn into_layer(self) -> RestServiceLayer {
+        RestServiceLayer {
             config: self.config,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RestRouterLayer {
+pub struct RestServiceLayer {
     config: RestConfig,
 }
 
-impl tower::Layer<Router> for RestRouterLayer {
-    type Service = Router;
+impl<S> tower::Layer<S> for RestServiceLayer {
+    type Service = S;
 
-    fn layer(&self, inner: Router) -> Self::Service {
+    fn layer(&self, inner: S) -> Self::Service {
         RestLayerStack::new(self.config.clone()).layer(inner)
     }
 }
 
-impl RestService {
-    pub fn new(name: impl Into<String>, server: RestServer) -> Self {
+impl<S> RestService<S> {
+    pub fn new(name: impl Into<String>, server: RestServer<S>) -> Self {
         Self {
             name: name.into(),
             server: std::sync::Mutex::new(Some(server)),
@@ -68,57 +79,34 @@ impl RestService {
     }
 }
 
-impl RuntimeService for RestService {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn start(&self, shutdown: roze_shutdown::ShutdownListener) -> ServiceFuture<'_> {
-        Box::pin(async move {
-            let server = self
-                .server
-                .lock()
-                .expect("rest service mutex")
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("REST service {} already started", self.name))?;
-
-            server
-                .serve_with_shutdown(async move {
-                    shutdown.wait().await;
-                })
-                .await
-                .map_err(|error| anyhow::anyhow!("REST service {} failed: {error}", self.name))
-        })
-    }
-}
-
-impl RestServer {
-    pub fn new(addr: SocketAddr, endpoint: Router) -> Self {
+impl<S> RestServer<S> {
+    pub fn new(addr: SocketAddr, service: S) -> Self {
         Self {
             config: RestConfig {
                 addr,
                 graceful_shutdown_timeout: Duration::from_secs(10),
             },
-            endpoint,
+            service,
         }
     }
 
-    pub fn with_config(config: RestConfig, endpoint: Router) -> Self {
-        Self { config, endpoint }
+    pub fn with_config(config: RestConfig, service: S) -> Self {
+        Self { config, service }
     }
 
     pub fn config(&self) -> &RestConfig {
         &self.config
     }
+}
 
-    pub fn raw_router(&self) -> Router {
-        self.endpoint.clone()
-    }
-
-    pub fn into_router(self) -> Router {
-        RestLayerStack::new(self.config).layer(self.endpoint)
-    }
-
+impl<S> RestServer<S>
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
     pub async fn serve(self) -> std::io::Result<()> {
         self.serve_with_shutdown(shutdown_signal()).await
     }
@@ -131,71 +119,91 @@ impl RestServer {
         info!(addr = %addr, "REST server listening");
 
         let listener = TcpListener::bind(addr).await?;
-        let service = self.into_router().into_make_service();
-        axum::serve(listener, service)
-            .with_graceful_shutdown(shutdown)
-            .await
+        let service = self.service.boxed_clone();
+        let mut shutdown = std::pin::pin!(shutdown);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let io = TokioIo::new(stream);
+                    let service = service.clone();
+                    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                        let service = service.clone();
+                        async move {
+                            let request: IncomingRequest = request.map(|body| {
+                                body.map_err(|error| -> BoxError { Box::new(error) }).boxed()
+                            });
+                            service.oneshot(request).await
+                        }
+                    });
+                    if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+                        tracing::debug!(error = %error, "HTTP connection closed with error");
+                    }
+                }
+            }
+        }
+        Ok(())
     }
+}
+
+pub fn empty_response(status: StatusCode) -> HttpResponse {
+    Response::builder()
+        .status(status)
+        .body(empty_body())
+        .expect("empty response")
+}
+
+pub fn text_response(status: StatusCode, text: impl Into<String>) -> HttpResponse {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(full_body(text.into()))
+        .expect("text response")
+}
+
+pub fn json_response<T: Serialize>(status: StatusCode, value: &T) -> HttpResponse {
+    match serde_json::to_vec(value) {
+        Ok(bytes) => Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(full_body(bytes))
+            .expect("json response"),
+        Err(error) => text_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize response: {error}"),
+        ),
+    }
+}
+
+pub fn error_response(error: &roze_error::RozeError) -> HttpResponse {
+    json_response(error.status_code(), &error.response_body())
+}
+
+pub fn api_response<T: Serialize>(value: &roze_result::ApiResponse<T>) -> HttpResponse {
+    json_response(StatusCode::OK, value)
+}
+
+pub fn full_body(data: impl Into<Bytes>) -> Body {
+    Full::new(data.into()).map_err(Into::into).boxed()
+}
+
+pub fn empty_body() -> Body {
+    Full::new(Bytes::new()).map_err(Into::into).boxed()
 }
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-#[macro_export]
-macro_rules! parse_json_request {
-    ($result:expr) => {
-        match $result {
-            Ok(axum::Json(payload)) => payload,
-            Err(err) => {
-                return Err(roze_error::RozeError::BadRequest(err.to_string()));
-            }
-        }
-    };
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::SocketAddr,
-        time::{Duration, Instant},
-    };
+    use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
-    use axum::{routing::get, Router};
-    use roze_service::ServiceGroup;
-    use tower::{Layer, ServiceExt};
+    use http::{Request, StatusCode};
+    use tower::{service_fn, Layer};
 
-    use super::{RestConfig, RestLayerStack, RestServer, RestService};
-
-    #[tokio::test]
-    async fn rest_server_exposes_raw_and_layered_router() {
-        let router = Router::new().route("/ready", get(|| async { "ok" }));
-        let server = RestServer::new("127.0.0.1:0".parse().expect("addr"), router);
-
-        let response = server
-            .raw_router()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/ready")
-                    .body(axum::body::Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        let response = server
-            .into_router()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/ready")
-                    .body(axum::body::Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-    }
+    use super::{text_response, RestConfig, RestLayerStack};
 
     #[test]
     fn rest_layer_stack_can_be_used_as_tower_layer() {
@@ -204,30 +212,11 @@ mod tests {
             graceful_shutdown_timeout: Duration::from_secs(3),
         };
         let layer = RestLayerStack::new(config.clone()).into_layer();
-        let router = Router::new();
+        let service = service_fn(|_request: Request<super::Body>| async {
+            Ok::<_, Infallible>(text_response(StatusCode::OK, "ok"))
+        });
 
-        let _router = layer.layer(router);
+        let _service = layer.layer(service);
         assert_eq!(config.graceful_shutdown_timeout, Duration::from_secs(3));
-    }
-
-    #[tokio::test]
-    async fn rest_service_runs_inside_service_group() {
-        let router = Router::new().route("/ready", get(|| async { "ok" }));
-        let server = RestServer::new("127.0.0.1:0".parse().expect("addr"), router);
-        let mut group = ServiceGroup::new();
-        let handle = group.handle();
-
-        group.add(RestService::new("rest", server));
-
-        let started_at = Instant::now();
-        let join = tokio::spawn(group.start_with_shutdown(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }));
-
-        join.await
-            .expect("service group should join")
-            .expect("service group should stop cleanly");
-        handle.shutdown();
-        assert!(started_at.elapsed() < Duration::from_secs(1));
     }
 }
