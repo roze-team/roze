@@ -32,8 +32,12 @@ pub enum RozeError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    #[error("rate limited")]
+    RateLimited,
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("service unavailable: {0}")]
+    Unavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -44,7 +48,9 @@ impl RozeError {
             RozeError::BadRequest(_) => "bad_request",
             RozeError::Unauthorized => "unauthorized",
             RozeError::Forbidden => "forbidden",
+            RozeError::RateLimited => "rate_limited",
             RozeError::NotFound(_) => "not_found",
+            RozeError::Unavailable(_) => "unavailable",
             RozeError::Internal(_) => "internal",
         }
     }
@@ -54,7 +60,9 @@ impl RozeError {
             RozeError::BadRequest(_) => 400,
             RozeError::Unauthorized => 401,
             RozeError::Forbidden => 403,
+            RozeError::RateLimited => 429,
             RozeError::NotFound(_) => 404,
+            RozeError::Unavailable(_) => 503,
             RozeError::Internal(_) => 500,
         }
     }
@@ -64,7 +72,9 @@ impl RozeError {
             RozeError::BadRequest(msg) => msg.clone(),
             RozeError::Unauthorized => "unauthorized".to_string(),
             RozeError::Forbidden => "forbidden".to_string(),
+            RozeError::RateLimited => "rate limited".to_string(),
             RozeError::NotFound(msg) => msg.clone(),
+            RozeError::Unavailable(msg) => msg.clone(),
             RozeError::Internal(msg) => msg.clone(),
         }
     }
@@ -73,6 +83,7 @@ impl RozeError {
         match self {
             RozeError::BadRequest(msg) if !msg.is_empty() => msg.clone(),
             RozeError::NotFound(msg) if !msg.is_empty() => msg.clone(),
+            RozeError::Unavailable(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Internal(msg) if !msg.is_empty() => msg.clone(),
             _ => localized_error_message(self.kind(), locale.as_ref()).to_string(),
         }
@@ -84,6 +95,7 @@ impl RozeError {
             RozeError::BadRequest(_)
                 | RozeError::Unauthorized
                 | RozeError::Forbidden
+                | RozeError::RateLimited
                 | RozeError::NotFound(_)
         )
     }
@@ -93,7 +105,9 @@ impl RozeError {
             RozeError::BadRequest(_) => StatusCode::BAD_REQUEST,
             RozeError::Unauthorized => StatusCode::UNAUTHORIZED,
             RozeError::Forbidden => StatusCode::FORBIDDEN,
+            RozeError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             RozeError::NotFound(_) => StatusCode::NOT_FOUND,
+            RozeError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             RozeError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -113,7 +127,9 @@ pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
             "bad_request" => "bad request",
             "unauthorized" => "unauthorized",
             "forbidden" => "forbidden",
+            "rate_limited" => "rate limited",
             "not_found" => "not found",
+            "unavailable" => "service unavailable",
             "internal" => "internal server error",
             _ => "internal server error",
         },
@@ -230,7 +246,9 @@ mod tests {
         assert_eq!(RozeError::BadRequest("x".into()).code(), 400);
         assert_eq!(RozeError::Unauthorized.code(), 401);
         assert_eq!(RozeError::Forbidden.code(), 403);
+        assert_eq!(RozeError::RateLimited.code(), 429);
         assert_eq!(RozeError::NotFound("x".into()).code(), 404);
+        assert_eq!(RozeError::Unavailable("x".into()).code(), 503);
         assert_eq!(RozeError::Internal("x".into()).code(), 500);
     }
 

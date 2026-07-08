@@ -212,7 +212,7 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use std::time::Duration;\n\nuse roze_http::{extract::State, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+        "use std::{collections::BTreeMap, time::Duration};\n\nuse roze_http::{extract::{Query, State}, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\nuse serde::{Deserialize, Serialize};\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and(ctx.config.governance.timeout_ms)\n        .map(Duration::from_millis);\n    let router = Router::new()\n");
@@ -231,6 +231,14 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
     out.push_str(&format!(
         "        .route(\"{}\", get(metrics))\n",
         roze_http_route_path(&full_route_path(spec, "/metrics"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", get(report_export))\n",
+        roze_http_route_path(&full_route_path(spec, "/reports/export"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", get(chart_query))\n",
+        roze_http_route_path(&full_route_path(spec, "/charts/query"))
     ));
     out.push_str(&format!(
         "        .route(\"{}\", get(openapi_doc))\n",
@@ -261,8 +269,121 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
     out.push_str(
         "async fn openapi_doc() -> Json<serde_json::Value> {\n    Json(openapi::document())\n}\n\n",
     );
+    out.push_str(report_chart_interface_code());
 
     out
+}
+
+fn report_chart_interface_code() -> &'static str {
+    r#"#[derive(Debug, Clone, Deserialize)]
+struct ReportExportQuery {
+    #[serde(default)]
+    report: String,
+    #[serde(default = "default_report_format")]
+    format: String,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    filters: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReportExportResponse {
+    report: String,
+    format: String,
+    status: String,
+    export_id: String,
+    download_url: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    filters: Option<String>,
+    columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChartQuery {
+    #[serde(default)]
+    chart: String,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    interval: Option<String>,
+    #[serde(default)]
+    filters: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChartQueryResponse {
+    chart: String,
+    interval: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    filters: Option<String>,
+    series: Vec<ChartSeries>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChartSeries {
+    name: String,
+    points: Vec<ChartPoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChartPoint {
+    timestamp: String,
+    value: f64,
+    labels: BTreeMap<String, String>,
+}
+
+fn default_report_format() -> String {
+    "csv".to_string()
+}
+
+fn default_interface_name(value: String) -> String {
+    if value.trim().is_empty() {
+        "default".to_string()
+    } else {
+        value
+    }
+}
+
+async fn report_export(
+    Query(query): Query<ReportExportQuery>,
+) -> Result<ApiResponse<ReportExportResponse>, RozeError> {
+    let report = default_interface_name(query.report);
+    let format = default_interface_name(query.format);
+    let export_id = format!("report-{report}-{format}");
+    Ok(ApiResponse::ok(ReportExportResponse {
+        report,
+        format,
+        status: "accepted".to_string(),
+        export_id,
+        download_url: None,
+        from: query.from,
+        to: query.to,
+        filters: query.filters,
+        columns: Vec::new(),
+    }))
+}
+
+async fn chart_query(
+    Query(query): Query<ChartQuery>,
+) -> Result<ApiResponse<ChartQueryResponse>, RozeError> {
+    Ok(ApiResponse::ok(ChartQueryResponse {
+        chart: default_interface_name(query.chart),
+        interval: query.interval,
+        from: query.from,
+        to: query.to,
+        filters: query.filters,
+        series: Vec::new(),
+    }))
+}
+
+"#
 }
 
 pub fn render_route_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
@@ -487,11 +608,8 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         .iter()
         .any(|route| route_has_jwt(spec, route));
     let mut out = String::from(
-        "use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema",
+        "use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema, HttpMethod, Operation",
     );
-    if !spec.rest_routes.is_empty() {
-        out.push_str(", HttpMethod, Operation");
-    }
     if needs_jwt {
         out.push_str(", SecurityScheme");
     }
@@ -558,6 +676,8 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         ));
         out.push_str("    }\n");
     }
+
+    out.push_str(&render_report_chart_openapi(spec));
 
     for route in &spec.rest_routes {
         let route_spec = route_request_spec(spec, route).expect("request spec");
@@ -634,6 +754,73 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
 
     out.push_str("    roze_openapi::to_json_value(&builder.finish())\n}\n");
     out
+}
+
+fn render_report_chart_openapi(spec: &ApiSpec) -> String {
+    let report_path = full_route_path(spec, "/reports/export");
+    let chart_path = full_route_path(spec, "/charts/query");
+    format!(
+        r#"    {{
+        let mut properties = BTreeMap::new();
+        properties.insert("report".to_string(), Schema::string());
+        properties.insert("format".to_string(), Schema::string());
+        properties.insert("status".to_string(), Schema::string());
+        properties.insert("export_id".to_string(), Schema::string());
+        properties.insert("download_url".to_string(), Schema::string());
+        properties.insert("from".to_string(), Schema::string());
+        properties.insert("to".to_string(), Schema::string());
+        properties.insert("filters".to_string(), Schema::string());
+        properties.insert("columns".to_string(), Schema::array(Schema::string()));
+        builder = builder.component_schema("ReportExportResponse", Schema::object(properties, vec!["report".to_string(), "format".to_string(), "status".to_string(), "export_id".to_string(), "columns".to_string()]));
+    }}
+    {{
+        let mut properties = BTreeMap::new();
+        properties.insert("timestamp".to_string(), Schema::string());
+        properties.insert("value".to_string(), Schema::number("double"));
+        properties.insert("labels".to_string(), Schema::object(BTreeMap::new(), Vec::new()));
+        builder = builder.component_schema("ChartPoint", Schema::object(properties, vec!["timestamp".to_string(), "value".to_string(), "labels".to_string()]));
+    }}
+    {{
+        let mut properties = BTreeMap::new();
+        properties.insert("name".to_string(), Schema::string());
+        properties.insert("points".to_string(), Schema::array(Schema::reference("ChartPoint")));
+        builder = builder.component_schema("ChartSeries", Schema::object(properties, vec!["name".to_string(), "points".to_string()]));
+    }}
+    {{
+        let mut properties = BTreeMap::new();
+        properties.insert("chart".to_string(), Schema::string());
+        properties.insert("interval".to_string(), Schema::string());
+        properties.insert("from".to_string(), Schema::string());
+        properties.insert("to".to_string(), Schema::string());
+        properties.insert("filters".to_string(), Schema::string());
+        properties.insert("series".to_string(), Schema::array(Schema::reference("ChartSeries")));
+        builder = builder.component_schema("ChartQueryResponse", Schema::object(properties, vec!["chart".to_string(), "series".to_string()]));
+    }}
+    let op = Operation::new("reportExport")
+        .summary("Export report data")
+        .tag({service:?})
+        .parameter("report", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("format", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("from", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("to", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("filters", roze_openapi::ParameterLocation::Query, "String", false)
+        .response("200", "OK", "ReportExportResponse");
+    builder.add_operation({report_path:?}, HttpMethod::Get, op);
+    let op = Operation::new("chartQuery")
+        .summary("Query chart series")
+        .tag({service:?})
+        .parameter("chart", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("from", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("to", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("interval", roze_openapi::ParameterLocation::Query, "String", false)
+        .parameter("filters", roze_openapi::ParameterLocation::Query, "String", false)
+        .response("200", "OK", "ChartQueryResponse");
+    builder.add_operation({chart_path:?}, HttpMethod::Get, op);
+"#,
+        service = spec.service,
+        report_path = report_path,
+        chart_path = chart_path
+    )
 }
 
 fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> String {
@@ -1553,7 +1740,7 @@ fn resolved_handler_name(route: &crate::parser::RestRoute) -> String {
         .unwrap_or_else(|| handler_name(&route.method, &route.path))
 }
 
-fn full_route_path(spec: &ApiSpec, path: &str) -> String {
+pub(crate) fn full_route_path(spec: &ApiSpec, path: &str) -> String {
     let prefix = spec
         .server
         .as_ref()
@@ -2116,6 +2303,54 @@ mod tests {
         assert!(openapi.contains("builder.add_operation(\"/ping-head\", HttpMethod::Head"));
         assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
+    }
+
+    #[test]
+    fn rest_generated_report_export_and_chart_query_interfaces() {
+        let spec = parse_api(
+            r#"
+            @server (
+                prefix: /api/v1
+            )
+
+            service analytics-api {
+                @handler listUsers
+                get /users (ListUsersReq) returns (ListUsersResp)
+            }
+
+            type (
+                ListUsersReq {
+                    keyword string `query:"keyword"`
+                }
+                ListUsersResp {
+                    total u64
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let routes = render_route_mod(&spec);
+        assert!(routes.contains(".route(\"/api/v1/reports/export\", get(report_export))"));
+        assert!(routes.contains(".route(\"/api/v1/charts/query\", get(chart_query))"));
+        assert!(routes.contains("struct ReportExportQuery"));
+        assert!(routes.contains("struct ChartQueryResponse"));
+        assert!(routes.contains("download_url: None"));
+        assert!(routes.contains("series: Vec::new()"));
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi
+            .contains("builder.add_operation(\"/api/v1/reports/export\", HttpMethod::Get, op);"));
+        assert!(openapi
+            .contains("builder.add_operation(\"/api/v1/charts/query\", HttpMethod::Get, op);"));
+        assert!(openapi.contains("builder.component_schema(\"ReportExportResponse\""));
+        assert!(openapi.contains("builder.component_schema(\"ChartQueryResponse\""));
+        assert!(openapi.contains(
+            ".parameter(\"format\", roze_openapi::ParameterLocation::Query, \"String\", false)"
+        ));
+        assert!(openapi.contains(
+            ".parameter(\"interval\", roze_openapi::ParameterLocation::Query, \"String\", false)"
+        ));
     }
 
     #[test]

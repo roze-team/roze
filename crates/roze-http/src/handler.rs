@@ -503,6 +503,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extracts_request_alias_in_handler() {
+        let handler =
+            |request: crate::extract::Request| async move { request.uri().path().to_string() };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .body(rest::empty_body())
+            .unwrap();
+
+        let response = Handler::<(crate::extract::Request,)>::call(handler, request).await;
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"/webhook");
+    }
+
+    #[tokio::test]
     async fn extracts_eight_handler_arguments() {
         let handler = |Path(path): Path<IdPath>,
                        Query(query): Query<SearchQuery>,

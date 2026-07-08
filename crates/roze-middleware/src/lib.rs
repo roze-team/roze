@@ -1,7 +1,14 @@
-use std::time::Instant;
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use roze_context::Context;
 use roze_error::RozeError;
+use roze_resilience::{BreakerRegistry, RateLimitRegistry};
+
+static ROUTE_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
+static ROUTE_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct CommonMiddlewareConfig {
@@ -131,10 +138,65 @@ pub fn resolve_middleware_plan(middlewares: &[String]) -> MiddlewarePlan {
 
 #[derive(Debug, Clone)]
 pub struct RouteGuard {
+    key: String,
     service: String,
     route: String,
     method: String,
     started: Instant,
+    breaker: Option<RouteBreakerConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoutePolicy {
+    pub timeout: Option<Duration>,
+    pub rate_limit: Option<RouteRateLimitConfig>,
+    pub breaker: Option<RouteBreakerConfig>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RouteRateLimitConfig {
+    pub burst: u32,
+    pub refill: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RouteBreakerConfig {
+    pub failure_threshold: u32,
+    pub reset_timeout: Duration,
+}
+
+pub fn route_policy(
+    governance: Option<&roze_config::GovernanceConfig>,
+    route: &str,
+) -> RoutePolicy {
+    let Some(governance) = governance else {
+        return RoutePolicy {
+            timeout: None,
+            rate_limit: None,
+            breaker: None,
+        };
+    };
+    let route_config = governance.routes.get(route);
+    RoutePolicy {
+        timeout: route_config
+            .and_then(|route| route.timeout_ms)
+            .or(governance.timeout_ms)
+            .map(Duration::from_millis),
+        rate_limit: route_config
+            .and_then(|route| route.rate_limit)
+            .or(governance.rate_limit)
+            .map(|config| RouteRateLimitConfig {
+                burst: config.burst,
+                refill: Duration::from_millis(config.refill_ms),
+            }),
+        breaker: route_config
+            .and_then(|route| route.breaker)
+            .or(governance.breaker)
+            .map(|config| RouteBreakerConfig {
+                failure_threshold: config.failure_threshold,
+                reset_timeout: Duration::from_millis(config.reset_timeout_ms),
+            }),
+    }
 }
 
 pub fn begin_route(
@@ -142,17 +204,45 @@ pub fn begin_route(
     route: impl Into<String>,
     method: impl Into<String>,
     request_ctx: Context,
-    _governance: Option<&roze_config::GovernanceConfig>,
+    governance: Option<&roze_config::GovernanceConfig>,
 ) -> Result<(Context, RouteGuard), RozeError> {
     let route = route.into();
     let method = method.into();
+    let policy = route_policy(governance, &route);
+    let key = format!("{service}:{method}:{route}");
+    if let Some(config) = &policy.rate_limit {
+        match enforce_route_rate_limit(&key, config) {
+            Ok(()) => roze_metrics::record_resilience_decision("http", "rate_limit", "allowed"),
+            Err(err) => {
+                roze_metrics::record_resilience_decision("http", "rate_limit", "rejected");
+                return Err(err);
+            }
+        }
+    }
+    if policy
+        .breaker
+        .as_ref()
+        .is_some_and(|_| route_breaker_is_open(&key))
+    {
+        roze_metrics::record_resilience_decision("http", "breaker", "open");
+        return Err(RozeError::Unavailable("circuit open".to_string()));
+    }
+    if policy.breaker.is_some() {
+        roze_metrics::record_resilience_decision("http", "breaker", "allowed");
+    }
+    let request_ctx = match policy.timeout {
+        Some(timeout) => request_ctx.with_timeout(timeout),
+        None => request_ctx,
+    };
     Ok((
         request_ctx,
         RouteGuard {
+            key,
             service,
             route,
             method,
             started: Instant::now(),
+            breaker: policy.breaker,
         },
     ))
 }
@@ -161,7 +251,50 @@ pub fn finish_route(guard: RouteGuard, success: bool, status: impl Into<String>)
     let status = status.into();
     let elapsed = guard.started.elapsed();
     roze_metrics::record_http_request(success, elapsed);
+    if let Some(config) = guard.breaker {
+        let breaker_success = success || !status.starts_with('5');
+        route_breaker_record(&guard.key, breaker_success, &config);
+    }
     roze_metrics::record_http_route(guard.service, guard.route, guard.method, status, elapsed);
+}
+
+fn enforce_route_rate_limit(key: &str, config: &RouteRateLimitConfig) -> Result<(), RozeError> {
+    if ROUTE_RATE_LIMITS
+        .get_or_init(RateLimitRegistry::new)
+        .allow(key, route_rate_limit_config(*config))
+    {
+        Ok(())
+    } else {
+        Err(RozeError::RateLimited)
+    }
+}
+
+fn route_rate_limit_config(config: RouteRateLimitConfig) -> roze_resilience::RateLimitConfig {
+    roze_resilience::RateLimitConfig {
+        burst: config.burst,
+        refill: config.refill,
+    }
+}
+
+fn route_breaker_is_open(key: &str) -> bool {
+    ROUTE_BREAKERS
+        .get_or_init(BreakerRegistry::new)
+        .is_open(key)
+}
+
+fn route_breaker_record(key: &str, success: bool, config: &RouteBreakerConfig) {
+    let registry = ROUTE_BREAKERS.get_or_init(BreakerRegistry::new);
+    if success {
+        registry.record_success(key);
+        return;
+    }
+    registry.record_failure(
+        key,
+        roze_resilience::BreakerConfig {
+            failure_threshold: config.failure_threshold,
+            reset_timeout: config.reset_timeout,
+        },
+    );
 }
 
 pub fn idempotency_key_from_headers<'a>(
@@ -197,5 +330,109 @@ mod tests {
         let plan = resolve_middleware_plan(&["auth".into(), "audit".into()]);
         assert_eq!(plan.builtins, vec![BuiltInMiddleware::Auth]);
         assert_eq!(plan.custom, vec!["audit"]);
+    }
+
+    #[test]
+    fn route_policy_prefers_route_override() {
+        let mut governance = roze_config::GovernanceConfig {
+            timeout_ms: Some(1_000),
+            rate_limit: Some(roze_config::RateLimitConfig {
+                burst: 10,
+                refill_ms: 100,
+            }),
+            breaker: Some(roze_config::BreakerConfig {
+                failure_threshold: 10,
+                reset_timeout_ms: 1_000,
+            }),
+            ..Default::default()
+        };
+        governance.routes.insert(
+            "get_user".to_string(),
+            roze_config::RouteGovernanceConfig {
+                timeout_ms: Some(50),
+                rate_limit: Some(roze_config::RateLimitConfig {
+                    burst: 1,
+                    refill_ms: 1_000,
+                }),
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 30_000,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let policy = route_policy(Some(&governance), "get_user");
+        assert_eq!(policy.timeout, Some(Duration::from_millis(50)));
+        assert_eq!(policy.rate_limit.expect("rate limit").burst, 1);
+        assert_eq!(policy.breaker.expect("breaker").failure_threshold, 1);
+    }
+
+    #[test]
+    fn begin_route_enforces_rate_limit() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let route = format!("limited_{}", std::process::id());
+        governance.routes.insert(
+            route.clone(),
+            roze_config::RouteGovernanceConfig {
+                rate_limit: Some(roze_config::RateLimitConfig {
+                    burst: 1,
+                    refill_ms: 60_000,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let first = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(first.is_ok());
+        let second = begin_route(
+            "svc".to_string(),
+            route,
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(matches!(second, Err(RozeError::RateLimited)));
+    }
+
+    #[test]
+    fn finish_route_opens_breaker_after_server_failure() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let route = format!("breaker_{}", std::process::id());
+        governance.routes.insert(
+            route.clone(),
+            roze_config::RouteGovernanceConfig {
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 60_000,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let (_ctx, guard) = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("first request should pass before breaker opens");
+        finish_route(guard, false, "500");
+
+        let next = begin_route(
+            "svc".to_string(),
+            route,
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(matches!(next, Err(RozeError::Unavailable(message)) if message == "circuit open"));
     }
 }

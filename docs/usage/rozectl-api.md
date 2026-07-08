@@ -268,8 +268,11 @@ ROZE_TEST_BASE_URL=http://127.0.0.1:3000 cargo test
 
 The generated contract test project uses `reqwest` and `tokio`. It builds sample
 path, query, header, form, and JSON requests from the `.api` request types,
-asserts successful HTTP status codes, and verifies JSON responses. The default
-base URL is `http://127.0.0.1:3000`; pass `--base-url` when generating or set
+asserts successful HTTP status codes, and verifies JSON responses. It also
+generates smoke checks for the framework-owned production endpoints:
+`/healthz`, `/readyz`, `/startupz`, `/metrics`, `/openapi.json`,
+`/reports/export`, and `/charts/query`. The default base URL is
+`http://127.0.0.1:3000`; pass `--base-url` when generating or set
 `ROZE_TEST_BASE_URL` at runtime.
 
 Check the local development environment:
@@ -354,6 +357,8 @@ Generated REST services expose standard operational endpoints:
 - `GET /readyz` for readiness
 - `GET /startupz` for startup state
 - `GET /metrics` for Prometheus metrics
+- `GET /reports/export` for a generated report-export scaffold
+- `GET /charts/query` for a generated chart-series query scaffold
 - `GET /openapi.json` for OpenAPI
 
 The default health handlers return `roze_health::ProbeReport` inside the
@@ -362,6 +367,11 @@ standard `ApiResponse` wrapper. Generated `ServiceContext` owns a
 startup are registered as readiness checks, and the registry tracks startup,
 ready, and draining phases. Applications can add more dynamic checks with
 `HealthRegistry::register_dependency` or `HealthRegistry::register_check`.
+Generated report and chart endpoints are framework-owned production interface
+scaffolds: they publish stable HTTP/OpenAPI boundaries for export jobs and
+chart data lookup, while application teams replace the default accepted/empty
+responses with their own report catalog, BI query, async export, object-store
+download, authorization, and audit implementation.
 New generated REST, RPC, and stream worker entrypoints run under
 `roze_service::ServiceGroup`. When shutdown starts, generated REST/RPC lifecycle
 tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops
@@ -379,7 +389,9 @@ Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/config-governance.yaml`, `ops/reliable-events.yaml`, and
 `ops/dependency-governance.yaml`, `ops/data-consistency.yaml`, and
 `ops/observability-contract.yaml`, `ops/runtime-hardening.yaml`, and
-`ops/error-contract.yaml`. The runbook records the generated service
+`ops/error-contract.yaml`, `ops/deployment-topology.yaml`, and
+`ops/service-communication.yaml`, `ops/cache-governance.yaml`, and
+`ops/data-access-governance.yaml`, and `ops/interface-governance.yaml`. The runbook records the generated service
 boundary, required production gates,
 `scripts/production-evidence.sh --area generated-services`, and lifecycle
 summary collection with `--lifecycle-summary`. The YAML baseline is
@@ -426,14 +438,29 @@ evidence retention. The runtime hardening contract defines timeout, rate limit,
 circuit breaker, load shedding, retry budget, deadline propagation, graceful
 shutdown, backpressure, and resource guard evidence. The error contract defines
 typed errors, transport status mapping, retryability, trace correlation, client
-behavior, redaction, and failure metrics.
+behavior, redaction, and failure metrics. The deployment topology contract
+defines probes, resources, scaling, disruption budgets, config/secret wiring,
+registry, network policy, image pinning, and rollback evidence. The service
+communication contract defines downstream inventory, discovery, load balancing,
+client deadlines, retry budget, circuit breakers, fallback, outlier handling,
+and trace propagation evidence. The cache governance contract defines cache key
+ownership, TTL, local/remote cache policy, singleflight, penetration/breakdown/
+avalanche protection, invalidation, consistency, and cache observability
+evidence. The data access governance contract defines query deadlines,
+connection pools, slow-query budgets, pagination, index review, read/write
+splitting, N+1 protection, and data-access observability evidence.
+The interface governance contract defines framework-owned endpoints, IDL-owned
+business routes or RPC methods, OpenAPI/proto projection, framework smoke
+coverage, auth/error boundaries, and bounded observability labels.
 Treat the runbook, YAML baseline, alert rules, dashboard, SLO file,
 failure-injection plan, release rollout plan, incident response playbook,
 capacity plan, security readiness plan, production gate, regeneration policy,
 client contract, config governance plan, reliable events plan, and dependency
 governance plan, data consistency plan, observability contract, runtime
-hardening contract, and error contract as the default promotion checklist for
-each generated service.
+hardening contract, error contract, deployment topology contract, and service
+communication contract, cache governance contract, data access governance
+contract, and interface governance contract as the default promotion checklist
+for each generated service.
 
 Generate client SDKs:
 
@@ -715,6 +742,11 @@ enforce route-specific timeout overrides from `governance.routes`. Set
 `timeout: false` when you only want timeout metadata propagated through
 `roze_context::Context` and do not want generated HTTP adapters to cancel
 long-running logic.
+Generated REST and RPC `config.yaml` files now include per-route or per-method
+`governance.routes` entries by default: timeout, retry budget, rate limit, and
+circuit breaker settings are explicit for every generated operation. REST
+`GET`/`HEAD` routes default to two retry attempts, while mutating routes default
+to one attempt so non-idempotent writes are not retried accidentally.
 
 Business logic should not pass or construct `trace_id` values. Use
 `tracing::info!`, `tracing::warn!`, and `tracing::error!` directly in
@@ -1080,12 +1112,38 @@ field headers can also chain directives such as
 `field String("email").Unique().NotEmpty() { ... }`. Round-trip rendering
 normalizes them to `field name: type`.
 Builder headers may include entgo's extra Go type sample argument, such as
-`field JSON("metadata", map[string]any{})` or
+`field JSON("metadata", map[string]any{})`,
+`field JSON("metadata", map[string]interface{}{})`, or
 `field UUID("public_id", uuid.UUID{})`; Roze uses the first argument as the
 field name and maps JSON/UUID to its string-backed model representation.
+Go map defaults such as `Default(map[string]any{})` and simple static literals
+like `Default(map[string]any{"theme": "dark", "beta": true})` or
+`Default(map[string]interface{}{"theme": "dark"})` on string-backed JSON fields
+normalize to JSON object strings for generated create builders.
+Simple Go slice defaults such as `Default([]string{"new", "hot"})` and
+`Default([]interface{}{true, 3, "ok", nil})` on string-backed JSON fields
+normalize to JSON array strings.
+Custom entgo `Other(...)` field builders are accepted with the same first-arg
+name parsing and map to string-backed fields so generated repositories stay
+compilable; keep domain-specific typed conversion in application extensions.
 Common ent field builders map to Roze model types, including `Text(...)` to
-`string`, `Uint(...)` to `u32`, `Float(...)` to `f32`, and `Bytes(...)` to
-`bytes`/`Vec<u8>`.
+`string`, `Uint(...)` to `u32`, `Float(...)`/`Float64(...)` to `f64`,
+`Float32(...)` to `f32`, and `Bytes(...)` to `bytes`/`Vec<u8>`.
+Network-oriented builders such as `IP(...)`, `MAC(...)`, and `URL(...)` map to
+string-backed fields; `IPs(...)` maps to `Vec<String>` and supports the same Go
+slice defaults as other plural string builders.
+Plural scalar builders map to Rust vectors, including `Strings(...)` to
+`Vec<String>`, `Ints(...)` to `Vec<i32>`, `Int64s(...)` to `Vec<i64>`,
+`Uints(...)` to `Vec<u32>`, `Floats(...)`/`Float64s(...)` to `Vec<f64>`,
+`Float32s(...)` to `Vec<f32>`, and `Bools(...)` to `Vec<bool>`; round-trip
+`.ent` rendering writes these as `[]string`, `[]i32`, and similar array types.
+Go slice defaults for those plural scalar builders, such as
+`Default([]string{"new", "hot"})` or `Default([]int{1, 2})`, are used by
+generated Rust create builders as `vec![...]` defaults.
+`Duration(...)` maps to an `i64` nanosecond value, matching Go
+`time.Duration`; common defaults such as `Default(time.Second)` and
+`Default(5 * time.Second)` are normalized to numeric nanoseconds for generated
+Rust create builders.
 `field ID("id")` maps to an `i64` primary field even when it is not the first
 declared field. Composite entgo IDs such as `ID("user_id", "group_id")` are
 not generated implicitly; model them as explicit fields and indexes until Roze
@@ -1146,6 +1204,9 @@ Plain ent-style `edge To("groups", Group.Type)` declarations without local
 `Field(...)`/`Ref(...)` are treated the same way; if either `Field(...)` or
 `Ref(...)` is present, both must be present so Roze can generate a concrete
 local-FK relationship.
+Chained inverse declarations such as
+`edge To("children", User.Type).From("parent")` are also accepted as
+parse-compatible no-ops when they do not declare a local FK field.
 Owning ent-style edges with `Field("user_id")` but no `Ref(...)` default the
 reference field to `id`, matching the common entgo convention of pointing to
 the target primary key.
@@ -1175,10 +1236,16 @@ Field directives also accept ent-style builder calls such as `Optional()`,
 lowercase schema form during round-trip rendering.
 Enum field builders such as `field Enum("state").Values("active", "disabled")`
 map to a Roze `string` field with generated enum-value validation.
+`NamedValues("Active", "active", "Disabled", "disabled")` is also accepted and
+normalizes to the stored values `active` and `disabled`.
 Timestamp defaults accept ent-style `Default(time.Now)`,
 `DefaultFunc(time.Now)`, `UpdateDefault(time.Now)`, and
 `ClientDefault(time.Now)` and normalize them to Roze's numeric `now_millis`
 timestamp default for `i64`/`u64` timestamp fields.
+UUID defaults accept ent-style `DefaultFunc(uuid.NewString)` and
+`DefaultFunc(uuid.New)` for `UUID(...)`/string-backed fields; generated Rust
+create builders use `uuid::Uuid::now_v7().to_string()` and model generation
+adds the `uuid` dependency when needed.
 The ent-style `field Time("created_at").Default(time.Now)` builder maps to a
 Roze `i64` epoch-millis timestamp field and uses the same numeric timestamp
 default generation.
@@ -1187,9 +1254,11 @@ Literal defaults such as `Default(true)`, `Default(18)`, and
 numeric, string, and nullable variants of those fields.
 Roze also accepts common ent metadata directives on fields, edges, and indexes,
 such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`,
-`Annotations(...)`, and edge `StorageKey(...)`, as parse-compatible no-ops;
-round-trip rendering keeps the normalized Roze schema and omits those
-metadata-only directives.
+`Annotations(...)`, `Deprecated(...)`, edge `StorageKey(...)`, and index
+`Where(...)`, as parse-compatible no-ops; round-trip rendering keeps the
+normalized Roze schema and omits those metadata-only directives. Partial index
+conditions are accepted for entgo input compatibility, but Roze does not emit
+partial-index DDL from them yet.
 Go-side field validators such as `Validate(...)` and `Match(...)` are accepted
 as parse-compatible no-ops; use Roze-supported validators such as `NotEmpty()`,
 `MinLen(...)`, `MaxLen(...)`, `Enum(...)`, and numeric bounds when generated

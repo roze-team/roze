@@ -15,12 +15,130 @@ use crate::{
     router::{MatchedPath, RouteParams},
 };
 
+pub type Request = IncomingRequest;
 pub type ExtractFuture<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
 
 pub trait FromRequestParts: Sized {
     type Rejection: IntoResponse;
 
     fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection>;
+}
+
+mod private {
+    pub trait Sealed {}
+
+    impl Sealed for super::IncomingRequest {}
+    impl Sealed for http::request::Parts {}
+}
+
+pub trait RequestPartsExt: private::Sealed {
+    fn extract<E>(&mut self) -> ExtractFuture<'_, E, E::Rejection>
+    where
+        E: FromRequestParts;
+
+    fn extract_optional<E>(&mut self) -> ExtractFuture<'_, Option<E>, E::Rejection>
+    where
+        E: OptionalFromRequestParts;
+}
+
+impl RequestPartsExt for HttpParts {
+    fn extract<E>(&mut self) -> ExtractFuture<'_, E, E::Rejection>
+    where
+        E: FromRequestParts,
+    {
+        E::from_request_parts(self)
+    }
+
+    fn extract_optional<E>(&mut self) -> ExtractFuture<'_, Option<E>, E::Rejection>
+    where
+        E: OptionalFromRequestParts,
+    {
+        E::optional_from_request_parts(self)
+    }
+}
+
+pub trait RequestExt: private::Sealed {
+    fn extract<E>(self) -> ExtractFuture<'static, E, E::Rejection>
+    where
+        E: FromRequest;
+
+    fn extract_optional<E>(self) -> ExtractFuture<'static, Option<E>, E::Rejection>
+    where
+        E: OptionalFromRequest;
+
+    fn extract_parts<E>(&mut self) -> ExtractFuture<'_, E, E::Rejection>
+    where
+        E: FromRequestParts;
+
+    fn extract_optional_parts<E>(&mut self) -> ExtractFuture<'_, Option<E>, E::Rejection>
+    where
+        E: OptionalFromRequestParts;
+}
+
+impl RequestExt for IncomingRequest {
+    fn extract<E>(self) -> ExtractFuture<'static, E, E::Rejection>
+    where
+        E: FromRequest,
+    {
+        E::from_request(self)
+    }
+
+    fn extract_optional<E>(self) -> ExtractFuture<'static, Option<E>, E::Rejection>
+    where
+        E: OptionalFromRequest,
+    {
+        E::optional_from_request(self)
+    }
+
+    fn extract_parts<E>(&mut self) -> ExtractFuture<'_, E, E::Rejection>
+    where
+        E: FromRequestParts,
+    {
+        Box::pin(async move {
+            let mut request = http::Request::new(());
+            *request.method_mut() = self.method().clone();
+            *request.uri_mut() = self.uri().clone();
+            *request.version_mut() = self.version();
+            *request.headers_mut() = std::mem::take(self.headers_mut());
+            *request.extensions_mut() = std::mem::take(self.extensions_mut());
+
+            let (mut parts, ()) = request.into_parts();
+            let result = E::from_request_parts(&mut parts).await;
+
+            *self.method_mut() = parts.method;
+            *self.uri_mut() = parts.uri;
+            *self.version_mut() = parts.version;
+            *self.headers_mut() = std::mem::take(&mut parts.headers);
+            *self.extensions_mut() = std::mem::take(&mut parts.extensions);
+
+            result
+        })
+    }
+
+    fn extract_optional_parts<E>(&mut self) -> ExtractFuture<'_, Option<E>, E::Rejection>
+    where
+        E: OptionalFromRequestParts,
+    {
+        Box::pin(async move {
+            let mut request = http::Request::new(());
+            *request.method_mut() = self.method().clone();
+            *request.uri_mut() = self.uri().clone();
+            *request.version_mut() = self.version();
+            *request.headers_mut() = std::mem::take(self.headers_mut());
+            *request.extensions_mut() = std::mem::take(self.extensions_mut());
+
+            let (mut parts, ()) = request.into_parts();
+            let result = E::optional_from_request_parts(&mut parts).await;
+
+            *self.method_mut() = parts.method;
+            *self.uri_mut() = parts.uri;
+            *self.version_mut() = parts.version;
+            *self.headers_mut() = std::mem::take(&mut parts.headers);
+            *self.extensions_mut() = std::mem::take(&mut parts.extensions);
+
+            result
+        })
+    }
 }
 
 pub trait FromRequest: Sized {
@@ -449,6 +567,133 @@ where
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawPathParams(RouteParams);
+
+impl RawPathParams {
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name)
+    }
+
+    pub fn iter(&self) -> RawPathParamsIter<'_> {
+        self.into_iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().next().is_none()
+    }
+}
+
+impl<'a> IntoIterator for &'a RawPathParams {
+    type Item = (&'a str, &'a str);
+    type IntoIter = RawPathParamsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RawPathParamsIter(Box::new(self.0.iter()))
+    }
+}
+
+pub struct RawPathParamsIter<'a>(Box<dyn Iterator<Item = (&'a str, &'a str)> + Send + Sync + 'a>);
+
+impl<'a> Iterator for RawPathParamsIter<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+impl FromRequest for RawPathParams {
+    type Rejection = roze_error::RozeError;
+
+    fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
+        let params = request.extensions().get::<RouteParams>().cloned();
+        Box::pin(async move {
+            params
+                .map(Self)
+                .ok_or_else(|| roze_error::RozeError::Internal("missing path params".to_string()))
+        })
+    }
+}
+
+impl FromRequestParts for RawPathParams {
+    type Rejection = roze_error::RozeError;
+
+    fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
+        let params = parts.extensions.get::<RouteParams>().cloned();
+        Box::pin(async move {
+            params
+                .map(Self)
+                .ok_or_else(|| roze_error::RozeError::Internal("missing path params".to_string()))
+        })
+    }
+}
+
+impl OptionalFromRequest for RawPathParams {
+    type Rejection = std::convert::Infallible;
+
+    fn optional_from_request(
+        request: IncomingRequest,
+    ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
+        let params = request.extensions().get::<RouteParams>().cloned();
+        Box::pin(async move { Ok(params.map(Self)) })
+    }
+}
+
+impl OptionalFromRequestParts for RawPathParams {
+    type Rejection = std::convert::Infallible;
+
+    fn optional_from_request_parts(
+        parts: &mut HttpParts,
+    ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
+        let params = parts.extensions.get::<RouteParams>().cloned();
+        Box::pin(async move { Ok(params.map(Self)) })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawQuery(pub Option<String>);
+
+impl FromRequest for RawQuery {
+    type Rejection = std::convert::Infallible;
+
+    fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
+        let query = request.uri().query().map(ToOwned::to_owned);
+        Box::pin(async move { Ok(Self(query)) })
+    }
+}
+
+impl FromRequestParts for RawQuery {
+    type Rejection = std::convert::Infallible;
+
+    fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
+        let query = parts.uri.query().map(ToOwned::to_owned);
+        Box::pin(async move { Ok(Self(query)) })
+    }
+}
+
+impl OptionalFromRequest for RawQuery {
+    type Rejection = std::convert::Infallible;
+
+    fn optional_from_request(
+        request: IncomingRequest,
+    ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
+        let query = request.uri().query().map(ToOwned::to_owned);
+        Box::pin(async move { Ok(query.map(|query| Self(Some(query)))) })
+    }
+}
+
+impl OptionalFromRequestParts for RawQuery {
+    type Rejection = std::convert::Infallible;
+
+    fn optional_from_request_parts(
+        parts: &mut HttpParts,
+    ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
+        let query = parts.uri.query().map(ToOwned::to_owned);
+        Box::pin(async move { Ok(query.map(|query| Self(Some(query)))) })
+    }
+}
+
 pub struct Query<T>(pub T);
 
 impl<T> Deref for Query<T> {
@@ -539,6 +784,47 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawForm(pub Bytes);
+
+impl FromRequest for RawForm {
+    type Rejection = roze_error::RozeError;
+
+    fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
+        Box::pin(async move {
+            if request.method() == Method::GET {
+                let query = request.uri().query().unwrap_or_default();
+                return Ok(Self(Bytes::copy_from_slice(query.as_bytes())));
+            }
+            if !has_urlencoded_content_type(request.headers()) {
+                return Err(roze_error::RozeError::BadRequest(
+                    "expected application/x-www-form-urlencoded content type".to_string(),
+                ));
+            }
+            let body = request
+                .into_body()
+                .collect()
+                .await
+                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
+                .to_bytes();
+            Ok(Self(body))
+        })
+    }
+}
+
+fn has_urlencoded_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|value| {
+                value
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            })
+        })
+}
+
 pub struct Form<T>(pub T);
 
 impl<T> Deref for Form<T> {
@@ -602,6 +888,7 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Extension<T>(pub T);
 
 impl<T> Deref for Extension<T> {
@@ -1077,6 +1364,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_ext_extracts_body_extractor() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .body(rest::full_body("hello roze"))
+            .unwrap();
+
+        let body: String = request.extract().await.expect("string body");
+
+        assert_eq!(body, "hello roze");
+    }
+
+    #[tokio::test]
+    async fn request_ext_extracts_optional_body_extractor() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/users")
+            .body(rest::empty_body())
+            .unwrap();
+
+        let payload: Option<Json<Payload>> =
+            request.extract_optional().await.expect("optional json");
+
+        assert!(payload.is_none());
+    }
+
+    #[tokio::test]
     async fn extracts_request_parts() {
         let request = Request::builder()
             .method("GET")
@@ -1113,6 +1427,81 @@ mod tests {
         assert_eq!(uri.path(), "/users/42");
         assert_eq!(uri.query(), Some("name=roze"));
         assert_eq!(version, Version::HTTP_2);
+    }
+
+    #[tokio::test]
+    async fn request_parts_ext_extracts_parts_extractor() {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/users?name=roze")
+            .body(rest::empty_body())
+            .unwrap();
+        let (mut parts, _body) = request.into_parts();
+
+        let method: Method = parts.extract().await.expect("method");
+        let RawQuery(query): RawQuery = parts.extract().await.expect("raw query");
+
+        assert_eq!(method, Method::GET);
+        assert_eq!(query.as_deref(), Some("name=roze"));
+    }
+
+    #[tokio::test]
+    async fn request_parts_ext_extracts_optional_parts_extractor() {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/users")
+            .body(rest::empty_body())
+            .unwrap();
+        let (mut parts, _body) = request.into_parts();
+
+        let query: Option<RawQuery> = parts.extract_optional().await.expect("optional query");
+
+        assert!(query.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_ext_extracts_parts_without_consuming_body() {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/webhook?name=roze")
+            .header("x-roze-test", "yes")
+            .body(rest::full_body("payload"))
+            .unwrap();
+
+        let method: Method = request.extract_parts().await.expect("method");
+        let RawQuery(query): RawQuery = request.extract_parts().await.expect("raw query");
+
+        assert_eq!(method, Method::POST);
+        assert_eq!(query.as_deref(), Some("name=roze"));
+        assert_eq!(
+            request
+                .headers()
+                .get("x-roze-test")
+                .and_then(|value| value.to_str().ok()),
+            Some("yes")
+        );
+
+        let body: String = request.extract().await.expect("body after parts");
+        assert_eq!(body, "payload");
+    }
+
+    #[tokio::test]
+    async fn request_ext_extracts_optional_parts_without_consuming_body() {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .body(rest::full_body("payload"))
+            .unwrap();
+
+        let query: Option<RawQuery> = request
+            .extract_optional_parts()
+            .await
+            .expect("optional raw query");
+
+        assert!(query.is_none());
+
+        let body: String = request.extract().await.expect("body after optional parts");
+        assert_eq!(body, "payload");
     }
 
     #[tokio::test]
@@ -1201,6 +1590,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extracts_raw_path_params_without_deserializing() {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/users/42/team/core")
+            .body(rest::empty_body())
+            .unwrap();
+        request.extensions_mut().insert(RouteParams::from_pairs([
+            ("user_id".to_string(), "42".to_string()),
+            ("team".to_string(), "core".to_string()),
+        ]));
+
+        let params = RawPathParams::from_request(request)
+            .await
+            .expect("raw path params");
+
+        assert_eq!(params.get("user_id"), Some("42"));
+        assert_eq!(
+            params.iter().collect::<Vec<_>>(),
+            vec![("user_id", "42"), ("team", "core")]
+        );
+        let mut seen = Vec::new();
+        for (key, value) in &params {
+            seen.push((key, value));
+        }
+        assert_eq!(seen, vec![("user_id", "42"), ("team", "core")]);
+    }
+
+    #[tokio::test]
+    async fn optional_raw_path_params_returns_none_when_absent() {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/users")
+            .body(rest::empty_body())
+            .unwrap();
+
+        let params = Option::<RawPathParams>::from_request(request)
+            .await
+            .expect("optional raw path params");
+        assert!(params.is_none());
+    }
+
+    #[tokio::test]
     async fn extracts_connect_info() {
         let peer_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
         let mut request = Request::builder()
@@ -1253,6 +1684,76 @@ mod tests {
             .await
             .expect("optional query");
         assert!(query.is_none());
+    }
+
+    #[tokio::test]
+    async fn extracts_raw_query_without_parsing() {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/users?name=roze%20team&tag=rust")
+            .body(rest::empty_body())
+            .unwrap();
+        let (mut parts, _body) = request.into_parts();
+
+        let RawQuery(query) = RawQuery::from_request_parts(&mut parts)
+            .await
+            .expect("raw query");
+
+        assert_eq!(query.as_deref(), Some("name=roze%20team&tag=rust"));
+    }
+
+    #[tokio::test]
+    async fn optional_raw_query_returns_none_when_absent() {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/users")
+            .body(rest::empty_body())
+            .unwrap();
+
+        let query = Option::<RawQuery>::from_request(request)
+            .await
+            .expect("optional raw query");
+        assert!(query.is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_form_extracts_query_for_get_requests() {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/users?page=0&size=10")
+            .body(rest::empty_body())
+            .unwrap();
+
+        let RawForm(form) = RawForm::from_request(request).await.expect("raw form");
+        assert_eq!(&form[..], b"page=0&size=10");
+    }
+
+    #[tokio::test]
+    async fn raw_form_extracts_urlencoded_body() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/login")
+            .header(
+                header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded; charset=utf-8",
+            )
+            .body(rest::full_body("username=user&password=secure%20password"))
+            .unwrap();
+
+        let RawForm(form) = RawForm::from_request(request).await.expect("raw form");
+        assert_eq!(&form[..], b"username=user&password=secure%20password");
+    }
+
+    #[tokio::test]
+    async fn raw_form_rejects_missing_urlencoded_content_type() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/login")
+            .body(rest::full_body("username=user"))
+            .unwrap();
+
+        let error = RawForm::from_request(request).await.unwrap_err();
+        assert_eq!(error.code(), 400);
     }
 
     #[tokio::test]

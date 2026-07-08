@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     fmt,
     future::{ready, Future, Ready},
-    ops::BitOr,
+    ops::{BitOr, Deref},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -147,6 +147,20 @@ impl MatchedPath {
     }
 }
 
+impl Deref for MatchedPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for MatchedPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl RouteParams {
     pub fn from_pairs<I>(pairs: I) -> Self
     where
@@ -180,6 +194,27 @@ impl RouteParams {
 impl Default for Router {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Debug for Router {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Router")
+            .field("route_count", &self.route_groups.len())
+            .field(
+                "routes",
+                &self
+                    .route_groups
+                    .iter()
+                    .map(|group| group.path.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "has_method_not_allowed_fallback",
+                &self.method_not_allowed_fallback.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -234,7 +269,11 @@ impl Router {
         self
     }
 
-    pub fn merge(mut self, router: Router) -> Self {
+    pub fn merge<R>(mut self, router: R) -> Self
+    where
+        R: Into<Router>,
+    {
+        let router = router.into();
         for (path, group_index) in router.path_index {
             let group = router.route_groups[group_index].clone();
             self.insert_group_routes(path, group, "merged");
@@ -255,7 +294,18 @@ impl Router {
             .route(format!("{prefix}/{{*tail}}"), any_service(service))
     }
 
-    pub fn route_service<S>(self, method: Method, path: impl Into<String>, service: S) -> Self
+    pub fn route_service<S>(self, path: impl Into<String>, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.route(path, any_service(service))
+    }
+
+    fn route_method_service<S>(self, method: Method, path: impl Into<String>, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
             + Clone
@@ -270,7 +320,7 @@ impl Router {
     where
         H: Handler<T>,
     {
-        self.route_service(method, path, handler.into_service())
+        self.route_method_service(method, path, handler.into_service())
     }
 
     pub fn get<H, T>(self, path: impl Into<String>, handler: H) -> Self
@@ -336,7 +386,7 @@ impl Router {
         self.route_handler(Method::CONNECT, path, handler)
     }
 
-    pub fn fallback<S>(mut self, service: S) -> Self
+    fn fallback_route_service<S>(mut self, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
             + Clone
@@ -348,6 +398,15 @@ impl Router {
         self
     }
 
+    pub fn fallback<H, T>(self, handler: H) -> Self
+    where
+        H: Handler<T>,
+    {
+        let mut router = self;
+        router.fallback = handler.into_service();
+        router
+    }
+
     pub fn fallback_service<S>(self, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -356,15 +415,7 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
-        self.fallback(service)
-    }
-
-    pub fn fallback_handler<H, T>(mut self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.fallback = handler.into_service();
-        self
+        self.fallback_route_service(service)
     }
 
     pub fn reset_fallback(mut self) -> Self {
@@ -650,6 +701,7 @@ impl Service<IncomingRequest> for Router {
             let original_uri = request.uri().clone();
             request.extensions_mut().insert(OriginalUri(original_uri));
         }
+        let strip_body = *request.method() == Method::HEAD;
         let path = request.uri().path().to_string();
         let matched = self.routes.at(&path).ok();
         let mut service = match matched {
@@ -670,6 +722,14 @@ impl Service<IncomingRequest> for Router {
                     .routes
                     .iter()
                     .find(|route| route.method.as_ref() == Some(request.method()))
+                    .or_else(|| {
+                        (*request.method() == Method::HEAD).then(|| {
+                            group
+                                .routes
+                                .iter()
+                                .find(|route| route.method.as_ref() == Some(&Method::GET))
+                        })?
+                    })
                     .or_else(|| group.routes.iter().find(|route| route.method.is_none()))
                     .map(|route| route.service.clone())
                     .unwrap_or_else(|| {
@@ -682,12 +742,17 @@ impl Service<IncomingRequest> for Router {
             None => self.fallback.clone(),
         };
         Box::pin(async move {
-            service
+            let response = service
                 .ready()
                 .await
                 .expect("infallible service")
                 .call(request)
-                .await
+                .await?;
+            if strip_body {
+                Ok(response.map(|_| rest::empty_body()))
+            } else {
+                Ok(response)
+            }
         })
     }
 }
@@ -707,6 +772,32 @@ struct MethodEndpoint {
 impl Default for MethodRouter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Debug for MethodRouter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MethodRouter")
+            .field(
+                "methods",
+                &self
+                    .endpoints
+                    .iter()
+                    .map(|endpoint| method_label(&endpoint.method))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "has_method_not_allowed_fallback",
+                &self.method_not_allowed_fallback.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl From<MethodRouter> for Router {
+    fn from(method_router: MethodRouter) -> Self {
+        Router::new().route("/", method_router)
     }
 }
 
@@ -1379,6 +1470,13 @@ fn allow_header(group: &RouteGroup) -> Option<String> {
         .filter_map(|route| route.method.as_ref())
         .map(ToString::to_string)
         .collect::<Vec<_>>();
+    if group
+        .routes
+        .iter()
+        .any(|route| route.method.as_ref() == Some(&Method::GET))
+    {
+        methods.push(Method::HEAD.to_string());
+    }
     methods.sort();
     methods.dedup();
     if methods.is_empty() {
@@ -1486,8 +1584,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uses_fallback_handler_for_missing_route() {
-        let mut router = Router::new().fallback_handler(|| async { "fallback" });
+    async fn uses_fallback_for_missing_route() {
+        let mut router = Router::new().fallback(|| async { "fallback" });
         let response = router
             .call(
                 Request::builder()
@@ -1525,7 +1623,7 @@ mod tests {
     #[tokio::test]
     async fn reset_fallback_restores_not_found() {
         let mut router = Router::new()
-            .fallback_handler(|| async { "fallback" })
+            .fallback(|| async { "fallback" })
             .reset_fallback();
         let response = router
             .call(
@@ -1546,6 +1644,29 @@ mod tests {
         assert!(Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .has_routes());
+    }
+
+    #[test]
+    fn router_debug_reports_route_summary() {
+        let router = Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .method_not_allowed_fallback(|| async { "nope" });
+        let debug = format!("{router:?}");
+
+        assert!(debug.contains("Router"));
+        assert!(debug.contains("route_count: 1"));
+        assert!(debug.contains("/healthz"));
+        assert!(debug.contains("has_method_not_allowed_fallback: true"));
+    }
+
+    #[test]
+    fn method_router_debug_reports_method_summary() {
+        let method_router = get(|| async { "ok" }).post(|| async { "created" });
+        let debug = format!("{method_router:?}");
+
+        assert!(debug.contains("MethodRouter"));
+        assert!(debug.contains("GET"));
+        assert!(debug.contains("POST"));
     }
 
     #[tokio::test]
@@ -1683,7 +1804,7 @@ mod tests {
     #[tokio::test]
     async fn with_state_applies_to_fallback() {
         let mut router = Router::new()
-            .fallback_handler(|State(state): State<String>| async move { state })
+            .fallback(|State(state): State<String>| async move { state })
             .with_state("fallback-state".to_string());
         let response = router
             .call(
@@ -1782,7 +1903,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(
             response.headers().get(header::ALLOW),
-            Some(&HeaderValue::from_static("GET, POST"))
+            Some(&HeaderValue::from_static("GET, HEAD, POST"))
         );
     }
 
@@ -1961,6 +2082,28 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"/users/{id}");
+    }
+
+    #[tokio::test]
+    async fn matched_path_derefs_and_displays_as_str() {
+        let mut router = Router::new().route(
+            "/users/{id}",
+            get(|matched_path: MatchedPath| async move {
+                format!("{matched_path}:{}", matched_path.len())
+            }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .uri("/users/42")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"/users/{id}:11");
     }
 
     #[tokio::test]
@@ -2201,6 +2344,44 @@ mod tests {
         assert_eq!(&body[..], b"create");
     }
 
+    #[tokio::test]
+    async fn method_router_converts_into_root_router() {
+        let mut router: Router = get(|| async { "root" }).into();
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"root");
+    }
+
+    #[tokio::test]
+    async fn merge_accepts_method_router_into_router() {
+        let mut router = Router::new()
+            .route("/healthz", get(|| async { "health" }))
+            .merge(post(|| async { "root post" }));
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"root post");
+    }
+
     #[test]
     #[should_panic(expected = "overlapping merged route")]
     fn merge_panics_on_overlapping_method() {
@@ -2225,6 +2406,47 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"accepted");
+    }
+
+    #[tokio::test]
+    async fn head_uses_get_route_without_response_body() {
+        let mut router = Router::new().route("/events", get(|| async { "accepted" }));
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/events")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_head_route_overrides_get_route() {
+        let mut router = Router::new().route(
+            "/events",
+            get(|| async { "get" }).head(|| async { (StatusCode::CREATED, "head") }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/events")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
     }
 
     #[tokio::test]
@@ -2265,6 +2487,30 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"service get");
+    }
+
+    #[tokio::test]
+    async fn route_service_routes_all_methods_to_service() {
+        let service = tower::service_fn(|request: IncomingRequest| async move {
+            Ok::<_, Infallible>(rest::text_response(
+                StatusCode::OK,
+                format!("service {}", request.method()),
+            ))
+        });
+        let mut router = Router::new().route_service("/svc", service);
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/svc")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"service PATCH");
     }
 
     #[tokio::test]

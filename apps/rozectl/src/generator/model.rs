@@ -348,9 +348,17 @@ fn rust_type_to_ent_type(ty: &str) -> String {
     if let Some(inner) = optional_inner_type(ty) {
         return format!("{}?", rust_type_to_ent_type(inner));
     }
+    if ty == "Vec<u8>" {
+        return "bytes".to_string();
+    }
+    if let Some(inner) = ty
+        .strip_prefix("Vec<")
+        .and_then(|value| value.strip_suffix('>'))
+    {
+        return format!("[]{}", rust_type_to_ent_type(inner));
+    }
     match ty {
         "String" => "string".to_string(),
-        "Vec<u8>" => "bytes".to_string(),
         "rust_decimal::Decimal" => "decimal".to_string(),
         other => other.to_string(),
     }
@@ -713,7 +721,12 @@ fn write_model_project(
         )?;
     }
 
-    update_model_dependencies(out, orm, models_need_rust_decimal(models))?;
+    update_model_dependencies(
+        out,
+        orm,
+        models_need_rust_decimal(models),
+        models_need_uuid(models),
+    )?;
     update_model_service_context(out)?;
     if orm == ModelOrm::Toasty {
         update_toasty_service_context(out, models)?;
@@ -778,6 +791,7 @@ fn update_model_dependencies(
     out: &Path,
     orm: ModelOrm,
     needs_rust_decimal: bool,
+    needs_uuid: bool,
 ) -> anyhow::Result<()> {
     let manifest_path = out.join("Cargo.toml");
     if !manifest_path.is_file() {
@@ -859,6 +873,16 @@ fn update_model_dependencies(
         };
         dependencies.insert("serde_json", item);
     }
+    if needs_uuid && !dependencies.contains_key("uuid") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            r#"{ version = "1", features = ["v7"] }"#
+                .parse::<toml_edit::Item>()
+                .expect("valid toml dependency value")
+        };
+        dependencies.insert("uuid", item);
+    }
     fs::write(&manifest_path, document.to_string())
         .with_context(|| format!("failed to write {}", manifest_path.display()))
 }
@@ -869,6 +893,18 @@ fn models_need_rust_decimal(models: &[ModelSpec]) -> bool {
             .fields
             .iter()
             .any(|field| type_contains_rust_decimal(&field.ty))
+    })
+}
+
+fn models_need_uuid(models: &[ModelSpec]) -> bool {
+    models.iter().any(|model| {
+        model.fields.iter().any(|field| {
+            matches!(field.default_value.as_deref(), Some("uuid_new_string"))
+                || matches!(
+                    field.client_default_value.as_deref(),
+                    Some("uuid_new_string")
+                )
+        })
     })
 }
 
@@ -1675,7 +1711,18 @@ fn client_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
     if let Some(expr) = timestamp_default_value_expr(default_value, ty) {
         return Some(expr);
     }
+    if let Some(expr) = uuid_default_value_expr(default_value, ty) {
+        return Some(expr);
+    }
     let inner_ty = optional_inner_type(ty).unwrap_or(ty);
+    if let Some(vec_inner_ty) = vec_inner_type(inner_ty) {
+        let value = go_slice_default_value_expr(default_value, vec_inner_ty)?;
+        return if optional_inner_type(ty).is_some() {
+            Some(format!("Some({value})"))
+        } else {
+            Some(value)
+        };
+    }
     let value = match inner_ty {
         "String" => format!("{default_value:?}.to_string()"),
         "bool" if matches!(default_value, "true" | "false") => default_value.to_string(),
@@ -1686,6 +1733,84 @@ fn client_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
         Some(format!("Some({value})"))
     } else {
         Some(value)
+    }
+}
+
+fn go_slice_default_value_expr(default_value: &str, inner_ty: &str) -> Option<String> {
+    let (go_ty, body) = parse_go_slice_literal(default_value)?;
+    if !go_slice_type_matches(go_ty, inner_ty) {
+        return None;
+    }
+    let items = split_ent_comma_items(body).ok()?;
+    if items.is_empty() {
+        return Some(format!("Vec::<{inner_ty}>::new()"));
+    }
+    let values = items
+        .iter()
+        .map(|item| go_slice_item_expr(item, inner_ty))
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("vec![{}]", values.join(", ")))
+}
+
+fn parse_go_slice_literal(value: &str) -> Option<(&str, &str)> {
+    let value = value.trim();
+    let rest = value.strip_prefix("[]")?;
+    let open = rest.rfind('{')?;
+    let go_ty = rest[..open].trim();
+    let body = rest[open + 1..].strip_suffix('}')?.trim();
+    if go_ty.is_empty() {
+        return None;
+    }
+    Some((go_ty, body))
+}
+
+fn go_slice_type_matches(go_ty: &str, inner_ty: &str) -> bool {
+    matches!(
+        (go_ty.trim(), inner_ty.trim()),
+        ("string", "String")
+            | ("bool", "bool")
+            | ("int", "i32")
+            | ("int32", "i32")
+            | ("int64", "i64")
+            | ("uint", "u32")
+            | ("uint32", "u32")
+            | ("uint64", "u64")
+            | ("float32", "f32")
+            | ("float", "f64")
+            | ("float64", "f64")
+    )
+}
+
+fn go_slice_item_expr(item: &str, inner_ty: &str) -> Option<String> {
+    let item = item.trim();
+    match inner_ty {
+        "String" => parse_ent_string_or_ident(item, 0)
+            .ok()
+            .map(|value| format!("{value:?}.to_string()")),
+        "bool" if matches!(item, "true" | "false") => Some(item.to_string()),
+        "i32" => item.parse::<i32>().ok().map(|_| item.to_string()),
+        "i64" => item.parse::<i64>().ok().map(|_| item.to_string()),
+        "u32" => item.parse::<u32>().ok().map(|_| item.to_string()),
+        "u64" => item.parse::<u64>().ok().map(|_| item.to_string()),
+        "f32" => item.parse::<f32>().ok().map(|_| item.to_string()),
+        "f64" => item.parse::<f64>().ok().map(|_| item.to_string()),
+        _ => None,
+    }
+}
+
+fn uuid_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
+    let inner_ty = optional_inner_type(ty).unwrap_or(ty);
+    if inner_ty != "String" {
+        return None;
+    }
+    let value = match default_value {
+        "uuid_new_string" => "uuid::Uuid::now_v7().to_string()",
+        _ => return None,
+    };
+    if optional_inner_type(ty).is_some() {
+        Some(format!("Some({value})"))
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -1755,18 +1880,28 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use crate::svc::ServiceContext;").unwrap();
     writeln!(&mut out).unwrap();
-    if has_sensitive_fields(model) {
-        writeln!(
+    let derive_eq = model_supports_eq(model);
+    match (has_sensitive_fields(model), derive_eq) {
+        (true, true) => writeln!(
             &mut out,
             "#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
         )
-        .unwrap();
-    } else {
-        writeln!(
+        .unwrap(),
+        (true, false) => writeln!(
+            &mut out,
+            "#[derive(Clone, PartialEq, Serialize, Deserialize, DeriveEntityModel)]"
+        )
+        .unwrap(),
+        (false, true) => writeln!(
             &mut out,
             "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
         )
-        .unwrap();
+        .unwrap(),
+        (false, false) => writeln!(
+            &mut out,
+            "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]"
+        )
+        .unwrap(),
     }
     match &model.schema_name {
         Some(schema_name) => {
@@ -6905,6 +7040,30 @@ fn optional_inner_type(ty: &str) -> Option<&str> {
         .and_then(|ty| ty.strip_suffix('>'))
 }
 
+fn vec_inner_type(ty: &str) -> Option<&str> {
+    ty.trim()
+        .strip_prefix("Vec<")
+        .and_then(|ty| ty.strip_suffix('>'))
+}
+
+fn model_supports_eq(model: &ModelSpec) -> bool {
+    model.fields.iter().all(|field| type_supports_eq(&field.ty))
+}
+
+fn type_supports_eq(ty: &str) -> bool {
+    let ty = ty.trim();
+    if matches!(ty, "f32" | "f64") {
+        return false;
+    }
+    if let Some(inner) = optional_inner_type(ty) {
+        return type_supports_eq(inner);
+    }
+    if let Some(inner) = vec_inner_type(ty) {
+        return type_supports_eq(inner);
+    }
+    true
+}
+
 fn render_mongo_model_module(model: &ModelSpec) -> String {
     let pascal = to_pascal_case(&model.name);
     let primary = &model.primary;
@@ -9048,6 +9207,10 @@ fn parse_ent_field(
             validation.enum_values = parse_ent_value_list(value.trim(), inner_line_no + 1)?;
             continue;
         }
+        if let Some(value) = ent_field_arg(&inner, &["named_values", "namedvalues"]) {
+            validation.enum_values = parse_ent_named_value_list(value.trim(), inner_line_no + 1)?;
+            continue;
+        }
         if let Some(value) = ent_field_arg(&inner, &["contains"]) {
             validation.contains = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
@@ -9078,17 +9241,13 @@ fn parse_ent_field(
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["update_default", "updatedefault"]) {
-            update_default = Some(normalize_ent_default_value(&parse_ent_string_or_ident(
-                value.trim(),
-                inner_line_no + 1,
-            )?));
+            let value = parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
+            update_default = Some(normalize_ent_default_value_for_type(&value, &ty));
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["client_default", "clientdefault"]) {
-            client_default_value = Some(normalize_ent_default_value(&parse_ent_string_or_ident(
-                value.trim(),
-                inner_line_no + 1,
-            )?));
+            let value = parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
+            client_default_value = Some(normalize_ent_default_value_for_type(&value, &ty));
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["source"]) {
@@ -9100,10 +9259,8 @@ fn parse_ent_field(
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["default"]) {
-            default_value = Some(normalize_ent_default_value(&parse_ent_string_or_ident(
-                value.trim(),
-                inner_line_no + 1,
-            )?));
+            let value = parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
+            default_value = Some(normalize_ent_default_value_for_type(&value, &ty));
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["default_func", "defaultfunc"]) {
@@ -9142,8 +9299,10 @@ fn is_ent_ignored_metadata_directive(value: &str) -> bool {
             "annotations",
             "annotation",
             "comment",
+            "deprecated",
             "validate",
             "match",
+            "where",
         ],
     )
     .is_some()
@@ -9523,6 +9682,9 @@ fn parse_ent_edge(
             )?));
             continue;
         }
+        if ent_field_arg(&inner, &["from"]).is_some() {
+            continue;
+        }
         if let Some(value) = ent_field_arg(&inner, &["field"]) {
             field = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
@@ -9659,9 +9821,8 @@ fn ent_parenthesized_arg(value: &str) -> Option<&str> {
 }
 
 fn parse_ent_value_list(value: &str, line_no: usize) -> anyhow::Result<Vec<String>> {
-    let values = value
-        .split(',')
-        .map(str::trim)
+    let values = split_ent_comma_items(value)?
+        .into_iter()
         .filter(|value| !value.is_empty())
         .map(|value| parse_ent_string_or_ident(value, line_no))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -9669,6 +9830,116 @@ fn parse_ent_value_list(value: &str, line_no: usize) -> anyhow::Result<Vec<Strin
         bail!("line {line_no}: enum must include at least one value");
     }
     Ok(values)
+}
+
+fn parse_ent_named_value_list(value: &str, line_no: usize) -> anyhow::Result<Vec<String>> {
+    let values = parse_ent_value_list(value, line_no)?;
+    if values.len() % 2 != 0 {
+        bail!("line {line_no}: named enum values must include name/value pairs");
+    }
+    Ok(values
+        .chunks_exact(2)
+        .map(|pair| pair[1].clone())
+        .collect::<Vec<_>>())
+}
+
+fn split_ent_comma_items(value: &str) -> anyhow::Result<Vec<&str>> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (idx, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 => {
+                let item = value[start..idx].trim();
+                if !item.is_empty() {
+                    items.push(item);
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if in_string {
+        bail!("unterminated string literal");
+    }
+    if paren_depth != 0 || brace_depth != 0 || bracket_depth != 0 {
+        bail!("unterminated nested expression");
+    }
+    let item = value[start..].trim();
+    if !item.is_empty() {
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn split_ent_top_level_once(value: &str, separator: char) -> anyhow::Result<Option<(&str, &str)>> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (idx, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ch if ch == separator && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 => {
+                return Ok(Some((
+                    value[..idx].trim(),
+                    value[idx + ch.len_utf8()..].trim(),
+                )));
+            }
+            _ => {}
+        }
+    }
+    if in_string {
+        bail!("unterminated string literal");
+    }
+    if paren_depth != 0 || brace_depth != 0 || bracket_depth != 0 {
+        bail!("unterminated nested expression");
+    }
+    Ok(None)
 }
 
 fn parse_ent_range_bounds(value: &str, line_no: usize) -> anyhow::Result<(String, String)> {
@@ -9717,17 +9988,123 @@ fn parse_ent_string_or_ident(value: &str, line_no: usize) -> anyhow::Result<Stri
 fn normalize_ent_default_value(value: &str) -> String {
     match value.trim() {
         "time.Now" | "time.Now()" => "now_millis".to_string(),
-        value => value.to_string(),
+        "uuid.NewString" | "uuid.NewString()" | "uuid.New" | "uuid.New()" | "uuid.NewV7"
+        | "uuid.NewV7()" => "uuid_new_string".to_string(),
+        value if is_empty_go_map_literal(value) => "{}".to_string(),
+        value => normalize_go_map_default_value(value)
+            .or_else(|| normalize_ent_duration_default_value(value))
+            .unwrap_or_else(|| value.to_string()),
     }
+}
+
+fn normalize_ent_default_value_for_type(value: &str, ty: &str) -> String {
+    let inner_ty = optional_inner_type(ty).unwrap_or(ty);
+    if inner_ty == "String" {
+        if let Some(value) = normalize_go_slice_json_default_value(value) {
+            return value;
+        }
+    }
+    normalize_ent_default_value(value)
+}
+
+fn is_empty_go_map_literal(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with("map[") && value.ends_with("{}")
+}
+
+fn normalize_go_map_default_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if !value.starts_with("map[") || !value.ends_with('}') {
+        return None;
+    }
+    let open_body = value.rfind('{')?;
+    let body = value[open_body + 1..].strip_suffix('}')?.trim();
+    if body.is_empty() {
+        return Some("{}".to_string());
+    }
+
+    let mut object = serde_json::Map::new();
+    for item in split_ent_comma_items(body).ok()? {
+        let (key, raw_value) = split_ent_top_level_once(item, ':').ok()??;
+        let key = parse_ent_string_or_ident(key, 0).ok()?;
+        let json_value = parse_go_map_json_value(raw_value)?;
+        object.insert(key, json_value);
+    }
+    serde_json::to_string(&serde_json::Value::Object(object)).ok()
+}
+
+fn normalize_go_slice_json_default_value(value: &str) -> Option<String> {
+    let (_, body) = parse_go_slice_literal(value)?;
+    if body.is_empty() {
+        return Some("[]".to_string());
+    }
+    let values = split_ent_comma_items(body)
+        .ok()?
+        .into_iter()
+        .map(parse_go_json_value)
+        .collect::<Option<Vec<_>>>()?;
+    serde_json::to_string(&serde_json::Value::Array(values)).ok()
+}
+
+fn parse_go_map_json_value(value: &str) -> Option<serde_json::Value> {
+    parse_go_json_value(value)
+}
+
+fn parse_go_json_value(value: &str) -> Option<serde_json::Value> {
+    let value = value.trim();
+    if value.starts_with('"') {
+        return parse_ent_string_or_ident(value, 0)
+            .ok()
+            .map(serde_json::Value::String);
+    }
+    match value {
+        "true" => Some(serde_json::Value::Bool(true)),
+        "false" => Some(serde_json::Value::Bool(false)),
+        "nil" | "null" => Some(serde_json::Value::Null),
+        _ => value
+            .parse::<serde_json::Number>()
+            .ok()
+            .map(serde_json::Value::Number),
+    }
+}
+
+fn normalize_ent_duration_default_value(value: &str) -> Option<String> {
+    fn unit_nanos(unit: &str) -> Option<i128> {
+        match unit.trim() {
+            "time.Nanosecond" => Some(1),
+            "time.Microsecond" => Some(1_000),
+            "time.Millisecond" => Some(1_000_000),
+            "time.Second" => Some(1_000_000_000),
+            "time.Minute" => Some(60_000_000_000),
+            "time.Hour" => Some(3_600_000_000_000),
+            _ => None,
+        }
+    }
+
+    let value = value.trim();
+    if let Some(nanos) = unit_nanos(value) {
+        return Some(nanos.to_string());
+    }
+    if let Some((left, right)) = value.split_once('*') {
+        let left = left.trim();
+        let right = right.trim();
+        if let (Ok(multiplier), Some(unit)) = (left.parse::<i128>(), unit_nanos(right)) {
+            return Some((multiplier * unit).to_string());
+        }
+        if let (Some(unit), Ok(multiplier)) = (unit_nanos(left), right.parse::<i128>()) {
+            return Some((unit * multiplier).to_string());
+        }
+    }
+    None
 }
 
 fn parse_ent_default_func_value(value: &str, line_no: usize) -> anyhow::Result<String> {
     let value = parse_ent_string_or_ident(value, line_no)?;
     let normalized = normalize_ent_default_value(&value);
-    if normalized == "now_millis" {
+    if matches!(normalized.as_str(), "now_millis" | "uuid_new_string") {
         return Ok(normalized);
     }
-    bail!("line {line_no}: DefaultFunc currently supports time.Now only")
+    bail!("line {line_no}: DefaultFunc currently supports time.Now and uuid.NewString only")
 }
 
 fn ent_type_to_rust_type(ty: &str) -> String {
@@ -9737,6 +10114,7 @@ fn ent_type_to_rust_type(ty: &str) -> String {
     }
     match trimmed.to_ascii_lowercase().as_str() {
         "decimal" | "numeric" => "rust_decimal::Decimal".to_string(),
+        "duration" => "i64".to_string(),
         "int8" => "i8".to_string(),
         "int16" => "i16".to_string(),
         "int32" => "i32".to_string(),
@@ -9755,6 +10133,18 @@ fn ent_field_builder_type_to_rust_type(builder: &str) -> String {
     match builder.trim().to_ascii_lowercase().as_str() {
         "id" => "i64".to_string(),
         "time" => "i64".to_string(),
+        "ip" | "mac" | "url" | "other" => "String".to_string(),
+        "float" | "float64" => "f64".to_string(),
+        "float32" => "f32".to_string(),
+        "ips" => "Vec<String>".to_string(),
+        "strings" => "Vec<String>".to_string(),
+        "bools" => "Vec<bool>".to_string(),
+        "ints" => "Vec<i32>".to_string(),
+        "int64s" => "Vec<i64>".to_string(),
+        "uints" => "Vec<u32>".to_string(),
+        "uint64s" => "Vec<u64>".to_string(),
+        "floats" | "float64s" => "Vec<f64>".to_string(),
+        "float32s" => "Vec<f32>".to_string(),
         _ => ent_type_to_rust_type(builder),
     }
 }
@@ -11109,14 +11499,32 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
 }
 
 fn strip_comment(line: &str) -> &str {
-    let hash = line.find('#');
-    let slash = line.find("//");
-    match (hash, slash) {
-        (Some(a), Some(b)) => line[..a.min(b)].trim_end(),
-        (Some(a), None) => line[..a].trim_end(),
-        (None, Some(b)) => line[..b].trim_end(),
-        (None, None) => line,
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '#' => return line[..idx].trim_end(),
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
+                return line[..idx].trim_end();
+            }
+            _ => {}
+        }
     }
+    line
 }
 
 fn parse_bool(input: &str, line_no: usize) -> anyhow::Result<bool> {
@@ -11705,6 +12113,8 @@ mod tests {
             }
             field Enum("state").Values("active", "disabled").Default("active") {
             }
+            field Enum("role").NamedValues("Admin", "admin", "Member", "member").Default("member") {
+            }
         }
         "#;
 
@@ -11718,16 +12128,30 @@ mod tests {
         assert_eq!(state.ty, "String");
         assert_eq!(state.validation.enum_values, ["active", "disabled"]);
         assert_eq!(state.default_value.as_deref(), Some("active"));
+        let role = model
+            .fields
+            .iter()
+            .find(|field| field.name == "role")
+            .expect("role field");
+        assert_eq!(role.ty, "String");
+        assert_eq!(role.validation.enum_values, ["admin", "member"]);
+        assert_eq!(role.default_value.as_deref(), Some("member"));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field state: string {"));
         assert!(ent.contains("enum \"active\", \"disabled\""));
         assert!(ent.contains("default \"active\""));
+        assert!(ent.contains("field role: string {"));
+        assert!(ent.contains("enum \"admin\", \"member\""));
+        assert!(ent.contains("default \"member\""));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub state: String"));
+        assert!(sea_orm.contains("pub role: String"));
         assert!(sea_orm.contains("!matches!(value.as_str(), \"active\" | \"disabled\")"));
+        assert!(sea_orm.contains("!matches!(value.as_str(), \"admin\" | \"member\")"));
         assert!(sea_orm.contains("state validation failed: value is not allowed"));
+        assert!(sea_orm.contains("role validation failed: value is not allowed"));
     }
 
     #[test]
@@ -12092,6 +12516,27 @@ mod tests {
     }
 
     #[test]
+    fn ent_enum_named_values_rejects_odd_arguments() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field Int64("id").Primary() {
+                }
+                field Enum("state").NamedValues("Active", "active", "Disabled") {
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("named values should be pairs");
+
+        assert!(err
+            .to_string()
+            .contains("named enum values must include name/value pairs"));
+    }
+
+    #[test]
     fn ent_numeric_field_validators_generate_mutation_checks() {
         let source = r#"
         entity User {
@@ -12421,13 +12866,56 @@ mod tests {
     }
 
     #[test]
+    fn ent_default_func_uuid_new_string_generates_uuid_default() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field UUID("public_id", uuid.UUID{}).DefaultFunc(uuid.NewString).Unique() {
+            }
+            field UUID("invite_id", uuid.UUID{}).Optional().DefaultFunc(uuid.New) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let public_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "public_id")
+            .expect("public_id field");
+        assert_eq!(public_id.ty, "String");
+        assert_eq!(public_id.default_value.as_deref(), Some("uuid_new_string"));
+        let invite_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "invite_id")
+            .expect("invite_id field");
+        assert_eq!(invite_id.ty, "Option<String>");
+        assert_eq!(invite_id.default_value.as_deref(), Some("uuid_new_string"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"uuid_new_string\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("public_id: self.public_id.map(Set).unwrap_or_else(|| Set(uuid::Uuid::now_v7().to_string()))"));
+        assert!(sea_orm.contains("invite_id: self.invite_id.map(Set).unwrap_or_else(|| Set(Some(uuid::Uuid::now_v7().to_string())))"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains("if let Some(value) = self.public_id { create = create.public_id(value); } else { create = create.public_id(uuid::Uuid::now_v7().to_string()); }"));
+        assert!(toasty.contains("if let Some(value) = self.invite_id { create = create.invite_id(value); } else { create = create.invite_id(Some(uuid::Uuid::now_v7().to_string())); }"));
+    }
+
+    #[test]
     fn ent_default_func_rejects_unsupported_functions() {
         let err = parse_models_with_format(
             r#"
             entity User {
                 table "users"
                 field String("id").Primary() {
-                    DefaultFunc(uuid.NewString)
+                    DefaultFunc(uuid.NewRandom)
                 }
             }
             "#,
@@ -12437,7 +12925,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("DefaultFunc currently supports time.Now only"));
+            .contains("DefaultFunc currently supports time.Now and uuid.NewString only"));
     }
 
     #[test]
@@ -12494,7 +12982,13 @@ mod tests {
             table "users"
             field UUID("public_id", uuid.UUID{}).Unique() {
             }
-            field JSON("metadata", map[string]any{}).Optional().StorageKey("metadata_json") {
+            field JSON("metadata", map[string]interface{}{}).Optional().StorageKey("metadata_json").Default(map[string]interface{}{"theme": "dark", "beta": true, "retry": 3}) {
+            }
+            field JSON("labels", []string{}).Optional().Default([]string{"new", "hot"}) {
+            }
+            field JSON("flags", []interface{}{}).Default([]interface{}{true, 3, "ok", nil}) {
+            }
+            field Other("profile", &Profile{}).Optional().StorageKey("profile_json").Default("{}") {
             }
         }
         "#;
@@ -12518,16 +13012,65 @@ mod tests {
             .expect("metadata field");
         assert_eq!(metadata.ty, "Option<String>");
         assert_eq!(metadata.source_name.as_deref(), Some("metadata_json"));
+        assert_eq!(
+            metadata.default_value.as_deref(),
+            Some(r#"{"theme":"dark","beta":true,"retry":3}"#)
+        );
+        let labels = model
+            .fields
+            .iter()
+            .find(|field| field.name == "labels")
+            .expect("labels field");
+        assert_eq!(labels.ty, "Option<String>");
+        assert_eq!(labels.default_value.as_deref(), Some(r#"["new","hot"]"#));
+        let flags = model
+            .fields
+            .iter()
+            .find(|field| field.name == "flags")
+            .expect("flags field");
+        assert_eq!(flags.ty, "String");
+        assert_eq!(
+            flags.default_value.as_deref(),
+            Some(r#"[true,3,"ok",null]"#)
+        );
+        let profile = model
+            .fields
+            .iter()
+            .find(|field| field.name == "profile")
+            .expect("profile field");
+        assert_eq!(profile.ty, "Option<String>");
+        assert_eq!(profile.source_name.as_deref(), Some("profile_json"));
+        assert_eq!(profile.default_value.as_deref(), Some("{}"));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field public_id: string {"));
         assert!(ent.contains("field metadata: string? {"));
         assert!(ent.contains("source \"metadata_json\""));
+        assert!(ent.contains(
+            "default \"{\\\"theme\\\":\\\"dark\\\",\\\"beta\\\":true,\\\"retry\\\":3}\""
+        ));
+        assert!(ent.contains("field labels: string? {"));
+        assert!(ent.contains("default \"[\\\"new\\\",\\\"hot\\\"]\""));
+        assert!(ent.contains("field flags: string {"));
+        assert!(ent.contains("default \"[true,3,\\\"ok\\\",null]\""));
+        assert!(ent.contains("field profile: string? {"));
+        assert!(ent.contains("source \"profile_json\""));
+        assert!(ent.contains("default \"{}\""));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub public_id: String"));
         assert!(sea_orm.contains("pub metadata: Option<String>"));
+        assert!(sea_orm.contains("pub labels: Option<String>"));
+        assert!(sea_orm.contains("pub flags: String"));
+        assert!(sea_orm.contains("pub profile: Option<String>"));
         assert!(sea_orm.contains("#[sea_orm(column_name = \"metadata_json\")]"));
+        assert!(sea_orm.contains("metadata: self.metadata.map(Set).unwrap_or_else(|| Set(Some(\"{\\\"theme\\\":\\\"dark\\\",\\\"beta\\\":true,\\\"retry\\\":3}\".to_string())))"));
+        assert!(sea_orm.contains("labels: self.labels.map(Set).unwrap_or_else(|| Set(Some(\"[\\\"new\\\",\\\"hot\\\"]\".to_string())))"));
+        assert!(sea_orm.contains("flags: self.flags.map(Set).unwrap_or_else(|| Set(\"[true,3,\\\"ok\\\",null]\".to_string()))"));
+        assert!(sea_orm.contains("#[sea_orm(column_name = \"profile_json\")]"));
+        assert!(sea_orm.contains(
+            "profile: self.profile.map(Set).unwrap_or_else(|| Set(Some(\"{}\".to_string())))"
+        ));
     }
 
     #[test]
@@ -12542,6 +13085,10 @@ mod tests {
             field Uint("visits").Default(7) {
             }
             field Float("ratio").Default(1.5) {
+            }
+            field Float32("score").Default(0.5) {
+            }
+            field Float64("weight").Default(2.5) {
             }
             field Bytes("payload").Optional() {
             }
@@ -12568,8 +13115,22 @@ mod tests {
             .iter()
             .find(|field| field.name == "ratio")
             .expect("ratio field");
-        assert_eq!(ratio.ty, "f32");
+        assert_eq!(ratio.ty, "f64");
         assert_eq!(ratio.default_value.as_deref(), Some("1.5"));
+        let score = model
+            .fields
+            .iter()
+            .find(|field| field.name == "score")
+            .expect("score field");
+        assert_eq!(score.ty, "f32");
+        assert_eq!(score.default_value.as_deref(), Some("0.5"));
+        let weight = model
+            .fields
+            .iter()
+            .find(|field| field.name == "weight")
+            .expect("weight field");
+        assert_eq!(weight.ty, "f64");
+        assert_eq!(weight.default_value.as_deref(), Some("2.5"));
         let payload = model
             .fields
             .iter()
@@ -12580,16 +13141,22 @@ mod tests {
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field bio: string? {"));
         assert!(ent.contains("field visits: u32 {"));
-        assert!(ent.contains("field ratio: f32 {"));
+        assert!(ent.contains("field ratio: f64 {"));
+        assert!(ent.contains("field score: f32 {"));
+        assert!(ent.contains("field weight: f64 {"));
         assert!(ent.contains("field payload: bytes? {"));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub bio: Option<String>"));
         assert!(sea_orm.contains("pub visits: u32"));
-        assert!(sea_orm.contains("pub ratio: f32"));
+        assert!(sea_orm.contains("pub ratio: f64"));
+        assert!(sea_orm.contains("pub score: f32"));
+        assert!(sea_orm.contains("pub weight: f64"));
         assert!(sea_orm.contains("pub payload: Option<Vec<u8>>"));
         assert!(sea_orm.contains("visits: self.visits.map(Set).unwrap_or_else(|| Set(7))"));
         assert!(sea_orm.contains("ratio: self.ratio.map(Set).unwrap_or_else(|| Set(1.5))"));
+        assert!(sea_orm.contains("score: self.score.map(Set).unwrap_or_else(|| Set(0.5))"));
+        assert!(sea_orm.contains("weight: self.weight.map(Set).unwrap_or_else(|| Set(2.5))"));
     }
 
     #[test]
@@ -12635,6 +13202,188 @@ mod tests {
         let err = parse_models_with_format(source, ModelFormat::Ent)
             .expect_err("composite ID should be rejected");
         assert!(err.to_string().contains("composite IDs are not supported"));
+    }
+
+    #[test]
+    fn ent_duration_field_builder_maps_to_i64_nanoseconds() {
+        let source = r#"
+        entity Job {
+            Table("jobs")
+            field ID("id") {
+            }
+            field Duration("timeout").Default(5 * time.Second) {
+            }
+            field Duration("cooldown").Optional().Default(time.Minute) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let timeout = model
+            .fields
+            .iter()
+            .find(|field| field.name == "timeout")
+            .expect("timeout field");
+        assert_eq!(timeout.ty, "i64");
+        assert_eq!(timeout.default_value.as_deref(), Some("5000000000"));
+        let cooldown = model
+            .fields
+            .iter()
+            .find(|field| field.name == "cooldown")
+            .expect("cooldown field");
+        assert_eq!(cooldown.ty, "Option<i64>");
+        assert_eq!(cooldown.default_value.as_deref(), Some("60000000000"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field timeout: i64 {"));
+        assert!(ent.contains("default \"5000000000\""));
+        assert!(ent.contains("field cooldown: i64? {"));
+        assert!(ent.contains("default \"60000000000\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(
+            sea_orm.contains("timeout: self.timeout.map(Set).unwrap_or_else(|| Set(5000000000))")
+        );
+        assert!(sea_orm.contains(
+            "cooldown: self.cooldown.map(Set).unwrap_or_else(|| Set(Some(60000000000)))"
+        ));
+    }
+
+    #[test]
+    fn ent_plural_field_builders_map_to_vec_types() {
+        let source = r#"
+        entity Post {
+            Table("posts")
+            field ID("id") {
+            }
+            field Strings("tags").Optional().Default([]string{"new", "hot"}) {
+            }
+            field Ints("scores").Default([]int{1, 2}) {
+            }
+            field Int64s("checkpoints") {
+            }
+            field Uints("views") {
+            }
+            field Float32s("ratios").Default([]float32{0.5, 1.5}) {
+            }
+            field Floats("weights").Default([]float64{2.5}) {
+            }
+            field Bools("flags").Default([]bool{true, false}) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let field_ty = |name: &str| {
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.ty.as_str())
+                .expect("field")
+        };
+        assert_eq!(field_ty("tags"), "Option<Vec<String>>");
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == "tags")
+                .and_then(|field| field.default_value.as_deref()),
+            Some("[]string{\"new\", \"hot\"}")
+        );
+        assert_eq!(field_ty("scores"), "Vec<i32>");
+        assert_eq!(field_ty("checkpoints"), "Vec<i64>");
+        assert_eq!(field_ty("views"), "Vec<u32>");
+        assert_eq!(field_ty("ratios"), "Vec<f32>");
+        assert_eq!(field_ty("weights"), "Vec<f64>");
+        assert_eq!(field_ty("flags"), "Vec<bool>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field tags: []string? {"));
+        assert!(ent.contains("field scores: []i32 {"));
+        assert!(ent.contains("field checkpoints: []i64 {"));
+        assert!(ent.contains("field views: []u32 {"));
+        assert!(ent.contains("field ratios: []f32 {"));
+        assert!(ent.contains("field weights: []f64 {"));
+        assert!(ent.contains("field flags: []bool {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]"
+        ));
+        assert!(!sea_orm.contains(
+            "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
+        ));
+        assert!(sea_orm.contains("pub tags: Option<Vec<String>>"));
+        assert!(sea_orm.contains("pub scores: Vec<i32>"));
+        assert!(sea_orm.contains("pub checkpoints: Vec<i64>"));
+        assert!(sea_orm.contains("pub views: Vec<u32>"));
+        assert!(sea_orm.contains("pub ratios: Vec<f32>"));
+        assert!(sea_orm.contains("pub weights: Vec<f64>"));
+        assert!(sea_orm.contains("pub flags: Vec<bool>"));
+        assert!(sea_orm.contains("tags: self.tags.map(Set).unwrap_or_else(|| Set(Some(vec![\"new\".to_string(), \"hot\".to_string()])))"));
+        assert!(sea_orm.contains("scores: self.scores.map(Set).unwrap_or_else(|| Set(vec![1, 2]))"));
+        assert!(
+            sea_orm.contains("ratios: self.ratios.map(Set).unwrap_or_else(|| Set(vec![0.5, 1.5]))")
+        );
+        assert!(
+            sea_orm.contains("weights: self.weights.map(Set).unwrap_or_else(|| Set(vec![2.5]))")
+        );
+        assert!(sea_orm
+            .contains("flags: self.flags.map(Set).unwrap_or_else(|| Set(vec![true, false]))"));
+    }
+
+    #[test]
+    fn ent_network_field_builders_map_to_string_backed_types() {
+        let source = r#"
+        entity Endpoint {
+            Table("endpoints")
+            field ID("id") {
+            }
+            field IP("addr").Default("127.0.0.1") {
+            }
+            field IPs("allowlist").Optional().Default([]string{"127.0.0.1", "::1"}) {
+            }
+            field MAC("mac").Optional() {
+            }
+            field URL("homepage").Default("https://example.com") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let field_ty = |name: &str| {
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.ty.as_str())
+                .expect("field")
+        };
+        assert_eq!(field_ty("addr"), "String");
+        assert_eq!(field_ty("allowlist"), "Option<Vec<String>>");
+        assert_eq!(field_ty("mac"), "Option<String>");
+        assert_eq!(field_ty("homepage"), "String");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field addr: string {"));
+        assert!(ent.contains("field allowlist: []string? {"));
+        assert!(ent.contains("field mac: string? {"));
+        assert!(ent.contains("field homepage: string {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub addr: String"));
+        assert!(sea_orm.contains("pub allowlist: Option<Vec<String>>"));
+        assert!(sea_orm.contains("pub mac: Option<String>"));
+        assert!(sea_orm.contains("pub homepage: String"));
+        assert!(sea_orm.contains(
+            "addr: self.addr.map(Set).unwrap_or_else(|| Set(\"127.0.0.1\".to_string()))"
+        ));
+        assert!(sea_orm.contains("allowlist: self.allowlist.map(Set).unwrap_or_else(|| Set(Some(vec![\"127.0.0.1\".to_string(), \"::1\".to_string()])))"));
+        assert!(sea_orm.contains("homepage: self.homepage.map(Set).unwrap_or_else(|| Set(\"https://example.com\".to_string()))"));
     }
 
     #[test]
@@ -12711,7 +13460,7 @@ mod tests {
         let source = r#"
         entity User {
             table "users"
-            field String("email").StructTag(`json:"email,omitempty"`).Annotations(entgql.OrderField("EMAIL")) {
+            field String("email").StructTag(`json:"email,omitempty"`).Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email") {
                 Unique()
                 SchemaType(map[string]string{dialect.Postgres: "citext"})
                 GoType(sql.NullString{})
@@ -12719,6 +13468,7 @@ mod tests {
             field JSON("metadata", map[string]any{}) {
                 Optional()
                 Annotations(entgql.Skip())
+                Deprecated("metadata_v2")
             }
         }
         "#;
@@ -12750,6 +13500,7 @@ mod tests {
         assert!(!ent.contains("GoType"));
         assert!(!ent.contains("StructTag"));
         assert!(!ent.contains("Annotations"));
+        assert!(!ent.contains("Deprecated"));
     }
 
     #[test]
@@ -12803,8 +13554,9 @@ mod tests {
             edge To("user", User.Type).Field("user_id").Ref("id").Unique().Annotations(entgql.Bind()) {
                 StorageKey("profile_user_fk")
                 Comment("owner relation")
+                Deprecated("use account")
             }
-            index Fields("tenant_id", "user_id").Unique().Annotations(entgql.OrderField("TENANT_USER")) {
+            index Fields("tenant_id", "user_id").Unique().Annotations(entgql.OrderField("TENANT_USER")).Where(sql.FieldNEQ("deleted_at", nil)).Deprecated("old lookup") {
             }
         }
         "#;
@@ -12838,6 +13590,8 @@ mod tests {
         assert!(!ent.contains("Annotations"));
         assert!(!ent.contains("StorageKey(\"profile_user_fk\")"));
         assert!(!ent.contains("Comment(\"owner relation\")"));
+        assert!(!ent.contains("Deprecated"));
+        assert!(!ent.contains("Where"));
     }
 
     #[test]
@@ -13381,6 +14135,8 @@ mod tests {
                 Unique()
                 Annotations(entgql.RelayConnection())
             }
+            edge To("children", User.Type).From("parent").Unique() {
+            }
         }
 
         entity Group {
@@ -13399,6 +14155,7 @@ mod tests {
 
         let ent = render_ent_schema(&models);
         assert!(!ent.contains("edge groups"));
+        assert!(!ent.contains("edge children"));
     }
 
     #[test]
@@ -14574,6 +15331,51 @@ impl ServiceContext {
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));
         assert!(!ext.contains(MODEL_GENERATED_MARKER));
+    }
+
+    #[test]
+    fn ent_uuid_default_updates_manifest_dependency() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-uuid-model-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "user-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            entity User {
+                table "users"
+                field Int64("id").Primary() {
+                }
+                field UUID("public_id", uuid.UUID{}).DefaultFunc(uuid.NewString) {
+                }
+            }
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Ent,
+            ModelOrm::SeaOrm,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains("uuid = { workspace = true }"));
+        let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
+        assert!(module.contains("uuid::Uuid::now_v7().to_string()"));
     }
 
     #[test]

@@ -57,7 +57,8 @@ let app = Router::new()
 - `matchit` route-template matching
 - path parameter capture through request extensions
 - matched route-template extraction with `MatchedPath` for metrics, tracing,
-  route-aware middleware, and handlers
+  route-aware middleware, and handlers; `MatchedPath` supports `as_str`,
+  `Deref<Target = str>`, and display formatting for concise observability code
 - original request URI extraction with `OriginalUri`, preserving a stable
   request URI view in extensions before route dispatch
 - method dispatch with `MethodRouter`
@@ -66,6 +67,9 @@ let app = Router::new()
   handler/service against multiple standard HTTP methods
 - standard method helpers for GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS,
   TRACE, and CONNECT
+- GET routes implicitly satisfy HEAD requests when no explicit HEAD route is
+  registered, and all HEAD responses preserve status/headers while omitting the
+  response body
 - service helper variants for each standard method, such as `get_service` and
   `MethodRouter::post_service`, so generated routes can attach Tower services
   without wrapping them as handlers
@@ -75,7 +79,12 @@ let app = Router::new()
 - route nesting with `Router::nest(prefix, router)`
 - service nesting with `Router::nest_service(prefix, service)`
 - router composition with `Router::merge(router)`
+- `Router::merge` accepts any `Into<Router>`, and `MethodRouter` converts into
+  a root-path router for compact composition
 - service-backed route registration
+- Axum-style `Router::route_service(path, service)` for attaching a Tower
+  service to all methods for one path; method-specific services use
+  `route(path, get_service(service))` and the other method service helpers
 - handler-backed route registration
 - Roze `Handler` conversion into Tower services
 - handler-level `Handler::layer` for applying Tower layers to one handler
@@ -101,9 +110,29 @@ let app = Router::new()
   errors into `IntoResponse` values
 - `Router::route_layer` for layers that apply only to matched routes and leave
   fallback responses untouched
-- fallback handlers and services with `fallback_handler`, `fallback_service`,
-  and `reset_fallback`
+- `middleware::from_fn` and `middleware::Next` for Axum-style function
+  middleware over Roze-owned extractors, supporting parts extractors before the
+  body-consuming request extractor and explicit continuation through
+  `next.run(request).await`
+- `middleware::from_fn_with_state` for function middleware with explicit
+  middleware-local state injected into request extensions before extractor
+  execution, making it available through `State<T>` and `Extension<T>`
+- `middleware::map_response` for response-only middleware that can inspect or
+  replace downstream responses while returning any Roze `IntoResponse` value
+- `middleware::map_request` and `IntoMapRequestResult` for request-only
+  middleware that can rewrite requests before routing continues or short-circuit
+  with any Roze `IntoResponse` rejection
+- `middleware::from_extractor::<E>()` for extractor-backed middleware that
+  validates request parts, discards successful extractor values, and returns
+  extractor rejections as responses without calling downstream services
+- `Extension<T>` implements `Layer`, and `middleware::AddExtensionLayer` /
+  `AddExtension` can insert cloned values into request extensions for
+  downstream `Extension<T>` and `State<T>`-style extraction
+- fallback handlers and services with Axum-style `fallback`,
+  `fallback_service`, and `reset_fallback`
 - route presence introspection with `has_routes`
+- `Debug` summaries for `Router` and `MethodRouter` expose route/method
+  structure without depending on handler or service internals
 - router and method-router state injection with `with_state`, consumed through
   `State<T>`
 - `FromRef` plus router, method-router, and handler
@@ -115,14 +144,32 @@ let app = Router::new()
   body-consuming extractor
 - `FromRequestParts` for extractors that do not consume the body, mirroring
   the parts/body split used by Axum while keeping Roze-owned traits
+- `RequestPartsExt` adds `parts.extract::<T>().await` and
+  `parts.extract_optional::<T>().await` convenience methods for composing
+  Roze-owned parts extractors inside custom extractors and middleware
+- `RequestExt` adds `request.extract::<T>().await`,
+  `request.extract_optional::<T>().await`, `request.extract_parts::<T>().await`,
+  and `request.extract_optional_parts::<T>().await`, letting custom extractors
+  compose body-consuming and parts-only extractors without losing the request
+  body
 - `OptionalFromRequestParts` and `OptionalFromRequest` power `Option<T>`
   extractors, so missing optional state, extensions, connection info, empty
   query/body payloads, and similar absence cases can be represented without
   turning them into handler rejections
 - `Result<T, T::Rejection>` extractors let handlers handle extractor failures
   explicitly instead of forcing immediate framework rejection responses
-- minimal request extraction with `FromRequest`, `RawRequest`, `Parts`,
-  `Path<T>`, `Query<T>`, `Form<T>`, `Json<T>`, and `OriginalUri`
+- minimal request extraction with `FromRequest`,
+  `roze_http::extract::Request` / `roze_http::Request` aliases, `RawRequest`,
+  `Parts`, `Path<T>`, `RawPathParams`, `RawQuery`, `RawForm`, `Query<T>`,
+  `Form<T>`, `Json<T>`, and `OriginalUri`
+- `RawPathParams` exposes named route captures without deserializing them,
+  useful for route-aware middleware, audit logs, and generic gateway policy;
+  it supports `iter()` and `for (key, value) in &params`
+- `RawQuery` exposes the unparsed URI query string for signature checks,
+  gateway policy, observability, and proxy-style handlers
+- `RawForm` exposes raw urlencoded form data, reading the query string for GET
+  requests and requiring `application/x-www-form-urlencoded` bodies for other
+  methods
 - raw body extraction with `Bytes` and `String` for webhook, signature,
   proxy, and debugging handlers that need the body without DTO parsing
 - direct extraction of common HTTP request parts such as `Method`, `Uri`,
@@ -166,7 +213,8 @@ The next growth step is generated handler integration.
 ## Non-Goals
 
 - Reintroducing Axum as a dependency.
-- Re-exporting Axum-compatible APIs.
+- Re-exporting Axum APIs or keeping compatibility aliases instead of Roze-owned
+  API names.
 - Copying Axum internals or implementation details.
 - Making business logic depend on HTTP framework types.
 

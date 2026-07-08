@@ -1380,6 +1380,8 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
     .unwrap();
     writeln!(&mut out).unwrap();
 
+    render_framework_http_smoke_tests(&mut out, spec);
+
     for (idx, route) in spec.rest_routes.iter().enumerate() {
         let test_name = http_smoke_test_name(route, idx);
         let method = http_method_name(&route.method).to_ascii_lowercase();
@@ -1463,12 +1465,126 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
         writeln!(&mut out).unwrap();
     }
 
-    if spec.rest_routes.is_empty() {
-        writeln!(&mut out, "#[test]").unwrap();
-        writeln!(&mut out, "fn no_rest_routes_declared() {{}}").unwrap();
-    }
-
     out
+}
+
+fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
+    let endpoints = [
+        (
+            "framework_healthz",
+            rest::full_route_path(spec, "/healthz"),
+            Vec::<(&str, &str)>::new(),
+            true,
+        ),
+        (
+            "framework_readyz",
+            rest::full_route_path(spec, "/readyz"),
+            Vec::<(&str, &str)>::new(),
+            true,
+        ),
+        (
+            "framework_startupz",
+            rest::full_route_path(spec, "/startupz"),
+            Vec::<(&str, &str)>::new(),
+            true,
+        ),
+        (
+            "framework_metrics",
+            rest::full_route_path(spec, "/metrics"),
+            Vec::<(&str, &str)>::new(),
+            false,
+        ),
+        (
+            "framework_openapi",
+            rest::full_route_path(spec, "/openapi.json"),
+            Vec::<(&str, &str)>::new(),
+            true,
+        ),
+        (
+            "framework_report_export",
+            rest::full_route_path(spec, "/reports/export"),
+            vec![
+                ("report", "smoke"),
+                ("format", "csv"),
+                ("from", "2026-01-01T00:00:00Z"),
+                ("to", "2026-01-01T01:00:00Z"),
+                ("filters", "env=smoke"),
+            ],
+            true,
+        ),
+        (
+            "framework_chart_query",
+            rest::full_route_path(spec, "/charts/query"),
+            vec![
+                ("chart", "smoke"),
+                ("interval", "1m"),
+                ("from", "2026-01-01T00:00:00Z"),
+                ("to", "2026-01-01T01:00:00Z"),
+                ("filters", "env=smoke"),
+            ],
+            true,
+        ),
+    ];
+    for (name, path, query, expects_json) in endpoints {
+        render_framework_http_smoke_test(out, name, &path, &query, expects_json);
+    }
+}
+
+fn render_framework_http_smoke_test(
+    out: &mut String,
+    name: &str,
+    path: &str,
+    query: &[(&str, &str)],
+    expects_json: bool,
+) {
+    use std::fmt::Write as _;
+    writeln!(out, "#[tokio::test]").unwrap();
+    writeln!(
+        out,
+        "async fn smoke_{name}() -> Result<(), Box<dyn std::error::Error>> {{"
+    )
+    .unwrap();
+    writeln!(out, "    let client = reqwest::Client::new();").unwrap();
+    writeln!(
+        out,
+        "    let url = format!(\"{{}}{{}}\", base_url().trim_end_matches('/'), {:?});",
+        path
+    )
+    .unwrap();
+    writeln!(out, "    let response = client.get(url)").unwrap();
+    if !query.is_empty() {
+        writeln!(out, "        .query(&{query:?})").unwrap();
+    }
+    writeln!(out, "        .send()").unwrap();
+    writeln!(out, "        .await?;").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
+    )
+    .unwrap();
+    if expects_json {
+        writeln!(
+            out,
+            "    let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or(\"\");"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    assert!(content_type.contains(\"json\"), \"expected JSON response, got {{content_type}}\");"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    let _: serde_json::Value = response.json().await?;"
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "    let _ = response.bytes().await?;").unwrap();
+    }
+    writeln!(out, "    Ok(())").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
 }
 
 fn render_http_smoke_test_readme(spec: &ApiSpec, api: &Path, base_url: &str) -> String {
@@ -1495,6 +1611,20 @@ fn render_http_smoke_test_readme(spec: &ApiSpec, api: &Path, base_url: &str) -> 
         base_url
     )
     .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "## Framework Smoke").unwrap();
+    writeln!(&mut out).unwrap();
+    for path in [
+        "/healthz",
+        "/readyz",
+        "/startupz",
+        "/metrics",
+        "/openapi.json",
+        "/reports/export",
+        "/charts/query",
+    ] {
+        writeln!(&mut out, "- `GET` `{}`", rest::full_route_path(spec, path)).unwrap();
+    }
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "## Routes").unwrap();
     writeln!(&mut out).unwrap();
@@ -2701,6 +2831,26 @@ fn generate_rest_project_with_rpc_clients(
         out.join("ops/error-contract.yaml"),
         error_contract_yaml(spec, ProjectKind::Rest),
     )?;
+    fs::write(
+        out.join("ops/deployment-topology.yaml"),
+        deployment_topology_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/service-communication.yaml"),
+        service_communication_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/cache-governance.yaml"),
+        cache_governance_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/data-access-governance.yaml"),
+        data_access_governance_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/interface-governance.yaml"),
+        interface_governance_yaml(spec, ProjectKind::Rest),
+    )?;
     write_preserved(
         &out.join("config.yaml"),
         config_yaml(spec, ProjectKind::Rest),
@@ -2873,6 +3023,26 @@ pub(super) fn generate_rpc_project(
     fs::write(
         out.join("ops/error-contract.yaml"),
         error_contract_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/deployment-topology.yaml"),
+        deployment_topology_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/service-communication.yaml"),
+        service_communication_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/cache-governance.yaml"),
+        cache_governance_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/data-access-governance.yaml"),
+        data_access_governance_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/interface-governance.yaml"),
+        interface_governance_yaml(spec, ProjectKind::Rpc),
     )?;
     fs::write(out.join("build.rs"), build_rs())?;
     write_preserved(
@@ -3488,8 +3658,7 @@ version = "0.1.0""#
         ProjectKind::Rest => (
             if in_workspace {
                 r#"anyhow.workspace = true
-config.workspace = true
-roze_http.workspace = true"#
+config.workspace = true"#
             } else {
                 r#"anyhow = "1"
 config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
@@ -3821,7 +3990,7 @@ team evidence store before broad rollout.
 - `cargo fmt --all -- --check`
 - `cargo test`
 - Generated project compile check in the Roze workspace
-- Runtime smoke against `/healthz`, `/readyz`, `/startupz`, and `/metrics` for REST services
+- Runtime smoke against `/healthz`, `/readyz`, `/startupz`, `/metrics`, `/openapi.json`, `/reports/export`, and `/charts/query` for REST services
 - Graceful shutdown and lifecycle snapshot evidence
 - Resource trend capture: CPU, memory, file descriptors, connections, and restart count
 - Failure timeline with recovery outcome
@@ -3891,6 +4060,25 @@ guard evidence.
 Error contracts are generated at `ops/error-contract.yaml`; use them to validate
 typed errors, transport status mapping, retryability, trace correlation, client
 behavior, redaction, and failure metrics.
+Deployment topology contracts are generated at `ops/deployment-topology.yaml`;
+use them to validate probes, resources, scaling, disruption budgets,
+configuration, secrets, registry, network policy, and rollback wiring.
+Service communication contracts are generated at `ops/service-communication.yaml`;
+use them to validate discovery, load balancing, client deadlines, retries,
+circuit breakers, fallback, outlier handling, and trace propagation for service
+calls.
+Cache governance contracts are generated at `ops/cache-governance.yaml`; use
+them to validate TTL, key ownership, local/remote cache policy, singleflight,
+penetration/breakdown/avalanche protection, invalidation, consistency, and cache
+metrics.
+Data access governance contracts are generated at
+`ops/data-access-governance.yaml`; use them to validate query deadlines,
+connection pools, slow-query budgets, pagination, index review, read/write
+splitting, N+1 prevention, and data-access metrics.
+Interface governance contracts are generated at
+`ops/interface-governance.yaml`; use them to validate generated framework
+interfaces, business IDL interfaces, OpenAPI/proto projection, framework smoke
+coverage, typed errors, auth boundaries, and bounded observability labels.
 
 ## Evidence Scaffold
 
@@ -3975,6 +4163,10 @@ architecture:
     - generated_observability_contract
     - generated_runtime_hardening_contract
     - generated_error_contract
+    - generated_deployment_topology_contract
+    - generated_service_communication_contract
+    - generated_cache_governance_contract
+    - generated_data_access_governance_contract
     - lifecycle_snapshot_evidence
     - failure_timeline_required
     - resource_trend_required
@@ -4033,6 +4225,10 @@ evidence_required:
   observability_contract: true
   runtime_hardening_contract: true
   error_contract: true
+  deployment_topology_contract: true
+  service_communication_contract: true
+  cache_governance_contract: true
+  data_access_governance_contract: true
   lifecycle_summary_consistency: true
   failure_injection_timeline: true
   rollback_notes: true
@@ -5248,6 +5444,11 @@ assets:
   observability_contract: ops/observability-contract.yaml
   runtime_hardening: ops/runtime-hardening.yaml
   error_contract: ops/error-contract.yaml
+  deployment_topology: ops/deployment-topology.yaml
+  service_communication: ops/service-communication.yaml
+  cache_governance: ops/cache-governance.yaml
+  data_access_governance: ops/data-access-governance.yaml
+  interface_governance: ops/interface-governance.yaml
 required_stages:
   - stage: generated_code_integrity
     required: true
@@ -5333,6 +5534,97 @@ required_stages:
       - client_retry_behavior_report
       - redaction_scan_result
       - error_metric_sample
+
+  - stage: deployment_topology
+    required: true
+    source: ops/deployment-topology.yaml
+    checks:
+      - startup_readiness_liveness_probes_defined
+      - resource_requests_limits_and_alerts_defined
+      - hpa_or_scale_policy_defined
+      - disruption_budget_defined
+      - config_and_secret_mounts_reviewed
+      - registry_and_network_policy_defined
+      - rollback_and_image_pinning_defined
+    evidence:
+      - rendered_manifest_or_platform_spec
+      - probe_output
+      - resource_limit_review
+      - scaling_policy_review
+      - disruption_test_result
+      - rollback_result
+
+  - stage: service_communication
+    required: true
+    source: ops/service-communication.yaml
+    checks:
+      - discovery_endpoint_change_verified
+      - load_balancing_distribution_verified
+      - client_deadline_and_cancellation_verified
+      - retry_budget_and_backoff_verified
+      - circuit_breaker_and_outlier_policy_verified
+      - fallback_or_no_fallback_declared
+      - trace_context_propagated_across_service_call
+    evidence:
+      - registry_change_test
+      - load_balancing_sample
+      - deadline_trace_sample
+      - retry_budget_metric_sample
+      - breaker_transition_sample
+      - fallback_test_result
+
+  - stage: cache_governance
+    required: true
+    source: ops/cache-governance.yaml
+    checks:
+      - cache_boundary_declared_or_no_cache_declared
+      - cache_keys_ttl_and_ownership_reviewed
+      - penetration_breakdown_avalanche_protection_defined
+      - invalidation_and_consistency_policy_defined
+      - singleflight_or_request_collapse_verified
+      - cache_metrics_and_alerts_defined
+    evidence:
+      - cache_policy_review
+      - key_ttl_table
+      - miss_storm_test_result
+      - invalidation_test_result
+      - cache_metric_sample
+
+  - stage: data_access_governance
+    required: true
+    source: ops/data-access-governance.yaml
+    checks:
+      - persistence_boundary_declared_or_no_persistence_declared
+      - query_deadlines_and_pool_limits_defined
+      - slow_query_budget_and_index_review_defined
+      - pagination_and_result_size_limits_defined
+      - n_plus_one_and_unbounded_scan_protection_defined
+      - read_write_split_or_single_primary_policy_defined
+      - data_access_metrics_and_alerts_defined
+    evidence:
+      - data_access_policy_review
+      - query_budget_table
+      - slow_query_report
+      - pool_saturation_sample
+      - index_review
+      - data_access_metric_sample
+
+  - stage: interface_governance
+    required: true
+    source: ops/interface-governance.yaml
+    checks:
+      - generated_framework_interfaces_documented
+      - business_interfaces_projected_from_idl
+      - openapi_or_proto_contains_declared_interfaces
+      - framework_smoke_tests_cover_generated_interfaces
+      - typed_error_and_auth_boundaries_reviewed
+      - observability_labels_are_bounded
+    evidence:
+      - interface_governance_review
+      - openapi_or_proto_artifact
+      - contract_diff
+      - framework_smoke_output
+      - auth_and_error_mapping_review
 
   - stage: client_contract
     required: true
@@ -5511,6 +5803,7 @@ promotion_levels:
     requires:
       - generated_code_integrity
       - runtime_smoke
+      - interface_governance
       - governance
       - reliability_evidence
       - release_control
@@ -7069,6 +7362,921 @@ blocking_findings:
     )
 }
 
+fn deployment_topology_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let port = match kind {
+        ProjectKind::Rest => 8080,
+        ProjectKind::Rpc => 50051,
+    };
+    let startup_probe = match kind {
+        ProjectKind::Rest => "GET /startupz",
+        ProjectKind::Rpc => "grpc_health_probe_startup_or_generated_startup_probe",
+    };
+    let readiness_probe = match kind {
+        ProjectKind::Rest => "GET /readyz",
+        ProjectKind::Rpc => "grpc_health_probe_readiness_or_generated_readiness_probe",
+    };
+    let liveness_probe = match kind {
+        ProjectKind::Rest => "GET /healthz",
+        ProjectKind::Rpc => "grpc_health_probe_liveness_or_generated_liveness_probe",
+    };
+    let workload_probe = match kind {
+        ProjectKind::Rest => "representative_http_route_probe",
+        ProjectKind::Rpc => "representative_rpc_method_probe",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required for deployable production topology review.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: deployment_topology
+container:
+  port: {port}
+  image:
+    pin_by_digest: required
+    mutable_tags_forbidden_in_production: true
+    roze_git_revision_label_required: true
+  command:
+    generated_binary: true
+    config_path_required: true
+probes:
+  startup:
+    probe: {startup_probe}
+    failure_threshold: platform_owner_defined
+    evidence: startup_probe_output
+  readiness:
+    probe: {readiness_probe}
+    must_turn_false_during_draining: true
+    evidence: readiness_transition_output
+  liveness:
+    probe: {liveness_probe}
+    must_not_replace_readiness: true
+    evidence: liveness_probe_output
+  workload:
+    probe: {workload_probe}
+    required_before_canary: true
+resources:
+  requests:
+    cpu: owner_defined_after_capacity_plan
+    memory: owner_defined_after_capacity_plan
+  limits:
+    cpu: owner_defined_or_platform_policy
+    memory: required
+  alerts:
+    - cpu_saturation
+    - memory_pressure
+    - restart_loop
+    - oom_killed
+scaling:
+  min_replicas: owner_defined_minimum_2_for_broad_production
+  max_replicas: owner_defined
+  hpa_or_platform_autoscaler_required: true
+  signals:
+    - request_or_call_rate
+    - p99_latency
+    - cpu
+    - memory
+    - queue_or_concurrency_when_available
+  scale_down_stabilization_required: true
+disruption_budget:
+  required: true
+  min_available_or_max_unavailable: owner_defined
+  validates_drain_before_termination: true
+termination:
+  graceful_shutdown_required: true
+  pre_stop_or_platform_drain_hook_required: true
+  termination_grace_period: owner_defined_from_shutdown_soak
+  readiness_false_before_signal: required
+configuration:
+  config_source:
+    - generated_config_yaml
+    - environment_overlay
+    - config_center_when_enabled
+  secrets:
+    plain_text_secret_in_config_forbidden: true
+    mounted_or_platform_secret_required: true
+    rotation_plan_required: true
+  config_reload:
+    invalid_reload_rejected_or_rolled_back: true
+    listener_failure_isolated: true
+network:
+  service_discovery:
+    registry_or_platform_service_required: true
+    endpoint_change_test_required: true
+  ingress:
+    rest_gateway_or_ingress_for_rest: required_when_public
+    rpc_internal_lb_or_mesh_for_rpc: required_when_remote
+  network_policy:
+    default_deny_recommended: true
+    declared_downstream_allowlist_required: true
+  tls:
+    external_tls_required: true
+    mtls_required_for_internal_sensitive_paths: owner_defined
+rollout:
+  canary_required: true
+  blue_green_or_rollback_required: true
+  image_digest_pinned: true
+  generated_assets_reviewed_before_rollout:
+    - ops/production-gate.yaml
+    - ops/release-rollout.yaml
+    - ops/runtime-hardening.yaml
+    - ops/observability-contract.yaml
+    - ops/error-contract.yaml
+tests:
+  - test: probe_contract
+    pass:
+      - startup_probe_passes_after_boot
+      - readiness_probe_fails_during_draining
+      - liveness_probe_does_not_mask_dependency_failure
+      - workload_probe_passes_before_canary
+    evidence:
+      - startup_probe_output
+      - readiness_transition_output
+      - workload_probe_output
+
+  - test: resource_and_scaling
+    pass:
+      - resource_requests_and_limits_reviewed_against_capacity_plan
+      - autoscaler_signal_is_bound_to_generated_metrics
+      - scale_out_and_scale_in_have_timeline_evidence
+    evidence:
+      - capacity_plan_link
+      - hpa_or_platform_policy
+      - scaling_timeline
+
+  - test: disruption_and_shutdown
+    pass:
+      - disruption_budget_prevents_total_outage
+      - termination_grace_allows_drain_or_cancellation
+      - final_metrics_logs_traces_are_flushed
+    evidence:
+      - disruption_test_result
+      - shutdown_timeline
+      - lifecycle_summary
+
+  - test: config_secret_network
+    pass:
+      - secret_not_present_in_plain_config
+      - config_reload_or_snapshot_restore_tested
+      - network_policy_matches_dependency_inventory
+      - registry_or_service_discovery_endpoint_change_tested
+    evidence:
+      - secret_scan_result
+      - config_reload_result
+      - network_policy_review
+      - registry_change_test
+promotion_required:
+  probe_contract_passed: true
+  resource_scaling_passed: true
+  disruption_shutdown_passed: true
+  config_secret_network_passed: true
+  image_digest_pinned: true
+  rollback_action_tested: true
+  owner_signoff: required
+blocking_findings:
+  - production_image_not_pinned_by_digest
+  - missing_readiness_or_startup_probe
+  - liveness_used_as_readiness
+  - no_resource_limit_or_memory_alert
+  - no_disruption_budget_for_multi_replica_service
+  - secret_in_plain_text_config
+  - network_policy_missing_for_declared_downstream
+  - rollback_action_not_tested
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        port = port,
+        startup_probe = startup_probe,
+        readiness_probe = readiness_probe,
+        liveness_probe = liveness_probe,
+        workload_probe = workload_probe,
+    )
+}
+
+fn service_communication_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let representative_call = match kind {
+        ProjectKind::Rest => {
+            "representative_http_handler_calls_declared_downstream_or_declares_none"
+        }
+        ProjectKind::Rpc => "representative_rpc_method_calls_declared_downstream_or_declares_none",
+    };
+    let client_stack = match kind {
+        ProjectKind::Rest => "generated_rest_service_context_http_clients_or_gateway_clients",
+        ProjectKind::Rpc => "generated_tonic_client_and_service_context_rpc_clients",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required for governed service-to-service calls.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: service_communication
+client_stack: {client_stack}
+downstream_inventory:
+  required: true
+  source:
+    - service_context
+    - generated_config
+    - dependency_governance
+  undeclared_downstream_forbidden: true
+discovery:
+  registry_required_when_dynamic: true
+  static_endpoint_allowed_only_for_controlled_internal_or_local: true
+  endpoint_change_test_required: true
+  stale_endpoint_ttl_required: true
+  evidence:
+    - registry_change_test
+    - endpoint_snapshot
+load_balancing:
+  required_for_multi_endpoint_dependency: true
+  policy: owner_defined
+  distribution_sample_required: true
+  unhealthy_endpoint_excluded: true
+  evidence:
+    - load_balancing_distribution_sample
+    - unhealthy_endpoint_ejection_result
+client_deadlines:
+  required: true
+  configured_from_inbound_deadline_or_service_budget: true
+  cancellation_propagates_to_downstream: true
+  timeout_error_maps_to_error_contract: true
+  evidence:
+    - deadline_trace_sample
+    - cancellation_log_sample
+retries:
+  retry_budget_required: true
+  exponential_backoff_with_jitter_required: true
+  retryable_errors_from_error_contract_only: true
+  retryable_mutation_requires_idempotency_policy: true
+  retry_storm_protection_required: true
+  evidence:
+    - retry_budget_metric_sample
+    - retry_amplification_report
+circuit_breaker:
+  required_for_remote_dependency: true
+  states:
+    - closed
+    - open
+    - half_open
+  half_open_probe_limit_required: true
+  state_transition_metrics_required: true
+  evidence:
+    - breaker_transition_sample
+    - dependency_failure_drill
+outlier_handling:
+  required_for_multi_endpoint_dependency: true
+  eject_slow_or_failing_endpoint: owner_defined_policy
+  reintroduce_after_probe_success: required
+  evidence:
+    - outlier_ejection_timeline
+fallback:
+  explicit_policy_required: true
+  allowed:
+    - fail_fast_with_typed_error
+    - cached_or_stale_response_with_staleness_header
+    - degraded_response_with_audit
+    - queued_or_outbox_when_async_boundary
+  forbidden:
+    - silent_success
+    - hidden_partial_write
+    - fallback_without_metric
+trace_context:
+  propagate:
+    - trace_id
+    - span_id
+    - request_id_or_correlation_id
+    - deadline_or_timeout_budget
+    - tenant_or_principal_when_allowed
+  downstream_span_required: true
+  logs_join_on_trace_id: true
+metrics:
+  service_latency_metric: {latency_metric}
+  downstream_metric: roze_downstream_requests_total
+  resilience_metric: roze_resilience_decisions_total
+  required_labels:
+    - service
+    - dependency
+    - operation
+    - decision
+    - error_code
+tests:
+  - test: downstream_inventory
+    probe: {representative_call}
+    pass:
+      - every_downstream_is_declared_or_no_downstream_is_declared
+      - config_contains_endpoint_or_registry_policy
+      - undeclared_downstream_scan_passes
+    evidence:
+      - inventory_review
+      - generated_config_snapshot
+
+  - test: discovery_and_load_balancing
+    pass:
+      - endpoint_change_is_observed_without_restart_or_with_declared_restart
+      - unhealthy_endpoint_is_not_selected
+      - traffic_distribution_is_recorded
+    evidence:
+      - registry_change_test
+      - load_balancing_distribution_sample
+      - unhealthy_endpoint_test
+
+  - test: deadline_retry_breaker
+    pass:
+      - downstream_timeout_observes_deadline
+      - retries_stop_at_budget
+      - breaker_opens_and_half_open_probe_is_bounded
+      - typed_error_matches_error_contract
+    evidence:
+      - deadline_trace_sample
+      - retry_budget_metric_sample
+      - breaker_transition_sample
+
+  - test: fallback_and_trace_context
+    pass:
+      - fallback_policy_is_explicit_or_declared_absent
+      - degraded_response_is_visible_in_metrics
+      - downstream_span_carries_trace_and_deadline
+      - no_silent_success_for_failed_dependency
+    evidence:
+      - fallback_test_result
+      - trace_query_sample
+      - resilience_metric_sample
+promotion_required:
+  downstream_inventory_passed: true
+  discovery_load_balancing_passed: true
+  deadline_retry_breaker_passed: true
+  fallback_trace_context_passed: true
+  owner_signoff: required
+blocking_findings:
+  - undeclared_remote_downstream
+  - dependency_without_deadline
+  - retry_without_budget_or_jitter
+  - breaker_without_transition_evidence
+  - fallback_without_metric_or_trace
+  - silent_success_on_dependency_failure
+  - missing_trace_context_on_downstream_call
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        representative_call = representative_call,
+        client_stack = client_stack,
+        latency_metric = latency_metric,
+    )
+}
+
+fn cache_governance_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let read_probe = match kind {
+        ProjectKind::Rest => "representative_http_query_declares_cache_policy_or_no_cache",
+        ProjectKind::Rpc => "representative_rpc_query_declares_cache_policy_or_no_cache",
+    };
+    let mutation_probe = match kind {
+        ProjectKind::Rest => "representative_http_mutation_declares_invalidation_or_no_cache",
+        ProjectKind::Rpc => "representative_rpc_mutation_declares_invalidation_or_no_cache",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required when generated services use local or remote caches.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: cache_governance
+policy:
+  cache_boundary_required: true
+  no_cache_allowed_when_declared: true
+  key_ownership:
+    required: true
+    owner: service_owner
+    key_prefix: "{name}:{boundary}:"
+    key_contains_raw_secret_or_token: forbidden
+    key_contains_unbounded_user_input: forbidden
+  layers:
+    local_cache:
+      allowed: true
+      max_entries_required: true
+      ttl_required: true
+      stale_read_policy_required: true
+    remote_cache:
+      allowed: true
+      timeout_required: true
+      circuit_breaker_required: true
+      fallback_policy_required: true
+  ttl:
+    required: true
+    jitter_required: true
+    zero_or_infinite_ttl_forbidden_without_owner_exception: true
+    negative_cache_ttl_required_when_cache_miss_is_expensive: true
+  consistency:
+    owner_defined: true
+    modes:
+      - strong_read_through_after_write_when_required
+      - eventual_with_staleness_bound
+      - no_cache_for_mutation_sensitive_path
+    stale_read_header_or_trace_attribute_required_when_serving_stale: true
+  invalidation:
+    mutation_invalidation_required: true
+    event_driven_invalidation_allowed: true
+    manual_purge_runbook_required: true
+    bulk_purge_rate_limit_required: true
+protection:
+  penetration:
+    negative_cache_required_for_repeated_absent_keys: true
+    bloom_or_guard_filter_required_for_large_keyspace: owner_defined
+    evidence: penetration_test_result
+  breakdown:
+    singleflight_or_request_collapse_required: true
+    early_refresh_or_lock_required_for_hot_keys: owner_defined
+    evidence: hot_key_test_result
+  avalanche:
+    ttl_jitter_required: true
+    bulk_expiry_forbidden_without_refresh_plan: true
+    evidence: expiry_spread_report
+  stampede:
+    concurrency_limit_required: true
+    remote_cache_timeout_required: true
+    fallback_must_not_hide_stale_or_partial_data: true
+observability:
+  metrics_required:
+    - roze_cache_requests_total
+    - roze_cache_hit_ratio
+    - roze_cache_latency_seconds
+    - roze_cache_errors_total
+    - roze_singleflight_collapses_total
+  labels:
+    - service
+    - boundary
+    - cache_name
+    - operation
+    - result
+  unbounded_key_label_forbidden: true
+  alerts:
+    - cache_hit_ratio_drop
+    - cache_error_rate_high
+    - remote_cache_latency_high
+    - hot_key_collapse_spike
+tests:
+  - test: cache_boundary
+    probes:
+      - {read_probe}
+      - {mutation_probe}
+    pass:
+      - every_cached_path_declares_key_ttl_owner_and_consistency
+      - every_mutation_declares_invalidation_or_no_cache_impact
+      - raw_secret_or_unbounded_input_is_not_used_as_key
+    evidence:
+      - cache_policy_review
+      - key_ttl_table
+
+  - test: penetration_breakdown_avalanche
+    pass:
+      - repeated_absent_key_does_not_hit_backend_unbounded
+      - hot_key_collapse_or_singleflight_is_observed
+      - ttl_jitter_spreads_expiry
+      - remote_cache_timeout_does_not_exhaust_request_budget
+    evidence:
+      - penetration_test_result
+      - hot_key_test_result
+      - expiry_spread_report
+      - timeout_trace_sample
+
+  - test: invalidation_consistency
+    pass:
+      - write_updates_or_invalidates_affected_keys
+      - stale_read_policy_is_visible_to_client_or_trace
+      - manual_purge_runbook_is_tested
+      - event_invalidation_is_idempotent_when_used
+    evidence:
+      - invalidation_test_result
+      - stale_read_sample
+      - purge_runbook_output
+
+  - test: cache_observability
+    pass:
+      - hit_miss_error_latency_metrics_exported
+      - cache_key_not_used_as_metric_label
+      - singleflight_collapse_metric_available_when_used
+      - alerts_attached_to_dashboard_or_runbook
+    evidence:
+      - cache_metric_sample
+      - cardinality_report
+      - alert_review
+promotion_required:
+  cache_boundary_passed: true
+  penetration_breakdown_avalanche_passed: true
+  invalidation_consistency_passed: true
+  cache_observability_passed: true
+  owner_signoff: required
+blocking_findings:
+  - cached_path_without_ttl_or_owner
+  - cache_key_contains_secret_or_unbounded_input
+  - mutation_without_cache_invalidation_policy
+  - hot_key_without_singleflight_or_collapse
+  - ttl_without_jitter_for_large_keyset
+  - cache_metric_uses_raw_key_label
+  - stale_data_served_without_declared_policy
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        read_probe = read_probe,
+        mutation_probe = mutation_probe,
+    )
+}
+
+fn data_access_governance_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let read_probe = match kind {
+        ProjectKind::Rest => {
+            "representative_http_query_declares_data_access_policy_or_no_persistence"
+        }
+        ProjectKind::Rpc => {
+            "representative_rpc_query_declares_data_access_policy_or_no_persistence"
+        }
+    };
+    let mutation_probe = match kind {
+        ProjectKind::Rest => "representative_http_mutation_declares_write_policy_or_no_persistence",
+        ProjectKind::Rpc => "representative_rpc_mutation_declares_write_policy_or_no_persistence",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required when generated services access databases or search stores.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: data_access_governance
+persistence_boundary:
+  declared_or_no_persistence_required: true
+  allowed_stores:
+    - sql
+    - mongo
+    - search
+    - cache_as_read_model
+  app_owned_queries_live_outside_generated_transport: true
+query_policy:
+  deadlines:
+    required: true
+    derived_from_request_or_call_deadline: true
+    database_timeout_must_be_less_than_transport_timeout: true
+  connection_pool:
+    max_connections_required: true
+    acquire_timeout_required: true
+    idle_timeout_required: true
+    pool_saturation_alert_required: true
+  result_size:
+    pagination_required_for_lists: true
+    max_page_size_required: true
+    unbounded_select_forbidden: true
+    streaming_or_cursor_required_for_large_exports: true
+  slow_query_budget:
+    required: true
+    p95_budget_owner_defined: true
+    p99_budget_owner_defined: true
+    explain_plan_required_for_hot_queries: true
+  index_review:
+    required_for_filters_sorts_and_joins: true
+    missing_index_exception_requires_owner_signoff: true
+    index_bloat_review_required_for_broad_production: true
+write_policy:
+  transaction_boundary_required_for_multi_statement_write: true
+  idempotency_required_for_retryable_write: true
+  optimistic_or_pessimistic_locking_policy_required_when_conflict_possible: true
+  outbox_or_dtm_required_for_write_plus_event: true
+  write_timeout_required: true
+read_write_split:
+  single_primary_allowed: true
+  read_replica_allowed: true
+  stale_read_policy_required_when_replica_used: true
+  read_after_write_policy_required: true
+n_plus_one_protection:
+  required: true
+  batching_or_join_plan_required_for_collection_expansion: true
+  per_request_query_count_budget_required: true
+  query_count_trace_attribute_required: true
+security:
+  tenant_filter_required_when_multi_tenant: true
+  row_level_policy_or_repository_guard_required: owner_defined
+  raw_sql_review_required: true
+  pii_projection_review_required: true
+observability:
+  metrics_required:
+    - roze_data_queries_total
+    - roze_data_query_duration_seconds
+    - roze_data_pool_acquire_seconds
+    - roze_data_pool_in_use
+    - roze_data_slow_queries_total
+  labels:
+    - service
+    - boundary
+    - store
+    - operation
+    - result
+  raw_sql_or_bind_values_as_labels_forbidden: true
+  traces:
+    db_span_required: true
+    query_name_required: true
+    row_count_or_page_size_attribute_required: true
+tests:
+  - test: persistence_boundary
+    probes:
+      - {read_probe}
+      - {mutation_probe}
+    pass:
+      - every_data_access_path_declares_store_or_no_persistence
+      - generated_transport_does_not_hide_application_owned_query
+      - tenant_or_permission_guard_is_declared_when_required
+    evidence:
+      - data_access_policy_review
+      - repository_or_query_inventory
+
+  - test: query_deadline_pool
+    pass:
+      - database_timeout_fires_before_transport_timeout
+      - pool_acquire_timeout_is_observed
+      - pool_saturation_alert_query_is_defined
+      - cancellation_stops_expensive_query_or_marks_owner_exception
+    evidence:
+      - timeout_trace_sample
+      - pool_saturation_sample
+      - cancellation_test_result
+
+  - test: slow_query_index_pagination
+    pass:
+      - hot_query_has_explain_plan_or_owner_exception
+      - list_endpoint_or_method_has_page_limit
+      - sort_filter_fields_have_index_review
+      - unbounded_scan_is_absent_or_blocked
+    evidence:
+      - slow_query_report
+      - explain_plan_sample
+      - index_review
+      - pagination_test_result
+
+  - test: n_plus_one_and_write_policy
+    pass:
+      - collection_expansion_has_query_count_budget
+      - multi_statement_write_has_transaction_boundary
+      - retryable_write_has_idempotency_policy
+      - write_plus_event_uses_outbox_or_dtm_or_declares_no_event
+    evidence:
+      - query_count_trace
+      - transaction_test_result
+      - idempotency_test_report
+promotion_required:
+  persistence_boundary_passed: true
+  query_deadline_pool_passed: true
+  slow_query_index_pagination_passed: true
+  n_plus_one_write_policy_passed: true
+  owner_signoff: required
+blocking_findings:
+  - data_access_without_timeout_or_deadline
+  - unbounded_query_result
+  - list_without_page_limit
+  - hot_query_without_index_or_explain_review
+  - n_plus_one_without_query_count_budget
+  - pool_without_saturation_alert
+  - multi_statement_write_without_transaction
+  - raw_sql_without_review
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        read_probe = read_probe,
+        mutation_probe = mutation_probe,
+    )
+}
+
+fn interface_governance_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    use std::fmt::Write as _;
+
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "# Generated by rozectl. Required when generated service interfaces are exposed."
+    )
+    .unwrap();
+    writeln!(&mut out, "service: {}", spec.service).unwrap();
+    writeln!(&mut out, "boundary: {boundary}").unwrap();
+    writeln!(&mut out, "endpoint_count: {endpoint_count}").unwrap();
+    writeln!(&mut out, "mode: interface_governance").unwrap();
+    writeln!(&mut out, "source_contract: generated_from_idl").unwrap();
+
+    match kind {
+        ProjectKind::Rest => {
+            writeln!(&mut out, "framework_endpoints:").unwrap();
+            for (name, method, path, evidence) in [
+                (
+                    "liveness",
+                    "GET",
+                    rest::full_route_path(spec, "/healthz"),
+                    "probe_returns_probe_report",
+                ),
+                (
+                    "readiness",
+                    "GET",
+                    rest::full_route_path(spec, "/readyz"),
+                    "drain_changes_readiness",
+                ),
+                (
+                    "startup",
+                    "GET",
+                    rest::full_route_path(spec, "/startupz"),
+                    "startup_state_reported",
+                ),
+                (
+                    "metrics",
+                    "GET",
+                    rest::full_route_path(spec, "/metrics"),
+                    "prometheus_scrapeable",
+                ),
+                (
+                    "openapi",
+                    "GET",
+                    rest::full_route_path(spec, "/openapi.json"),
+                    "openapi_contains_business_and_framework_interfaces",
+                ),
+                (
+                    "report_export",
+                    "GET",
+                    rest::full_route_path(spec, "/reports/export"),
+                    "smoke_export_request_returns_typed_response",
+                ),
+                (
+                    "chart_query",
+                    "GET",
+                    rest::full_route_path(spec, "/charts/query"),
+                    "smoke_chart_query_returns_typed_series_response",
+                ),
+            ] {
+                writeln!(&mut out, "  - name: {name}").unwrap();
+                writeln!(&mut out, "    method: {method}").unwrap();
+                writeln!(&mut out, "    path: {path}").unwrap();
+                writeln!(&mut out, "    owner: framework").unwrap();
+                writeln!(&mut out, "    evidence: {evidence}").unwrap();
+            }
+
+            writeln!(&mut out, "business_endpoints:").unwrap();
+            for route in &spec.rest_routes {
+                writeln!(&mut out, "  - method: {}", http_method_name(&route.method)).unwrap();
+                writeln!(
+                    &mut out,
+                    "    path: {}",
+                    rest::full_route_path_for_route(spec, route)
+                )
+                .unwrap();
+                writeln!(&mut out, "    request: {}", route.request).unwrap();
+                writeln!(&mut out, "    response: {}", route.response).unwrap();
+                writeln!(
+                    &mut out,
+                    "    handler: {}",
+                    route
+                        .handler
+                        .as_deref()
+                        .unwrap_or("generated_from_method_path")
+                )
+                .unwrap();
+                writeln!(&mut out, "    owner: application_logic").unwrap();
+                writeln!(&mut out, "    generated_boundary: route_handler_logic").unwrap();
+            }
+
+            writeln!(&mut out, "required_smoke:").unwrap();
+            writeln!(&mut out, "  framework:").unwrap();
+            for test in [
+                "smoke_framework_healthz",
+                "smoke_framework_readyz",
+                "smoke_framework_startupz",
+                "smoke_framework_metrics",
+                "smoke_framework_openapi",
+                "smoke_framework_report_export",
+                "smoke_framework_chart_query",
+            ] {
+                writeln!(&mut out, "    - {test}").unwrap();
+            }
+            writeln!(&mut out, "  business_routes: generated_from_api_contract").unwrap();
+        }
+        ProjectKind::Rpc => {
+            writeln!(&mut out, "rpc_methods:").unwrap();
+            for method in &spec.rpc_methods {
+                writeln!(&mut out, "  - name: {}", method.name).unwrap();
+                writeln!(&mut out, "    request: {}", method.request).unwrap();
+                writeln!(&mut out, "    response: {}", method.response).unwrap();
+                writeln!(&mut out, "    owner: application_logic").unwrap();
+                writeln!(
+                    &mut out,
+                    "    generated_boundary: tonic_server_client_adapter"
+                )
+                .unwrap();
+            }
+            writeln!(&mut out, "required_smoke:").unwrap();
+            writeln!(&mut out, "  lifecycle: startup_readiness_metrics").unwrap();
+            writeln!(&mut out, "  representative_rpc_call: required").unwrap();
+            writeln!(&mut out, "  client_deadline_and_cancel: required").unwrap();
+        }
+    }
+
+    writeln!(&mut out, "policy:").unwrap();
+    writeln!(&mut out, "  compatibility_required: true").unwrap();
+    writeln!(&mut out, "  versioning_required: true").unwrap();
+    writeln!(
+        &mut out,
+        "  request_response_contract_review_required: true"
+    )
+    .unwrap();
+    writeln!(&mut out, "  breaking_change_requires_owner_approval: true").unwrap();
+    writeln!(
+        &mut out,
+        "  generated_openapi_or_proto_source_of_truth: true"
+    )
+    .unwrap();
+    writeln!(&mut out, "  public_error_contract_required: true").unwrap();
+    writeln!(&mut out, "  authn_authz_boundary_required: true").unwrap();
+    writeln!(
+        &mut out,
+        "  idempotency_review_required_for_mutations: true"
+    )
+    .unwrap();
+    writeln!(&mut out, "  pagination_required_for_list_endpoints: true").unwrap();
+    writeln!(&mut out, "  deprecation_window_required: true").unwrap();
+    writeln!(&mut out, "governance_requirements:").unwrap();
+    writeln!(&mut out, "  timeout: required").unwrap();
+    writeln!(&mut out, "  rate_limit: required").unwrap();
+    writeln!(&mut out, "  circuit_breaker: required").unwrap();
+    writeln!(&mut out, "  load_shedding: required").unwrap();
+    writeln!(&mut out, "  retry_budget: required").unwrap();
+    writeln!(&mut out, "  deadline_propagation: required").unwrap();
+    writeln!(&mut out, "  auth_projection: required_or_declared_not_used").unwrap();
+    writeln!(&mut out, "  typed_error_projection: required").unwrap();
+    writeln!(
+        &mut out,
+        "  observability_labels: bounded_method_route_status"
+    )
+    .unwrap();
+    writeln!(&mut out, "  trace_context: propagated").unwrap();
+    writeln!(&mut out, "evidence_required:").unwrap();
+    writeln!(&mut out, "  contract_diff: true").unwrap();
+    writeln!(&mut out, "  compatibility_test: true").unwrap();
+    writeln!(&mut out, "  framework_smoke: true").unwrap();
+    writeln!(&mut out, "  auth_boundary_review: true").unwrap();
+    writeln!(&mut out, "  error_mapping_review: true").unwrap();
+    writeln!(&mut out, "  owner_signoff: required").unwrap();
+    writeln!(&mut out, "blocking_findings:").unwrap();
+    writeln!(&mut out, "  - undocumented_interface_change").unwrap();
+    writeln!(&mut out, "  - breaking_change_without_version_or_exception").unwrap();
+    writeln!(&mut out, "  - missing_auth_boundary").unwrap();
+    writeln!(&mut out, "  - mutation_without_idempotency_review").unwrap();
+    writeln!(&mut out, "  - list_endpoint_without_pagination_or_limit").unwrap();
+    writeln!(&mut out, "  - endpoint_missing_smoke_test").unwrap();
+    writeln!(&mut out, "  - openapi_or_proto_missing_interface").unwrap();
+    writeln!(&mut out, "  - handler_bypasses_timeout_or_deadline").unwrap();
+    writeln!(&mut out, "  - unbounded_label_cardinality").unwrap();
+    writeln!(&mut out, "  - error_contract_mismatch").unwrap();
+    out
+}
+
 fn build_rs() -> String {
     r#"fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
@@ -7084,6 +8292,7 @@ fn build_rs() -> String {
 }
 
 fn config_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let governance_routes = governance_routes_yaml(spec, kind);
     match kind {
         ProjectKind::Rest => format!(
             r#"name: {}
@@ -7128,7 +8337,8 @@ governance:
   breaker:
     failure_threshold: 5
     reset_timeout_ms: 30000
-  routes: {{}}
+  routes:
+{}
 # rpc_client:
 #   endpoints: ["127.0.0.1:4000"]
 #   # target: dns:///user.rpc
@@ -7169,6 +8379,7 @@ governance:
 #   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
             spec.service,
+            governance_routes,
             spec.service,
             spec.service,
             spec.service,
@@ -7196,7 +8407,8 @@ governance:
   breaker:
     failure_threshold: 5
     reset_timeout_ms: 30000
-  routes: {{}}
+  routes:
+{}
 # database:
 #   url: postgres://postgres:postgres@127.0.0.1:5432/{}
 #   # policy: round-robin # round-robin or random
@@ -7245,6 +8457,7 @@ governance:
 #   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
             spec.service,
+            governance_routes,
             spec.service,
             spec.service,
             spec.service,
@@ -7257,6 +8470,70 @@ governance:
             spec.service
         ),
     }
+}
+
+fn governance_routes_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    match kind {
+        ProjectKind::Rest => {
+            for route in &spec.rest_routes {
+                let key = rest_governance_key(route);
+                let retry_attempts = match route.method {
+                    HttpMethod::Get | HttpMethod::Head => 2,
+                    HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch | HttpMethod::Delete => {
+                        1
+                    }
+                };
+                writeln!(&mut out, "    {key}:").unwrap();
+                writeln!(&mut out, "      timeout_ms: 5000").unwrap();
+                writeln!(&mut out, "      retry:").unwrap();
+                writeln!(&mut out, "        max_attempts: {retry_attempts}").unwrap();
+                writeln!(&mut out, "        backoff_ms: 50").unwrap();
+                writeln!(&mut out, "        max_backoff_ms: 500").unwrap();
+                writeln!(&mut out, "        budget_percent: 10").unwrap();
+                writeln!(&mut out, "      rate_limit:").unwrap();
+                writeln!(&mut out, "        burst: 100").unwrap();
+                writeln!(&mut out, "        refill_ms: 10").unwrap();
+                writeln!(&mut out, "      breaker:").unwrap();
+                writeln!(&mut out, "        failure_threshold: 5").unwrap();
+                writeln!(&mut out, "        reset_timeout_ms: 30000").unwrap();
+            }
+        }
+        ProjectKind::Rpc => {
+            for method in &spec.rpc_methods {
+                writeln!(&mut out, "    {}:", method.name).unwrap();
+                writeln!(&mut out, "      timeout_ms: 5000").unwrap();
+                writeln!(&mut out, "      retry:").unwrap();
+                writeln!(&mut out, "        max_attempts: 2").unwrap();
+                writeln!(&mut out, "        backoff_ms: 50").unwrap();
+                writeln!(&mut out, "        max_backoff_ms: 500").unwrap();
+                writeln!(&mut out, "        budget_percent: 10").unwrap();
+                writeln!(&mut out, "      rate_limit:").unwrap();
+                writeln!(&mut out, "        burst: 100").unwrap();
+                writeln!(&mut out, "        refill_ms: 10").unwrap();
+                writeln!(&mut out, "      breaker:").unwrap();
+                writeln!(&mut out, "        failure_threshold: 5").unwrap();
+                writeln!(&mut out, "        reset_timeout_ms: 30000").unwrap();
+            }
+        }
+    }
+    if out.is_empty() {
+        "    {}".to_string()
+    } else {
+        out.trim_end().to_string()
+    }
+}
+
+fn rest_governance_key(route: &crate::parser::RestRoute) -> String {
+    route
+        .handler
+        .as_deref()
+        .map(to_snake_case)
+        .unwrap_or_else(|| {
+            to_snake_case(&rest::handler_name_for_openapi(&route.method, &route.path))
+        })
 }
 
 fn api_template(service: &str) -> String {
@@ -8912,6 +10189,8 @@ mod tests {
         .expect("generate rpc project");
 
         let rest_readme = fs::read_to_string(rest_out.join("README.md")).expect("read rest readme");
+        let rest_config =
+            fs::read_to_string(rest_out.join("config.yaml")).expect("read rest config");
         let rest_runbook = fs::read_to_string(rest_out.join("ops/production-evidence.md"))
             .expect("read rest runbook");
         let rest_governance = fs::read_to_string(rest_out.join("ops/governance-baseline.yaml"))
@@ -8959,7 +10238,22 @@ mod tests {
                 .expect("read rest runtime hardening contract");
         let rest_error_contract = fs::read_to_string(rest_out.join("ops/error-contract.yaml"))
             .expect("read rest error contract");
+        let rest_deployment_topology =
+            fs::read_to_string(rest_out.join("ops/deployment-topology.yaml"))
+                .expect("read rest deployment topology");
+        let rest_service_communication =
+            fs::read_to_string(rest_out.join("ops/service-communication.yaml"))
+                .expect("read rest service communication");
+        let rest_cache_governance = fs::read_to_string(rest_out.join("ops/cache-governance.yaml"))
+            .expect("read rest cache governance");
+        let rest_data_access_governance =
+            fs::read_to_string(rest_out.join("ops/data-access-governance.yaml"))
+                .expect("read rest data access governance");
+        let rest_interface_governance =
+            fs::read_to_string(rest_out.join("ops/interface-governance.yaml"))
+                .expect("read rest interface governance");
         let rpc_readme = fs::read_to_string(rpc_out.join("README.md")).expect("read rpc readme");
+        let rpc_config = fs::read_to_string(rpc_out.join("config.yaml")).expect("read rpc config");
         let rpc_runbook = fs::read_to_string(rpc_out.join("ops/production-evidence.md"))
             .expect("read rpc runbook");
         let rpc_governance = fs::read_to_string(rpc_out.join("ops/governance-baseline.yaml"))
@@ -9002,9 +10296,30 @@ mod tests {
             .expect("read rpc runtime hardening contract");
         let rpc_error_contract = fs::read_to_string(rpc_out.join("ops/error-contract.yaml"))
             .expect("read rpc error contract");
+        let rpc_deployment_topology =
+            fs::read_to_string(rpc_out.join("ops/deployment-topology.yaml"))
+                .expect("read rpc deployment topology");
+        let rpc_service_communication =
+            fs::read_to_string(rpc_out.join("ops/service-communication.yaml"))
+                .expect("read rpc service communication");
+        let rpc_cache_governance = fs::read_to_string(rpc_out.join("ops/cache-governance.yaml"))
+            .expect("read rpc cache governance");
+        let rpc_data_access_governance =
+            fs::read_to_string(rpc_out.join("ops/data-access-governance.yaml"))
+                .expect("read rpc data access governance");
+        let rpc_interface_governance =
+            fs::read_to_string(rpc_out.join("ops/interface-governance.yaml"))
+                .expect("read rpc interface governance");
 
         assert!(rest_readme.contains("ops/production-evidence.md"));
         assert!(rpc_readme.contains("ops/production-evidence.md"));
+        assert!(rest_config.contains("routes:\n    get_user:"));
+        assert!(rest_config.contains("max_attempts: 2"));
+        assert!(rest_config.contains("rate_limit:\n        burst: 100"));
+        assert!(rest_config.contains("breaker:\n        failure_threshold: 5"));
+        assert!(rpc_config.contains("routes:\n    GetUser:"));
+        assert!(rpc_config.contains("timeout_ms: 5000"));
+        assert!(rpc_config.contains("budget_percent: 10"));
         assert!(rest_runbook.contains("Generated by `rozectl` for the REST boundary."));
         assert!(rpc_runbook.contains("Generated by `rozectl` for the RPC boundary."));
         assert!(rest_runbook.contains("## Architecture Borrowed And Extended"));
@@ -9032,6 +10347,11 @@ mod tests {
         assert!(rest_runbook.contains("ops/observability-contract.yaml"));
         assert!(rest_runbook.contains("ops/runtime-hardening.yaml"));
         assert!(rest_runbook.contains("ops/error-contract.yaml"));
+        assert!(rest_runbook.contains("ops/deployment-topology.yaml"));
+        assert!(rest_runbook.contains("ops/service-communication.yaml"));
+        assert!(rest_runbook.contains("ops/cache-governance.yaml"));
+        assert!(rest_runbook.contains("ops/data-access-governance.yaml"));
+        assert!(rest_runbook.contains("ops/interface-governance.yaml"));
         assert!(rest_governance.contains("boundary: rest"));
         assert!(rest_governance.contains("endpoint_count: 1"));
         assert!(rest_governance.contains("failure_oriented_resilience"));
@@ -9053,6 +10373,10 @@ mod tests {
         assert!(rest_governance.contains("generated_observability_contract"));
         assert!(rest_governance.contains("generated_runtime_hardening_contract"));
         assert!(rest_governance.contains("generated_error_contract"));
+        assert!(rest_governance.contains("generated_deployment_topology_contract"));
+        assert!(rest_governance.contains("generated_service_communication_contract"));
+        assert!(rest_governance.contains("generated_cache_governance_contract"));
+        assert!(rest_governance.contains("generated_data_access_governance_contract"));
         assert!(rest_governance.contains("circuit_breaker:"));
         assert!(rest_governance.contains("generated_rules: ops/prometheus-rules.yaml"));
         assert!(rest_governance.contains("generated_dashboard: ops/grafana-dashboard.json"));
@@ -9073,6 +10397,10 @@ mod tests {
         assert!(rest_governance.contains("observability_contract: true"));
         assert!(rest_governance.contains("runtime_hardening_contract: true"));
         assert!(rest_governance.contains("error_contract: true"));
+        assert!(rest_governance.contains("deployment_topology_contract: true"));
+        assert!(rest_governance.contains("service_communication_contract: true"));
+        assert!(rest_governance.contains("cache_governance_contract: true"));
+        assert!(rest_governance.contains("data_access_governance_contract: true"));
         assert!(rest_rules.contains("RozeGeneratedServiceHighErrorRate"));
         assert!(rest_rules.contains("RozeGeneratedServiceHighP99Latency"));
         assert!(rest_rules.contains("RozeGeneratedServiceCircuitBreakerOpen"));
@@ -9133,6 +10461,11 @@ mod tests {
         assert!(rest_production_gate.contains("ops/observability-contract.yaml"));
         assert!(rest_production_gate.contains("ops/runtime-hardening.yaml"));
         assert!(rest_production_gate.contains("ops/error-contract.yaml"));
+        assert!(rest_production_gate.contains("ops/deployment-topology.yaml"));
+        assert!(rest_production_gate.contains("ops/service-communication.yaml"));
+        assert!(rest_production_gate.contains("ops/cache-governance.yaml"));
+        assert!(rest_production_gate.contains("ops/data-access-governance.yaml"));
+        assert!(rest_production_gate.contains("ops/interface-governance.yaml"));
         assert!(rest_production_gate.contains("stage: client_contract"));
         assert!(rest_production_gate.contains("stage: config_governance"));
         assert!(rest_production_gate.contains("stage: reliable_events"));
@@ -9141,6 +10474,12 @@ mod tests {
         assert!(rest_production_gate.contains("stage: observability_contract"));
         assert!(rest_production_gate.contains("stage: runtime_hardening"));
         assert!(rest_production_gate.contains("stage: error_contract"));
+        assert!(rest_production_gate.contains("stage: deployment_topology"));
+        assert!(rest_production_gate.contains("stage: service_communication"));
+        assert!(rest_production_gate.contains("stage: cache_governance"));
+        assert!(rest_production_gate.contains("stage: data_access_governance"));
+        assert!(rest_production_gate.contains("stage: interface_governance"));
+        assert!(rest_production_gate.contains("framework_smoke_output"));
         assert!(rest_production_gate.contains("stage: capacity_and_soak"));
         assert!(rest_production_gate.contains("stage: security_readiness"));
         assert!(rest_production_gate.contains("idl_drift_classified"));
@@ -9198,6 +10537,38 @@ mod tests {
         assert!(rest_error_contract.contains("typed_errors_required: true"));
         assert!(rest_error_contract.contains("no_implicit_compatibility_claim: true"));
         assert!(rest_error_contract.contains("raw_internal_error_returned_to_client"));
+        assert!(rest_deployment_topology.contains("boundary: rest"));
+        assert!(rest_deployment_topology.contains("port: 8080"));
+        assert!(rest_deployment_topology.contains("GET /readyz"));
+        assert!(rest_deployment_topology.contains("image_digest_pinned: true"));
+        assert!(rest_deployment_topology.contains("secret_in_plain_text_config"));
+        assert!(rest_service_communication.contains("boundary: rest"));
+        assert!(rest_service_communication
+            .contains("generated_rest_service_context_http_clients_or_gateway_clients"));
+        assert!(rest_service_communication
+            .contains("representative_http_handler_calls_declared_downstream_or_declares_none"));
+        assert!(rest_service_communication.contains("discovery_and_load_balancing"));
+        assert!(rest_service_communication.contains("silent_success_on_dependency_failure"));
+        assert!(rest_cache_governance.contains("boundary: rest"));
+        assert!(rest_cache_governance
+            .contains("representative_http_query_declares_cache_policy_or_no_cache"));
+        assert!(rest_cache_governance.contains("singleflight_or_request_collapse_required"));
+        assert!(rest_cache_governance.contains("ttl_without_jitter_for_large_keyset"));
+        assert!(rest_cache_governance.contains("cache_metric_uses_raw_key_label"));
+        assert!(rest_data_access_governance.contains("boundary: rest"));
+        assert!(rest_data_access_governance
+            .contains("representative_http_query_declares_data_access_policy_or_no_persistence"));
+        assert!(rest_data_access_governance.contains("slow_query_index_pagination"));
+        assert!(rest_data_access_governance.contains("n_plus_one_without_query_count_budget"));
+        assert!(rest_data_access_governance.contains("raw_sql_without_review"));
+        assert!(rest_interface_governance.contains("boundary: rest"));
+        assert!(rest_interface_governance.contains("framework_endpoints:"));
+        assert!(rest_interface_governance.contains("path: /reports/export"));
+        assert!(rest_interface_governance.contains("path: /charts/query"));
+        assert!(rest_interface_governance.contains("business_endpoints:"));
+        assert!(rest_interface_governance.contains("path: /users/:id"));
+        assert!(rest_interface_governance.contains("smoke_framework_report_export"));
+        assert!(rest_interface_governance.contains("endpoint_missing_smoke_test"));
         assert!(rpc_runbook.contains("client RPC calls for 1 method(s)"));
         assert!(rpc_governance.contains("boundary: rpc"));
         assert!(rpc_governance.contains("endpoint_count: 1"));
@@ -9234,7 +10605,9 @@ mod tests {
         assert!(rpc_security_readiness.contains("security_owner_signoff: required"));
         assert!(rpc_security_readiness.contains("revoked_key_accepted"));
         assert!(rpc_production_gate.contains("boundary: rpc"));
+        assert!(rpc_production_gate.contains("ops/interface-governance.yaml"));
         assert!(rpc_production_gate.contains("cargo_check_generated_rpc_service"));
+        assert!(rpc_production_gate.contains("stage: interface_governance"));
         assert!(
             rpc_production_gate.contains("startup_readiness_metrics_and_representative_rpc_call")
         );
@@ -9287,6 +10660,36 @@ mod tests {
         assert!(rpc_error_contract.contains("representative_rpc_status_and_metadata"));
         assert!(rpc_error_contract.contains("retryable_mutation_without_idempotency_policy"));
         assert!(rpc_error_contract.contains("transport_status_mapping_missing"));
+        assert!(rpc_deployment_topology.contains("boundary: rpc"));
+        assert!(rpc_deployment_topology.contains("port: 50051"));
+        assert!(rpc_deployment_topology.contains("grpc_health_probe_readiness"));
+        assert!(rpc_deployment_topology.contains("representative_rpc_method_probe"));
+        assert!(rpc_deployment_topology.contains("rollback_action_not_tested"));
+        assert!(rpc_service_communication.contains("boundary: rpc"));
+        assert!(rpc_service_communication
+            .contains("generated_tonic_client_and_service_context_rpc_clients"));
+        assert!(rpc_service_communication
+            .contains("representative_rpc_method_calls_declared_downstream_or_declares_none"));
+        assert!(rpc_service_communication.contains("retry_without_budget_or_jitter"));
+        assert!(rpc_service_communication.contains("missing_trace_context_on_downstream_call"));
+        assert!(rpc_cache_governance.contains("boundary: rpc"));
+        assert!(rpc_cache_governance
+            .contains("representative_rpc_query_declares_cache_policy_or_no_cache"));
+        assert!(rpc_cache_governance.contains("roze_singleflight_collapses_total"));
+        assert!(rpc_cache_governance.contains("mutation_without_cache_invalidation_policy"));
+        assert!(rpc_cache_governance.contains("stale_data_served_without_declared_policy"));
+        assert!(rpc_data_access_governance.contains("boundary: rpc"));
+        assert!(rpc_data_access_governance
+            .contains("representative_rpc_query_declares_data_access_policy_or_no_persistence"));
+        assert!(rpc_data_access_governance.contains("roze_data_pool_acquire_seconds"));
+        assert!(rpc_data_access_governance.contains("data_access_without_timeout_or_deadline"));
+        assert!(rpc_data_access_governance.contains("multi_statement_write_without_transaction"));
+        assert!(rpc_interface_governance.contains("boundary: rpc"));
+        assert!(rpc_interface_governance.contains("rpc_methods:"));
+        assert!(rpc_interface_governance.contains("name: GetUser"));
+        assert!(rpc_interface_governance.contains("representative_rpc_call: required"));
+        assert!(rpc_interface_governance.contains("client_deadline_and_cancel: required"));
+        assert!(rpc_interface_governance.contains("openapi_or_proto_missing_interface"));
 
         fs::remove_dir_all(root).expect("remove runbook test root");
     }
@@ -9925,10 +11328,20 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(cargo.contains(r#"name = "user-api-contract-tests""#));
         assert!(tests.contains(r#"std::env::var("ROZE_TEST_BASE_URL")"#));
         assert!(tests.contains("let response = client.get(url)"));
+        assert!(tests.contains("async fn smoke_framework_healthz()"));
+        assert!(tests.contains("async fn smoke_framework_report_export()"));
+        assert!(tests.contains("async fn smoke_framework_chart_query()"));
+        assert!(tests.contains(r#""/api/reports/export""#));
+        assert!(tests.contains(r#".query(&[("report", "smoke"), ("format", "csv")"#));
+        assert!(tests.contains(r#""/api/charts/query""#));
         assert!(tests.contains(r#""/api/users/string""#));
         assert!(tests.contains(r#".header("x-trace-id", "string")"#));
         assert!(tests.contains(r#".query(&[("verbose", "true")])"#));
         assert!(tests.contains(r#""name": "string""#));
+        let readme = fs::read_to_string(out.join("README.md")).expect("read readme");
+        assert!(readme.contains("## Framework Smoke"));
+        assert!(readme.contains("`GET` `/api/reports/export`"));
+        assert!(readme.contains("`GET` `/api/charts/query`"));
         assert!(write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", false).is_err());
         write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", true)
             .expect("force contract tests");
