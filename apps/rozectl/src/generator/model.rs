@@ -3293,6 +3293,46 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         .unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
+
+        if field.name != model.primary {
+            let first_method = rust_identifier(&format!("first_{}", field.name));
+            let only_method = rust_identifier(&format!("only_{}", field.name));
+            writeln!(
+                out,
+                "    pub async fn {first_method}(mut self) -> anyhow::Result<Option<{}>> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(out, "        self.limit = Some(1);").unwrap();
+            writeln!(out, "        Ok(self.{method}().await?.into_iter().next())").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+            writeln!(
+                out,
+                "    pub async fn {only_method}(mut self) -> anyhow::Result<{}> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(out, "        self.limit = Some(2);").unwrap();
+            writeln!(out, "        let mut values = self.{method}().await?;").unwrap();
+            writeln!(out, "        match values.len() {{").unwrap();
+            writeln!(out, "            1 => Ok(values.remove(0)),").unwrap();
+            writeln!(
+                out,
+                "            0 => anyhow::bail!(\"expected exactly one {pascal}.{} value, found none\"),",
+                field.name
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            _ => anyhow::bail!(\"expected exactly one {pascal}.{} value, found multiple\"),",
+                field.name
+            )
+            .unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
     }
 
     for field in model
@@ -5454,6 +5494,46 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
         .unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
+
+        if field.name != model.primary {
+            let first_method = rust_identifier(&format!("first_{}", field.name));
+            let only_method = rust_identifier(&format!("only_{}", field.name));
+            writeln!(
+                out,
+                "    pub async fn {first_method}(mut self) -> toasty::Result<Option<{}>> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(out, "        self.limit = Some(1);").unwrap();
+            writeln!(out, "        Ok(self.{method}().await?.into_iter().next())").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+            writeln!(
+                out,
+                "    pub async fn {only_method}(mut self) -> toasty::Result<{}> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(out, "        self.limit = Some(2);").unwrap();
+            writeln!(out, "        let mut values = self.{method}().await?;").unwrap();
+            writeln!(out, "        match values.len() {{").unwrap();
+            writeln!(out, "            1 => Ok(values.remove(0)),").unwrap();
+            writeln!(
+                out,
+                "            0 => Err(toasty::Error::invalid_record_count(\"{pascal}.{} query returned no value\")),",
+                field.name
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            _ => Err(toasty::Error::invalid_record_count(\"{pascal}.{} query returned more than one value\")),",
+                field.name
+            )
+            .unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
     }
 
     for field in model
@@ -9987,7 +10067,14 @@ mod tests {
         assert!(rendered.contains("expected exactly one User id, found multiple"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> anyhow::Result<Vec<String>>"));
         assert!(rendered
+            .contains("pub async fn first_name(mut self) -> anyhow::Result<Option<String>>"));
+        assert!(rendered.contains("pub async fn only_name(mut self) -> anyhow::Result<String>"));
+        assert!(rendered.contains("expected exactly one User.name value, found multiple"));
+        assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains(
+            "pub async fn first_nickname(mut self) -> anyhow::Result<Option<Option<String>>>"
+        ));
         assert!(rendered.contains("extension::postgres::PgExpr"));
         assert!(rendered.contains("select_only().column(Column::Id).into_tuple::<i64>()"));
         assert!(rendered.contains("pub async fn sum_id(self) -> anyhow::Result<i64>"));
@@ -10231,7 +10318,14 @@ mod tests {
         assert!(rendered.contains("User query returned more than one id"));
         assert!(rendered.contains("pub async fn pluck_name(self) -> toasty::Result<Vec<String>>"));
         assert!(rendered
+            .contains("pub async fn first_name(mut self) -> toasty::Result<Option<String>>"));
+        assert!(rendered.contains("pub async fn only_name(mut self) -> toasty::Result<String>"));
+        assert!(rendered.contains("User.name query returned more than one value"));
+        assert!(rendered
             .contains("pub async fn pluck_nickname(self) -> toasty::Result<Vec<Option<String>>>"));
+        assert!(rendered.contains(
+            "pub async fn first_nickname(mut self) -> toasty::Result<Option<Option<String>>>"
+        ));
         assert!(rendered.contains("query.select(User::fields().id()).exec(self.db).await"));
         assert!(rendered.contains("pub async fn sum_id(self) -> toasty::Result<u64>"));
         assert!(rendered.contains("pub async fn min_id(self) -> toasty::Result<Option<u64>>"));
