@@ -46,6 +46,35 @@ require_value() {
   fi
 }
 
+require_unsigned_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name must be an unsigned integer, got: $value" >&2
+    exit 2
+  fi
+}
+
+require_positive_integer() {
+  local name="$1"
+  local value="$2"
+  require_unsigned_integer "$name" "$value"
+  if (( value == 0 )); then
+    echo "$name must be greater than zero" >&2
+    exit 2
+  fi
+}
+
+require_equal() {
+  local name="$1"
+  local actual="$2"
+  local expected="$3"
+  if (( actual != expected )); then
+    echo "$name must be $expected, got: $actual" >&2
+    exit 2
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --area)
@@ -185,6 +214,21 @@ if [[ -n "$LIFECYCLE_SUMMARY" ]]; then
         ;;
     esac
   done
+
+  require_unsigned_integer "lifecycle summary cycles" "$LIFECYCLE_CYCLES"
+  require_unsigned_integer "lifecycle summary worker_exits" "$LIFECYCLE_WORKER_EXITS"
+  require_unsigned_integer "lifecycle summary stop_hooks" "$LIFECYCLE_STOP_HOOKS"
+  require_unsigned_integer "lifecycle summary running_snapshots" "$LIFECYCLE_RUNNING_SNAPSHOTS"
+  require_unsigned_integer "lifecycle summary stopped_snapshots" "$LIFECYCLE_STOPPED_SNAPSHOTS"
+  require_unsigned_integer "lifecycle summary max_service_count" "$LIFECYCLE_MAX_SERVICE_COUNT"
+  require_positive_integer "lifecycle summary cycles" "$LIFECYCLE_CYCLES"
+  require_positive_integer "lifecycle summary max_service_count" "$LIFECYCLE_MAX_SERVICE_COUNT"
+
+  LIFECYCLE_EXPECTED_WORKERS=$((LIFECYCLE_CYCLES * LIFECYCLE_MAX_SERVICE_COUNT))
+  require_equal "lifecycle summary worker_exits" "$LIFECYCLE_WORKER_EXITS" "$LIFECYCLE_EXPECTED_WORKERS"
+  require_equal "lifecycle summary stop_hooks" "$LIFECYCLE_STOP_HOOKS" "$LIFECYCLE_EXPECTED_WORKERS"
+  require_equal "lifecycle summary running_snapshots" "$LIFECYCLE_RUNNING_SNAPSHOTS" "$LIFECYCLE_CYCLES"
+  require_equal "lifecycle summary stopped_snapshots" "$LIFECYCLE_STOPPED_SNAPSHOTS" "$LIFECYCLE_CYCLES"
 fi
 
 DATE="$(date -u +%Y-%m-%d)"

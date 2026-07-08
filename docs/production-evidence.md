@@ -108,7 +108,10 @@ Lifecycle soak output includes a single `roze_lifecycle_soak` summary line with
 `stopped_snapshots`, and `max_service_count`. Copy that line into the report
 alongside resource trends and failure-injection notes. The report scaffold adds
 a lifecycle snapshot section automatically for `--area lifecycle`; pass the
-line with `--lifecycle-summary` to prefill that section.
+line with `--lifecycle-summary` to prefill that section. When provided, the
+summary must include all six fields as unsigned integers, with
+`running_snapshots == stopped_snapshots == cycles` and
+`worker_exits == stop_hooks == cycles * max_service_count`.
 
 These commands are evidence inputs. The final report still needs the measured
 latency/throughput/resource trends and artifacts described above.
@@ -117,6 +120,8 @@ latency/throughput/resource trends and artifacts described above.
 
 `scripts/release-gate.sh` proves that high-signal automated checks pass. It is
 not a replacement for long-run production evidence.
+It also runs `scripts/production-evidence-smoke.sh` to verify report scaffold
+generation and lifecycle summary validation.
 
 A release can be cut without long-run reports only when the release notes say
 the affected modules are `beta`, `scaffold`, or `planned`.

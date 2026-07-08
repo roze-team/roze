@@ -94,8 +94,32 @@ pub struct ModelField {
     pub ty: String,
     pub auto_increment: bool,
     pub immutable: bool,
+    pub sensitive: bool,
+    pub validation: ModelFieldValidation,
+    pub update_default: Option<String>,
+    pub client_default_value: Option<String>,
     pub default_value: Option<String>,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelFieldValidation {
+    pub not_empty: bool,
+    pub min_len: Option<usize>,
+    pub max_len: Option<usize>,
+    pub enum_values: Vec<String>,
+    pub contains: Option<String>,
+    pub starts_with: Option<String>,
+    pub ends_with: Option<String>,
+    pub not_contains: Option<String>,
+    pub not_starts_with: Option<String>,
+    pub not_ends_with: Option<String>,
+    pub positive: bool,
+    pub non_negative: bool,
+    pub negative: bool,
+    pub non_positive: bool,
+    pub min: Option<String>,
+    pub max: Option<String>,
 }
 
 fn normalized_source_kind(format: ModelFormat, source: &str) -> ModelFormat {
@@ -159,6 +183,10 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
                     .edges
                     .iter()
                     .any(|edge| edge.unique && edge.field == field.name);
+            let field_indexed = model
+                .indexes
+                .iter()
+                .any(|index| is_default_field_index(index, &field.name));
             writeln!(
                 out,
                 "  field {}: {} {{",
@@ -178,8 +206,80 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             if field.immutable {
                 writeln!(out, "    immutable").unwrap();
             }
+            if field.sensitive {
+                writeln!(out, "    sensitive").unwrap();
+            }
+            if field.validation.not_empty {
+                writeln!(out, "    not_empty").unwrap();
+            }
+            if let Some(min_len) = field.validation.min_len {
+                writeln!(out, "    min_len {min_len}").unwrap();
+            }
+            if let Some(max_len) = field.validation.max_len {
+                writeln!(out, "    max_len {max_len}").unwrap();
+            }
+            if let Some(min) = &field.validation.min {
+                writeln!(out, "    min {min}").unwrap();
+            }
+            if let Some(max) = &field.validation.max {
+                writeln!(out, "    max {max}").unwrap();
+            }
+            if !field.validation.enum_values.is_empty() {
+                let values = field
+                    .validation
+                    .enum_values
+                    .iter()
+                    .map(|value| quote_ent_string(value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(out, "    enum {values}").unwrap();
+            }
+            if let Some(value) = &field.validation.contains {
+                writeln!(out, "    contains {}", quote_ent_string(value)).unwrap();
+            }
+            if let Some(value) = &field.validation.starts_with {
+                writeln!(out, "    starts_with {}", quote_ent_string(value)).unwrap();
+            }
+            if let Some(value) = &field.validation.ends_with {
+                writeln!(out, "    ends_with {}", quote_ent_string(value)).unwrap();
+            }
+            if let Some(value) = &field.validation.not_contains {
+                writeln!(out, "    not_contains {}", quote_ent_string(value)).unwrap();
+            }
+            if let Some(value) = &field.validation.not_starts_with {
+                writeln!(out, "    not_starts_with {}", quote_ent_string(value)).unwrap();
+            }
+            if let Some(value) = &field.validation.not_ends_with {
+                writeln!(out, "    not_ends_with {}", quote_ent_string(value)).unwrap();
+            }
+            if field.validation.positive {
+                writeln!(out, "    positive").unwrap();
+            }
+            if field.validation.non_negative {
+                writeln!(out, "    non_negative").unwrap();
+            }
+            if field.validation.negative {
+                writeln!(out, "    negative").unwrap();
+            }
+            if field.validation.non_positive {
+                writeln!(out, "    non_positive").unwrap();
+            }
+            if let Some(update_default) = &field.update_default {
+                writeln!(out, "    update_default {update_default}").unwrap();
+            }
+            if let Some(client_default_value) = &field.client_default_value {
+                writeln!(
+                    out,
+                    "    client_default {}",
+                    quote_ent_string(client_default_value)
+                )
+                .unwrap();
+            }
             if field_unique {
                 writeln!(out, "    unique").unwrap();
+            }
+            if field_indexed {
+                writeln!(out, "    index").unwrap();
             }
             if let Some(default_value) = &field.default_value {
                 writeln!(out, "    default {}", quote_ent_string(default_value)).unwrap();
@@ -196,6 +296,10 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
                 .fields
                 .first()
                 .is_some_and(|field| is_default_field_unique_index(index, field))
+                || index
+                    .fields
+                    .first()
+                    .is_some_and(|field| is_default_field_index(index, field))
             {
                 continue;
             }
@@ -492,6 +596,10 @@ fn mongo_field_from_samples(key: &str, documents: &[Document]) -> ModelField {
         ty,
         auto_increment: false,
         immutable: false,
+        sensitive: false,
+        validation: ModelFieldValidation::default(),
+        update_default: None,
+        client_default_value: None,
         default_value: None,
         comment: None,
     }
@@ -1252,6 +1360,353 @@ fn model_field_ident_by_name(name: &str) -> String {
     rust_identifier(name)
 }
 
+fn has_sensitive_fields(model: &ModelSpec) -> bool {
+    model.fields.iter().any(|field| field.sensitive)
+}
+
+fn render_debug_impl(out: &mut String, type_name: &str, fields: &[ModelField]) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "impl std::fmt::Debug for {type_name} {{").unwrap();
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let mut debug = f.debug_struct(\"{type_name}\");"
+    )
+    .unwrap();
+    for field in fields {
+        let ident = model_field_ident(field);
+        if field.sensitive {
+            writeln!(
+                out,
+                "        debug.field(\"{}\", &\"<sensitive>\");",
+                field.name
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "        debug.field(\"{}\", &self.{ident});",
+                field.name
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "        debug.finish()").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn render_field_validation_checks(out: &mut String, fields: &[&ModelField], result_kind: &str) {
+    use std::fmt::Write as _;
+
+    for field in fields
+        .iter()
+        .copied()
+        .filter(|field| field.validation != ModelFieldValidation::default())
+    {
+        let field_ident = model_field_ident(field);
+        if optional_inner_type(&field.ty).is_some() {
+            writeln!(
+                out,
+                "        if let Some(Some(value)) = self.{field_ident}.as_ref() {{"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "        if let Some(value) = self.{field_ident}.as_ref() {{"
+            )
+            .unwrap();
+        }
+        render_field_validation_body(out, field, result_kind);
+        writeln!(out, "        }}").unwrap();
+    }
+}
+
+fn render_field_validation_body(out: &mut String, field: &ModelField, result_kind: &str) {
+    let message_prefix = format!("{} validation failed", field.name);
+    if field.validation.not_empty {
+        render_validation_return(
+            out,
+            result_kind,
+            "value.trim().is_empty()",
+            &format!("{message_prefix}: must not be empty"),
+        );
+    }
+    if let Some(min_len) = field.validation.min_len {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.chars().count() < {min_len}"),
+            &format!("{message_prefix}: length must be at least {min_len}"),
+        );
+    }
+    if let Some(max_len) = field.validation.max_len {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.chars().count() > {max_len}"),
+            &format!("{message_prefix}: length must be at most {max_len}"),
+        );
+    }
+    if !field.validation.enum_values.is_empty() {
+        let allowed = field
+            .validation
+            .enum_values
+            .iter()
+            .map(|value| format!("{:?}", value))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("!matches!(value.as_str(), {allowed})"),
+            &format!("{message_prefix}: value is not allowed"),
+        );
+    }
+    if let Some(contains) = &field.validation.contains {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("!value.contains({contains:?})"),
+            &format!("{message_prefix}: must contain required substring"),
+        );
+    }
+    if let Some(starts_with) = &field.validation.starts_with {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("!value.starts_with({starts_with:?})"),
+            &format!("{message_prefix}: must start with required prefix"),
+        );
+    }
+    if let Some(ends_with) = &field.validation.ends_with {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("!value.ends_with({ends_with:?})"),
+            &format!("{message_prefix}: must end with required suffix"),
+        );
+    }
+    if let Some(not_contains) = &field.validation.not_contains {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.contains({not_contains:?})"),
+            &format!("{message_prefix}: must not contain forbidden substring"),
+        );
+    }
+    if let Some(not_starts_with) = &field.validation.not_starts_with {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.starts_with({not_starts_with:?})"),
+            &format!("{message_prefix}: must not start with forbidden prefix"),
+        );
+    }
+    if let Some(not_ends_with) = &field.validation.not_ends_with {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.ends_with({not_ends_with:?})"),
+            &format!("{message_prefix}: must not end with forbidden suffix"),
+        );
+    }
+    if field.validation.positive {
+        render_validation_return(
+            out,
+            result_kind,
+            "*value <= 0",
+            &format!("{message_prefix}: must be positive"),
+        );
+    }
+    if field.validation.non_negative {
+        render_validation_return(
+            out,
+            result_kind,
+            "*value < 0",
+            &format!("{message_prefix}: must be non-negative"),
+        );
+    }
+    if field.validation.negative {
+        render_validation_return(
+            out,
+            result_kind,
+            "*value >= 0",
+            &format!("{message_prefix}: must be negative"),
+        );
+    }
+    if field.validation.non_positive {
+        render_validation_return(
+            out,
+            result_kind,
+            "*value > 0",
+            &format!("{message_prefix}: must be non-positive"),
+        );
+    }
+    if let Some(min) = &field.validation.min {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("*value < {min}"),
+            &format!("{message_prefix}: must be at least {min}"),
+        );
+    }
+    if let Some(max) = &field.validation.max {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("*value > {max}"),
+            &format!("{message_prefix}: must be at most {max}"),
+        );
+    }
+}
+
+fn render_validation_return(out: &mut String, result_kind: &str, condition: &str, message: &str) {
+    use std::fmt::Write as _;
+
+    match result_kind {
+        "anyhow" => {
+            writeln!(
+                out,
+                "            if {condition} {{ anyhow::bail!(\"{message}\"); }}"
+            )
+            .unwrap();
+        }
+        "toasty" => {
+            writeln!(
+                out,
+                "            if {condition} {{ return Err(toasty::Error::invalid_record_count(\"{message}\")); }}"
+            )
+            .unwrap();
+        }
+        _ => unreachable!("unknown validation result kind"),
+    }
+}
+
+fn render_order_shortcut_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
+    use std::fmt::Write as _;
+
+    for field in model_order_fields(model) {
+        let field_name = rust_identifier(&field.name);
+        let asc_method = rust_identifier(&format!("order_by_{field_name}_asc"));
+        let desc_method = rust_identifier(&format!("order_by_{field_name}_desc"));
+        let variant = to_pascal_case(&field.name);
+        writeln!(out, "    pub fn {asc_method}(mut self) -> Self {{").unwrap();
+        writeln!(
+            out,
+            "        self.orders.push({pascal}Order::{variant}Asc);"
+        )
+        .unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "    pub fn {desc_method}(mut self) -> Self {{").unwrap();
+        writeln!(
+            out,
+            "        self.orders.push({pascal}Order::{variant}Desc);"
+        )
+        .unwrap();
+        writeln!(out, "        self").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+fn render_update_default_assignments(out: &mut String, fields: &[&ModelField], target: &str) {
+    use std::fmt::Write as _;
+
+    for field in fields {
+        if field.update_default.is_none() {
+            continue;
+        }
+        let field_ident = model_field_ident(field);
+        let Some(value_expr) = update_default_value_expr(field) else {
+            continue;
+        };
+        match target {
+            "sea-orm-active" => {
+                writeln!(
+                    out,
+                    "        if self.{field_ident}.is_none() {{ active.{field_ident} = Set({value_expr}); }}"
+                )
+                .unwrap();
+            }
+            "toasty-model" => {
+                writeln!(
+                    out,
+                    "        if self.{field_ident}.is_none() {{ model.{field_ident} = {value_expr}; }}"
+                )
+                .unwrap();
+            }
+            "toasty-many-model" => {
+                writeln!(
+                    out,
+                    "            if self.{field_ident}.is_none() {{ model.{field_ident} = {value_expr}; }}"
+                )
+                .unwrap();
+            }
+            _ => unreachable!("unknown update default target"),
+        }
+    }
+}
+
+fn update_default_value_expr(field: &ModelField) -> Option<String> {
+    let update_default = field.update_default.as_deref()?;
+    timestamp_default_value_expr(update_default, &field.ty)
+}
+
+fn create_default_value_expr(field: &ModelField) -> Option<String> {
+    if let Some(client_default) = field.client_default_value.as_deref() {
+        return client_default_value_expr(client_default, &field.ty);
+    }
+    let default_value = field.default_value.as_deref()?;
+    timestamp_default_value_expr(default_value, &field.ty)
+}
+
+fn client_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
+    if let Some(expr) = timestamp_default_value_expr(default_value, ty) {
+        return Some(expr);
+    }
+    let inner_ty = optional_inner_type(ty).unwrap_or(ty);
+    let value = match inner_ty {
+        "String" => format!("{default_value:?}.to_string()"),
+        "bool" if matches!(default_value, "true" | "false") => default_value.to_string(),
+        ty if is_primitive_numeric_validation_type(ty) => default_value.to_string(),
+        _ => return None,
+    };
+    if optional_inner_type(ty).is_some() {
+        Some(format!("Some({value})"))
+    } else {
+        Some(value)
+    }
+}
+
+fn timestamp_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
+    let inner_ty = optional_inner_type(ty).unwrap_or(ty);
+    let duration_getter = match default_value {
+        "now_millis" => "as_millis",
+        "now_secs" => "as_secs",
+        "now_micros" => "as_micros",
+        "now_nanos" => "as_nanos",
+        _ => return None,
+    };
+    let value = format!(
+        "std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.{duration_getter}() as {inner_ty}).unwrap_or_default()"
+    );
+    if optional_inner_type(ty).is_some() {
+        Some(format!("Some({value})"))
+    } else {
+        Some(value)
+    }
+}
+
 fn render_mongo_model_mod(models: &[ModelSpec]) -> String {
     let mut out = String::from("#![allow(dead_code, unused_imports)]\n\n");
     for model in models {
@@ -1299,11 +1754,19 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use crate::svc::ServiceContext;").unwrap();
     writeln!(&mut out).unwrap();
-    writeln!(
-        &mut out,
-        "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
-    )
-    .unwrap();
+    if has_sensitive_fields(model) {
+        writeln!(
+            &mut out,
+            "#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            &mut out,
+            "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
+        )
+        .unwrap();
+    }
     match &model.schema_name {
         Some(schema_name) => {
             writeln!(
@@ -1343,6 +1806,9 @@ fn render_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    if has_sensitive_fields(model) {
+        render_debug_impl(&mut out, "Model", &model.fields);
+    }
     render_sea_orm_edge_methods(&mut out, model);
     writeln!(
         &mut out,
@@ -2239,12 +2705,24 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
         "    pub async fn save(self) -> anyhow::Result<Model> {{"
     )
     .unwrap();
+    let validation_fields = model
+        .fields
+        .iter()
+        .filter(|field| !field.auto_increment)
+        .collect::<Vec<_>>();
+    render_field_validation_checks(out, &validation_fields, "anyhow");
     writeln!(out, "        let db = self.repo.write_db()?;").unwrap();
     writeln!(out, "        let active = ActiveModel {{").unwrap();
     for field in model.fields.iter().filter(|field| !field.auto_increment) {
         let field_ident = model_field_ident(field);
         if optional_inner_type(&field.ty).is_some() {
-            if field.default_value.is_some() {
+            if let Some(default_expr) = create_default_value_expr(field) {
+                writeln!(
+                    out,
+                    "            {field_ident}: self.{field_ident}.map(Set).unwrap_or_else(|| Set({default_expr})),"
+                )
+                .unwrap();
+            } else if field.default_value.is_some() {
                 writeln!(
                     out,
                     "            {field_ident}: self.{field_ident}.map(Set).unwrap_or_default(),"
@@ -2257,6 +2735,12 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
                 )
                 .unwrap();
             }
+        } else if let Some(default_expr) = create_default_value_expr(field) {
+            writeln!(
+                out,
+                "            {field_ident}: self.{field_ident}.map(Set).unwrap_or_else(|| Set({default_expr})),"
+            )
+            .unwrap();
         } else if field.default_value.is_some() {
             writeln!(
                 out,
@@ -2404,6 +2888,8 @@ fn render_sea_orm_update_builder(
         "    pub async fn save(self) -> anyhow::Result<Model> {{"
     )
     .unwrap();
+    let validation_fields = updatable_model_fields(model, primary);
+    render_field_validation_checks(out, &validation_fields, "anyhow");
     writeln!(out, "        let db = self.repo.write_db()?;").unwrap();
     writeln!(out, "        let mut active = ActiveModel {{").unwrap();
     writeln!(
@@ -2421,6 +2907,8 @@ fn render_sea_orm_update_builder(
         )
         .unwrap();
     }
+    let update_default_fields = updatable_model_fields(model, primary);
+    render_update_default_assignments(out, &update_default_fields, "sea-orm-active");
     writeln!(out, "        let updated = active.update(db).await?;").unwrap();
     if model.cache {
         writeln!(
@@ -2546,6 +3034,8 @@ fn render_sea_orm_update_many_builder(
         "    pub async fn save(self) -> anyhow::Result<Vec<Model>> {{"
     )
     .unwrap();
+    let validation_fields = updatable_model_fields(model, primary);
+    render_field_validation_checks(out, &validation_fields, "anyhow");
     writeln!(out, "        let mut query = self.repo.query();").unwrap();
     writeln!(
         out,
@@ -2818,6 +3308,7 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_order_shortcut_methods(out, model, pascal);
     writeln!(out, "    pub fn limit(mut self, limit: u64) -> Self {{").unwrap();
     writeln!(out, "        self.limit = Some(limit);").unwrap();
     writeln!(out, "        self").unwrap();
@@ -3529,7 +4020,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
 
 fn render_sea_orm_index_methods(out: &mut String, model: &ModelSpec) {
     use std::fmt::Write as _;
-    for index in model.indexes.iter().filter(|index| index.fields.len() > 1) {
+    for index in model
+        .indexes
+        .iter()
+        .filter(|index| index.fields.len() > 1 || !index.unique)
+    {
         let Some(fields) = index_fields(model, index) else {
             continue;
         };
@@ -4555,11 +5050,23 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
         "    pub async fn save(self) -> toasty::Result<{pascal}> {{"
     )
     .unwrap();
+    let validation_fields = model
+        .fields
+        .iter()
+        .filter(|field| !field.auto_increment)
+        .collect::<Vec<_>>();
+    render_field_validation_checks(out, &validation_fields, "toasty");
     writeln!(out, "        let mut create = {pascal}::create();").unwrap();
     for field in model.fields.iter().filter(|field| !field.auto_increment) {
         let field_ident = model_field_ident(field);
         if optional_inner_type(&field.ty).is_some() {
-            if field.default_value.is_some() {
+            if let Some(default_expr) = create_default_value_expr(field) {
+                writeln!(
+                    out,
+                    "        if let Some(value) = self.{field_ident} {{ create = create.{field_ident}(value); }} else {{ create = create.{field_ident}({default_expr}); }}"
+                )
+                .unwrap();
+            } else if field.default_value.is_some() {
                 writeln!(
                     out,
                     "        if let Some(value) = self.{field_ident} {{ create = create.{field_ident}(value); }}"
@@ -4572,6 +5079,12 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
                 )
                 .unwrap();
             }
+        } else if let Some(default_expr) = create_default_value_expr(field) {
+            writeln!(
+                out,
+                "        if let Some(value) = self.{field_ident} {{ create = create.{field_ident}(value); }} else {{ create = create.{field_ident}({default_expr}); }}"
+            )
+            .unwrap();
         } else if field.default_value.is_some() {
             writeln!(
                 out,
@@ -4708,6 +5221,8 @@ fn render_toasty_update_builder(
         "    pub async fn save(self) -> toasty::Result<{pascal}> {{"
     )
     .unwrap();
+    let validation_fields = updatable_model_fields(model, primary);
+    render_field_validation_checks(out, &validation_fields, "toasty");
     writeln!(
         out,
         "        let mut model = {pascal}::get_by_{primary}(self.db, &self.{primary_ident}).await?;"
@@ -4721,6 +5236,8 @@ fn render_toasty_update_builder(
         )
         .unwrap();
     }
+    let update_default_fields = updatable_model_fields(model, primary);
+    render_update_default_assignments(out, &update_default_fields, "toasty-model");
     writeln!(
         out,
         "        {pascal}Repository::update(self.db, model).await"
@@ -4838,6 +5355,8 @@ fn render_toasty_update_many_builder(
         "    pub async fn save(self) -> toasty::Result<Vec<{pascal}>> {{"
     )
     .unwrap();
+    let validation_fields = updatable_model_fields(model, primary);
+    render_field_validation_checks(out, &validation_fields, "toasty");
     writeln!(out, "        let items = {{").unwrap();
     writeln!(
         out,
@@ -4866,6 +5385,8 @@ fn render_toasty_update_many_builder(
         )
         .unwrap();
     }
+    let update_default_fields = updatable_model_fields(model, primary);
+    render_update_default_assignments(out, &update_default_fields, "toasty-many-model");
     writeln!(
         out,
         "            updated.push({pascal}Repository::update(&mut *self.db, model).await?);"
@@ -5066,6 +5587,7 @@ fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal:
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_order_shortcut_methods(out, model, pascal);
     writeln!(out, "    pub fn limit(mut self, limit: usize) -> Self {{").unwrap();
     writeln!(out, "        self.limit = Some(limit);").unwrap();
     writeln!(out, "        self").unwrap();
@@ -5853,11 +6375,19 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
     writeln!(&mut out).unwrap();
-    writeln!(
-        &mut out,
-        "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"
-    )
-    .unwrap();
+    if has_sensitive_fields(model) {
+        writeln!(
+            &mut out,
+            "#[derive(Clone, PartialEq, Serialize, Deserialize, toasty::Model)]"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            &mut out,
+            "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"
+        )
+        .unwrap();
+    }
     if model.schema_name.is_some() {
         writeln!(
             &mut out,
@@ -5900,6 +6430,9 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    if has_sensitive_fields(model) {
+        render_debug_impl(&mut out, &pascal, &model.fields);
+    }
     render_toasty_edge_methods(&mut out, model, &pascal);
     render_toasty_query_types(&mut out, model, &pascal);
     render_toasty_create_builder(&mut out, model, &pascal);
@@ -6172,7 +6705,11 @@ fn sea_orm_reusable_value_expr(ty: &str, ident: &str) -> String {
 
 fn render_toasty_index_methods(out: &mut String, model: &ModelSpec, pascal: &str) {
     use std::fmt::Write as _;
-    for index in model.indexes.iter().filter(|index| index.fields.len() > 1) {
+    for index in model
+        .indexes
+        .iter()
+        .filter(|index| index.fields.len() > 1 || !index.unique)
+    {
         let Some(fields) = index_fields(model, index) else {
             continue;
         };
@@ -7230,6 +7767,10 @@ fn build_inspected_model(
             ty,
             auto_increment: column.auto_increment,
             immutable: false,
+            sensitive: false,
+            validation: ModelFieldValidation::default(),
+            update_default: None,
+            client_default_value: None,
             default_value: column.default_value,
             comment: column.comment,
         });
@@ -7399,6 +7940,12 @@ fn is_default_field_unique_index(index: &ModelIndex, field_name: &str) -> bool {
         && index.name == format!("uniq_{field_name}")
 }
 
+fn is_default_field_index(index: &ModelIndex, field_name: &str) -> bool {
+    !index.unique
+        && index.fields == [field_name.to_string()]
+        && index.name == format!("idx_{field_name}")
+}
+
 fn validate_soft_delete_field(
     model_name: &str,
     field_name: &str,
@@ -7440,6 +7987,7 @@ fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>
 
     for model in &models {
         validate_model_generated_names(model)?;
+        validate_model_field_validations(model)?;
 
         let module = to_snake_case(&model.name);
         if let Some(previous) = generated_modules.insert(module.clone(), model.name.clone()) {
@@ -7468,7 +8016,312 @@ fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>
 
 fn validate_model_spec(model: ModelSpec) -> anyhow::Result<ModelSpec> {
     validate_model_generated_names(&model)?;
+    validate_model_field_validations(&model)?;
     Ok(model)
+}
+
+fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
+    for field in &model.fields {
+        validate_model_field_default(model, field)?;
+        validate_model_field_update_default(model, field)?;
+        validate_model_field_client_default(model, field)?;
+        if field.validation == ModelFieldValidation::default() {
+            continue;
+        }
+        let has_string_validation = field.validation.not_empty
+            || field.validation.min_len.is_some()
+            || field.validation.max_len.is_some()
+            || !field.validation.enum_values.is_empty()
+            || field.validation.contains.is_some()
+            || field.validation.starts_with.is_some()
+            || field.validation.ends_with.is_some()
+            || field.validation.not_contains.is_some()
+            || field.validation.not_starts_with.is_some()
+            || field.validation.not_ends_with.is_some();
+        let has_numeric_validation = field.validation.positive
+            || field.validation.non_negative
+            || field.validation.negative
+            || field.validation.non_positive
+            || field.validation.min.is_some()
+            || field.validation.max.is_some();
+        if has_string_validation && !matches!(field.ty.as_str(), "String" | "Option<String>") {
+            bail!(
+                "model `{}` field `{}` validation currently supports String or Option<String>, got `{}`",
+                model.name,
+                model_field_source_label(field),
+                field.ty
+            );
+        }
+        if has_numeric_validation {
+            let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+            if !is_primitive_numeric_validation_type(validation_ty) {
+                bail!(
+                    "model `{}` field `{}` numeric validation currently supports primitive numeric fields, got `{}`",
+                    model.name,
+                    model_field_source_label(field),
+                    field.ty
+                );
+            }
+            if let Some(min) = &field.validation.min {
+                parse_numeric_validation_literal(&model.name, field, "min", min, validation_ty)?;
+            }
+            if let Some(max) = &field.validation.max {
+                parse_numeric_validation_literal(&model.name, field, "max", max, validation_ty)?;
+            }
+            if let (Some(min), Some(max)) = (&field.validation.min, &field.validation.max) {
+                let min_value = parse_numeric_validation_literal(
+                    &model.name,
+                    field,
+                    "min",
+                    min,
+                    validation_ty,
+                )?;
+                let max_value = parse_numeric_validation_literal(
+                    &model.name,
+                    field,
+                    "max",
+                    max,
+                    validation_ty,
+                )?;
+                if min_value > max_value {
+                    bail!(
+                        "model `{}` field `{}` min {min} exceeds max {max}",
+                        model.name,
+                        model_field_source_label(field)
+                    );
+                }
+            }
+        }
+        if let (Some(min_len), Some(max_len)) = (field.validation.min_len, field.validation.max_len)
+        {
+            if min_len > max_len {
+                bail!(
+                    "model `{}` field `{}` min_len {min_len} exceeds max_len {max_len}",
+                    model.name,
+                    model_field_source_label(field)
+                );
+            }
+        }
+        if !field.validation.enum_values.is_empty() {
+            let mut seen = HashSet::new();
+            for value in &field.validation.enum_values {
+                if value.is_empty() {
+                    bail!(
+                        "model `{}` field `{}` enum values cannot be empty",
+                        model.name,
+                        model_field_source_label(field)
+                    );
+                }
+                if !seen.insert(value) {
+                    bail!(
+                        "model `{}` field `{}` enum value `{value}` is duplicated",
+                        model.name,
+                        model_field_source_label(field)
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_field_default(model: &ModelSpec, field: &ModelField) -> anyhow::Result<()> {
+    let Some(default_value) = field.default_value.as_deref() else {
+        return Ok(());
+    };
+    if !matches!(
+        default_value,
+        "now_millis" | "now_secs" | "now_micros" | "now_nanos"
+    ) {
+        return Ok(());
+    }
+    if field.auto_increment {
+        bail!(
+            "model `{}` field `{}` default `{default_value}` cannot be used on auto-increment fields",
+            model.name,
+            model_field_source_label(field)
+        );
+    }
+    let default_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+    if !matches!(default_ty, "i64" | "u64") {
+        bail!(
+            "model `{}` field `{}` default `{default_value}` currently supports i64, u64, Option<i64>, or Option<u64>, got `{}`",
+            model.name,
+            model_field_source_label(field),
+            field.ty
+        );
+    }
+    Ok(())
+}
+
+fn validate_model_field_update_default(
+    model: &ModelSpec,
+    field: &ModelField,
+) -> anyhow::Result<()> {
+    let Some(update_default) = field.update_default.as_deref() else {
+        return Ok(());
+    };
+    if !matches!(
+        update_default,
+        "now_millis" | "now_secs" | "now_micros" | "now_nanos"
+    ) {
+        bail!(
+            "model `{}` field `{}` update_default `{update_default}` is not supported; expected `now_millis`, `now_secs`, `now_micros`, or `now_nanos`",
+            model.name,
+            model_field_source_label(field)
+        );
+    }
+    if field.name == model.primary {
+        bail!(
+            "model `{}` field `{}` update_default cannot be used on the primary field",
+            model.name,
+            model_field_source_label(field)
+        );
+    }
+    if field.immutable {
+        bail!(
+            "model `{}` field `{}` update_default cannot be used on immutable fields",
+            model.name,
+            model_field_source_label(field)
+        );
+    }
+    let update_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+    if !matches!(update_ty, "i64" | "u64") {
+        bail!(
+            "model `{}` field `{}` update_default currently supports i64, u64, Option<i64>, or Option<u64>, got `{}`",
+            model.name,
+            model_field_source_label(field),
+            field.ty
+        );
+    }
+    Ok(())
+}
+
+fn validate_model_field_client_default(
+    model: &ModelSpec,
+    field: &ModelField,
+) -> anyhow::Result<()> {
+    let Some(client_default) = field.client_default_value.as_deref() else {
+        return Ok(());
+    };
+    if field.auto_increment {
+        bail!(
+            "model `{}` field `{}` client_default `{client_default}` cannot be used on auto-increment fields",
+            model.name,
+            model_field_source_label(field)
+        );
+    }
+    if matches!(
+        client_default,
+        "now_millis" | "now_secs" | "now_micros" | "now_nanos"
+    ) {
+        let default_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+        if !matches!(default_ty, "i64" | "u64") {
+            bail!(
+                "model `{}` field `{}` client_default `{client_default}` currently supports i64, u64, Option<i64>, or Option<u64> for timestamp defaults, got `{}`",
+                model.name,
+                model_field_source_label(field),
+                field.ty
+            );
+        }
+        return Ok(());
+    }
+
+    let default_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+    match default_ty {
+        "String" => Ok(()),
+        "bool" if matches!(client_default, "true" | "false") => Ok(()),
+        "bool" => bail!(
+            "model `{}` field `{}` client_default `{client_default}` must be `true` or `false` for bool fields",
+            model.name,
+            model_field_source_label(field)
+        ),
+        ty if is_primitive_numeric_validation_type(ty) => {
+            parse_numeric_validation_literal(
+                &model.name,
+                field,
+                "client_default",
+                client_default,
+                ty,
+            )?;
+            Ok(())
+        }
+        _ => bail!(
+            "model `{}` field `{}` client_default `{client_default}` currently supports String, bool, primitive numeric fields, or now_* timestamp defaults, got `{}`",
+            model.name,
+            model_field_source_label(field),
+            field.ty
+        ),
+    }
+}
+
+fn is_primitive_numeric_validation_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
+fn parse_numeric_validation_literal(
+    model_name: &str,
+    field: &ModelField,
+    directive: &str,
+    value: &str,
+    ty: &str,
+) -> anyhow::Result<f64> {
+    if is_unsigned_numeric_type(ty) && value.trim_start().starts_with('-') {
+        bail!(
+            "model `{model_name}` field `{}` {directive} value `{value}` cannot be negative for `{ty}`",
+            model_field_source_label(field)
+        );
+    }
+    if is_integer_numeric_type(ty)
+        && (value.contains('.') || value.contains('e') || value.contains('E'))
+    {
+        bail!(
+            "model `{model_name}` field `{}` {directive} value `{value}` must be an integer literal for `{ty}`",
+            model_field_source_label(field)
+        );
+    }
+    value.parse::<f64>().with_context(|| {
+        format!(
+            "model `{model_name}` field `{}` {directive} value `{value}` is not a numeric literal",
+            model_field_source_label(field)
+        )
+    })
+}
+
+fn is_integer_numeric_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+    )
+}
+
+fn is_unsigned_numeric_type(ty: &str) -> bool {
+    matches!(ty, "u8" | "u16" | "u32" | "u64" | "u128" | "usize")
 }
 
 fn validate_model_generated_names(model: &ModelSpec) -> anyhow::Result<()> {
@@ -7862,6 +8715,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         let mut edges = Vec::new();
         let mut fields = Vec::new();
         let mut unique_fields = Vec::new();
+        let mut indexed_fields = Vec::new();
 
         while i < lines.len() {
             let (inner_line_no, raw) = lines[i];
@@ -7915,13 +8769,16 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 continue;
             }
             if inner.starts_with("field ") && inner.ends_with('{') {
-                let (field, is_primary, is_unique) =
+                let (field, is_primary, is_unique, is_indexed) =
                     parse_ent_field(inner, &lines, &mut i, inner_line_no + 1)?;
                 if is_primary {
                     primary = Some(field.name.clone());
                 }
                 if is_unique {
                     unique_fields.push(field.name.clone());
+                }
+                if is_indexed {
+                    indexed_fields.push(field.name.clone());
                 }
                 fields.push(field);
                 continue;
@@ -7951,22 +8808,35 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         if cache_keys.is_empty() {
             cache_keys.push(primary.clone());
         }
-        let mut field_unique_indexes = Vec::new();
+        let mut field_indexes = Vec::new();
         for field in unique_fields {
             if !indexes
                 .iter()
                 .any(|index| index.unique && index.fields == [field.clone()])
             {
-                field_unique_indexes.push(ModelIndex {
+                field_indexes.push(ModelIndex {
                     name: format!("uniq_{field}"),
                     fields: vec![field],
                     unique: true,
                 });
             }
         }
-        if !field_unique_indexes.is_empty() {
-            field_unique_indexes.extend(indexes);
-            indexes = field_unique_indexes;
+        for field in indexed_fields {
+            if !indexes
+                .iter()
+                .chain(field_indexes.iter())
+                .any(|index| !index.unique && index.fields == [field.clone()])
+            {
+                field_indexes.push(ModelIndex {
+                    name: format!("idx_{field}"),
+                    fields: vec![field],
+                    unique: false,
+                });
+            }
+        }
+        if !field_indexes.is_empty() {
+            field_indexes.extend(indexes);
+            indexes = field_indexes;
         }
         normalize_edge_unique_indexes(&mut indexes, &edges);
         normalize_edge_unique_cache_keys(&mut cache_keys, &edges, &fields);
@@ -8026,7 +8896,7 @@ fn parse_ent_field(
     lines: &[(usize, &str)],
     i: &mut usize,
     line_no: usize,
-) -> anyhow::Result<(ModelField, bool, bool)> {
+) -> anyhow::Result<(ModelField, bool, bool, bool)> {
     let value = header
         .trim_start_matches("field ")
         .trim_end_matches('{')
@@ -8035,14 +8905,19 @@ fn parse_ent_field(
         bail!("line {line_no}: expected `field name: type {{`");
     };
     let name = name.trim().to_string();
-    let ty = ent_type_to_rust_type(ty.trim());
+    let mut ty = ent_type_to_rust_type(ty.trim());
     let mut source_name = None;
     let mut auto_increment = false;
     let mut default_value = None;
     let mut comment = None;
     let mut primary = false;
     let mut unique = false;
+    let mut indexed = false;
     let mut immutable = false;
+    let mut sensitive = false;
+    let mut validation = ModelFieldValidation::default();
+    let mut update_default = None;
+    let mut client_default_value = None;
 
     while *i < lines.len() {
         let (inner_line_no, raw) = lines[*i];
@@ -8059,11 +8934,16 @@ fn parse_ent_field(
                     ty,
                     auto_increment,
                     immutable,
+                    sensitive,
+                    validation,
+                    update_default,
+                    client_default_value,
                     default_value,
                     comment,
                 },
                 primary,
                 unique,
+                indexed,
             ));
         }
         if inner == "primary" {
@@ -8074,12 +8954,110 @@ fn parse_ent_field(
             unique = true;
             continue;
         }
+        if inner == "index" {
+            indexed = true;
+            continue;
+        }
         if inner == "auto_increment" {
             auto_increment = true;
             continue;
         }
         if inner == "immutable" {
             immutable = true;
+            continue;
+        }
+        if inner == "sensitive" {
+            sensitive = true;
+            continue;
+        }
+        if inner == "optional" {
+            if optional_inner_type(&ty).is_none() {
+                ty = format!("Option<{ty}>");
+            }
+            continue;
+        }
+        if inner == "not_empty" {
+            validation.not_empty = true;
+            continue;
+        }
+        if inner == "positive" {
+            validation.positive = true;
+            continue;
+        }
+        if inner == "non_negative" {
+            validation.non_negative = true;
+            continue;
+        }
+        if inner == "negative" {
+            validation.negative = true;
+            continue;
+        }
+        if inner == "non_positive" {
+            validation.non_positive = true;
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("min_len ") {
+            validation.min_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("max_len ") {
+            validation.max_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("min ") {
+            validation.min = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("max ") {
+            validation.max = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("range ") {
+            let (min, max) = parse_ent_range_bounds(value.trim(), inner_line_no + 1)?;
+            validation.min = Some(min);
+            validation.max = Some(max);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("enum ") {
+            validation.enum_values = parse_ent_value_list(value.trim(), inner_line_no + 1)?;
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("contains ") {
+            validation.contains = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("starts_with ") {
+            validation.starts_with =
+                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("ends_with ") {
+            validation.ends_with =
+                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("not_contains ") {
+            validation.not_contains =
+                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("not_starts_with ") {
+            validation.not_starts_with =
+                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("not_ends_with ") {
+            validation.not_ends_with =
+                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("update_default ") {
+            update_default = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = inner.strip_prefix("client_default ") {
+            client_default_value =
+                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
         if let Some(value) = inner.strip_prefix("source ") {
@@ -8095,7 +9073,7 @@ fn parse_ent_field(
             continue;
         }
         bail!(
-            "line {}: expected `primary`, `unique`, `immutable`, `source`, `auto_increment`, `default`, `comment` or `}}`",
+            "line {}: expected `primary`, `unique`, `index`, `immutable`, `sensitive`, `optional`, `not_empty`, `positive`, `non_negative`, `negative`, `non_positive`, `min_len`, `max_len`, `min`, `max`, `range`, `enum`, `contains`, `starts_with`, `ends_with`, `not_contains`, `not_starts_with`, `not_ends_with`, `update_default`, `client_default`, `source`, `auto_increment`, `default`, `comment` or `}}`",
             inner_line_no + 1
         );
     }
@@ -8236,6 +9214,34 @@ fn parse_ent_ident_list(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn parse_ent_value_list(value: &str, line_no: usize) -> anyhow::Result<Vec<String>> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_ent_string_or_ident(value, line_no))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if values.is_empty() {
+        bail!("line {line_no}: enum must include at least one value");
+    }
+    Ok(values)
+}
+
+fn parse_ent_range_bounds(value: &str, line_no: usize) -> anyhow::Result<(String, String)> {
+    if let Some((min, max)) = value.split_once(',') {
+        let min = min.trim();
+        let max = max.trim();
+        if !min.is_empty() && !max.is_empty() {
+            return Ok((min.to_string(), max.to_string()));
+        }
+    }
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() == 2 {
+        return Ok((parts[0].to_string(), parts[1].to_string()));
+    }
+    bail!("line {line_no}: range must include exactly two bounds")
 }
 
 fn parse_ent_string_or_ident(value: &str, line_no: usize) -> anyhow::Result<String> {
@@ -8391,6 +9397,10 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                     ty: normalize_dsl_model_type(field_ty),
                     auto_increment: false,
                     immutable: false,
+                    sensitive: false,
+                    validation: ModelFieldValidation::default(),
+                    update_default: None,
+                    client_default_value: None,
                     default_value: None,
                     comment: None,
                 });
@@ -8781,6 +9791,10 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
                 ty,
                 auto_increment: field.auto_increment,
                 immutable: false,
+                sensitive: false,
+                validation: ModelFieldValidation::default(),
+                update_default: None,
+                client_default_value: None,
                 default_value: field.default_value,
                 comment: field.comment,
             }
@@ -9643,6 +10657,12 @@ fn parse_u64(input: &str, line_no: usize) -> anyhow::Result<u64> {
         .with_context(|| format!("line {}: expected a positive integer", line_no))
 }
 
+fn parse_usize(input: &str, line_no: usize) -> anyhow::Result<usize> {
+    input
+        .parse::<usize>()
+        .with_context(|| format!("line {}: expected a positive integer", line_no))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9783,6 +10803,796 @@ mod tests {
         assert!(toasty.contains("pub fn set_created_at(mut self, value: i64) -> Self"));
         assert!(!toasty.contains("pub struct UserUpdate<'a> {\n    db: &'a mut dyn toasty::Executor,\n    id: i64,\n    created_at: Option<i64>,"));
         assert!(!toasty.contains("model.created_at = value;"));
+    }
+
+    #[test]
+    fn ent_field_index_generates_single_field_list_helpers() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field name: string {
+                index
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert!(model
+            .indexes
+            .iter()
+            .any(|index| !index.unique && index.name == "idx_name" && index.fields == ["name"]));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field name: string {\n    index\n  }"));
+        assert!(!ent.contains("index idx_name {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "pub async fn list_by_name(&self, name: String) -> anyhow::Result<Vec<Model>>"
+        ));
+        assert!(sea_orm.contains("self.query().where_(name_eq(name)).all().await"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "pub async fn list_by_name(db: &mut dyn toasty::Executor, name: &String) -> toasty::Result<Vec<User>>"
+        ));
+        assert!(toasty.contains("User::query(db).where_(name_eq(name.clone())).all().await"));
+    }
+
+    #[test]
+    fn ent_optional_field_directive_generates_nullable_field() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field nickname: string {
+                optional
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let nickname = model
+            .fields
+            .iter()
+            .find(|field| field.name == "nickname")
+            .expect("nickname field");
+        assert_eq!(nickname.ty, "Option<String>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field nickname: string? {"));
+        assert!(!ent.contains("optional"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub nickname: Option<String>"));
+        assert!(sea_orm.contains("pub fn clear_nickname(mut self) -> Self"));
+        assert!(sea_orm.contains("NicknameIsNull"));
+        assert!(sea_orm.contains("pub fn nickname_is_null() -> UserPredicate"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains("pub nickname: Option<String>"));
+        assert!(toasty.contains("pub fn clear_nickname(mut self) -> Self"));
+        assert!(toasty.contains("NicknameIsNull"));
+        assert!(toasty.contains("pub fn nickname_is_null() -> UserPredicate"));
+    }
+
+    #[test]
+    fn ent_sensitive_fields_are_redacted_from_debug_output() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field username: string {
+            }
+            field password: string {
+                sensitive
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let password = model
+            .fields
+            .iter()
+            .find(|field| field.name == "password")
+            .expect("password field");
+        assert!(password.sensitive);
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field password: string {\n    sensitive\n  }"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
+        ));
+        assert!(sea_orm.contains("impl std::fmt::Debug for Model"));
+        assert!(sea_orm.contains("debug.field(\"username\", &self.username);"));
+        assert!(sea_orm.contains("debug.field(\"password\", &\"<sensitive>\");"));
+        assert!(!sea_orm.contains(
+            "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(
+            toasty.contains("#[derive(Clone, PartialEq, Serialize, Deserialize, toasty::Model)]")
+        );
+        assert!(toasty.contains("impl std::fmt::Debug for User"));
+        assert!(toasty.contains("debug.field(\"username\", &self.username);"));
+        assert!(toasty.contains("debug.field(\"password\", &\"<sensitive>\");"));
+        assert!(!toasty
+            .contains("#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"));
+    }
+
+    #[test]
+    fn ent_string_field_validators_generate_mutation_checks() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field name: string {
+                not_empty
+                min_len 3
+                max_len 32
+            }
+            field nickname: string? {
+                max_len 64
+            }
+            field status: string {
+                enum active, disabled
+            }
+            field code: string {
+                starts_with usr_
+                contains "-"
+                ends_with _v1
+                not_contains " "
+                not_starts_with tmp_
+                not_ends_with _draft
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let name = model
+            .fields
+            .iter()
+            .find(|field| field.name == "name")
+            .expect("name field");
+        assert!(name.validation.not_empty);
+        assert_eq!(name.validation.min_len, Some(3));
+        assert_eq!(name.validation.max_len, Some(32));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("not_empty"));
+        assert!(ent.contains("min_len 3"));
+        assert!(ent.contains("max_len 32"));
+        assert!(ent.contains("enum \"active\", \"disabled\""));
+        assert!(ent.contains("starts_with \"usr_\""));
+        assert!(ent.contains("contains \"-\""));
+        assert!(ent.contains("ends_with \"_v1\""));
+        assert!(ent.contains("not_contains \" \""));
+        assert!(ent.contains("not_starts_with \"tmp_\""));
+        assert!(ent.contains("not_ends_with \"_draft\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("if let Some(value) = self.name.as_ref() {"));
+        assert!(sea_orm.contains(
+            "if value.trim().is_empty() { anyhow::bail!(\"name validation failed: must not be empty\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.chars().count() < 3 { anyhow::bail!(\"name validation failed: length must be at least 3\"); }"
+        ));
+        assert!(sea_orm.contains("if let Some(Some(value)) = self.nickname.as_ref() {"));
+        assert!(sea_orm.contains(
+            "if value.chars().count() > 64 { anyhow::bail!(\"nickname validation failed: length must be at most 64\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if !matches!(value.as_str(), \"active\" | \"disabled\") { anyhow::bail!(\"status validation failed: value is not allowed\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if !value.contains(\"-\") { anyhow::bail!(\"code validation failed: must contain required substring\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if !value.starts_with(\"usr_\") { anyhow::bail!(\"code validation failed: must start with required prefix\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if !value.ends_with(\"_v1\") { anyhow::bail!(\"code validation failed: must end with required suffix\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.contains(\" \") { anyhow::bail!(\"code validation failed: must not contain forbidden substring\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.starts_with(\"tmp_\") { anyhow::bail!(\"code validation failed: must not start with forbidden prefix\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.ends_with(\"_draft\") { anyhow::bail!(\"code validation failed: must not end with forbidden suffix\"); }"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains("if let Some(value) = self.name.as_ref() {"));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"name validation failed: must not be empty\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"nickname validation failed: length must be at most 64\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"status validation failed: value is not allowed\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"code validation failed: must contain required substring\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"code validation failed: must start with required prefix\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"code validation failed: must end with required suffix\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"code validation failed: must not contain forbidden substring\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"code validation failed: must not start with forbidden prefix\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"code validation failed: must not end with forbidden suffix\"));"
+        ));
+    }
+
+    #[test]
+    fn ent_field_validators_reject_non_string_fields() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                    min_len 3
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid validator target");
+
+        assert!(err.to_string().contains(
+            "model `User` field `id` validation currently supports String or Option<String>"
+        ));
+    }
+
+    #[test]
+    fn ent_enum_validator_rejects_duplicate_values() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field status: string {
+                    enum active, active
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("duplicate enum value");
+
+        assert!(err
+            .to_string()
+            .contains("model `User` field `status` enum value `active` is duplicated"));
+    }
+
+    #[test]
+    fn ent_numeric_field_validators_generate_mutation_checks() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field age: i32 {
+                min 0
+                max 130
+            }
+            field score: i64? {
+                min -10
+            }
+            field balance: i64 {
+                non_negative
+            }
+            field rank: u64 {
+                positive
+            }
+            field delta: i64 {
+                negative
+            }
+            field debt: i64 {
+                non_positive
+            }
+            field level: i32 {
+                range 1, 100
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let age = model
+            .fields
+            .iter()
+            .find(|field| field.name == "age")
+            .expect("age field");
+        assert_eq!(age.validation.min.as_deref(), Some("0"));
+        assert_eq!(age.validation.max.as_deref(), Some("130"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("min 0"));
+        assert!(ent.contains("max 130"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("if let Some(value) = self.age.as_ref() {"));
+        assert!(sea_orm.contains(
+            "if *value < 0 { anyhow::bail!(\"age validation failed: must be at least 0\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if *value > 130 { anyhow::bail!(\"age validation failed: must be at most 130\"); }"
+        ));
+        assert!(sea_orm.contains("if let Some(Some(value)) = self.score.as_ref() {"));
+        assert!(sea_orm.contains(
+            "if *value < 0 { anyhow::bail!(\"balance validation failed: must be non-negative\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if *value <= 0 { anyhow::bail!(\"rank validation failed: must be positive\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if *value >= 0 { anyhow::bail!(\"delta validation failed: must be negative\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if *value > 0 { anyhow::bail!(\"debt validation failed: must be non-positive\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if *value < 1 { anyhow::bail!(\"level validation failed: must be at least 1\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if *value > 100 { anyhow::bail!(\"level validation failed: must be at most 100\"); }"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"age validation failed: must be at least 0\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"score validation failed: must be at least -10\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"balance validation failed: must be non-negative\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"rank validation failed: must be positive\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"delta validation failed: must be negative\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"debt validation failed: must be non-positive\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"level validation failed: must be at least 1\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"level validation failed: must be at most 100\"));"
+        ));
+    }
+
+    #[test]
+    fn ent_numeric_field_validators_reject_unsigned_negative_bounds() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: u64 {
+                    primary
+                    min -1
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid unsigned bound");
+
+        assert!(err
+            .to_string()
+            .contains("model `User` field `id` min value `-1` cannot be negative for `u64`"));
+    }
+
+    #[test]
+    fn ent_numeric_shorthand_validators_reject_non_numeric_fields() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field name: string {
+                    positive
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid numeric shorthand target");
+
+        assert!(err.to_string().contains(
+            "model `User` field `name` numeric validation currently supports primitive numeric fields"
+        ));
+    }
+
+    #[test]
+    fn ent_range_validator_rejects_reversed_bounds() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field score: i32 {
+                    range 10 1
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid numeric range");
+
+        assert!(err
+            .to_string()
+            .contains("model `User` field `score` min 10 exceeds max 1"));
+    }
+
+    #[test]
+    fn ent_update_default_generates_timestamp_update_assignments() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field name: string {
+            }
+            field updated_at: i64 {
+                update_default now_millis
+            }
+            field synced_at: u64? {
+                update_default now_secs
+            }
+            field touched_at: i64 {
+                update_default now_micros
+            }
+            field observed_at: u64? {
+                update_default now_nanos
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let updated_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "updated_at")
+            .expect("updated_at field");
+        assert_eq!(updated_at.update_default.as_deref(), Some("now_millis"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("update_default now_millis"));
+        assert!(ent.contains("update_default now_secs"));
+        assert!(ent.contains("update_default now_micros"));
+        assert!(ent.contains("update_default now_nanos"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "if self.updated_at.is_none() { active.updated_at = Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()); }"
+        ));
+        assert!(sea_orm.contains(
+            "if self.synced_at.is_none() { active.synced_at = Set(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_secs() as u64).unwrap_or_default())); }"
+        ));
+        assert!(sea_orm.contains(
+            "if self.touched_at.is_none() { active.touched_at = Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_micros() as i64).unwrap_or_default()); }"
+        ));
+        assert!(sea_orm.contains(
+            "if self.observed_at.is_none() { active.observed_at = Set(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_nanos() as u64).unwrap_or_default())); }"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "if self.updated_at.is_none() { model.updated_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default(); }"
+        ));
+        assert!(
+            toasty
+                .matches("if self.synced_at.is_none() { model.synced_at = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_secs() as u64).unwrap_or_default()); }")
+                .count()
+                >= 2
+        );
+        assert!(toasty.contains(
+            "if self.touched_at.is_none() { model.touched_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_micros() as i64).unwrap_or_default(); }"
+        ));
+        assert!(
+            toasty
+                .matches("if self.observed_at.is_none() { model.observed_at = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_nanos() as u64).unwrap_or_default()); }")
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn ent_update_default_rejects_immutable_fields() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field updated_at: i64 {
+                    immutable
+                    update_default now_millis
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid update default target");
+
+        assert!(err.to_string().contains(
+            "model `User` field `updated_at` update_default cannot be used on immutable fields"
+        ));
+    }
+
+    #[test]
+    fn ent_update_default_rejects_unsupported_type() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field updated_at: string {
+                    update_default now_millis
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid update default type");
+
+        assert!(err.to_string().contains(
+            "model `User` field `updated_at` update_default currently supports i64, u64, Option<i64>, or Option<u64>"
+        ));
+    }
+
+    #[test]
+    fn ent_timestamp_defaults_generate_create_assignments() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field created_at: i64 {
+                default now_millis
+            }
+            field synced_at: u64? {
+                default now_secs
+            }
+            field touched_at: i64 {
+                default now_micros
+            }
+            field observed_at: u64? {
+                default now_nanos
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let created_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_at")
+            .expect("created_at field");
+        assert_eq!(created_at.default_value.as_deref(), Some("now_millis"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"now_millis\""));
+        assert!(ent.contains("default \"now_secs\""));
+        assert!(ent.contains("default \"now_micros\""));
+        assert!(ent.contains("default \"now_nanos\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "created_at: self.created_at.map(Set).unwrap_or_else(|| Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default())),"
+        ));
+        assert!(sea_orm.contains(
+            "synced_at: self.synced_at.map(Set).unwrap_or_else(|| Set(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_secs() as u64).unwrap_or_default()))),"
+        ));
+        assert!(sea_orm.contains(
+            "touched_at: self.touched_at.map(Set).unwrap_or_else(|| Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_micros() as i64).unwrap_or_default())),"
+        ));
+        assert!(sea_orm.contains(
+            "observed_at: self.observed_at.map(Set).unwrap_or_else(|| Set(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_nanos() as u64).unwrap_or_default()))),"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "if let Some(value) = self.created_at { create = create.created_at(value); } else { create = create.created_at(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.synced_at { create = create.synced_at(value); } else { create = create.synced_at(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_secs() as u64).unwrap_or_default())); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.touched_at { create = create.touched_at(value); } else { create = create.touched_at(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_micros() as i64).unwrap_or_default()); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.observed_at { create = create.observed_at(value); } else { create = create.observed_at(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_nanos() as u64).unwrap_or_default())); }"
+        ));
+    }
+
+    #[test]
+    fn ent_timestamp_defaults_reject_unsupported_type() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field created_at: string {
+                    default now_millis
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid timestamp default type");
+
+        assert!(err.to_string().contains(
+            "model `User` field `created_at` default `now_millis` currently supports i64, u64, Option<i64>, or Option<u64>"
+        ));
+    }
+
+    #[test]
+    fn ent_client_defaults_generate_create_assignments() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field name: string {
+                client_default anonymous
+            }
+            field active: bool {
+                client_default true
+            }
+            field score: i32 {
+                client_default 10
+            }
+            field nickname: string? {
+                client_default guest
+            }
+            field synced_at: u64? {
+                client_default now_micros
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let name = model
+            .fields
+            .iter()
+            .find(|field| field.name == "name")
+            .expect("name field");
+        assert_eq!(name.client_default_value.as_deref(), Some("anonymous"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("client_default \"anonymous\""));
+        assert!(ent.contains("client_default \"true\""));
+        assert!(ent.contains("client_default \"10\""));
+        assert!(ent.contains("client_default \"guest\""));
+        assert!(ent.contains("client_default \"now_micros\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "name: self.name.map(Set).unwrap_or_else(|| Set(\"anonymous\".to_string()))"
+        ));
+        assert!(sea_orm.contains("active: self.active.map(Set).unwrap_or_else(|| Set(true))"));
+        assert!(sea_orm.contains("score: self.score.map(Set).unwrap_or_else(|| Set(10))"));
+        assert!(sea_orm.contains(
+            "nickname: self.nickname.map(Set).unwrap_or_else(|| Set(Some(\"guest\".to_string())))"
+        ));
+        assert!(sea_orm.contains(
+            "synced_at: self.synced_at.map(Set).unwrap_or_else(|| Set(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_micros() as u64).unwrap_or_default())))"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "if let Some(value) = self.name { create = create.name(value); } else { create = create.name(\"anonymous\".to_string()); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.active { create = create.active(value); } else { create = create.active(true); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.score { create = create.score(value); } else { create = create.score(10); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.nickname { create = create.nickname(value); } else { create = create.nickname(Some(\"guest\".to_string())); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.synced_at { create = create.synced_at(value); } else { create = create.synced_at(Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_micros() as u64).unwrap_or_default())); }"
+        ));
+    }
+
+    #[test]
+    fn ent_client_defaults_reject_unsupported_type() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field amount: decimal {
+                    client_default 1.0
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid client default type");
+
+        assert!(err.to_string().contains(
+            "model `User` field `amount` client_default `1.0` currently supports String, bool, primitive numeric fields, or now_* timestamp defaults"
+        ));
+    }
+
+    #[test]
+    fn ent_client_defaults_reject_invalid_bool() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field id: i64 {
+                    primary
+                }
+                field active: bool {
+                    client_default yes
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid bool client default");
+
+        assert!(err.to_string().contains(
+            "model `User` field `active` client_default `yes` must be `true` or `false` for bool fields"
+        ));
     }
 
     #[test]
@@ -10135,6 +11945,10 @@ mod tests {
                     ty: "i64".to_string(),
                     auto_increment: true,
                     immutable: false,
+                    sensitive: false,
+                    validation: ModelFieldValidation::default(),
+                    update_default: None,
+                    client_default_value: None,
                     default_value: None,
                     comment: None,
                 },
@@ -10144,6 +11958,10 @@ mod tests {
                     ty: "String".to_string(),
                     auto_increment: false,
                     immutable: false,
+                    sensitive: false,
+                    validation: ModelFieldValidation::default(),
+                    update_default: None,
+                    client_default_value: None,
                     default_value: None,
                     comment: None,
                 },
@@ -10153,6 +11971,10 @@ mod tests {
                     ty: "String".to_string(),
                     auto_increment: false,
                     immutable: false,
+                    sensitive: false,
+                    validation: ModelFieldValidation::default(),
+                    update_default: None,
+                    client_default_value: None,
                     default_value: None,
                     comment: None,
                 },
@@ -10162,6 +11984,10 @@ mod tests {
                     ty: "Option<String>".to_string(),
                     auto_increment: false,
                     immutable: false,
+                    sensitive: false,
+                    validation: ModelFieldValidation::default(),
+                    update_default: None,
+                    client_default_value: None,
                     default_value: None,
                     comment: None,
                 },
@@ -10171,6 +11997,10 @@ mod tests {
                     ty: "bool".to_string(),
                     auto_increment: false,
                     immutable: false,
+                    sensitive: false,
+                    validation: ModelFieldValidation::default(),
+                    update_default: None,
+                    client_default_value: None,
                     default_value: None,
                     comment: None,
                 },
@@ -10251,6 +12081,10 @@ mod tests {
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
         assert!(rendered.contains("pub fn order_all<I>(mut self, orders: I) -> Self"));
         assert!(rendered.contains("self.orders.extend(orders);"));
+        assert!(rendered.contains("pub fn order_by_name_asc(mut self) -> Self"));
+        assert!(rendered.contains("self.orders.push(UserOrder::NameAsc);"));
+        assert!(rendered.contains("pub fn order_by_name_desc(mut self) -> Self"));
+        assert!(rendered.contains("self.orders.push(UserOrder::NameDesc);"));
         assert!(rendered.contains("pub async fn all(self) -> anyhow::Result<Vec<Model>>"));
         assert!(rendered.contains("pub async fn ids(self) -> anyhow::Result<Vec<i64>>"));
         assert!(rendered.contains("pub async fn first_id(mut self) -> anyhow::Result<Option<i64>>"));
@@ -10515,6 +12349,10 @@ mod tests {
         assert!(rendered.contains("pub fn order(mut self, order: UserOrder) -> Self"));
         assert!(rendered.contains("pub fn order_all<I>(mut self, orders: I) -> Self"));
         assert!(rendered.contains("self.orders.extend(orders);"));
+        assert!(rendered.contains("pub fn order_by_name_asc(mut self) -> Self"));
+        assert!(rendered.contains("self.orders.push(UserOrder::NameAsc);"));
+        assert!(rendered.contains("pub fn order_by_name_desc(mut self) -> Self"));
+        assert!(rendered.contains("self.orders.push(UserOrder::NameDesc);"));
         assert!(rendered.contains("pub async fn all(self) -> toasty::Result<Vec<User>>"));
         assert!(rendered.contains("pub async fn ids(self) -> toasty::Result<Vec<u64>>"));
         assert!(rendered.contains("pub async fn first_id(mut self) -> toasty::Result<Option<u64>>"));
