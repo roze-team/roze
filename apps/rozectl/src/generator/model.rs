@@ -3313,6 +3313,22 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
             writeln!(out, "        Ok(groups.into_iter().collect())").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
+
+            let unique_method = rust_identifier(&format!("unique_{}", field.name));
+            writeln!(
+                out,
+                "    pub async fn {unique_method}(self) -> anyhow::Result<Vec<{}>> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        let values = self.{method}().await?.into_iter().collect::<std::collections::BTreeSet<_>>();"
+            )
+            .unwrap();
+            writeln!(out, "        Ok(values.into_iter().collect())").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
         }
 
         if field.name != model.primary {
@@ -5552,6 +5568,22 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
             writeln!(out, "            *groups.entry(value).or_insert(0) += 1;").unwrap();
             writeln!(out, "        }}").unwrap();
             writeln!(out, "        Ok(groups.into_iter().collect())").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+
+            let unique_method = rust_identifier(&format!("unique_{}", field.name));
+            writeln!(
+                out,
+                "    pub async fn {unique_method}(self) -> toasty::Result<Vec<{}>> {{",
+                field.ty
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        let values = self.{method}().await?.into_iter().collect::<std::collections::BTreeSet<_>>();"
+            )
+            .unwrap();
+            writeln!(out, "        Ok(values.into_iter().collect())").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
         }
@@ -10228,8 +10260,10 @@ mod tests {
         assert!(
             rendered.contains("pub async fn count_by_id(self) -> anyhow::Result<Vec<(i64, u64)>>")
         );
+        assert!(rendered.contains("pub async fn unique_id(self) -> anyhow::Result<Vec<i64>>"));
         assert!(rendered
             .contains("pub async fn count_by_name(self) -> anyhow::Result<Vec<(String, u64)>>"));
+        assert!(rendered.contains("pub async fn unique_name(self) -> anyhow::Result<Vec<String>>"));
         assert!(rendered
             .contains("pub async fn first_name(mut self) -> anyhow::Result<Option<String>>"));
         assert!(rendered.contains("pub async fn only_name(mut self) -> anyhow::Result<String>"));
@@ -10239,6 +10273,8 @@ mod tests {
         assert!(rendered.contains(
             "pub async fn count_by_nickname(self) -> anyhow::Result<Vec<(Option<String>, u64)>>"
         ));
+        assert!(rendered
+            .contains("pub async fn unique_nickname(self) -> anyhow::Result<Vec<Option<String>>>"));
         assert!(rendered.contains(
             "pub async fn first_nickname(mut self) -> anyhow::Result<Option<Option<String>>>"
         ));
@@ -10488,8 +10524,10 @@ mod tests {
         assert!(
             rendered.contains("pub async fn count_by_id(self) -> toasty::Result<Vec<(u64, u64)>>")
         );
+        assert!(rendered.contains("pub async fn unique_id(self) -> toasty::Result<Vec<u64>>"));
         assert!(rendered
             .contains("pub async fn count_by_name(self) -> toasty::Result<Vec<(String, u64)>>"));
+        assert!(rendered.contains("pub async fn unique_name(self) -> toasty::Result<Vec<String>>"));
         assert!(rendered
             .contains("pub async fn first_name(mut self) -> toasty::Result<Option<String>>"));
         assert!(rendered.contains("pub async fn only_name(mut self) -> toasty::Result<String>"));
@@ -10499,6 +10537,8 @@ mod tests {
         assert!(rendered.contains(
             "pub async fn count_by_nickname(self) -> toasty::Result<Vec<(Option<String>, u64)>>"
         ));
+        assert!(rendered
+            .contains("pub async fn unique_nickname(self) -> toasty::Result<Vec<Option<String>>>"));
         assert!(rendered.contains(
             "pub async fn first_nickname(mut self) -> toasty::Result<Option<Option<String>>>"
         ));

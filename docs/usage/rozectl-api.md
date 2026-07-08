@@ -1090,8 +1090,9 @@ SQL repositories additionally generate:
 - query builders with `where_`, `where_all`, `where_any`, `where_not`,
   `where_none`, `order`, `order_all`, `limit`, `offset`, `paginate`, `all`,
   `count`, `exists`, `ids`, `first_id`, `only_id`, `pluck_<field>`,
-  `count_by_<field>`, `first_<field>`, `only_<field>`, `sum_<field>`,
-  `avg_<field>`, `min_<field>`, `max_<field>`, `first`, `only`, and `page`
+  `unique_<field>`, `count_by_<field>`, `first_<field>`, `only_<field>`,
+  `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`, `first`,
+  `only`, and `page`
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - entity relation methods for `.ent` edges, such as
@@ -1146,6 +1147,7 @@ let page = ctx
 
 let ids = ctx.model().user().query().ids().await?;
 let names = ctx.model().user().query().pluck_name().await?;
+let unique_names = ctx.model().user().query().unique_name().await?;
 let name_counts = ctx.model().user().query().count_by_name().await?;
 let first_name = ctx.model().user().query().first_name().await?;
 let only_name = ctx.model().user().query().where_(user::id(1)).only_name().await?;
@@ -1202,6 +1204,7 @@ let items = UserRepository::query(&mut db)
 
 let ids = UserRepository::query(&mut db).ids().await?;
 let names = UserRepository::query(&mut db).pluck_name().await?;
+let unique_names = UserRepository::query(&mut db).unique_name().await?;
 let name_counts = UserRepository::query(&mut db).count_by_name().await?;
 let first_name = UserRepository::query(&mut db).first_name().await?;
 let only_name = UserRepository::query(&mut db).where_(user::id(1)).only_name().await?;
