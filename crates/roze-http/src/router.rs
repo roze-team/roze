@@ -1,7 +1,9 @@
 use std::{
     collections::BTreeMap,
     convert::Infallible,
-    future::Future,
+    fmt,
+    future::{ready, Future, Ready},
+    ops::BitOr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -11,6 +13,7 @@ use matchit::Router as MatchRouter;
 use tower::{util::BoxCloneService, Layer, Service, ServiceExt};
 
 use crate::{
+    extract::{ConnectInfo, FromRef, OriginalUri},
     handler::Handler,
     rest::{self, HttpResponse, IncomingRequest},
 };
@@ -23,18 +26,109 @@ pub struct Router {
     route_groups: Vec<RouteGroup>,
     path_index: BTreeMap<String, usize>,
     fallback: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    method_not_allowed_fallback: Option<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>,
 }
 
 #[derive(Clone)]
 struct RouteGroup {
     path: String,
     routes: Vec<Route>,
+    method_not_allowed_fallback: Option<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>,
 }
 
 #[derive(Clone)]
 struct Route {
     method: Option<Method>,
     service: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MethodFilter(u16);
+
+impl MethodFilter {
+    pub const GET: Self = Self(1 << 0);
+    pub const POST: Self = Self(1 << 1);
+    pub const PUT: Self = Self(1 << 2);
+    pub const PATCH: Self = Self(1 << 3);
+    pub const DELETE: Self = Self(1 << 4);
+    pub const HEAD: Self = Self(1 << 5);
+    pub const OPTIONS: Self = Self(1 << 6);
+    pub const TRACE: Self = Self(1 << 7);
+    pub const CONNECT: Self = Self(1 << 8);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn from_known_method(method: &Method) -> Option<Self> {
+        match *method {
+            Method::GET => Some(Self::GET),
+            Method::POST => Some(Self::POST),
+            Method::PUT => Some(Self::PUT),
+            Method::PATCH => Some(Self::PATCH),
+            Method::DELETE => Some(Self::DELETE),
+            Method::HEAD => Some(Self::HEAD),
+            Method::OPTIONS => Some(Self::OPTIONS),
+            Method::TRACE => Some(Self::TRACE),
+            Method::CONNECT => Some(Self::CONNECT),
+            _ => None,
+        }
+    }
+
+    fn methods(self) -> Vec<Method> {
+        [
+            (Self::GET, Method::GET),
+            (Self::POST, Method::POST),
+            (Self::PUT, Method::PUT),
+            (Self::PATCH, Method::PATCH),
+            (Self::DELETE, Method::DELETE),
+            (Self::HEAD, Method::HEAD),
+            (Self::OPTIONS, Method::OPTIONS),
+            (Self::TRACE, Method::TRACE),
+            (Self::CONNECT, Method::CONNECT),
+        ]
+        .into_iter()
+        .filter_map(|(filter, method)| self.contains(filter).then_some(method))
+        .collect()
+    }
+}
+
+impl BitOr for MethodFilter {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+pub enum MethodSelection {
+    Method(Method),
+    Filter(MethodFilter),
+}
+
+impl MethodSelection {
+    fn methods(self) -> Vec<Method> {
+        match self {
+            Self::Method(method) => vec![method],
+            Self::Filter(filter) => filter.methods(),
+        }
+    }
+}
+
+impl From<Method> for MethodSelection {
+    fn from(method: Method) -> Self {
+        Self::Method(method)
+    }
+}
+
+impl From<MethodFilter> for MethodSelection {
+    fn from(filter: MethodFilter) -> Self {
+        Self::Filter(filter)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -96,6 +190,7 @@ impl Router {
             route_groups: Vec::new(),
             path_index: BTreeMap::new(),
             fallback: default_not_found_service(),
+            method_not_allowed_fallback: None,
         }
     }
 
@@ -119,6 +214,12 @@ impl Router {
                 method: endpoint.method,
                 service: endpoint.service,
             });
+        }
+        if let Some(fallback) = method_router.method_not_allowed_fallback {
+            if group.method_not_allowed_fallback.is_some() {
+                panic!("overlapping method-not-allowed fallback for {}", group.path);
+            }
+            group.method_not_allowed_fallback = Some(fallback);
         }
         self
     }
@@ -271,8 +372,39 @@ impl Router {
         self
     }
 
+    pub fn method_not_allowed_fallback<H, T>(mut self, handler: H) -> Self
+    where
+        H: Handler<T>,
+    {
+        let fallback = handler.into_service();
+        self.method_not_allowed_fallback = Some(fallback.clone());
+        for group in &mut self.route_groups {
+            group.method_not_allowed_fallback = Some(fallback.clone());
+        }
+        self
+    }
+
     pub fn has_routes(&self) -> bool {
         !self.route_groups.is_empty()
+    }
+
+    pub fn as_service(&mut self) -> RouterAsService<'_> {
+        RouterAsService { router: self }
+    }
+
+    pub fn into_service(self) -> RouterIntoService {
+        RouterIntoService { router: self }
+    }
+
+    pub fn into_make_service(self) -> IntoMakeService {
+        IntoMakeService { router: self }
+    }
+
+    pub fn into_make_service_with_connect_info<T>(self) -> IntoMakeServiceWithConnectInfo<T> {
+        IntoMakeServiceWithConnectInfo {
+            router: self,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn with_state<T>(self, state: T) -> Self
@@ -280,6 +412,14 @@ impl Router {
         T: Clone + Send + Sync + 'static,
     {
         self.layer(StateLayer { state })
+    }
+
+    pub fn with_state_from_ref<Outer, Inner>(self, state: Outer) -> Self
+    where
+        Outer: Clone + Send + Sync + 'static,
+        Inner: FromRef<Outer> + Clone + Send + Sync + 'static,
+    {
+        self.layer(StateFromRefLayer::<Outer, Inner>::new(state))
     }
 
     fn ensure_route_group(&mut self, path: String) -> usize {
@@ -293,6 +433,7 @@ impl Router {
                 self.route_groups.push(RouteGroup {
                     path: path.clone(),
                     routes: Vec::new(),
+                    method_not_allowed_fallback: self.method_not_allowed_fallback.clone(),
                 });
                 self.path_index.insert(path, index);
                 index
@@ -301,8 +442,13 @@ impl Router {
     }
 
     fn insert_group_routes(&mut self, path: String, group: RouteGroup, action: &str) {
+        let RouteGroup {
+            routes,
+            method_not_allowed_fallback,
+            ..
+        } = group;
         let group_index = self.ensure_route_group(path);
-        for route in group.routes {
+        for route in routes {
             if self.route_groups[group_index]
                 .routes
                 .iter()
@@ -314,6 +460,15 @@ impl Router {
                 );
             }
             self.route_groups[group_index].routes.push(route);
+        }
+        if let Some(fallback) = method_not_allowed_fallback {
+            if self.route_groups[group_index]
+                .method_not_allowed_fallback
+                .is_some()
+            {
+                panic!("overlapping {action} method-not-allowed fallback");
+            }
+            self.route_groups[group_index].method_not_allowed_fallback = Some(fallback);
         }
     }
 
@@ -366,7 +521,118 @@ impl Router {
             for route in &mut group.routes {
                 route.service = layer_service(layer.clone(), route.service.clone());
             }
+            if let Some(fallback) = group.method_not_allowed_fallback.take() {
+                group.method_not_allowed_fallback = Some(layer_service(layer.clone(), fallback));
+            }
         }
+    }
+}
+
+pub struct RouterAsService<'a> {
+    router: &'a mut Router,
+}
+
+impl Service<IncomingRequest> for RouterAsService<'_> {
+    type Response = HttpResponse;
+    type Error = Infallible;
+    type Future = BoxFuture;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.router.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: IncomingRequest) -> Self::Future {
+        self.router.call(request)
+    }
+}
+
+impl fmt::Debug for RouterAsService<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouterAsService").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+pub struct RouterIntoService {
+    router: Router,
+}
+
+impl Service<IncomingRequest> for RouterIntoService {
+    type Response = HttpResponse;
+    type Error = Infallible;
+    type Future = BoxFuture;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.router.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: IncomingRequest) -> Self::Future {
+        self.router.call(request)
+    }
+}
+
+impl fmt::Debug for RouterIntoService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouterIntoService").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+pub struct IntoMakeService {
+    router: Router,
+}
+
+impl<Target> Service<Target> for IntoMakeService {
+    type Response = Router;
+    type Error = Infallible;
+    type Future = Ready<Result<Router, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _target: Target) -> Self::Future {
+        ready(Ok(self.router.clone()))
+    }
+}
+
+impl fmt::Debug for IntoMakeService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntoMakeService").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+pub struct IntoMakeServiceWithConnectInfo<T> {
+    router: Router,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T, Target> Service<Target> for IntoMakeServiceWithConnectInfo<T>
+where
+    T: Clone + Send + Sync + 'static,
+    Target: Into<T>,
+{
+    type Response = Router;
+    type Error = Infallible;
+    type Future = Ready<Result<Router, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, target: Target) -> Self::Future {
+        ready(Ok(self
+            .router
+            .clone()
+            .with_state(ConnectInfo(target.into()))))
+    }
+}
+
+impl<T> fmt::Debug for IntoMakeServiceWithConnectInfo<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntoMakeServiceWithConnectInfo")
+            .finish_non_exhaustive()
     }
 }
 
@@ -380,6 +646,10 @@ impl Service<IncomingRequest> for Router {
     }
 
     fn call(&mut self, mut request: IncomingRequest) -> Self::Future {
+        if request.extensions().get::<OriginalUri>().is_none() {
+            let original_uri = request.uri().clone();
+            request.extensions_mut().insert(OriginalUri(original_uri));
+        }
         let path = request.uri().path().to_string();
         let matched = self.routes.at(&path).ok();
         let mut service = match matched {
@@ -402,7 +672,12 @@ impl Service<IncomingRequest> for Router {
                     .find(|route| route.method.as_ref() == Some(request.method()))
                     .or_else(|| group.routes.iter().find(|route| route.method.is_none()))
                     .map(|route| route.service.clone())
-                    .unwrap_or_else(|| method_not_allowed_service(allow_header(group)))
+                    .unwrap_or_else(|| {
+                        group
+                            .method_not_allowed_fallback
+                            .clone()
+                            .unwrap_or_else(|| method_not_allowed_service(allow_header(group)))
+                    })
             }
             None => self.fallback.clone(),
         };
@@ -420,6 +695,7 @@ impl Service<IncomingRequest> for Router {
 #[derive(Clone)]
 pub struct MethodRouter {
     endpoints: Vec<MethodEndpoint>,
+    method_not_allowed_fallback: Option<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>,
 }
 
 #[derive(Clone)]
@@ -438,35 +714,45 @@ impl MethodRouter {
     pub fn new() -> Self {
         Self {
             endpoints: Vec::new(),
+            method_not_allowed_fallback: None,
         }
     }
 
-    pub fn on<H, T>(self, method: Method, handler: H) -> Self
+    pub fn on<M, H, T>(self, method: M, handler: H) -> Self
     where
+        M: Into<MethodSelection>,
         H: Handler<T>,
     {
         self.on_service(method, handler.into_service())
     }
 
-    pub fn on_service<S>(mut self, method: Method, service: S) -> Self
+    pub fn on_service<M, S>(mut self, method: M, service: S) -> Self
     where
+        M: Into<MethodSelection>,
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
             + Clone
             + Send
             + 'static,
         S::Future: Send + 'static,
     {
-        if self
-            .endpoints
-            .iter()
-            .any(|endpoint| routes_overlap(&endpoint.method, &Some(method.clone())))
-        {
-            panic!("overlapping method route for {method}");
+        let methods = method.into().methods();
+        if methods.is_empty() {
+            panic!("method filter must not be empty");
         }
-        self.endpoints.push(MethodEndpoint {
-            method: Some(method),
-            service: service.boxed_clone(),
-        });
+        let service = service.boxed_clone();
+        for method in methods {
+            if self
+                .endpoints
+                .iter()
+                .any(|endpoint| routes_overlap(&endpoint.method, &Some(method.clone())))
+            {
+                panic!("overlapping method route for {method}");
+            }
+            self.endpoints.push(MethodEndpoint {
+                method: Some(method),
+                service: service.clone(),
+            });
+        }
         self
     }
 
@@ -506,11 +792,33 @@ impl MethodRouter {
         self.on(Method::GET, handler)
     }
 
+    pub fn get_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::GET, service)
+    }
+
     pub fn post<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
     {
         self.on(Method::POST, handler)
+    }
+
+    pub fn post_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::POST, service)
     }
 
     pub fn put<H, T>(self, handler: H) -> Self
@@ -520,11 +828,33 @@ impl MethodRouter {
         self.on(Method::PUT, handler)
     }
 
+    pub fn put_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::PUT, service)
+    }
+
     pub fn patch<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
     {
         self.on(Method::PATCH, handler)
+    }
+
+    pub fn patch_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::PATCH, service)
     }
 
     pub fn delete<H, T>(self, handler: H) -> Self
@@ -534,11 +864,33 @@ impl MethodRouter {
         self.on(Method::DELETE, handler)
     }
 
+    pub fn delete_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::DELETE, service)
+    }
+
     pub fn head<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
     {
         self.on(Method::HEAD, handler)
+    }
+
+    pub fn head_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::HEAD, service)
     }
 
     pub fn options<H, T>(self, handler: H) -> Self
@@ -548,11 +900,33 @@ impl MethodRouter {
         self.on(Method::OPTIONS, handler)
     }
 
+    pub fn options_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::OPTIONS, service)
+    }
+
     pub fn trace<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
     {
         self.on(Method::TRACE, handler)
+    }
+
+    pub fn trace_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::TRACE, service)
     }
 
     pub fn connect<H, T>(self, handler: H) -> Self
@@ -562,11 +936,50 @@ impl MethodRouter {
         self.on(Method::CONNECT, handler)
     }
 
+    pub fn connect_service<S>(self, service: S) -> Self
+    where
+        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.on_service(Method::CONNECT, service)
+    }
+
     pub fn with_state<T>(self, state: T) -> Self
     where
         T: Clone + Send + Sync + 'static,
     {
         self.layer(StateLayer { state })
+    }
+
+    pub fn with_state_from_ref<Outer, Inner>(self, state: Outer) -> Self
+    where
+        Outer: Clone + Send + Sync + 'static,
+        Inner: FromRef<Outer> + Clone + Send + Sync + 'static,
+    {
+        self.layer(StateFromRefLayer::<Outer, Inner>::new(state))
+    }
+
+    pub fn method_not_allowed_fallback<H, T>(mut self, handler: H) -> Self
+    where
+        H: Handler<T>,
+    {
+        if self.method_not_allowed_fallback.is_some() {
+            panic!("overlapping method-not-allowed fallback");
+        }
+        self.method_not_allowed_fallback = Some(handler.into_service());
+        self
+    }
+
+    pub fn method_filter(&self) -> Option<MethodFilter> {
+        let mut filter = MethodFilter::default();
+        for endpoint in &self.endpoints {
+            let method = endpoint.method.as_ref()?;
+            filter = filter | MethodFilter::from_known_method(method)?;
+        }
+        (!filter.is_empty()).then_some(filter)
     }
 
     pub fn layer<L>(mut self, layer: L) -> Self
@@ -583,6 +996,9 @@ impl MethodRouter {
     {
         for endpoint in &mut self.endpoints {
             endpoint.service = layer_service(layer.clone(), endpoint.service.clone());
+        }
+        if let Some(fallback) = self.method_not_allowed_fallback.take() {
+            self.method_not_allowed_fallback = Some(layer_service(layer, fallback));
         }
         self
     }
@@ -613,11 +1029,51 @@ where
     MethodRouter::new().any_service(service)
 }
 
+pub fn on<H, T>(filter: MethodFilter, handler: H) -> MethodRouter
+where
+    H: Handler<T>,
+{
+    MethodRouter::new().on(filter, handler)
+}
+
+pub fn on_service<S>(filter: MethodFilter, service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().on_service(filter, service)
+}
+
+pub fn get_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().get_service(service)
+}
+
 pub fn post<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
 {
     MethodRouter::new().post(handler)
+}
+
+pub fn post_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().post_service(service)
 }
 
 pub fn put<H, T>(handler: H) -> MethodRouter
@@ -627,11 +1083,33 @@ where
     MethodRouter::new().put(handler)
 }
 
+pub fn put_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().put_service(service)
+}
+
 pub fn patch<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
 {
     MethodRouter::new().patch(handler)
+}
+
+pub fn patch_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().patch_service(service)
 }
 
 pub fn delete<H, T>(handler: H) -> MethodRouter
@@ -641,11 +1119,33 @@ where
     MethodRouter::new().delete(handler)
 }
 
+pub fn delete_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().delete_service(service)
+}
+
 pub fn head<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
 {
     MethodRouter::new().head(handler)
+}
+
+pub fn head_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().head_service(service)
 }
 
 pub fn options<H, T>(handler: H) -> MethodRouter
@@ -655,6 +1155,17 @@ where
     MethodRouter::new().options(handler)
 }
 
+pub fn options_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().options_service(service)
+}
+
 pub fn trace<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -662,11 +1173,33 @@ where
     MethodRouter::new().trace(handler)
 }
 
+pub fn trace_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().trace_service(service)
+}
+
 pub fn connect<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
 {
     MethodRouter::new().connect(handler)
+}
+
+pub fn connect_service<S>(service: S) -> MethodRouter
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    MethodRouter::new().connect_service(service)
 }
 
 fn method_not_allowed_service(
@@ -757,6 +1290,70 @@ where
     }
 }
 
+#[derive(Clone)]
+struct StateFromRefLayer<Outer, Inner> {
+    state: Outer,
+    _marker: std::marker::PhantomData<fn() -> Inner>,
+}
+
+impl<Outer, Inner> StateFromRefLayer<Outer, Inner> {
+    fn new(state: Outer) -> Self {
+        Self {
+            state,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<Outer, Inner> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
+    for StateFromRefLayer<Outer, Inner>
+where
+    Outer: Clone + Send + Sync + 'static,
+    Inner: FromRef<Outer> + Clone + Send + Sync + 'static,
+{
+    type Service = StateFromRefService<Outer, Inner>;
+
+    fn layer(
+        &self,
+        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    ) -> Self::Service {
+        StateFromRefService {
+            state: self.state.clone(),
+            inner,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StateFromRefService<Outer, Inner> {
+    state: Outer,
+    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    _marker: std::marker::PhantomData<fn() -> Inner>,
+}
+
+impl<Outer, Inner> Service<IncomingRequest> for StateFromRefService<Outer, Inner>
+where
+    Outer: Clone + Send + Sync + 'static,
+    Inner: FromRef<Outer> + Clone + Send + Sync + 'static,
+{
+    type Response = HttpResponse;
+    type Error = Infallible;
+    type Future = BoxFuture;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: IncomingRequest) -> Self::Future {
+        let inner_state = Inner::from_ref(&self.state);
+        request.extensions_mut().insert(self.state.clone());
+        request.extensions_mut().insert(inner_state);
+        let mut inner = self.inner.clone();
+        Box::pin(async move { inner.call(request).await })
+    }
+}
+
 fn routes_overlap(left: &Option<Method>, right: &Option<Method>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left == right,
@@ -819,9 +1416,10 @@ fn join_paths(prefix: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::State;
+    use crate::{ConnectInfo, OriginalUri, State};
     use http::{HeaderValue, Request};
     use http_body_util::BodyExt;
+    use std::net::SocketAddr;
 
     #[tokio::test]
     async fn routes_requests_to_matching_handler() {
@@ -839,6 +1437,36 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn handler_can_return_status_headers_and_body_tuple() {
+        let mut router = Router::new().route(
+            "/queued",
+            post(|| async {
+                let mut headers = http::HeaderMap::new();
+                headers.insert("x-roze-test", HeaderValue::from_static("yes"));
+                (StatusCode::ACCEPTED, headers, "queued")
+            }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/queued")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.headers().get("x-roze-test"),
+            Some(&HeaderValue::from_static("yes"))
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"queued");
     }
 
     #[tokio::test]
@@ -943,6 +1571,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_state_from_ref_injects_outer_and_inner_state() {
+        #[derive(Clone)]
+        struct AppState {
+            api: ApiState,
+            name: String,
+        }
+
+        #[derive(Clone)]
+        struct ApiState {
+            tenant: String,
+        }
+
+        impl FromRef<AppState> for ApiState {
+            fn from_ref(input: &AppState) -> Self {
+                input.api.clone()
+            }
+        }
+
+        let mut router = Router::new()
+            .route(
+                "/state",
+                get(
+                    |State(app): State<AppState>, State(api): State<ApiState>| async move {
+                        format!("{}:{}", app.name, api.tenant)
+                    },
+                ),
+            )
+            .with_state_from_ref::<AppState, ApiState>(AppState {
+                api: ApiState {
+                    tenant: "tenant-a".to_string(),
+                },
+                name: "app".to_string(),
+            });
+        let response = router
+            .call(
+                Request::builder()
+                    .uri("/state")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"app:tenant-a");
+    }
+
+    #[tokio::test]
     async fn method_router_with_state_injects_state() {
         let mut router = Router::new().route(
             "/state",
@@ -964,6 +1640,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn method_router_with_state_from_ref_injects_inner_state() {
+        #[derive(Clone)]
+        struct AppState {
+            api: ApiState,
+        }
+
+        #[derive(Clone)]
+        struct ApiState {
+            value: String,
+        }
+
+        impl FromRef<AppState> for ApiState {
+            fn from_ref(input: &AppState) -> Self {
+                input.api.clone()
+            }
+        }
+
+        let mut router = Router::new().route(
+            "/state",
+            get(|State(api): State<ApiState>| async move { api.value })
+                .with_state_from_ref::<AppState, ApiState>(AppState {
+                    api: ApiState {
+                        value: "method-inner".to_string(),
+                    },
+                }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .uri("/state")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"method-inner");
+    }
+
+    #[tokio::test]
     async fn with_state_applies_to_fallback() {
         let mut router = Router::new()
             .fallback_handler(|State(state): State<String>| async move { state })
@@ -980,6 +1697,30 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"fallback-state");
+    }
+
+    #[tokio::test]
+    async fn optional_state_extractor_can_be_absent_in_handler() {
+        let mut router = Router::new().route(
+            "/optional-state",
+            get(|state: Option<State<String>>| async move {
+                state
+                    .map(|State(value)| value)
+                    .unwrap_or_else(|| "none".to_string())
+            }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .uri("/optional-state")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"none");
     }
 
     #[tokio::test]
@@ -1046,6 +1787,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn method_router_can_override_method_not_allowed_fallback() {
+        let mut router = Router::new().route(
+            "/users",
+            get(|| async { "list" }).method_not_allowed_fallback(|| async {
+                rest::text_response(StatusCode::IM_A_TEAPOT, "custom method fallback")
+            }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/users")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"custom method fallback");
+    }
+
+    #[tokio::test]
+    async fn router_can_override_method_not_allowed_fallback() {
+        let mut router = Router::new()
+            .route("/users", get(|| async { "list" }))
+            .method_not_allowed_fallback(|| async {
+                rest::text_response(StatusCode::BAD_REQUEST, "router method fallback")
+            });
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/users")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"router method fallback");
+    }
+
+    #[tokio::test]
+    async fn router_as_service_and_into_service_call_routes() {
+        let mut router = Router::new().route("/healthz", get(|| async { "borrowed" }));
+        let borrowed = router
+            .as_service()
+            .call(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let borrowed_body = borrowed.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&borrowed_body[..], b"borrowed");
+
+        let mut owned = Router::new()
+            .route("/readyz", get(|| async { "owned" }))
+            .into_service();
+        let owned_response = owned
+            .call(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let owned_body = owned_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(&owned_body[..], b"owned");
+    }
+
+    #[tokio::test]
+    async fn router_into_make_service_builds_request_services() {
+        let mut make_service = Router::new()
+            .route("/healthz", get(|| async { "made" }))
+            .into_make_service();
+        let mut service = make_service.call(()).await.unwrap();
+        let response = service
+            .call(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"made");
+    }
+
+    #[tokio::test]
+    async fn router_into_make_service_with_connect_info_injects_peer_addr() {
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 4312));
+        let mut make_service = Router::new()
+            .route(
+                "/peer",
+                get(|ConnectInfo(addr): ConnectInfo<SocketAddr>| async move { addr.to_string() }),
+            )
+            .into_make_service_with_connect_info::<SocketAddr>();
+        let mut service = make_service.call(peer_addr).await.unwrap();
+        let response = service
+            .call(
+                Request::builder()
+                    .uri("/peer")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], peer_addr.to_string().as_bytes());
+    }
+
+    #[tokio::test]
     async fn matches_parameterized_paths() {
         let mut router = Router::new().route(
             "/users/{id}",
@@ -1092,6 +1961,27 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"/users/{id}");
+    }
+
+    #[tokio::test]
+    async fn extracts_original_uri() {
+        let mut router = Router::new().route(
+            "/users/{id}",
+            get(|original_uri: OriginalUri| async move { original_uri.to_string() }),
+        );
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/users/42?include=roles")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"/users/42?include=roles");
     }
 
     #[tokio::test]
@@ -1165,6 +2055,28 @@ mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert!(missing.headers().get("x-roze-layer").is_none());
+    }
+
+    #[tokio::test]
+    async fn route_layer_can_map_fallible_layer_errors() {
+        let mut router = Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .route_layer(crate::handle_error(FallibleLayer, |FallibleError| async {
+                (StatusCode::SERVICE_UNAVAILABLE, "mapped-layer-error")
+            }));
+        let response = router
+            .call(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"mapped-layer-error");
     }
 
     #[tokio::test]
@@ -1335,6 +2247,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn top_level_service_helpers_route_services() {
+        let service = tower::service_fn(|_request: IncomingRequest| async {
+            Ok::<_, Infallible>(rest::text_response(StatusCode::OK, "service get"))
+        });
+        let mut router = Router::new().route("/svc", get_service(service));
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/svc")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"service get");
+    }
+
+    #[tokio::test]
+    async fn method_router_chains_service_helpers() {
+        let post_service = tower::service_fn(|_request: IncomingRequest| async {
+            Ok::<_, Infallible>(rest::text_response(StatusCode::OK, "service post"))
+        });
+        let mut router = Router::new().route(
+            "/mixed",
+            get(|| async { "handler get" }).post_service(post_service),
+        );
+
+        let get_response = router
+            .call(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/mixed")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&get_body[..], b"handler get");
+
+        let post_response = router
+            .call(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mixed")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let post_body = post_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(&post_body[..], b"service post");
+    }
+
+    #[tokio::test]
+    async fn on_routes_multiple_methods_with_filter() {
+        let mut router = Router::new().route(
+            "/filtered",
+            on(MethodFilter::GET | MethodFilter::DELETE, || async {
+                "filtered"
+            }),
+        );
+
+        for method in [Method::GET, Method::DELETE] {
+            let response = router
+                .call(
+                    Request::builder()
+                        .method(method)
+                        .uri("/filtered")
+                        .body(empty_incoming())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&body[..], b"filtered");
+        }
+
+        let missing_method = router
+            .call(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/filtered")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn on_service_routes_multiple_methods_with_filter() {
+        let service = tower::service_fn(|request: IncomingRequest| async move {
+            Ok::<_, Infallible>(rest::text_response(
+                StatusCode::OK,
+                request.method().as_str(),
+            ))
+        });
+        let mut router = Router::new().route(
+            "/filtered-service",
+            on_service(MethodFilter::PUT | MethodFilter::PATCH, service),
+        );
+
+        let put = router
+            .call(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/filtered-service")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let put_body = put.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&put_body[..], b"PUT");
+
+        let patch = router
+            .call(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/filtered-service")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let patch_body = patch.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&patch_body[..], b"PATCH");
+    }
+
+    #[test]
+    fn method_router_reports_method_filter() {
+        let router = get(|| async { "get" }).post(|| async { "post" });
+        let filter = router.method_filter().expect("method filter");
+        assert!(filter.contains(MethodFilter::GET));
+        assert!(filter.contains(MethodFilter::POST));
+        assert!(!filter.contains(MethodFilter::DELETE));
+        assert!(any(|| async { "any" }).method_filter().is_none());
+    }
+
+    #[tokio::test]
     async fn options_helper_routes_options_method() {
         let mut router = Router::new().route("/events", options(|| async { "options" }));
         let response = router
@@ -1417,6 +2479,42 @@ mod tests {
                     .insert("x-roze-layer", HeaderValue::from_static("yes"));
                 Ok(response)
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FallibleLayer;
+
+    impl Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for FallibleLayer {
+        type Service = FallibleService;
+
+        fn layer(
+            &self,
+            inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        ) -> Self::Service {
+            FallibleService { inner }
+        }
+    }
+
+    #[derive(Clone)]
+    struct FallibleService {
+        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    }
+
+    #[derive(Debug)]
+    struct FallibleError;
+
+    impl Service<IncomingRequest> for FallibleService {
+        type Response = HttpResponse;
+        type Error = FallibleError;
+        type Future = Pin<Box<dyn Future<Output = Result<HttpResponse, FallibleError>> + Send>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.inner.poll_ready(cx).map_err(|_| FallibleError)
+        }
+
+        fn call(&mut self, _request: IncomingRequest) -> Self::Future {
+            Box::pin(async { Err(FallibleError) })
         }
     }
 }

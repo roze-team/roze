@@ -73,6 +73,14 @@ enum ProjectKind {
     Rpc,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RpcClientBinding {
+    name: String,
+    dep_name: String,
+    crate_name: String,
+    path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerateMode {
     Create,
@@ -2355,13 +2363,14 @@ pub fn write_swift_client(api: &Path, out: &Path) -> anyhow::Result<()> {
 fn api_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
         GeneratorCommand::ApiGenerate { api, out, options } => {
+            let rpc_clients = read_api_rpc_client_bindings(&api)?;
             let source = read_api_source(&api)?;
             let spec = crate::parser::parse_api(&source)?;
             validate_project_kind(&spec, ProjectKind::Rest)?;
             if matches!(options.mode, GenerateMode::Force) {
                 cleanup_rest_project(&out)?;
             }
-            generate_rest_project(&spec, &out, options)
+            generate_rest_project_with_rpc_clients(&spec, &out, options, &rpc_clients)
                 .with_context(|| format!("failed to generate api project at {}", out.display()))
         }
         other => bail!("unexpected command variant for api.generate: {other:?}"),
@@ -2590,6 +2599,15 @@ fn generate_rest_project(
     out: &Path,
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
+    generate_rest_project_with_rpc_clients(spec, out, options, &[])
+}
+
+fn generate_rest_project_with_rpc_clients(
+    spec: &ApiSpec,
+    out: &Path,
+    options: GenerateOptions,
+    rpc_clients: &[RpcClientBinding],
+) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
 
     fs::create_dir_all(out.join("src"))?;
@@ -2603,7 +2621,7 @@ fn generate_rest_project(
     fs::create_dir_all(out.join("src/types"))?;
     fs::create_dir_all(out.join("ops"))?;
     fs::create_dir_all(out.join(".cargo"))?;
-    write_cargo_toml(spec, out, options, ProjectKind::Rest)?;
+    write_cargo_toml_with_rpc_clients(spec, out, options, ProjectKind::Rest, rpc_clients)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rest))?;
     fs::write(
@@ -2630,6 +2648,58 @@ fn generate_rest_project(
     fs::write(
         out.join("ops/release-rollout.yaml"),
         release_rollout_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/incident-response.yaml"),
+        incident_response_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/capacity-plan.yaml"),
+        capacity_plan_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/security-readiness.yaml"),
+        security_readiness_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/production-gate.yaml"),
+        production_gate_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/regeneration-policy.yaml"),
+        regeneration_policy_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/client-contract.yaml"),
+        client_contract_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/config-governance.yaml"),
+        config_governance_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/reliable-events.yaml"),
+        reliable_events_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/dependency-governance.yaml"),
+        dependency_governance_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/data-consistency.yaml"),
+        data_consistency_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/observability-contract.yaml"),
+        observability_contract_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/runtime-hardening.yaml"),
+        runtime_hardening_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/error-contract.yaml"),
+        error_contract_yaml(spec, ProjectKind::Rest),
     )?;
     write_preserved(
         &out.join("config.yaml"),
@@ -2693,7 +2763,7 @@ fn generate_rest_project(
     )?;
     write_preserved(
         &out.join("src/svc/mod.rs"),
-        service_context_rs(ProjectKind::Rest),
+        rest_service_context_rs(rpc_clients),
         options.mode,
     )?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
@@ -2751,6 +2821,58 @@ pub(super) fn generate_rpc_project(
     fs::write(
         out.join("ops/release-rollout.yaml"),
         release_rollout_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/incident-response.yaml"),
+        incident_response_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/capacity-plan.yaml"),
+        capacity_plan_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/security-readiness.yaml"),
+        security_readiness_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/production-gate.yaml"),
+        production_gate_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/regeneration-policy.yaml"),
+        regeneration_policy_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/client-contract.yaml"),
+        client_contract_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/config-governance.yaml"),
+        config_governance_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/reliable-events.yaml"),
+        reliable_events_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/dependency-governance.yaml"),
+        dependency_governance_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/data-consistency.yaml"),
+        data_consistency_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/observability-contract.yaml"),
+        observability_contract_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/runtime-hardening.yaml"),
+        runtime_hardening_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/error-contract.yaml"),
+        error_contract_yaml(spec, ProjectKind::Rpc),
     )?;
     fs::write(out.join("build.rs"), build_rs())?;
     write_preserved(
@@ -3061,6 +3183,16 @@ fn write_cargo_toml(
     options: GenerateOptions,
     kind: ProjectKind,
 ) -> anyhow::Result<()> {
+    write_cargo_toml_with_rpc_clients(spec, out, options, kind, &[])
+}
+
+fn write_cargo_toml_with_rpc_clients(
+    spec: &ApiSpec,
+    out: &Path,
+    options: GenerateOptions,
+    kind: ProjectKind,
+    rpc_clients: &[RpcClientBinding],
+) -> anyhow::Result<()> {
     let path = out.join("Cargo.toml");
     let package_name = package_name_from_output(out, spec);
     let workspace_root = find_workspace_root(out)?;
@@ -3085,6 +3217,8 @@ fn write_cargo_toml(
                 local_crates_prefix.as_deref(),
                 workspace_root.is_some(),
                 kind,
+                out,
+                rpc_clients,
             ),
         )
         .with_context(|| format!("failed to write {}", path.display()));
@@ -3110,6 +3244,15 @@ fn write_cargo_toml(
             ),
         );
     }
+    for client in rpc_clients {
+        dependencies.insert(
+            &client.dep_name,
+            toml_edit::value(toml_edit::InlineTable::from_iter([(
+                "path",
+                toml_edit::Value::from(rpc_client_dependency_path(out, client)),
+            )])),
+        );
+    }
 
     fs::write(&path, document.to_string())
         .with_context(|| format!("failed to write {}", path.display()))
@@ -3121,10 +3264,14 @@ fn has_entries(path: &Path) -> anyhow::Result<bool> {
 
 pub(super) fn read_api_source(path: &Path) -> anyhow::Result<String> {
     let mut seen = HashSet::new();
-    read_api_source_inner(path, &mut seen)
+    read_api_source_inner(path, &mut seen, true)
 }
 
-fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Result<String> {
+fn read_api_source_inner(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+    include_pure_rpc: bool,
+) -> anyhow::Result<String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -3138,6 +3285,9 @@ fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Re
     }
     let source = fs::read_to_string(&absolute)
         .with_context(|| format!("failed to read {}", absolute.display()))?;
+    if !include_pure_rpc && source_is_pure_rpc_contract(&source) {
+        return Ok(String::new());
+    }
     let base = absolute
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", absolute.display()))?;
@@ -3147,7 +3297,7 @@ fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Re
         let line = raw.trim();
         if let Some(import) = parse_import_line(line) {
             let import_path = base.join(import);
-            out.push_str(&read_api_source_inner(&import_path, seen)?);
+            out.push_str(&read_api_source_inner(&import_path, seen, false)?);
             out.push('\n');
         } else if is_import_block_start(line) {
             for import_raw in lines.by_ref() {
@@ -3160,7 +3310,7 @@ fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Re
                 }
                 if let Some(import) = parse_import_path(import_line) {
                     let import_path = base.join(import);
-                    out.push_str(&read_api_source_inner(&import_path, seen)?);
+                    out.push_str(&read_api_source_inner(&import_path, seen, false)?);
                     out.push('\n');
                 } else {
                     anyhow::bail!(
@@ -3176,6 +3326,111 @@ fn read_api_source_inner(path: &Path, seen: &mut HashSet<PathBuf>) -> anyhow::Re
         }
     }
     Ok(out)
+}
+
+fn read_api_rpc_client_bindings(path: &Path) -> anyhow::Result<Vec<RpcClientBinding>> {
+    let mut seen = HashSet::new();
+    let mut bindings = BTreeSet::new();
+    collect_api_rpc_client_bindings(path, true, &mut seen, &mut bindings)?;
+    Ok(bindings.into_iter().collect())
+}
+
+fn collect_api_rpc_client_bindings(
+    path: &Path,
+    root: bool,
+    seen: &mut HashSet<PathBuf>,
+    bindings: &mut BTreeSet<RpcClientBinding>,
+) -> anyhow::Result<()> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let absolute = absolute
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    if !seen.insert(absolute.clone()) {
+        return Ok(());
+    }
+    let source = fs::read_to_string(&absolute)
+        .with_context(|| format!("failed to read {}", absolute.display()))?;
+    if !root && source_is_pure_rpc_contract(&source) {
+        bindings.insert(rpc_client_binding_for_import(path, &absolute)?);
+        return Ok(());
+    }
+
+    let base = absolute
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", absolute.display()))?;
+    let mut lines = source.lines();
+    while let Some(raw) = lines.next() {
+        let line = raw.trim();
+        if let Some(import) = parse_import_line(line) {
+            collect_api_rpc_client_bindings(&base.join(import), false, seen, bindings)?;
+        } else if is_import_block_start(line) {
+            for import_raw in lines.by_ref() {
+                let import_line = strip_inline_comment(import_raw).trim();
+                if import_line == ")" {
+                    break;
+                }
+                if import_line.is_empty() {
+                    continue;
+                }
+                if let Some(import) = parse_import_path(import_line) {
+                    collect_api_rpc_client_bindings(&base.join(import), false, seen, bindings)?;
+                } else {
+                    anyhow::bail!(
+                        "invalid import entry `{}` in {}",
+                        import_line,
+                        absolute.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_is_pure_rpc_contract(source: &str) -> bool {
+    crate::parser::parse_api(source)
+        .map(|spec| !spec.rpc_methods.is_empty() && spec.rest_routes.is_empty())
+        .unwrap_or(false)
+}
+
+fn rpc_client_binding_for_import(
+    import_path: &Path,
+    absolute: &Path,
+) -> anyhow::Result<RpcClientBinding> {
+    let package = absolute
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .or_else(|| absolute.file_stem().and_then(|name| name.to_str()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "failed to infer rpc client crate for {}",
+                absolute.display()
+            )
+        })?;
+    let dep_name = normalize_crate_name(package);
+    let service_name = dep_name
+        .strip_suffix("-rpc")
+        .unwrap_or(&dep_name)
+        .rsplit('-')
+        .next()
+        .unwrap_or(dep_name.as_str())
+        .to_string();
+    let path = import_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(RpcClientBinding {
+        name: service_name,
+        dep_name,
+        crate_name: normalize_crate_name(package).replace('-', "_"),
+        path,
+    })
 }
 
 fn parse_import_line(line: &str) -> Option<&str> {
@@ -3212,6 +3467,8 @@ fn cargo_toml(
     local_crates_prefix: Option<&str>,
     in_workspace: bool,
     kind: ProjectKind,
+    out: &Path,
+    rpc_clients: &[RpcClientBinding],
 ) -> String {
     let roze_dependencies = roze_dependencies(
         dependency_source,
@@ -3298,6 +3555,7 @@ tonic-prost-build = "0.14.6""#
     } else {
         format!("\n[build-dependencies]\n{build_dependencies}\n")
     };
+    let rpc_client_dependencies = render_rpc_client_dependencies(out, rpc_clients);
 
     format!(
         r#"[package]
@@ -3307,15 +3565,49 @@ name = "{package_name}"
 [dependencies]
 {dependencies}
 {roze_dependencies}
+{rpc_client_dependencies}
 {remaining_dependencies}
 {build_dependencies_section}"#,
         package_name = package_name,
         package = package,
         dependencies = dependencies,
         roze_dependencies = roze_dependencies,
+        rpc_client_dependencies = rpc_client_dependencies,
         remaining_dependencies = remaining_dependencies,
         build_dependencies_section = build_dependencies_section,
     )
+}
+
+fn render_rpc_client_dependencies(out: &Path, rpc_clients: &[RpcClientBinding]) -> String {
+    rpc_clients
+        .iter()
+        .map(|client| {
+            format!(
+                r#"{} = {{ path = "{}" }}"#,
+                client.dep_name,
+                rpc_client_dependency_path(out, client)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rpc_client_dependency_path(out: &Path, client: &RpcClientBinding) -> String {
+    let path = Path::new(&client.path);
+    if path.is_absolute() {
+        if let Some(parent) = out.parent() {
+            if let (Ok(parent), Ok(client_path)) = (parent.canonicalize(), path.canonicalize()) {
+                if let Ok(stripped) = client_path.strip_prefix(&parent) {
+                    return format!("../{}", path_to_forward_slashes(stripped));
+                }
+            }
+        }
+    }
+    path_to_forward_slashes(path)
+}
+
+fn path_to_forward_slashes(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn package_name_from_output(out: &Path, spec: &ApiSpec) -> String {
@@ -3562,6 +3854,43 @@ Failure-injection plans are generated at `ops/failure-injection-plan.yaml`; run
 them in staging before promotion and copy observed recovery into the report.
 Release rollout gates are generated at `ops/release-rollout.yaml`; use them for
 canary, blue-green, rollback, and post-release evidence before broad rollout.
+Incident response playbooks are generated at `ops/incident-response.yaml`; use
+them to connect alerts to triage, mitigation, rollback, and postmortem evidence.
+Capacity plans are generated at `ops/capacity-plan.yaml`; use them to prove
+load, soak, burst, resource trend, and scaling behavior before broad rollout.
+Security readiness plans are generated at `ops/security-readiness.yaml`; use
+them to prove auth, authorization, tenant isolation, key rotation, mTLS, and
+audit evidence before broad rollout.
+Production gates are generated at `ops/production-gate.yaml`; use that file as
+the CI or platform entrypoint that validates all generated production assets.
+Regeneration policies are generated at `ops/regeneration-policy.yaml`; use them
+to block unsafe IDL drift, generated ownership edits, and missing evidence reruns.
+Client contracts are generated at `ops/client-contract.yaml`; use them to
+validate generated SDK/OpenAPI/proto projections, typed errors, auth injection,
+timeouts, retry budget, and trace propagation.
+Config governance plans are generated at `ops/config-governance.yaml`; use them
+to validate config schema, diff, audit, canary rollout, hot reload isolation,
+rollback, and snapshot recovery evidence.
+Reliable event plans are generated at `ops/reliable-events.yaml`; use them to
+validate event envelopes, idempotency, outbox/inbox, DLQ, replay, lag, retry
+budget, and retry storm protection before enabling asynchronous workflows.
+Dependency governance plans are generated at `ops/dependency-governance.yaml`;
+use them to validate service discovery, load balancing, connection pools,
+deadline propagation, circuit breakers, bulkheads, outlier behavior, and
+fallback evidence for every downstream.
+Data consistency plans are generated at `ops/data-consistency.yaml`; use them to
+validate transactions, migrations, idempotent writes, outbox/DTM/Saga, read-write
+consistency, backup restore, and data rollback evidence.
+Observability contracts are generated at `ops/observability-contract.yaml`; use
+them to validate metrics, logs, traces, profiles, sampling, label cardinality,
+debug queries, and evidence retention.
+Runtime hardening contracts are generated at `ops/runtime-hardening.yaml`; use
+them to validate timeout, rate limit, circuit breaker, load shedding, retry
+budget, deadline propagation, graceful shutdown, backpressure, and resource
+guard evidence.
+Error contracts are generated at `ops/error-contract.yaml`; use them to validate
+typed errors, transport status mapping, retryability, trace correlation, client
+behavior, redaction, and failure metrics.
 
 ## Evidence Scaffold
 
@@ -3633,6 +3962,19 @@ architecture:
     - generated_slo_error_budget
     - generated_failure_injection_plan
     - generated_release_rollout_gates
+    - generated_incident_response_playbook
+    - generated_capacity_plan
+    - generated_security_readiness_plan
+    - generated_production_gate
+    - generated_regeneration_policy
+    - generated_client_contract
+    - generated_config_governance
+    - generated_reliable_events_plan
+    - generated_dependency_governance
+    - generated_data_consistency_plan
+    - generated_observability_contract
+    - generated_runtime_hardening_contract
+    - generated_error_contract
     - lifecycle_snapshot_evidence
     - failure_timeline_required
     - resource_trend_required
@@ -3678,6 +4020,19 @@ evidence_required:
   slo_error_budget_report: true
   failure_injection_plan: true
   release_rollout_plan: true
+  incident_response_playbook: true
+  capacity_plan: true
+  security_readiness_plan: true
+  production_gate: true
+  regeneration_policy: true
+  client_contract: true
+  config_governance: true
+  reliable_events_plan: true
+  dependency_governance: true
+  data_consistency_plan: true
+  observability_contract: true
+  runtime_hardening_contract: true
+  error_contract: true
   lifecycle_summary_consistency: true
   failure_injection_timeline: true
   rollback_notes: true
@@ -4280,6 +4635,2440 @@ rollback_required:
     )
 }
 
+fn incident_response_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let user_probe = match kind {
+        ProjectKind::Rest => "representative_http_request_and_health_probes",
+        ProjectKind::Rpc => "representative_rpc_call_and_client_deadline_probe",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Fill owner and channel before broad production rollout.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+owner:
+  primary: required
+  secondary: required
+  escalation_channel: required
+  customer_comms_channel: required
+linked_assets:
+  evidence_runbook: ops/production-evidence.md
+  governance_baseline: ops/governance-baseline.yaml
+  alert_rules: ops/prometheus-rules.yaml
+  dashboard: ops/grafana-dashboard.json
+  slo: ops/slo.yaml
+  failure_injection: ops/failure-injection-plan.yaml
+  release_rollout: ops/release-rollout.yaml
+severity:
+  sev1:
+    page: immediate
+    examples:
+      - service_down
+      - broad_5xx_regression
+      - failed_rollout_without_automatic_recovery
+    decision_window: 5m
+  sev2:
+    page: immediate
+    examples:
+      - sustained_p99_latency_regression
+      - circuit_breaker_open
+      - load_shedding_sustained
+    decision_window: 15m
+  sev3:
+    page: business_hours
+    examples:
+      - slow_error_budget_burn
+      - isolated_dependency_degradation
+      - config_reload_rejected
+    decision_window: 1h
+response_matrix:
+  - alert: RozeGeneratedServiceDown
+    severity: sev1
+    confirm:
+      metrics_query: up{{service="{name}"}}
+      user_probe: {user_probe}
+      log_query: startup_readiness_shutdown_and_panic_logs
+      trace_query: first_failing_request_or_rpc_trace
+    mitigate:
+      - stop_current_rollout
+      - check_readiness_and_registry_membership
+      - rollback_to_last_known_good_version_if_new_release
+      - fail_traffic_to_healthy_instances_or_region
+    rollback_when:
+      - outage_started_after_release_or_config_change
+      - readiness_does_not_recover_within_5m
+    evidence_required:
+      - incident_start_time
+      - detection_source
+      - rollback_or_failover_action
+      - recovery_time
+      - affected_endpoints_or_methods
+
+  - alert: RozeGeneratedServiceHighErrorRate
+    severity: sev1
+    confirm:
+      metrics_query: sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+      log_query: error_logs_grouped_by_code_and_dependency
+      trace_query: top_error_traces_with_correlation_id
+    mitigate:
+      - identify_new_release_config_or_dependency_change
+      - open_or_tighten_circuit_breaker_for_failing_dependency
+      - reduce_canary_or_rollback_if_release_related
+      - disable_optional_feature_or_route_if_available
+    rollback_when:
+      - error_rate_above_1_percent_for_5m
+      - error_budget_fast_burn_detected
+    evidence_required:
+      - top_error_classes
+      - dependency_status
+      - breaker_state
+      - retry_budget_usage
+      - recovery_time
+
+  - alert: RozeGeneratedServiceHighP99Latency
+    severity: sev2
+    confirm:
+      metrics_query: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
+      log_query: slow_request_or_rpc_logs
+      trace_query: p99_trace_samples
+    mitigate:
+      - check_downstream_latency_and_connection_pools
+      - verify_timeout_budget_and_deadline_propagation
+      - enable_or_tighten_load_shedding_if_saturation_detected
+      - rollback_if_latency_regression_started_after_release
+    rollback_when:
+      - p99_latency_above_slo_for_10m_after_release
+      - saturation_continues_after_shedding
+    evidence_required:
+      - p95_p99_before_during_after
+      - slowest_dependencies
+      - timeout_configuration
+      - resource_trend
+
+  - alert: RozeGeneratedServiceCircuitBreakerOpen
+    severity: sev2
+    confirm:
+      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="breaker"}}
+      log_query: breaker_transition_logs
+      trace_query: downstream_failure_trace_samples
+    mitigate:
+      - verify_downstream_health
+      - keep_breaker_open_if_dependency_is_failing
+      - reduce_retry_pressure
+      - route_to_healthy_dependency_pool_if_available
+    rollback_when:
+      - breaker_open_started_after_release
+      - fallback_path_is_missing_or_failing
+    evidence_required:
+      - breaker_open_half_open_closed_timeline
+      - downstream_owner_contacted
+      - fallback_result
+      - recovery_time
+
+  - alert: RozeGeneratedServiceLoadShedding
+    severity: sev2
+    confirm:
+      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="load_shedding"}}
+      log_query: load_shedding_decision_logs
+      trace_query: shed_and_accepted_request_trace_samples
+    mitigate:
+      - inspect_cpu_memory_connections_and_queue_depth
+      - reduce_traffic_or_canary_weight
+      - shed_optional_work_before_core_paths
+      - rollback_if_new_version_increased_resource_cost
+    rollback_when:
+      - shedding_sustained_for_5m_after_release
+      - accepted_requests_miss_latency_slo
+    evidence_required:
+      - shed_rate
+      - accepted_latency
+      - resource_trend
+      - traffic_level
+
+  - alert: RozeGeneratedServiceRestarting
+    severity: sev1
+    confirm:
+      metrics_query: increase(process_start_time_seconds{{service="{name}"}}[15m])
+      log_query: panic_oom_startup_and_shutdown_logs
+      trace_query: last_successful_trace_before_restart
+    mitigate:
+      - freeze_rollout
+      - inspect_crash_or_oom_reason
+      - rollback_release_or_config_if_restart_started_after_change
+      - reduce_traffic_until_stable
+    rollback_when:
+      - more_than_one_restart_in_15m_after_release
+      - startup_probe_fails_after_restart
+    evidence_required:
+      - restart_count
+      - crash_reason
+      - memory_trend
+      - rollback_action
+
+  - alert: ConfigReloadRejectedOrRolledBack
+    severity: sev3
+    confirm:
+      metrics_query: roze_config_reload_total{{service="{name}",result=~"rejected|rollback"}}
+      log_query: config_reload_validation_and_audit_logs
+      trace_query: config_reload_trace_if_available
+    mitigate:
+      - keep_last_known_good_config
+      - identify_invalid_field_and_operator
+      - rerun_config_validation_before_retry
+      - attach_config_diff_to_evidence
+    rollback_when:
+      - invalid_config_was_applied_to_any_instance
+      - service_behavior_changed_after_config_push
+    evidence_required:
+      - config_version
+      - rejected_fields
+      - operator
+      - last_known_good_version
+postmortem_required:
+  timeline: true
+  customer_impact: true
+  metrics_traces_logs: true
+  rollback_or_mitigation_result: true
+  followup_owner: true
+  prevention_change: true
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        request_metric = request_metric,
+        latency_metric = latency_metric,
+        user_probe = user_probe,
+    )
+}
+
+fn capacity_plan_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let traffic_unit = match kind {
+        ProjectKind::Rest => "requests_per_second",
+        ProjectKind::Rpc => "rpc_calls_per_second",
+    };
+    let driver = match kind {
+        ProjectKind::Rest => "representative_http_workload_with_health_and_metrics_scrapes",
+        ProjectKind::Rpc => "representative_rpc_workload_with_client_deadlines",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Replace placeholder targets with service-owner approved values.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+traffic_unit: {traffic_unit}
+traffic_driver: {driver}
+objectives:
+  prove_sustained_capacity: true
+  prove_burst_tolerance: true
+  prove_resource_trend_stability: true
+  prove_scaling_behavior: true
+  prove_governance_under_pressure: true
+targets:
+  baseline_rps: required
+  peak_rps: required
+  burst_multiplier: 2
+  soak_duration_minimum: 24h
+  extended_soak_duration: 72h
+  max_error_rate_percent: 1
+  max_p99_latency_seconds: 1
+  max_resilience_rejection_rate_percent: 0.5
+  cpu_saturation_threshold_percent: 75
+  memory_growth_threshold_percent_per_hour: 2
+  restart_tolerance: 0
+measurements:
+  request_rate: sum(rate({request_metric}{{service="{name}"}}[5m]))
+  error_rate: sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+  p99_latency: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
+  resilience_decisions: sum(rate(roze_resilience_decisions_total{{service="{name}"}}[5m])) by (kind, decision)
+  restarts: increase(process_start_time_seconds{{service="{name}"}}[15m])
+  memory: process_resident_memory_bytes{{service="{name}"}}
+  cpu: rate(process_cpu_seconds_total{{service="{name}"}}[5m])
+plans:
+  - phase: baseline_characterization
+    duration: 30m
+    load: baseline_rps
+    pass:
+      - p99_latency_within_target
+      - error_rate_within_target
+      - no_restarts
+      - no_unexpected_governance_rejections
+    evidence:
+      - request_rate_graph
+      - p95_p99_latency_graph
+      - error_rate_graph
+      - representative_traces
+
+  - phase: step_load
+    duration: 2h
+    load_steps:
+      - 25_percent_peak
+      - 50_percent_peak
+      - 75_percent_peak
+      - 100_percent_peak
+    hold_each: 30m
+    pass:
+      - latency_curve_has_no_cliff
+      - resource_curve_is_bounded
+      - retry_budget_not_exhausted
+      - breaker_and_shedding_decisions_match_thresholds
+    evidence:
+      - per_step_capacity_table
+      - resource_trend_graph
+      - resilience_decision_graph
+      - dependency_latency_graph
+
+  - phase: burst
+    duration: 30m
+    load: peak_rps_times_burst_multiplier
+    pass:
+      - load_shedding_or_rate_limit_protects_core_paths
+      - accepted_traffic_stays_within_latency_target
+      - recovery_after_burst_within_5m
+    evidence:
+      - burst_start_and_end_time
+      - shed_or_rejected_rate
+      - recovery_time
+      - accepted_request_latency
+
+  - phase: soak_24h
+    duration: 24h
+    load: approved_sustained_peak
+    pass:
+      - no_memory_leak_trend
+      - no_connection_or_file_descriptor_growth
+      - no_restart
+      - slow_burn_rate_within_slo
+    evidence:
+      - memory_growth_percent_per_hour
+      - cpu_trend
+      - connection_trend
+      - error_budget_burn
+      - lifecycle_summary
+
+  - phase: soak_72h
+    duration: 72h
+    load: approved_sustained_peak
+    required_for: broad_production_stable_claim
+    pass:
+      - all_24h_soak_gates_remain_true
+      - resource_trends_stay_bounded_across_day_boundaries
+      - dependency_error_rates_do_not_amplify
+      - operational_alert_noise_is_acceptable
+    evidence:
+      - hourly_resource_table
+      - daily_latency_summary
+      - dependency_health_summary
+      - alert_noise_summary
+
+  - phase: scale_out
+    duration: 1h
+    action: add_instances_or_increase_worker_capacity_under_load
+    pass:
+      - traffic_distribution_rebalances
+      - p99_latency_improves_or_stabilizes
+      - no_registry_or_readiness_flapping
+    evidence:
+      - instance_count_timeline
+      - per_instance_request_rate
+      - registry_change_events
+
+  - phase: scale_in
+    duration: 1h
+    action: remove_instances_or_reduce_worker_capacity_under_load
+    pass:
+      - draining_completes_before_capacity_removal
+      - no_request_loss_beyond_slo
+      - readiness_turns_false_before_instance_exit
+    evidence:
+      - drain_timeline
+      - readiness_timeline
+      - error_rate_during_scale_in
+promotion_required:
+  baseline_characterization_passed: true
+  step_load_passed: true
+  burst_passed: true
+  soak_24h_passed: true
+  scale_out_passed: true
+  scale_in_passed: true
+  soak_72h_passed_for_broad_stability_claim: true
+  owner_signoff: required
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        traffic_unit = traffic_unit,
+        driver = driver,
+        request_metric = request_metric,
+        latency_metric = latency_metric,
+    )
+}
+
+fn security_readiness_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let auth_probe = match kind {
+        ProjectKind::Rest => {
+            "representative_http_request_with_valid_expired_missing_and_malformed_tokens"
+        }
+        ProjectKind::Rpc => {
+            "representative_rpc_call_with_valid_expired_missing_and_malformed_credentials"
+        }
+    };
+    let boundary_policy = match kind {
+        ProjectKind::Rest => "route_method_path_and_openapi_security_projection",
+        ProjectKind::Rpc => "rpc_method_and_proto_service_security_projection",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Fill concrete providers and owners before broad production rollout.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+security_model:
+  identity_provider: required
+  token_format: jwt_or_oidc_required
+  transport_security: tls_required
+  service_to_service_security: mtls_required_for_internal_production
+  tenant_isolation: required_when_multi_tenant
+  audit_log: required_for_authz_and_operator_actions
+  secret_storage: external_secret_manager_required
+  key_rotation: required
+policy_projection:
+  boundary_policy: {boundary_policy}
+  generated_contracts_must_include:
+    - authenticated_operations
+    - public_operations
+    - required_scopes_or_roles
+    - tenant_context_requirement
+    - error_response_shape
+readiness_checks:
+  - check: authentication
+    probe: {auth_probe}
+    pass:
+      - valid_credential_is_accepted
+      - missing_credential_is_rejected
+      - expired_credential_is_rejected
+      - malformed_credential_is_rejected
+      - auth_failure_uses_stable_error_model
+    evidence:
+      metrics_query: roze_auth_decisions_total{{service="{name}"}}
+      trace_query: auth_success_and_failure_trace_samples
+      log_query: auth_decision_logs_without_sensitive_token_material
+
+  - check: authorization
+    probe: allowed_denied_scope_role_and_abac_cases
+    pass:
+      - allowed_principal_can_access_expected_operation
+      - denied_principal_receives_forbidden
+      - role_scope_and_abac_denials_are_distinguishable_in_audit
+      - generated_sdk_or_openapi_metadata_reflects_required_policy
+    evidence:
+      metrics_query: roze_authz_decisions_total{{service="{name}"}}
+      trace_query: authorization_denial_trace_samples
+      log_query: authorization_audit_logs
+
+  - check: tenant_isolation
+    probe: cross_tenant_read_write_and_list_attempts
+    pass:
+      - tenant_context_is_required
+      - cross_tenant_read_is_denied
+      - cross_tenant_write_is_denied
+      - list_queries_are_tenant_scoped
+      - cache_keys_include_tenant_scope_when_needed
+    evidence:
+      metrics_query: roze_tenant_isolation_decisions_total{{service="{name}"}}
+      trace_query: cross_tenant_denial_trace_samples
+      log_query: tenant_isolation_audit_logs
+
+  - check: key_rotation
+    probe: old_new_and_revoked_signing_keys_during_rotation_window
+    pass:
+      - new_key_is_accepted
+      - old_key_is_accepted_only_inside_grace_window
+      - revoked_key_is_rejected
+      - jwks_or_key_cache_refresh_is_observed
+    evidence:
+      metrics_query: roze_key_rotation_total{{service="{name}"}}
+      trace_query: key_rotation_auth_trace_samples
+      log_query: key_rotation_and_cache_refresh_logs
+
+  - check: mtls
+    probe: valid_client_certificate_missing_certificate_and_wrong_spiffe_identity
+    pass:
+      - valid_service_identity_is_accepted
+      - missing_client_certificate_is_rejected
+      - wrong_service_identity_is_rejected
+      - certificate_expiry_alert_is_configured
+    evidence:
+      metrics_query: roze_mtls_handshake_total{{service="{name}"}}
+      trace_query: mtls_denial_trace_samples
+      log_query: mtls_identity_logs_without_private_key_material
+
+  - check: audit_log
+    probe: authz_denial_sensitive_read_sensitive_write_and_operator_action
+    pass:
+      - actor_subject_action_resource_tenant_and_result_are_recorded
+      - correlation_id_is_present
+      - sensitive_values_are_redacted
+      - audit_log_sink_failure_is_reported
+    evidence:
+      metrics_query: roze_audit_events_total{{service="{name}"}}
+      trace_query: audit_event_trace_correlation_samples
+      log_query: audit_log_query_by_correlation_id
+
+  - check: sensitive_data
+    probe: validation_error_debug_log_trace_and_metric_label_paths
+    pass:
+      - secrets_tokens_and_passwords_never_appear_in_logs
+      - sensitive_fields_are_redacted_in_debug_output
+      - metric_labels_do_not_contain_pii_or_secret_material
+      - error_responses_do_not_leak_internal_dependency_details
+    evidence:
+      metrics_query: roze_sensitive_data_scan_total{{service="{name}",result="pass"}}
+      trace_query: redaction_validation_trace_samples
+      log_query: redaction_scan_report
+
+  - check: dependency_security
+    probe: outbound_dependency_identity_timeout_and_scope_review
+    pass:
+      - dependency_credentials_are_not_in_config_yaml_plaintext
+      - outbound_calls_have_deadline_and_identity
+      - least_privilege_scope_is_documented
+      - dependency_rotation_plan_exists
+    evidence:
+      metrics_query: roze_dependency_security_checks_total{{service="{name}"}}
+      trace_query: outbound_dependency_trace_samples
+      log_query: dependency_security_review_logs
+promotion_required:
+  authentication_passed: true
+  authorization_passed: true
+  tenant_isolation_passed: true
+  key_rotation_passed: true
+  mtls_plan_attached: true
+  audit_log_passed: true
+  sensitive_data_scan_passed: true
+  dependency_security_review_passed: true
+  security_owner_signoff: required
+blocking_findings:
+  - plaintext_secret_in_repo_or_config
+  - missing_auth_on_non_public_operation
+  - cross_tenant_access_allowed
+  - revoked_key_accepted
+  - sensitive_token_or_secret_in_logs
+  - missing_audit_for_privileged_action
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        auth_probe = auth_probe,
+        boundary_policy = boundary_policy,
+    )
+}
+
+fn production_gate_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let compile_probe = match kind {
+        ProjectKind::Rest => "cargo_check_generated_rest_service",
+        ProjectKind::Rpc => "cargo_check_generated_rpc_service",
+    };
+    let runtime_probe = match kind {
+        ProjectKind::Rest => "healthz_readyz_startupz_metrics_and_representative_http_request",
+        ProjectKind::Rpc => "startup_readiness_metrics_and_representative_rpc_call",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Wire this file into CI or your deployment platform.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: production_promotion_gate
+assets:
+  production_evidence: ops/production-evidence.md
+  governance_baseline: ops/governance-baseline.yaml
+  prometheus_rules: ops/prometheus-rules.yaml
+  grafana_dashboard: ops/grafana-dashboard.json
+  slo: ops/slo.yaml
+  failure_injection: ops/failure-injection-plan.yaml
+  release_rollout: ops/release-rollout.yaml
+  incident_response: ops/incident-response.yaml
+  capacity_plan: ops/capacity-plan.yaml
+  security_readiness: ops/security-readiness.yaml
+  regeneration_policy: ops/regeneration-policy.yaml
+  client_contract: ops/client-contract.yaml
+  config_governance: ops/config-governance.yaml
+  reliable_events: ops/reliable-events.yaml
+  dependency_governance: ops/dependency-governance.yaml
+  data_consistency: ops/data-consistency.yaml
+  observability_contract: ops/observability-contract.yaml
+  runtime_hardening: ops/runtime-hardening.yaml
+  error_contract: ops/error-contract.yaml
+required_stages:
+  - stage: generated_code_integrity
+    required: true
+    source: ops/regeneration-policy.yaml
+    checks:
+      - cargo_fmt_check
+      - cargo_test
+      - {compile_probe}
+      - generated_owned_files_are_regenerated_from_idl
+      - application_owned_files_are_preserved_on_update
+      - idl_drift_classified
+      - breaking_changes_have_owner_signoff
+    evidence:
+      - ci_run_url
+      - generated_diff_summary
+      - idl_commit
+
+  - stage: runtime_smoke
+    required: true
+    checks:
+      - {runtime_probe}
+      - config_loads_from_expected_location
+      - metrics_are_scrapeable
+      - tracing_correlation_id_present
+      - structured_logs_have_service_boundary_and_version
+    evidence:
+      - smoke_command
+      - smoke_output
+      - metrics_sample
+      - trace_sample
+
+  - stage: observability_contract
+    required: true
+    source: ops/observability-contract.yaml
+    checks:
+      - required_metrics_exported
+      - structured_logs_have_required_fields
+      - trace_propagation_verified
+      - profile_or_runtime_diagnostics_defined
+      - label_cardinality_budget_defined
+      - debug_queries_documented
+    evidence:
+      - metrics_sample
+      - log_query_sample
+      - trace_query_sample
+      - dashboard_link
+      - profile_or_diagnostics_sample
+
+  - stage: runtime_hardening
+    required: true
+    source: ops/runtime-hardening.yaml
+    checks:
+      - timeout_deadline_and_cancellation_verified
+      - rate_limit_and_backpressure_verified
+      - circuit_breaker_state_transitions_verified
+      - load_shedding_threshold_verified
+      - retry_budget_caps_amplification
+      - graceful_shutdown_and_drain_verified
+      - resource_guardrails_have_alerts
+    evidence:
+      - resilience_metric_sample
+      - deadline_trace_sample
+      - breaker_transition_sample
+      - shedding_decision_sample
+      - shutdown_timeline
+      - resource_trend_sample
+
+  - stage: error_contract
+    required: true
+    source: ops/error-contract.yaml
+    checks:
+      - typed_error_catalog_defined
+      - transport_status_mapping_verified
+      - retryability_and_idempotency_flags_defined
+      - trace_id_and_request_id_returned_or_logged
+      - sensitive_error_details_redacted
+      - client_behavior_documented
+      - failure_metrics_are_bounded
+    evidence:
+      - error_catalog_review
+      - representative_error_response
+      - grpc_status_or_http_status_sample
+      - client_retry_behavior_report
+      - redaction_scan_result
+      - error_metric_sample
+
+  - stage: client_contract
+    required: true
+    source: ops/client-contract.yaml
+    checks:
+      - contract_projection_generated
+      - typed_errors_documented
+      - timeout_and_retry_budget_exposed_to_clients
+      - auth_injection_defined
+      - trace_and_correlation_propagation_defined
+      - sdk_smoke_tests_passed
+    evidence:
+      - openapi_or_proto_artifact
+      - sdk_generation_output
+      - typed_error_table
+      - client_smoke_report
+
+  - stage: governance
+    required: true
+    source: ops/governance-baseline.yaml
+    checks:
+      - timeout_configured
+      - rate_limit_configured
+      - circuit_breaker_configured
+      - load_shedding_configured
+      - retry_budget_configured
+      - deadline_propagation_verified
+      - discovery_load_balancing_tracing_metrics_verified
+    evidence:
+      - governance_review
+      - resilience_metric_sample
+      - dashboard_link
+
+  - stage: config_governance
+    required: true
+    source: ops/config-governance.yaml
+    checks:
+      - config_schema_validated
+      - config_diff_reviewed
+      - config_audit_recorded
+      - canary_config_rollout_defined
+      - invalid_config_rejected_or_rolled_back
+      - config_snapshot_restore_tested
+    evidence:
+      - config_diff
+      - config_version
+      - audit_record
+      - rollback_result
+      - snapshot_restore_result
+
+  - stage: reliable_events
+    required: true
+    source: ops/reliable-events.yaml
+    checks:
+      - event_envelope_defined_or_declared_not_used
+      - idempotency_key_policy_defined
+      - outbox_inbox_policy_defined
+      - dlq_replay_and_purge_defined
+      - retry_budget_and_storm_protection_defined
+      - lag_metrics_and_alerts_defined
+    evidence:
+      - event_contract_review
+      - idempotency_test_report
+      - dlq_replay_test_result
+      - retry_budget_metric_sample
+      - lag_metric_sample
+
+  - stage: dependency_governance
+    required: true
+    source: ops/dependency-governance.yaml
+    checks:
+      - downstream_inventory_declared
+      - service_discovery_or_static_endpoint_policy_defined
+      - load_balancing_policy_defined
+      - timeout_deadline_and_cancellation_verified
+      - circuit_breaker_and_bulkhead_verified
+      - fallback_or_degradation_path_defined
+    evidence:
+      - dependency_inventory
+      - registry_change_test
+      - load_balancing_distribution_sample
+      - breaker_transition_sample
+      - fallback_test_result
+
+  - stage: data_consistency
+    required: true
+    source: ops/data-consistency.yaml
+    checks:
+      - persistence_boundary_declared
+      - migrations_have_forward_and_rollback_plan
+      - idempotent_write_policy_defined
+      - transaction_outbox_or_dtm_policy_defined
+      - backup_restore_tested
+      - data_reconciliation_defined
+    evidence:
+      - migration_plan
+      - idempotency_test_report
+      - consistency_failure_drill
+      - backup_restore_result
+      - reconciliation_report
+
+  - stage: reliability_evidence
+    required: true
+    checks:
+      - generated_services_report_complete
+      - lifecycle_report_complete
+      - failure_injection_plan_complete
+      - incident_response_playbook_reviewed
+      - rollback_notes_present
+    evidence:
+      - production_evidence_report
+      - lifecycle_summary
+      - failure_timeline
+      - incident_tabletop_result
+
+  - stage: release_control
+    required: true
+    source: ops/release-rollout.yaml
+    checks:
+      - preflight_passed
+      - canary_gate_defined
+      - progressive_rollout_gate_defined
+      - blue_green_or_manual_rollback_defined
+      - rollback_owner_named
+    evidence:
+      - rollout_plan
+      - rollback_command_or_platform_action
+      - owner_signoff
+
+  - stage: capacity_and_soak
+    required: true
+    source: ops/capacity-plan.yaml
+    checks:
+      - baseline_characterization_passed
+      - step_load_passed
+      - burst_passed
+      - soak_24h_passed
+      - scale_out_passed
+      - scale_in_passed
+    broad_stability_claim_requires:
+      - soak_72h_passed
+    evidence:
+      - load_test_report
+      - resource_trend_report
+      - capacity_table
+      - scaling_timeline
+
+  - stage: security_readiness
+    required: true
+    source: ops/security-readiness.yaml
+    checks:
+      - authentication_passed
+      - authorization_passed
+      - tenant_isolation_passed
+      - key_rotation_passed
+      - mtls_plan_attached
+      - audit_log_passed
+      - sensitive_data_scan_passed
+      - dependency_security_review_passed
+    evidence:
+      - security_review
+      - authz_test_report
+      - tenant_isolation_report
+      - audit_log_sample
+blocking_rules:
+  - missing_required_asset
+  - missing_owner_signoff
+  - missing_rollback_path
+  - failing_or_unrun_required_stage
+  - unresolved_sev1_or_sev2_incident_from_release
+  - slo_fast_burn_detected
+  - capacity_resource_trend_unbounded
+  - security_blocking_finding_present
+promotion_levels:
+  controlled_production:
+    requires:
+      - generated_code_integrity
+      - runtime_smoke
+      - governance
+      - reliability_evidence
+      - release_control
+      - security_readiness
+  broad_production_stable:
+    requires:
+      - controlled_production
+      - capacity_and_soak
+      - soak_72h_passed
+      - post_release_observation_complete
+reporting:
+  required_output:
+    - promotion_level
+    - passed_stages
+    - failed_stages
+    - blocking_rules_triggered
+    - evidence_links
+    - owner_signoff
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        compile_probe = compile_probe,
+        runtime_probe = runtime_probe,
+    )
+}
+
+fn regeneration_policy_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let generated_owned = match kind {
+        ProjectKind::Rest => {
+            r#"    - src/main.rs
+    - src/openapi/mod.rs
+    - src/route/**
+    - src/handler/mod.rs
+    - src/types/mod.rs
+    - README.md
+    - ops/**"#
+        }
+        ProjectKind::Rpc => {
+            r#"    - src/main.rs
+    - src/pb/mod.rs
+    - src/server/mod.rs
+    - src/client/mod.rs
+    - src/types/mod.rs
+    - proto/service.proto
+    - build.rs
+    - README.md
+    - ops/**"#
+        }
+    };
+    let preserved = match kind {
+        ProjectKind::Rest => {
+            r#"    - config.yaml
+    - src/config/mod.rs
+    - src/svc/mod.rs
+    - src/logic/**
+    - src/middleware/**
+    - src/handler/*/*.rs
+    - src/model/**"#
+        }
+        ProjectKind::Rpc => {
+            r#"    - config.yaml
+    - src/config/mod.rs
+    - src/svc/mod.rs
+    - src/logic/**
+    - src/model/**"#
+        }
+    };
+    let contract_surface = match kind {
+        ProjectKind::Rest => {
+            "route_method_path_request_response_validation_openapi_security_projection"
+        }
+        ProjectKind::Rpc => "rpc_method_request_response_proto_service_security_projection",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Use this file to review update/regeneration safety.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+contract_surface: {contract_surface}
+regeneration_modes:
+  create:
+    allowed_when: output_directory_is_empty_or_missing
+    blocks_when:
+      - output_directory_contains_untracked_service_files
+  update:
+    allowed_when: preserving_application_owned_extension_points
+    blocks_when:
+      - generated_owned_file_was_hand_edited_without_regeneration
+      - idl_breaking_change_missing_owner_signoff
+      - production_gate_evidence_not_refreshed
+  force:
+    allowed_when: explicit_full_rebuild_approved
+    blocks_when:
+      - app_owned_files_have_uncommitted_changes
+      - rollback_plan_missing
+ownership:
+  generator_owned:
+{generated_owned}
+  application_owned_or_preserved:
+{preserved}
+  never_put_business_logic_in:
+    - generated transport glue
+    - generated DTO or protobuf modules
+    - generated route or RPC registration
+    - generated OpenAPI or SDK projection
+drift_classification:
+  non_breaking:
+    - adding_optional_request_field_with_default
+    - adding_response_field_that_clients_can_ignore
+    - adding_new_rest_route_or_rpc_method
+    - adding_new_error_variant_with_documented_mapping
+  risky:
+    - changing_timeout_rate_limit_breaker_or_shedding_defaults
+    - changing_auth_or_tenant_policy
+    - changing_dependency_or_config_schema
+    - changing_generated_metrics_labels
+  breaking:
+    - removing_route_or_rpc_method
+    - changing_path_method_or_rpc_name
+    - removing_or_renaming_required_field
+    - changing_field_type_or_semantics
+    - changing_error_response_shape
+    - weakening_auth_authorization_or_tenant_isolation
+required_on_change:
+  any_idl_change:
+    - regenerate_service
+    - cargo_fmt_check
+    - cargo_test
+    - runtime_smoke
+    - update_openapi_or_proto_artifacts
+  risky_change:
+    - rerun_production_gate
+    - refresh_governance_baseline_review
+    - refresh_slo_and_alert_review
+    - refresh_security_readiness_if_policy_related
+    - refresh_capacity_plan_if_resource_related
+  breaking_change:
+    - owner_signoff
+    - migration_or_client_rollout_plan
+    - rollback_plan
+    - release_rollout_refresh
+    - incident_response_refresh
+    - production_evidence_report_refresh
+ci_checks:
+  required_files_exist:
+    - ops/production-evidence.md
+    - ops/governance-baseline.yaml
+    - ops/prometheus-rules.yaml
+    - ops/grafana-dashboard.json
+    - ops/slo.yaml
+    - ops/failure-injection-plan.yaml
+    - ops/release-rollout.yaml
+    - ops/incident-response.yaml
+    - ops/capacity-plan.yaml
+    - ops/security-readiness.yaml
+    - ops/production-gate.yaml
+    - ops/regeneration-policy.yaml
+  block_if:
+    - generated_owned_file_changed_without_idl_or_generator_change
+    - preserved_file_deleted_by_regeneration
+    - breaking_change_without_migration_plan
+    - risky_change_without_refreshed_evidence
+evidence_required:
+  regeneration_diff_summary: true
+  ownership_boundary_review: true
+  idl_drift_classification: true
+  production_gate_result: true
+  rollback_plan_for_breaking_or_force: true
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        contract_surface = contract_surface,
+        generated_owned = generated_owned,
+        preserved = preserved,
+    )
+}
+
+fn client_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let contract_artifact = match kind {
+        ProjectKind::Rest => "src/openapi/mod.rs_and_generated_openapi_json",
+        ProjectKind::Rpc => "proto/service.proto_and_generated_tonic_client",
+    };
+    let sdk_targets = match kind {
+        ProjectKind::Rest => "typescript_javascript_dart_and_openapi_consumers",
+        ProjectKind::Rpc => "rust_tonic_clients_and_proto_consumers",
+    };
+    let smoke_probe = match kind {
+        ProjectKind::Rest => "generated_client_calls_representative_http_route",
+        ProjectKind::Rpc => "generated_client_calls_representative_rpc_method",
+    };
+
+    format!(
+        r#"# Generated by rozectl. This is a production contract for generated clients and consumers.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+contract_artifact: {contract_artifact}
+sdk_targets: {sdk_targets}
+principles:
+  idl_first: true
+  no_silent_contract_drift: true
+  typed_errors_required: true
+  timeout_required: true
+  retry_budget_required: true
+  auth_injection_required: true
+  trace_propagation_required: true
+projection_required:
+  request_types: true
+  response_types: true
+  error_model: true
+  validation_constraints: true
+  auth_policy: true
+  timeout_policy: true
+  retry_policy: true
+  trace_headers_or_metadata: true
+client_runtime_contract:
+  timeout:
+    required: true
+    client_can_override_within_service_budget: true
+    evidence: timeout_smoke_with_deadline_exceeded_result
+  retry_budget:
+    required: true
+    must_not_retry_non_idempotent_operations_without_policy: true
+    evidence: retry_attempts_capped_by_budget
+  auth_injection:
+    required: true
+    supports_token_or_credential_provider: true
+    evidence: valid_missing_expired_credentials_smoke
+  trace_propagation:
+    required: true
+    correlation_id_required: true
+    evidence: client_to_service_trace_sample
+  typed_errors:
+    required: true
+    stable_fields:
+      - code
+      - message
+      - trace_id
+      - details
+    evidence: typed_error_mapping_table
+  cancellation:
+    required: true
+    evidence: client_cancel_reaches_service_deadline_or_cancel_path
+smoke_tests:
+  - test: contract_projection_generated
+    probe: {contract_artifact}
+    pass:
+      - request_response_types_exist
+      - validation_constraints_projected
+      - auth_policy_projected
+      - error_model_projected
+    evidence:
+      - generated_contract_artifact
+      - projection_diff
+
+  - test: generated_client_success_path
+    probe: {smoke_probe}
+    pass:
+      - client_compiles
+      - request_serialization_matches_contract
+      - response_deserialization_matches_contract
+      - trace_or_correlation_id_observed
+    evidence:
+      - client_smoke_output
+      - trace_sample
+
+  - test: generated_client_failure_path
+    probe: invalid_request_auth_failure_timeout_and_server_error
+    pass:
+      - validation_error_maps_to_typed_error
+      - auth_error_maps_to_typed_error
+      - timeout_maps_to_typed_error
+      - server_error_preserves_trace_id
+    evidence:
+      - typed_error_table
+      - failure_smoke_output
+
+  - test: generated_client_governance_path
+    probe: retry_budget_timeout_cancellation_and_idempotency_policy
+    pass:
+      - retry_budget_caps_attempts
+      - timeout_stops_waiting
+      - cancellation_stops_inflight_call
+      - non_idempotent_retry_requires_explicit_policy
+    evidence:
+      - retry_attempt_log
+      - cancellation_trace
+      - timeout_trace
+promotion_required:
+  contract_projection_generated: true
+  generated_client_success_path_passed: true
+  generated_client_failure_path_passed: true
+  generated_client_governance_path_passed: true
+  typed_error_table_attached: true
+  client_owner_signoff: required
+blocking_findings:
+  - generated_client_does_not_compile
+  - contract_projection_missing_error_model
+  - auth_policy_not_projected
+  - timeout_or_retry_budget_not_projected
+  - trace_or_correlation_id_not_propagated
+  - typed_error_missing_trace_id
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        contract_artifact = contract_artifact,
+        sdk_targets = sdk_targets,
+        smoke_probe = smoke_probe,
+    )
+}
+
+fn config_governance_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let reload_probe = match kind {
+        ProjectKind::Rest => "reload_timeout_rate_limit_cors_registry_and_dependency_config",
+        ProjectKind::Rpc => "reload_timeout_registry_client_deadline_and_dependency_config",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Use this as the production contract for config changes.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+config_sources:
+  local_file: config.yaml
+  external_config_center: optional_required_for_broad_production
+  secret_manager: required_for_secrets
+principles:
+  schema_validated: true
+  no_plaintext_secrets: true
+  versioned_changes: true
+  audited_operator_actions: true
+  canary_before_global: true
+  rollback_ready: true
+  listener_failure_isolated: true
+schema:
+  required:
+    - service_name
+    - bind_address_or_endpoint
+    - timeout_budget
+    - resilience_settings
+    - tracing_metrics_settings
+    - registry_or_discovery_settings
+  validation:
+    - reject_unknown_critical_fields
+    - reject_negative_timeouts_or_limits
+    - reject_plaintext_secret_values
+    - reject_incomplete_dependency_endpoints
+change_control:
+  required_metadata:
+    - config_version
+    - operator
+    - change_reason
+    - linked_ticket
+    - rollout_scope
+    - rollback_version
+  diff_required: true
+  signature_or_approval_required: true
+  audit_log_required: true
+rollout:
+  - phase: validate
+    probe: parse_schema_validate_and_secret_scan
+    pass:
+      - schema_valid
+      - no_plaintext_secret
+      - rollback_version_exists
+      - owner_approved
+    evidence:
+      - config_diff
+      - validation_output
+      - approval_record
+
+  - phase: canary_reload
+    probe: {reload_probe}
+    pass:
+      - only_canary_instance_receives_change
+      - readiness_stays_true_or_drains_cleanly
+      - invalid_config_is_rejected
+      - listener_timeout_does_not_block_runtime
+      - metrics_report_reload_result
+    evidence:
+      metrics_query: roze_config_reload_total{{service="{name}"}}
+      log_query: config_reload_audit_logs
+      trace_query: config_reload_trace_if_available
+
+  - phase: global_rollout
+    probe: roll_config_to_all_instances_after_canary_passes
+    pass:
+      - all_instances_report_same_config_version
+      - no_restart_loop
+      - no_slo_fast_burn
+      - no_unexpected_resilience_decision_spike
+    evidence:
+      - config_version_per_instance
+      - metrics_snapshot
+      - alert_snapshot
+
+  - phase: rollback
+    probe: rollback_to_last_known_good_config
+    pass:
+      - previous_config_version_restored
+      - service_recovers_within_rollback_window
+      - rollback_action_is_audited
+      - rejected_config_is_quarantined
+    evidence:
+      - rollback_command_or_event
+      - recovery_time
+      - audit_record
+
+  - phase: snapshot_restore
+    probe: restore_config_snapshot_in_staging
+    pass:
+      - snapshot_checksum_verified
+      - restored_config_matches_expected_version
+      - service_starts_and_reports_ready
+    evidence:
+      - snapshot_id
+      - checksum
+      - startup_smoke_output
+failure_isolation:
+  listener_timeout:
+    max_duration: 5s
+    required: true
+  listener_panic:
+    must_not_crash_service: true
+  invalid_remote_event:
+    must_keep_last_known_good: true
+  config_center_unavailable:
+    service_uses_cached_or_local_config: true
+promotion_required:
+  schema_validation_passed: true
+  config_diff_reviewed: true
+  audit_record_attached: true
+  canary_reload_passed: true
+  invalid_config_rejection_tested: true
+  rollback_tested: true
+  snapshot_restore_tested: true
+  owner_signoff: required
+blocking_findings:
+  - plaintext_secret_in_config
+  - missing_rollback_version
+  - invalid_config_applied_globally
+  - listener_failure_blocks_runtime
+  - config_change_without_audit_record
+  - config_center_unavailable_breaks_startup
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        reload_probe = reload_probe,
+    )
+}
+
+fn reliable_events_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let producer_probe = match kind {
+        ProjectKind::Rest => "representative_http_mutation_publishes_or_declares_no_event",
+        ProjectKind::Rpc => "representative_rpc_mutation_publishes_or_declares_no_event",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required before enabling asynchronous side effects.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: reliable_event_readiness
+async_boundary:
+  enabled: service_owner_decision_required
+  if_disabled:
+    required_evidence: no_async_side_effects_or_external_event_contracts
+  if_enabled:
+    broker: kafka_nats_or_platform_supported_broker_required
+    delivery_semantics: at_least_once
+    exactly_once_claims_forbidden_without_evidence: true
+event_contract:
+  envelope_required: true
+  required_fields:
+    - event_id
+    - event_type
+    - schema_version
+    - occurred_at
+    - producer
+    - trace_id
+    - tenant_id_when_multi_tenant
+    - idempotency_key
+  schema_registry_or_contract_store_required: true
+  compatibility_policy: no_implicit_compatibility_claims
+producer:
+  probe: {producer_probe}
+  required:
+    - idempotency_key_generated_before_publish
+    - outbox_used_for_db_plus_event_atomicity
+    - publish_timeout_defined
+    - retry_budget_defined
+    - trace_context_attached
+  evidence:
+    - outbox_insert_and_publish_trace
+    - duplicate_publish_idempotency_test
+    - publish_timeout_test
+consumer:
+  required:
+    - inbox_or_dedup_store_used
+    - handler_is_idempotent
+    - poison_message_policy_defined
+    - consumer_lag_metric_exported
+    - graceful_shutdown_drains_or_commits_safely
+  evidence:
+    - duplicate_delivery_test
+    - poison_message_test
+    - lag_metric_sample
+    - shutdown_commit_or_ack_trace
+dlq:
+  required: true
+  policy:
+    - max_attempts_defined
+    - backoff_defined
+    - dlq_topic_or_subject_defined
+    - replay_requires_operator_and_reason
+    - purge_requires_owner_signoff
+  evidence:
+    - dlq_routing_test
+    - dlq_replay_test
+    - dlq_purge_audit_record
+retry_storm_protection:
+  required: true
+  controls:
+    - retry_budget
+    - exponential_backoff_with_jitter
+    - max_inflight_limit
+    - circuit_breaker_for_failing_dependency
+    - load_shedding_when_lag_or_error_rate_grows
+  metrics:
+    - roze_event_retry_attempts_total
+    - roze_event_dlq_total
+    - roze_event_consumer_lag
+    - roze_event_dedup_total
+    - roze_event_publish_duration_seconds
+tests:
+  - test: outbox_inbox_idempotency
+    pass:
+      - duplicate_event_processed_once
+      - duplicate_publish_does_not_duplicate_side_effect
+      - trace_id_preserved_across_event
+    evidence:
+      - idempotency_key_samples
+      - dedup_metric_sample
+      - event_trace_sample
+
+  - test: broker_failure
+    pass:
+      - publish_failure_does_not_lose_outbox_record
+      - retry_budget_caps_attempts
+      - service_recovers_after_broker_returns
+    evidence:
+      - outbox_backlog_timeline
+      - retry_budget_metric_sample
+      - recovery_time
+
+  - test: dlq_replay
+    pass:
+      - poison_message_moves_to_dlq
+      - replay_is_audited
+      - replay_is_idempotent
+      - purge_requires_signoff
+    evidence:
+      - dlq_message_id
+      - replay_audit_log
+      - replay_result
+
+  - test: lag_and_shutdown
+    pass:
+      - lag_alert_fires_when_consumer_is_slow
+      - graceful_shutdown_does_not_ack_unprocessed_work
+      - restart_resumes_from_committed_position
+    evidence:
+      - lag_metric_sample
+      - shutdown_trace
+      - restart_resume_trace
+promotion_required:
+  async_boundary_decision_recorded: true
+  envelope_contract_defined_or_disabled_evidence_attached: true
+  idempotency_test_passed: true
+  outbox_inbox_policy_passed: true
+  dlq_replay_test_passed: true
+  retry_storm_protection_passed: true
+  lag_metric_attached: true
+  owner_signoff: required
+blocking_findings:
+  - event_without_idempotency_key
+  - db_write_and_event_publish_without_outbox_or_transactional_evidence
+  - consumer_side_effect_not_idempotent
+  - dlq_replay_without_audit
+  - unbounded_retry_without_budget
+  - lag_metric_missing_for_enabled_consumer
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        producer_probe = producer_probe,
+    )
+}
+
+fn dependency_governance_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let representative_call = match kind {
+        ProjectKind::Rest => {
+            "representative_http_handler_calls_declared_downstream_or_declares_none"
+        }
+        ProjectKind::Rpc => "representative_rpc_method_calls_declared_downstream_or_declares_none",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required for every downstream before broad production rollout.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: dependency_governance_readiness
+inventory:
+  required: true
+  if_no_downstream:
+    evidence: no_runtime_dependency_clients_or_external_calls
+  downstream_fields:
+    - name
+    - type
+    - owner
+    - endpoint_or_discovery_key
+    - timeout_budget
+    - retry_policy
+    - breaker_policy
+    - fallback_policy
+    - data_classification
+principles:
+  deadline_propagation_required: true
+  no_unbounded_retry: true
+  no_downstream_without_owner: true
+  no_dependency_without_metrics: true
+  fallback_or_explicit_fail_closed_required: true
+discovery:
+  required_for_dynamic_downstreams: true
+  checks:
+    - registry_add_remove_event_observed
+    - stale_endpoint_evicted
+    - readiness_or_health_used_for_endpoint_selection
+    - config_center_or_registry_failure_has_cached_behavior
+  evidence:
+    - registry_event_log
+    - endpoint_set_before_after
+    - stale_endpoint_request_sample
+load_balancing:
+  required: true
+  policy: round_robin_weighted_or_platform_policy
+  checks:
+    - traffic_distribution_is_visible
+    - unhealthy_endpoint_gets_less_or_no_traffic
+    - outlier_endpoint_is_detected
+    - per_endpoint_latency_is_visible
+  metrics:
+    - roze_dependency_requests_total
+    - roze_dependency_latency_seconds
+    - roze_dependency_endpoint_health
+    - roze_dependency_outlier_total
+timeouts_and_cancellation:
+  probe: {representative_call}
+  required:
+    - client_timeout_less_than_request_deadline
+    - deadline_propagates_to_logic_and_dependency
+    - cancellation_stops_inflight_dependency_call
+    - timeout_error_maps_to_typed_error
+  evidence:
+    - timeout_trace
+    - cancellation_trace
+    - typed_error_sample
+resilience:
+  retry_budget:
+    required: true
+    checks:
+      - max_attempts_defined
+      - backoff_with_jitter_defined
+      - retry_only_idempotent_or_explicitly_allowed_operations
+      - retry_budget_metric_exported
+  circuit_breaker:
+    required: true
+    checks:
+      - open_half_open_closed_transitions_observed
+      - breaker_state_metric_exported
+      - breaker_open_does_not_amplify_dependency_pressure
+  bulkhead:
+    required: true
+    checks:
+      - max_inflight_per_dependency_defined
+      - saturation_does_not_block_unrelated_dependencies
+      - queue_or_semaphore_wait_is_bounded
+  fallback:
+    required: explicit_policy
+    allowed_modes:
+      - cached_response
+      - degraded_response
+      - fail_closed
+      - alternate_dependency
+tests:
+  - test: downstream_inventory
+    pass:
+      - every_dependency_has_owner
+      - every_dependency_has_timeout_retry_breaker_policy
+      - every_dependency_has_metrics_and_trace_labels
+    evidence:
+      - dependency_inventory_table
+
+  - test: endpoint_change
+    pass:
+      - new_endpoint_receives_traffic
+      - removed_endpoint_stops_receiving_traffic
+      - stale_endpoint_error_does_not_cause_slo_fast_burn
+    evidence:
+      - registry_event_log
+      - load_balancing_distribution_sample
+
+  - test: slow_downstream
+    pass:
+      - timeout_fires_within_budget
+      - breaker_or_shedding_protects_service
+      - accepted_requests_keep_latency_budget
+    evidence:
+      - p99_latency_before_during_after
+      - breaker_transition_metric
+      - resource_trend
+
+  - test: failing_downstream
+    pass:
+      - breaker_opens
+      - retry_budget_caps_attempts
+      - fallback_or_fail_closed_behavior_matches_policy
+      - recovery_closes_breaker_after_dependency_recovers
+    evidence:
+      - breaker_timeline
+      - retry_budget_metric
+      - fallback_result
+
+  - test: dependency_saturation
+    pass:
+      - bulkhead_limits_inflight_calls
+      - unrelated_dependencies_remain_healthy
+      - service_remains_ready_or_drains_intentionally
+    evidence:
+      - inflight_metric_sample
+      - unrelated_dependency_latency_sample
+      - readiness_timeline
+promotion_required:
+  downstream_inventory_passed: true
+  endpoint_change_test_passed: true
+  slow_downstream_test_passed: true
+  failing_downstream_test_passed: true
+  dependency_saturation_test_passed: true
+  fallback_policy_reviewed: true
+  owner_signoff: required
+blocking_findings:
+  - dependency_without_owner
+  - dependency_without_timeout
+  - dependency_without_retry_budget
+  - dependency_without_circuit_breaker
+  - dependency_without_metrics_or_traces
+  - unbounded_connection_pool
+  - fallback_claim_without_test_evidence
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        representative_call = representative_call,
+    )
+}
+
+fn data_consistency_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let write_probe = match kind {
+        ProjectKind::Rest => "representative_http_mutation_declares_transaction_or_no_persistence",
+        ProjectKind::Rpc => "representative_rpc_mutation_declares_transaction_or_no_persistence",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required before enabling persistent writes or distributed transactions.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: data_consistency_readiness
+persistence_boundary:
+  required: true
+  if_no_persistence:
+    evidence: no_database_cache_search_index_or_external_state_mutation
+  if_persistent:
+    stores:
+      - sql
+      - mongo
+      - redis_or_cache
+      - search_index
+      - external_stateful_dependency
+principles:
+  transaction_boundary_required: true
+  idempotent_writes_required: true
+  migration_rollback_required: true
+  no_dual_write_without_outbox_or_dtm_evidence: true
+  reconciliation_required_for_eventual_consistency: true
+  backup_restore_required_for_broad_production: true
+write_paths:
+  probe: {write_probe}
+  required_for_each_mutation:
+    - transaction_scope
+    - idempotency_key_or_natural_unique_key
+    - retry_safety_classification
+    - rollback_or_compensation_strategy
+    - audit_or_trace_correlation
+  evidence:
+    - mutation_inventory
+    - duplicate_write_test
+    - rollback_or_compensation_test
+migrations:
+  required: true
+  checks:
+    - forward_migration_script_reviewed
+    - rollback_or_compensating_migration_reviewed
+    - expand_migrate_contract_plan_for_breaking_schema_changes
+    - migration_lock_or_serialization_policy_defined
+    - migration_runtime_and_row_count_estimated
+  evidence:
+    - migration_plan
+    - dry_run_output
+    - rollback_dry_run_output
+transactions:
+  local_transaction:
+    required_when_single_store_write: true
+    evidence: commit_and_rollback_test
+  outbox:
+    required_when_db_write_publishes_event: true
+    evidence: db_commit_outbox_publish_recovery_test
+  dtm_or_saga:
+    required_when_multiple_stateful_services_mutate: true
+    evidence: saga_success_failure_compensation_test
+  inbox:
+    required_when_consuming_events_mutates_state: true
+    evidence: duplicate_event_mutates_once
+read_write_consistency:
+  required: true
+  checks:
+    - read_after_write_expectation_documented
+    - cache_invalidation_or_refresh_policy_defined
+    - search_index_lag_budget_defined_when_used
+    - stale_read_behavior_documented
+  evidence:
+    - read_after_write_test
+    - cache_invalidation_test
+    - index_lag_metric_sample
+reconciliation:
+  required_for_eventual_consistency: true
+  checks:
+    - reconciliation_job_or_query_defined
+    - drift_threshold_defined
+    - repair_action_is_audited
+    - reconciliation_does_not_overwrite_newer_state
+  evidence:
+    - reconciliation_report_sample
+    - repair_audit_log
+backup_restore:
+  required_for_broad_production: true
+  checks:
+    - backup_schedule_defined
+    - restore_test_passed
+    - point_in_time_recovery_objective_defined
+    - restore_runbook_attached
+  evidence:
+    - backup_snapshot_id
+    - restore_duration
+    - restored_row_or_document_count
+    - consistency_check_after_restore
+tests:
+  - test: idempotent_write
+    pass:
+      - duplicate_request_does_not_duplicate_state
+      - retry_after_timeout_is_safe_or_rejected
+      - idempotency_key_conflict_is_observable
+    evidence:
+      - duplicate_request_trace
+      - idempotency_metric_sample
+
+  - test: transaction_failure
+    pass:
+      - partial_failure_rolls_back_or_compensates
+      - no_orphan_outbox_or_inbox_state
+      - typed_error_preserves_trace_id
+    evidence:
+      - rollback_trace
+      - outbox_inbox_state_query
+
+  - test: migration_rollback
+    pass:
+      - forward_migration_succeeds_in_staging
+      - rollback_or_compensation_succeeds_in_staging
+      - old_and_new_service_versions_are_accounted_for_without_compatibility_claim
+    evidence:
+      - forward_migration_output
+      - rollback_output
+      - owner_signoff
+
+  - test: backup_restore
+    pass:
+      - backup_restores_to_isolated_environment
+      - restored_data_passes_consistency_checks
+      - restore_time_meets_recovery_objective
+    evidence:
+      - restore_log
+      - consistency_query_output
+      - recovery_time
+promotion_required:
+  persistence_boundary_declared: true
+  idempotent_write_test_passed: true
+  transaction_failure_test_passed: true
+  migration_rollback_test_passed: true
+  backup_restore_test_passed_for_broad_production: true
+  reconciliation_plan_attached_when_eventual_consistency_used: true
+  owner_signoff: required
+blocking_findings:
+  - persistent_write_without_transaction_boundary
+  - non_idempotent_retryable_write
+  - dual_write_without_outbox_or_dtm_evidence
+  - migration_without_rollback_or_compensation
+  - cache_or_search_index_without_staleness_policy
+  - backup_restore_not_tested_for_broad_production
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        write_probe = write_probe,
+    )
+}
+
+fn observability_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+    let operation_label = match kind {
+        ProjectKind::Rest => "method_route_status",
+        ProjectKind::Rpc => "service_method_status",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required for production debugging and evidence retention.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: observability_contract
+signals:
+  metrics:
+    required: true
+    request_metric: {request_metric}
+    latency_metric: {latency_metric}
+    resilience_metric: roze_resilience_decisions_total
+    labels_required:
+      - service
+      - boundary
+      - version
+      - {operation_label}
+      - result
+    label_cardinality_budget:
+      route_or_method: bounded_by_idl
+      status: bounded
+      error_code: bounded
+      tenant: forbidden_unless_low_cardinality_or_sampled
+      user_id: forbidden
+  logs:
+    required: true
+    structured_fields:
+      - timestamp
+      - level
+      - service
+      - boundary
+      - version
+      - trace_id
+      - request_id
+      - operation
+      - error_code
+      - tenant_id_when_allowed
+    forbidden_fields:
+      - password
+      - token
+      - secret
+      - private_key
+      - raw_authorization_header
+  traces:
+    required: true
+    propagation:
+      - trace_id
+      - span_id
+      - request_id_or_correlation_id
+      - deadline_or_timeout_budget
+    spans_required:
+      - transport_entry
+      - validation
+      - auth_when_enabled
+      - logic
+      - downstream_dependency
+      - data_or_event_boundary_when_used
+  profiles:
+    required_for_broad_production: true
+    types:
+      - cpu
+      - heap
+      - task_or_thread_dump
+      - allocation_or_contention_when_available
+sampling:
+  traces:
+    normal: service_owner_defined
+    errors: always_sample_or_high_rate
+    slow_requests: always_sample
+  logs:
+    info_sampling_allowed: true
+    warn_error_sampling_forbidden: true
+  profiles:
+    on_demand: true
+    incident_capture: required
+debug_queries:
+  request_rate: sum(rate({request_metric}{{service="{name}"}}[5m]))
+  error_rate: sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+  p99_latency: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
+  resilience_decisions: sum(rate(roze_resilience_decisions_total{{service="{name}"}}[5m])) by (kind, decision)
+  restarts: increase(process_start_time_seconds{{service="{name}"}}[15m])
+retention:
+  metrics: service_owner_defined_minimum_30d
+  logs: service_owner_defined_minimum_14d
+  traces: service_owner_defined_minimum_7d
+  incident_evidence: retain_with_production_evidence_report
+tests:
+  - test: metrics_export
+    pass:
+      - request_count_increments
+      - latency_histogram_records
+      - error_status_or_code_is_bounded
+      - resilience_decision_metric_available
+    evidence:
+      - metrics_scrape_sample
+      - cardinality_report
+
+  - test: log_correlation
+    pass:
+      - request_id_present
+      - trace_id_present
+      - error_code_present_for_failures
+      - forbidden_sensitive_fields_absent
+    evidence:
+      - log_query_sample
+      - redaction_scan_result
+
+  - test: trace_propagation
+    pass:
+      - entry_span_created
+      - downstream_span_links_to_entry_span
+      - deadline_or_timeout_budget_visible
+      - error_trace_contains_typed_error_code
+    evidence:
+      - trace_query_sample
+      - slow_trace_sample
+
+  - test: incident_diagnostics
+    pass:
+      - dashboard_links_required_queries
+      - profile_or_runtime_diagnostics_capture_available
+      - evidence_report_can_link_metrics_logs_traces
+    evidence:
+      - dashboard_link
+      - profile_or_diagnostics_sample
+      - evidence_report_links
+promotion_required:
+  metrics_export_passed: true
+  log_correlation_passed: true
+  trace_propagation_passed: true
+  incident_diagnostics_passed: true
+  cardinality_budget_reviewed: true
+  retention_policy_attached: true
+  owner_signoff: required
+blocking_findings:
+  - missing_request_or_latency_metric
+  - unbounded_metric_label
+  - logs_missing_trace_id
+  - traces_missing_downstream_span
+  - sensitive_data_in_logs_or_labels
+  - no_debug_query_for_primary_slo
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        request_metric = request_metric,
+        latency_metric = latency_metric,
+        operation_label = operation_label,
+    )
+}
+
+fn runtime_hardening_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let entry_probe = match kind {
+        ProjectKind::Rest => "representative_http_request_with_server_timeout_and_client_cancel",
+        ProjectKind::Rpc => "representative_rpc_call_with_client_deadline_and_cancel",
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+    let latency_metric = match kind {
+        ProjectKind::Rest => "roze_http_request_duration_seconds_bucket",
+        ProjectKind::Rpc => "roze_rpc_method_duration_seconds_bucket",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required for runtime governance before production promotion.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: runtime_hardening
+entry_probe: {entry_probe}
+policy:
+  timeout:
+    required: true
+    source: generated_config_and_platform_defaults
+    enforce_at:
+      - transport_entry
+      - logic_boundary
+      - downstream_dependency
+    evidence:
+      - timeout_metric
+      - deadline_trace
+      - cancellation_log
+  rate_limit:
+    required: true
+    source: generated_config_or_gateway_policy
+    modes:
+      - per_service
+      - per_operation_when_needed
+      - tenant_or_principal_when_low_cardinality
+    evidence:
+      - allowed_rejected_metric_sample
+      - limit_config_snapshot
+  circuit_breaker:
+    required: true
+    source: dependency_governance_and_runtime_policy
+    states:
+      - closed
+      - open
+      - half_open
+    evidence:
+      - breaker_transition_metric
+      - dependency_failure_trace
+  load_shedding:
+    required: true
+    source: generated_config_or_platform_policy
+    signals:
+      - concurrency
+      - queue_depth
+      - latency_budget
+      - cpu_or_memory_pressure
+    evidence:
+      - shedding_decision_metric
+      - protected_latency_sample
+  retry_budget:
+    required: true
+    max_attempts: service_owner_defined
+    jitter: required
+    amplification_cap: required
+    evidence:
+      - retry_attempt_metric
+      - amplification_review
+  deadline_propagation:
+    required: true
+    propagate_to:
+      - auth
+      - validation
+      - logic
+      - database
+      - cache
+      - rpc_or_http_downstream
+      - mq_or_outbox_when_used
+    evidence:
+      - deadline_trace_sample
+      - cancelled_work_does_not_continue
+  graceful_shutdown:
+    required: true
+    phases:
+      - mark_not_ready
+      - stop_accepting_new_work
+      - drain_in_flight_until_deadline
+      - cancel_remaining_work
+      - flush_metrics_logs_traces
+    evidence:
+      - shutdown_timeline
+      - readyz_or_readiness_transition
+      - no_lost_in_flight_work_without_explicit_cancellation
+  resource_guards:
+    required: true
+    guards:
+      - bounded_request_body_or_message_size
+      - bounded_concurrency
+      - bounded_connection_or_stream_lifetime
+      - bounded_queue_depth
+      - memory_and_cpu_alerts
+    evidence:
+      - resource_trend_sample
+      - guard_rejection_sample
+metrics:
+  request_metric: {request_metric}
+  latency_metric: {latency_metric}
+  resilience_metric: roze_resilience_decisions_total
+  resource_metrics:
+    - process_cpu_seconds_total
+    - process_resident_memory_bytes
+    - tokio_tasks_or_runtime_diagnostics_when_available
+tests:
+  - test: timeout_and_deadline
+    probe: {entry_probe}
+    pass:
+      - request_or_call_times_out_with_typed_error
+      - downstream_work_receives_deadline
+      - cancellation_is_observed_before_business_side_effect
+    evidence:
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind=~"timeout|deadline"}}[5m]))
+      - trace_query: deadline_propagates_to_logic_and_dependency
+      - log_query: timeout_or_cancellation_log_with_trace_id
+
+  - test: rate_limit_and_backpressure
+    pass:
+      - excess_work_rejected_or_queued_with_bound
+      - accepted_work_stays_inside_latency_budget
+      - retry_after_or_typed_limit_error_defined
+    evidence:
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="rate_limit"}}[5m])) by (decision)
+      - load_profile
+      - rejection_sample
+
+  - test: breaker_and_retry_budget
+    pass:
+      - dependency_5xx_opens_breaker
+      - half_open_probe_is_bounded
+      - retries_do_not_exceed_budget
+      - fallback_or_degraded_response_is_documented
+    evidence:
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind=~"breaker|retry"}}[5m])) by (decision)
+      - breaker_transition_timeline
+      - retry_amplification_report
+
+  - test: load_shedding_and_resource_guards
+    pass:
+      - shedding_starts_before_resource_exhaustion
+      - memory_and_cpu_trend_remain_bounded
+      - queue_or_concurrency_limit_is_visible
+    evidence:
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="load_shed"}}[5m])) by (decision)
+      - resource_trend_report
+      - protected_latency_report
+
+  - test: shutdown_and_drain
+    pass:
+      - readiness_turns_false_before_stop
+      - in_flight_work_drains_or_is_cancelled_by_deadline
+      - final_metrics_logs_and_traces_are_flushed
+    evidence:
+      - shutdown_timeline
+      - readiness_probe_output
+      - lifecycle_summary
+promotion_required:
+  timeout_deadline_test_passed: true
+  rate_limit_backpressure_test_passed: true
+  breaker_retry_budget_test_passed: true
+  load_shedding_resource_guard_test_passed: true
+  shutdown_drain_test_passed: true
+  resource_alerts_attached: true
+  owner_signoff: required
+blocking_findings:
+  - missing_timeout_or_deadline_policy
+  - unbounded_retry_amplification
+  - breaker_without_state_transition_evidence
+  - load_shedding_without_resource_trend
+  - graceful_shutdown_without_readiness_drain_timeline
+  - unbounded_queue_body_message_or_concurrency
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        entry_probe = entry_probe,
+        request_metric = request_metric,
+        latency_metric = latency_metric,
+    )
+}
+
+fn error_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let endpoint_count = match kind {
+        ProjectKind::Rest => spec.rest_routes.len(),
+        ProjectKind::Rpc => spec.rpc_methods.len(),
+    };
+    let transport_mapping = match kind {
+        ProjectKind::Rest => {
+            "http_status_mapping:
+      validation: 400
+      unauthenticated: 401
+      permission_denied: 403
+      not_found: 404
+      conflict: 409
+      rate_limited: 429
+      timeout: 504
+      dependency_unavailable: 503
+      internal: 500"
+        }
+        ProjectKind::Rpc => {
+            "grpc_status_mapping:
+      validation: INVALID_ARGUMENT
+      unauthenticated: UNAUTHENTICATED
+      permission_denied: PERMISSION_DENIED
+      not_found: NOT_FOUND
+      conflict: ABORTED
+      rate_limited: RESOURCE_EXHAUSTED
+      timeout: DEADLINE_EXCEEDED
+      dependency_unavailable: UNAVAILABLE
+      internal: INTERNAL"
+        }
+    };
+    let representative_probe = match kind {
+        ProjectKind::Rest => "representative_http_error_response",
+        ProjectKind::Rpc => "representative_rpc_status_and_metadata",
+    };
+    let status_sample = match kind {
+        ProjectKind::Rest => "http_status_body_headers_and_trace_id",
+        ProjectKind::Rpc => "grpc_status_code_metadata_and_trace_id",
+    };
+    let request_metric = match kind {
+        ProjectKind::Rest => "roze_http_requests_total",
+        ProjectKind::Rpc => "roze_rpc_requests_total",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Required for stable client behavior and incident triage.
+service: {name}
+boundary: {boundary}
+endpoint_count: {endpoint_count}
+mode: error_contract
+catalog:
+  typed_errors_required: true
+  fields:
+    - code
+    - message
+    - retryable
+    - idempotency_required
+    - trace_id
+    - request_id_or_correlation_id
+    - details_when_safe
+  categories:
+    validation:
+      retryable: false
+      client_action: fix_request
+    unauthenticated:
+      retryable: false
+      client_action: refresh_or_supply_credentials
+    permission_denied:
+      retryable: false
+      client_action: request_access
+    not_found:
+      retryable: false
+      client_action: check_identifier_or_treat_as_absent
+    conflict:
+      retryable: conditional
+      idempotency_required: true
+      client_action: reload_state_or_use_idempotency_key
+    rate_limited:
+      retryable: true
+      client_action: honor_retry_after_and_retry_budget
+    timeout:
+      retryable: conditional
+      idempotency_required: true
+      client_action: retry_only_when_operation_is_idempotent
+    dependency_unavailable:
+      retryable: true
+      client_action: retry_with_backoff_inside_budget
+    internal:
+      retryable: false
+      client_action: surface_trace_id_and_stop_retry_storm
+transport:
+  {transport_mapping}
+response_contract:
+  trace_id_required: true
+  request_id_or_correlation_id_required: true
+  raw_internal_error_forbidden: true
+  stack_trace_forbidden_in_client_response: true
+  sensitive_fields_forbidden:
+    - password
+    - token
+    - secret
+    - private_key
+    - authorization
+  representative_probe: {representative_probe}
+client_behavior:
+  typed_error_projection_required: true
+  retry_budget_required: true
+  retry_after_supported_for_rate_limit: true
+  idempotency_key_required_for_retryable_mutations: true
+  cancellation_and_timeout_errors_distinguishable: true
+  no_implicit_compatibility_claim: true
+observability:
+  metric: {request_metric}
+  labels:
+    - service
+    - boundary
+    - operation
+    - status_or_code
+    - error_code
+  error_code_cardinality: bounded_by_catalog
+  log_fields:
+    - trace_id
+    - request_id
+    - error_code
+    - retryable
+    - redaction_applied
+tests:
+  - test: typed_error_catalog
+    pass:
+      - every_generated_operation_has_declared_error_projection_or_default_catalog
+      - typed_error_fields_are_available_to_clients
+      - error_code_cardinality_is_bounded
+    evidence:
+      - catalog_review
+      - generated_client_error_type_sample
+
+  - test: transport_status_mapping
+    probe: {representative_probe}
+    pass:
+      - validation_error_maps_to_expected_transport_status
+      - timeout_error_maps_to_expected_transport_status
+      - dependency_error_maps_to_expected_transport_status
+      - trace_id_available_for_each_failure
+    evidence:
+      - {status_sample}
+      - trace_query_sample
+
+  - test: retryability_and_idempotency
+    pass:
+      - retryable_errors_are_explicit
+      - non_retryable_errors_are_explicit
+      - retryable_mutation_requires_idempotency_key_or_owner_exception
+      - retry_after_or_backoff_policy_is_documented
+    evidence:
+      - client_retry_behavior_report
+      - idempotency_review
+
+  - test: redaction
+    pass:
+      - internal_error_details_are_not_returned_to_clients
+      - forbidden_sensitive_fields_absent_from_response_and_logs
+      - public_message_is_actionable_without_leaking_secret
+    evidence:
+      - redaction_scan_result
+      - representative_error_response
+
+  - test: failure_metrics
+    pass:
+      - error_code_label_is_bounded_by_catalog
+      - failure_rate_query_uses_status_or_error_code
+      - retry_storm_can_be_detected
+    evidence:
+      - metrics_query: sum(rate({request_metric}{{service="{name}",error_code!=""}}[5m])) by (error_code)
+      - retry_metric_sample
+promotion_required:
+  typed_error_catalog_passed: true
+  transport_status_mapping_passed: true
+  retryability_idempotency_passed: true
+  redaction_passed: true
+  failure_metrics_passed: true
+  owner_signoff: required
+blocking_findings:
+  - raw_internal_error_returned_to_client
+  - retryable_error_without_retry_budget
+  - retryable_mutation_without_idempotency_policy
+  - unbounded_error_code_label
+  - missing_trace_id_on_error
+  - transport_status_mapping_missing
+"#,
+        name = spec.service,
+        boundary = boundary,
+        endpoint_count = endpoint_count,
+        transport_mapping = transport_mapping,
+        representative_probe = representative_probe,
+        status_sample = status_sample,
+        request_metric = request_metric,
+    )
+}
+
 fn build_rs() -> String {
     r#"fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
@@ -4605,13 +7394,13 @@ pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigE
 
 fn service_context_rs(kind: ProjectKind) -> String {
     match kind {
-        ProjectKind::Rest => rest_service_context_rs(),
+        ProjectKind::Rest => rest_service_context_rs(&[]),
         ProjectKind::Rpc => rpc_service_context_rs(),
     }
 }
 
-fn rest_service_context_rs() -> String {
-    r#"#![allow(dead_code)]
+fn rest_service_context_rs(rpc_clients: &[RpcClientBinding]) -> String {
+    let mut out = r#"#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -4669,9 +7458,32 @@ impl ServiceContext {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("nats jetstream is not configured"))
     }
-}
 "#
-    .to_string()
+    .to_string();
+
+    for client in rpc_clients {
+        out.push_str(&format!(
+            r#"
+
+    pub async fn {name}(&self) -> anyhow::Result<{crate_name}::client::RpcClient> {{
+        let config = self
+            .config
+            .rpc_client_config("{name}")
+            .ok_or_else(|| anyhow::anyhow!("rpc client `{name}` is not configured"))?;
+        {crate_name}::client::RpcClient::connect_from_config(config).await
+    }}
+"#,
+            name = rust_identifier(&client.name),
+            crate_name = client.crate_name
+        ));
+    }
+
+    out.push_str(
+        r#"}
+}
+"#,
+    );
+    out
 }
 
 fn rpc_service_context_rs() -> String {
@@ -5085,6 +7897,106 @@ mod tests {
     }
 
     #[test]
+    fn api_generation_turns_rpc_imports_into_named_clients() {
+        let root = temp_test_root("roze-api-rpc-client-imports");
+        let admin = root.join("shop-admin-api");
+        let order = root.join("shop-order-rpc");
+        let payment = root.join("shop-payment-rpc");
+        std::fs::create_dir_all(&admin).expect("create admin dir");
+        std::fs::create_dir_all(&order).expect("create order dir");
+        std::fs::create_dir_all(&payment).expect("create payment dir");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+        std::fs::write(
+            order.join("order.api"),
+            r#"
+            service order-rpc {
+                rpc GetOrder (GetOrderReq) returns (GetOrderResp)
+            }
+
+            type GetOrderReq {
+                id: u64
+            }
+
+            type GetOrderResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("write order api");
+        std::fs::write(
+            payment.join("payment.api"),
+            r#"
+            service payment-rpc {
+                rpc GetPayment (GetPaymentReq) returns (GetPaymentResp)
+            }
+
+            type GetPaymentReq {
+                id: u64
+            }
+
+            type GetPaymentResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("write payment api");
+        let api = admin.join("admin.api");
+        std::fs::write(
+            &api,
+            r#"
+            import (
+                "../shop-order-rpc/order.api"
+                "../shop-payment-rpc/payment.api"
+            )
+
+            service shop-admin-api {
+                get /health returns (HealthResp)
+            }
+
+            type HealthResp {
+                ok: bool
+            }
+            "#,
+        )
+        .expect("write admin api");
+
+        let source = read_api_source(&api).expect("read api source");
+        let spec = parse_api(&source).expect("parse api");
+        validate_project_kind(&spec, ProjectKind::Rest).expect("pure REST api");
+        let clients = read_api_rpc_client_bindings(&api).expect("rpc client imports");
+
+        assert_eq!(
+            clients
+                .iter()
+                .map(|client| client.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["order", "payment"]
+        );
+
+        generate_rest_project_with_rpc_clients(
+            &spec,
+            &admin,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            &clients,
+        )
+        .expect("generate admin api");
+
+        let svc = std::fs::read_to_string(admin.join("src/svc/mod.rs")).expect("read svc");
+        assert!(svc.contains("pub async fn order(&self)"));
+        assert!(svc.contains("rpc_client_config(\"order\")"));
+        assert!(svc.contains("shop_order_rpc::client::RpcClient::connect_from_config(config)"));
+        assert!(svc.contains("pub async fn payment(&self)"));
+        assert!(svc.contains("rpc_client_config(\"payment\")"));
+
+        let cargo = std::fs::read_to_string(admin.join("Cargo.toml")).expect("read cargo");
+        assert!(cargo.contains(r#"shop-order-rpc = { path = "../shop-order-rpc" }"#));
+        assert!(cargo.contains(r#"shop-payment-rpc = { path = "../shop-payment-rpc" }"#));
+
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
     fn renders_valid_rpc_name_for_route_without_handler() {
         let spec = parse_api(
             r#"
@@ -5269,6 +8181,8 @@ mod tests {
             None,
             true,
             ProjectKind::Rest,
+            Path::new("user-api"),
+            &[],
         );
 
         assert!(
@@ -5308,6 +8222,8 @@ mod tests {
             Some("../../crates"),
             true,
             ProjectKind::Rest,
+            Path::new("user-api"),
+            &[],
         );
 
         assert!(cargo.contains(r#"roze-config = { path = "../../crates/roze-config" }"#));
@@ -5344,6 +8260,8 @@ mod tests {
             None,
             false,
             ProjectKind::Rpc,
+            Path::new("user"),
+            &[],
         );
 
         assert!(cargo.contains(r#"edition = "2021""#));
@@ -6008,6 +8926,39 @@ mod tests {
                 .expect("read rest failure injection plan");
         let rest_release_rollout = fs::read_to_string(rest_out.join("ops/release-rollout.yaml"))
             .expect("read rest release rollout plan");
+        let rest_incident_response =
+            fs::read_to_string(rest_out.join("ops/incident-response.yaml"))
+                .expect("read rest incident response playbook");
+        let rest_capacity_plan = fs::read_to_string(rest_out.join("ops/capacity-plan.yaml"))
+            .expect("read rest capacity plan");
+        let rest_security_readiness =
+            fs::read_to_string(rest_out.join("ops/security-readiness.yaml"))
+                .expect("read rest security readiness plan");
+        let rest_production_gate = fs::read_to_string(rest_out.join("ops/production-gate.yaml"))
+            .expect("read rest production gate");
+        let rest_regeneration_policy =
+            fs::read_to_string(rest_out.join("ops/regeneration-policy.yaml"))
+                .expect("read rest regeneration policy");
+        let rest_client_contract = fs::read_to_string(rest_out.join("ops/client-contract.yaml"))
+            .expect("read rest client contract");
+        let rest_config_governance =
+            fs::read_to_string(rest_out.join("ops/config-governance.yaml"))
+                .expect("read rest config governance");
+        let rest_reliable_events = fs::read_to_string(rest_out.join("ops/reliable-events.yaml"))
+            .expect("read rest reliable events");
+        let rest_dependency_governance =
+            fs::read_to_string(rest_out.join("ops/dependency-governance.yaml"))
+                .expect("read rest dependency governance");
+        let rest_data_consistency = fs::read_to_string(rest_out.join("ops/data-consistency.yaml"))
+            .expect("read rest data consistency");
+        let rest_observability =
+            fs::read_to_string(rest_out.join("ops/observability-contract.yaml"))
+                .expect("read rest observability contract");
+        let rest_runtime_hardening =
+            fs::read_to_string(rest_out.join("ops/runtime-hardening.yaml"))
+                .expect("read rest runtime hardening contract");
+        let rest_error_contract = fs::read_to_string(rest_out.join("ops/error-contract.yaml"))
+            .expect("read rest error contract");
         let rpc_readme = fs::read_to_string(rpc_out.join("README.md")).expect("read rpc readme");
         let rpc_runbook = fs::read_to_string(rpc_out.join("ops/production-evidence.md"))
             .expect("read rpc runbook");
@@ -6022,6 +8973,35 @@ mod tests {
             .expect("read rpc failure injection plan");
         let rpc_release_rollout = fs::read_to_string(rpc_out.join("ops/release-rollout.yaml"))
             .expect("read rpc release rollout plan");
+        let rpc_incident_response = fs::read_to_string(rpc_out.join("ops/incident-response.yaml"))
+            .expect("read rpc incident response playbook");
+        let rpc_capacity_plan = fs::read_to_string(rpc_out.join("ops/capacity-plan.yaml"))
+            .expect("read rpc capacity plan");
+        let rpc_security_readiness =
+            fs::read_to_string(rpc_out.join("ops/security-readiness.yaml"))
+                .expect("read rpc security readiness plan");
+        let rpc_production_gate = fs::read_to_string(rpc_out.join("ops/production-gate.yaml"))
+            .expect("read rpc production gate");
+        let rpc_regeneration_policy =
+            fs::read_to_string(rpc_out.join("ops/regeneration-policy.yaml"))
+                .expect("read rpc regeneration policy");
+        let rpc_client_contract = fs::read_to_string(rpc_out.join("ops/client-contract.yaml"))
+            .expect("read rpc client contract");
+        let rpc_config_governance = fs::read_to_string(rpc_out.join("ops/config-governance.yaml"))
+            .expect("read rpc config governance");
+        let rpc_reliable_events = fs::read_to_string(rpc_out.join("ops/reliable-events.yaml"))
+            .expect("read rpc reliable events");
+        let rpc_dependency_governance =
+            fs::read_to_string(rpc_out.join("ops/dependency-governance.yaml"))
+                .expect("read rpc dependency governance");
+        let rpc_data_consistency = fs::read_to_string(rpc_out.join("ops/data-consistency.yaml"))
+            .expect("read rpc data consistency");
+        let rpc_observability = fs::read_to_string(rpc_out.join("ops/observability-contract.yaml"))
+            .expect("read rpc observability contract");
+        let rpc_runtime_hardening = fs::read_to_string(rpc_out.join("ops/runtime-hardening.yaml"))
+            .expect("read rpc runtime hardening contract");
+        let rpc_error_contract = fs::read_to_string(rpc_out.join("ops/error-contract.yaml"))
+            .expect("read rpc error contract");
 
         assert!(rest_readme.contains("ops/production-evidence.md"));
         assert!(rpc_readme.contains("ops/production-evidence.md"));
@@ -6039,6 +9019,19 @@ mod tests {
         assert!(rest_runbook.contains("ops/slo.yaml"));
         assert!(rest_runbook.contains("ops/failure-injection-plan.yaml"));
         assert!(rest_runbook.contains("ops/release-rollout.yaml"));
+        assert!(rest_runbook.contains("ops/incident-response.yaml"));
+        assert!(rest_runbook.contains("ops/capacity-plan.yaml"));
+        assert!(rest_runbook.contains("ops/security-readiness.yaml"));
+        assert!(rest_runbook.contains("ops/production-gate.yaml"));
+        assert!(rest_runbook.contains("ops/regeneration-policy.yaml"));
+        assert!(rest_runbook.contains("ops/client-contract.yaml"));
+        assert!(rest_runbook.contains("ops/config-governance.yaml"));
+        assert!(rest_runbook.contains("ops/reliable-events.yaml"));
+        assert!(rest_runbook.contains("ops/dependency-governance.yaml"));
+        assert!(rest_runbook.contains("ops/data-consistency.yaml"));
+        assert!(rest_runbook.contains("ops/observability-contract.yaml"));
+        assert!(rest_runbook.contains("ops/runtime-hardening.yaml"));
+        assert!(rest_runbook.contains("ops/error-contract.yaml"));
         assert!(rest_governance.contains("boundary: rest"));
         assert!(rest_governance.contains("endpoint_count: 1"));
         assert!(rest_governance.contains("failure_oriented_resilience"));
@@ -6047,6 +9040,19 @@ mod tests {
         assert!(rest_governance.contains("generated_slo_error_budget"));
         assert!(rest_governance.contains("generated_failure_injection_plan"));
         assert!(rest_governance.contains("generated_release_rollout_gates"));
+        assert!(rest_governance.contains("generated_incident_response_playbook"));
+        assert!(rest_governance.contains("generated_capacity_plan"));
+        assert!(rest_governance.contains("generated_security_readiness_plan"));
+        assert!(rest_governance.contains("generated_production_gate"));
+        assert!(rest_governance.contains("generated_regeneration_policy"));
+        assert!(rest_governance.contains("generated_client_contract"));
+        assert!(rest_governance.contains("generated_config_governance"));
+        assert!(rest_governance.contains("generated_reliable_events_plan"));
+        assert!(rest_governance.contains("generated_dependency_governance"));
+        assert!(rest_governance.contains("generated_data_consistency_plan"));
+        assert!(rest_governance.contains("generated_observability_contract"));
+        assert!(rest_governance.contains("generated_runtime_hardening_contract"));
+        assert!(rest_governance.contains("generated_error_contract"));
         assert!(rest_governance.contains("circuit_breaker:"));
         assert!(rest_governance.contains("generated_rules: ops/prometheus-rules.yaml"));
         assert!(rest_governance.contains("generated_dashboard: ops/grafana-dashboard.json"));
@@ -6054,6 +9060,19 @@ mod tests {
         assert!(rest_governance.contains("slo_error_budget_report: true"));
         assert!(rest_governance.contains("failure_injection_plan: true"));
         assert!(rest_governance.contains("release_rollout_plan: true"));
+        assert!(rest_governance.contains("incident_response_playbook: true"));
+        assert!(rest_governance.contains("capacity_plan: true"));
+        assert!(rest_governance.contains("security_readiness_plan: true"));
+        assert!(rest_governance.contains("production_gate: true"));
+        assert!(rest_governance.contains("regeneration_policy: true"));
+        assert!(rest_governance.contains("client_contract: true"));
+        assert!(rest_governance.contains("config_governance: true"));
+        assert!(rest_governance.contains("reliable_events_plan: true"));
+        assert!(rest_governance.contains("dependency_governance: true"));
+        assert!(rest_governance.contains("data_consistency_plan: true"));
+        assert!(rest_governance.contains("observability_contract: true"));
+        assert!(rest_governance.contains("runtime_hardening_contract: true"));
+        assert!(rest_governance.contains("error_contract: true"));
         assert!(rest_rules.contains("RozeGeneratedServiceHighErrorRate"));
         assert!(rest_rules.contains("RozeGeneratedServiceHighP99Latency"));
         assert!(rest_rules.contains("RozeGeneratedServiceCircuitBreakerOpen"));
@@ -6079,6 +9098,106 @@ mod tests {
         assert!(rest_release_rollout.contains("blue_green:"));
         assert!(rest_release_rollout.contains("rollback_required:"));
         assert!(rest_release_rollout.contains("roze_http_requests_total"));
+        assert!(rest_incident_response.contains("boundary: rest"));
+        assert!(rest_incident_response.contains("alert: RozeGeneratedServiceDown"));
+        assert!(rest_incident_response.contains("alert: RozeGeneratedServiceHighErrorRate"));
+        assert!(rest_incident_response.contains("alert: RozeGeneratedServiceLoadShedding"));
+        assert!(rest_incident_response.contains("rollback_when:"));
+        assert!(rest_incident_response.contains("postmortem_required:"));
+        assert!(rest_incident_response.contains("roze_http_requests_total"));
+        assert!(rest_capacity_plan.contains("boundary: rest"));
+        assert!(rest_capacity_plan.contains("phase: soak_24h"));
+        assert!(rest_capacity_plan.contains("phase: soak_72h"));
+        assert!(rest_capacity_plan.contains("phase: burst"));
+        assert!(rest_capacity_plan.contains("phase: scale_out"));
+        assert!(rest_capacity_plan.contains("phase: scale_in"));
+        assert!(rest_capacity_plan.contains("roze_http_request_duration_seconds_bucket"));
+        assert!(rest_security_readiness.contains("boundary: rest"));
+        assert!(rest_security_readiness.contains("check: authentication"));
+        assert!(rest_security_readiness.contains("check: tenant_isolation"));
+        assert!(rest_security_readiness.contains("check: key_rotation"));
+        assert!(rest_security_readiness.contains("check: mtls"));
+        assert!(rest_security_readiness.contains("check: audit_log"));
+        assert!(rest_security_readiness.contains("blocking_findings:"));
+        assert!(
+            rest_security_readiness.contains("route_method_path_and_openapi_security_projection")
+        );
+        assert!(rest_production_gate.contains("boundary: rest"));
+        assert!(rest_production_gate.contains("ops/security-readiness.yaml"));
+        assert!(rest_production_gate.contains("ops/regeneration-policy.yaml"));
+        assert!(rest_production_gate.contains("ops/client-contract.yaml"));
+        assert!(rest_production_gate.contains("ops/config-governance.yaml"));
+        assert!(rest_production_gate.contains("ops/reliable-events.yaml"));
+        assert!(rest_production_gate.contains("ops/dependency-governance.yaml"));
+        assert!(rest_production_gate.contains("ops/data-consistency.yaml"));
+        assert!(rest_production_gate.contains("ops/observability-contract.yaml"));
+        assert!(rest_production_gate.contains("ops/runtime-hardening.yaml"));
+        assert!(rest_production_gate.contains("ops/error-contract.yaml"));
+        assert!(rest_production_gate.contains("stage: client_contract"));
+        assert!(rest_production_gate.contains("stage: config_governance"));
+        assert!(rest_production_gate.contains("stage: reliable_events"));
+        assert!(rest_production_gate.contains("stage: dependency_governance"));
+        assert!(rest_production_gate.contains("stage: data_consistency"));
+        assert!(rest_production_gate.contains("stage: observability_contract"));
+        assert!(rest_production_gate.contains("stage: runtime_hardening"));
+        assert!(rest_production_gate.contains("stage: error_contract"));
+        assert!(rest_production_gate.contains("stage: capacity_and_soak"));
+        assert!(rest_production_gate.contains("stage: security_readiness"));
+        assert!(rest_production_gate.contains("idl_drift_classified"));
+        assert!(rest_production_gate.contains("blocking_rules:"));
+        assert!(rest_production_gate.contains("broad_production_stable:"));
+        assert!(rest_regeneration_policy.contains("boundary: rest"));
+        assert!(rest_regeneration_policy.contains("src/openapi/mod.rs"));
+        assert!(rest_regeneration_policy.contains("src/logic/**"));
+        assert!(rest_regeneration_policy.contains("drift_classification:"));
+        assert!(rest_regeneration_policy.contains("breaking_change_without_migration_plan"));
+        assert!(rest_client_contract.contains("boundary: rest"));
+        assert!(rest_client_contract.contains("src/openapi/mod.rs_and_generated_openapi_json"));
+        assert!(rest_client_contract.contains("typed_errors_required: true"));
+        assert!(rest_client_contract.contains("auth_injection_required: true"));
+        assert!(rest_client_contract.contains("generated_client_governance_path"));
+        assert!(rest_config_governance.contains("boundary: rest"));
+        assert!(rest_config_governance
+            .contains("reload_timeout_rate_limit_cors_registry_and_dependency_config"));
+        assert!(rest_config_governance.contains("phase: canary_reload"));
+        assert!(rest_config_governance.contains("phase: snapshot_restore"));
+        assert!(rest_config_governance.contains("listener_failure_isolated: true"));
+        assert!(rest_reliable_events.contains("boundary: rest"));
+        assert!(rest_reliable_events
+            .contains("representative_http_mutation_publishes_or_declares_no_event"));
+        assert!(rest_reliable_events.contains("outbox_inbox_idempotency"));
+        assert!(rest_reliable_events.contains("dlq_replay"));
+        assert!(rest_reliable_events.contains("retry_storm_protection"));
+        assert!(rest_dependency_governance.contains("boundary: rest"));
+        assert!(rest_dependency_governance
+            .contains("representative_http_handler_calls_declared_downstream_or_declares_none"));
+        assert!(rest_dependency_governance.contains("load_balancing:"));
+        assert!(rest_dependency_governance.contains("circuit_breaker:"));
+        assert!(rest_dependency_governance.contains("dependency_without_timeout"));
+        assert!(rest_data_consistency.contains("boundary: rest"));
+        assert!(rest_data_consistency
+            .contains("representative_http_mutation_declares_transaction_or_no_persistence"));
+        assert!(rest_data_consistency.contains("outbox:"));
+        assert!(rest_data_consistency.contains("test: migration_rollback"));
+        assert!(rest_data_consistency.contains("dual_write_without_outbox_or_dtm_evidence"));
+        assert!(rest_observability.contains("boundary: rest"));
+        assert!(rest_observability.contains("roze_http_requests_total"));
+        assert!(rest_observability.contains("method_route_status"));
+        assert!(rest_observability.contains("label_cardinality_budget:"));
+        assert!(rest_observability.contains("sensitive_data_in_logs_or_labels"));
+        assert!(rest_runtime_hardening.contains("boundary: rest"));
+        assert!(rest_runtime_hardening
+            .contains("representative_http_request_with_server_timeout_and_client_cancel"));
+        assert!(rest_runtime_hardening.contains("load_shedding:"));
+        assert!(rest_runtime_hardening.contains("retry_budget:"));
+        assert!(
+            rest_runtime_hardening.contains("graceful_shutdown_without_readiness_drain_timeline")
+        );
+        assert!(rest_error_contract.contains("boundary: rest"));
+        assert!(rest_error_contract.contains("http_status_mapping:"));
+        assert!(rest_error_contract.contains("typed_errors_required: true"));
+        assert!(rest_error_contract.contains("no_implicit_compatibility_claim: true"));
+        assert!(rest_error_contract.contains("raw_internal_error_returned_to_client"));
         assert!(rpc_runbook.contains("client RPC calls for 1 method(s)"));
         assert!(rpc_governance.contains("boundary: rpc"));
         assert!(rpc_governance.contains("endpoint_count: 1"));
@@ -6097,6 +9216,77 @@ mod tests {
         assert!(rpc_release_rollout.contains("gate: full_rollout"));
         assert!(rpc_release_rollout.contains("roze_rpc_requests_total"));
         assert!(rpc_release_rollout.contains("max_decision_time: 5m"));
+        assert!(rpc_incident_response.contains("boundary: rpc"));
+        assert!(rpc_incident_response.contains("representative_rpc_call_and_client_deadline_probe"));
+        assert!(rpc_incident_response.contains("alert: RozeGeneratedServiceHighP99Latency"));
+        assert!(rpc_incident_response.contains("ConfigReloadRejectedOrRolledBack"));
+        assert!(rpc_incident_response.contains("roze_rpc_requests_total"));
+        assert!(rpc_capacity_plan.contains("boundary: rpc"));
+        assert!(rpc_capacity_plan.contains("rpc_calls_per_second"));
+        assert!(rpc_capacity_plan.contains("representative_rpc_workload_with_client_deadlines"));
+        assert!(rpc_capacity_plan.contains("soak_72h_passed_for_broad_stability_claim"));
+        assert!(rpc_capacity_plan.contains("roze_rpc_method_duration_seconds_bucket"));
+        assert!(rpc_security_readiness.contains("boundary: rpc"));
+        assert!(rpc_security_readiness.contains(
+            "representative_rpc_call_with_valid_expired_missing_and_malformed_credentials"
+        ));
+        assert!(rpc_security_readiness.contains("rpc_method_and_proto_service_security_projection"));
+        assert!(rpc_security_readiness.contains("security_owner_signoff: required"));
+        assert!(rpc_security_readiness.contains("revoked_key_accepted"));
+        assert!(rpc_production_gate.contains("boundary: rpc"));
+        assert!(rpc_production_gate.contains("cargo_check_generated_rpc_service"));
+        assert!(
+            rpc_production_gate.contains("startup_readiness_metrics_and_representative_rpc_call")
+        );
+        assert!(rpc_production_gate.contains("controlled_production:"));
+        assert!(rpc_production_gate.contains("security_blocking_finding_present"));
+        assert!(rpc_regeneration_policy.contains("boundary: rpc"));
+        assert!(rpc_regeneration_policy.contains("proto/service.proto"));
+        assert!(rpc_regeneration_policy
+            .contains("rpc_method_request_response_proto_service_security_projection"));
+        assert!(rpc_regeneration_policy
+            .contains("generated_owned_file_changed_without_idl_or_generator_change"));
+        assert!(rpc_client_contract.contains("boundary: rpc"));
+        assert!(rpc_client_contract.contains("proto/service.proto_and_generated_tonic_client"));
+        assert!(rpc_client_contract.contains("rust_tonic_clients_and_proto_consumers"));
+        assert!(rpc_client_contract.contains("generated_client_calls_representative_rpc_method"));
+        assert!(rpc_client_contract.contains("typed_error_missing_trace_id"));
+        assert!(rpc_config_governance.contains("boundary: rpc"));
+        assert!(rpc_config_governance
+            .contains("reload_timeout_registry_client_deadline_and_dependency_config"));
+        assert!(rpc_config_governance.contains("config_center_unavailable_breaks_startup"));
+        assert!(rpc_config_governance.contains("snapshot_restore_tested: true"));
+        assert!(rpc_reliable_events.contains("boundary: rpc"));
+        assert!(rpc_reliable_events
+            .contains("representative_rpc_mutation_publishes_or_declares_no_event"));
+        assert!(rpc_reliable_events.contains("roze_event_consumer_lag"));
+        assert!(rpc_reliable_events.contains("event_without_idempotency_key"));
+        assert!(rpc_dependency_governance.contains("boundary: rpc"));
+        assert!(rpc_dependency_governance
+            .contains("representative_rpc_method_calls_declared_downstream_or_declares_none"));
+        assert!(rpc_dependency_governance.contains("endpoint_change_test_passed: true"));
+        assert!(rpc_dependency_governance.contains("fallback_claim_without_test_evidence"));
+        assert!(rpc_data_consistency.contains("boundary: rpc"));
+        assert!(rpc_data_consistency
+            .contains("representative_rpc_mutation_declares_transaction_or_no_persistence"));
+        assert!(rpc_data_consistency.contains("dtm_or_saga:"));
+        assert!(rpc_data_consistency.contains("backup_restore_test_passed_for_broad_production"));
+        assert!(rpc_observability.contains("boundary: rpc"));
+        assert!(rpc_observability.contains("roze_rpc_requests_total"));
+        assert!(rpc_observability.contains("service_method_status"));
+        assert!(rpc_observability.contains("trace_propagation"));
+        assert!(rpc_observability.contains("no_debug_query_for_primary_slo"));
+        assert!(rpc_runtime_hardening.contains("boundary: rpc"));
+        assert!(rpc_runtime_hardening
+            .contains("representative_rpc_call_with_client_deadline_and_cancel"));
+        assert!(rpc_runtime_hardening.contains("timeout_and_deadline"));
+        assert!(rpc_runtime_hardening.contains("breaker_and_retry_budget"));
+        assert!(rpc_runtime_hardening.contains("unbounded_retry_amplification"));
+        assert!(rpc_error_contract.contains("boundary: rpc"));
+        assert!(rpc_error_contract.contains("grpc_status_mapping:"));
+        assert!(rpc_error_contract.contains("representative_rpc_status_and_metadata"));
+        assert!(rpc_error_contract.contains("retryable_mutation_without_idempotency_policy"));
+        assert!(rpc_error_contract.contains("transport_status_mapping_missing"));
 
         fs::remove_dir_all(root).expect("remove runbook test root");
     }

@@ -1,4 +1,11 @@
-use std::{convert::Infallible, error::Error, future::Future, net::SocketAddr, time::Duration};
+use std::{
+    convert::Infallible,
+    error::Error,
+    future::{ready, Future, Ready},
+    net::SocketAddr,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::{header, Request, Response, StatusCode};
@@ -23,7 +30,7 @@ pub struct RestConfig {
 
 pub struct RestServer<S> {
     config: RestConfig,
-    service: S,
+    make_service: S,
 }
 
 #[allow(dead_code)]
@@ -80,18 +87,21 @@ impl<S> RestService<S> {
 }
 
 impl<S> RestServer<S> {
-    pub fn new(addr: SocketAddr, service: S) -> Self {
+    pub fn from_make_service(addr: SocketAddr, make_service: S) -> Self {
         Self {
             config: RestConfig {
                 addr,
                 graceful_shutdown_timeout: Duration::from_secs(10),
             },
-            service,
+            make_service,
         }
     }
 
-    pub fn with_config(config: RestConfig, service: S) -> Self {
-        Self { config, service }
+    pub fn with_make_service_config(config: RestConfig, make_service: S) -> Self {
+        Self {
+            config,
+            make_service,
+        }
     }
 
     pub fn config(&self) -> &RestConfig {
@@ -99,8 +109,48 @@ impl<S> RestServer<S> {
     }
 }
 
-impl<S> RestServer<S>
+impl<S> RestServer<SharedService<S>> {
+    pub fn new(addr: SocketAddr, service: S) -> Self {
+        Self::from_make_service(addr, SharedService::new(service))
+    }
+
+    pub fn with_config(config: RestConfig, service: S) -> Self {
+        Self::with_make_service_config(config, SharedService::new(service))
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedService<S> {
+    service: S,
+}
+
+impl<S> SharedService<S> {
+    pub fn new(service: S) -> Self {
+        Self { service }
+    }
+}
+
+impl<S, Target> Service<Target> for SharedService<S>
 where
+    S: Clone,
+{
+    type Response = S;
+    type Error = Infallible;
+    type Future = Ready<Result<S, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _target: Target) -> Self::Future {
+        ready(Ok(self.service.clone()))
+    }
+}
+
+impl<M, S> RestServer<M>
+where
+    M: Service<SocketAddr, Response = S, Error = Infallible> + Clone + Send + 'static,
+    M::Future: Send + 'static,
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
         + Clone
         + Send
@@ -119,15 +169,22 @@ where
         info!(addr = %addr, "REST server listening");
 
         let listener = TcpListener::bind(addr).await?;
-        let service = self.service.boxed_clone();
+        let mut make_service = self.make_service.clone();
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
+                    let (stream, peer_addr) = accepted?;
                     let io = TokioIo::new(stream);
-                    let service = service.clone();
+                    let service = make_service
+                        .ready()
+                        .await
+                        .expect("infallible make service")
+                        .call(peer_addr)
+                        .await
+                        .expect("infallible make service")
+                        .boxed_clone();
                     let service = service_fn(move |request: Request<hyper::body::Incoming>| {
                         let service = service.clone();
                         async move {
@@ -203,7 +260,7 @@ mod tests {
     use http::{Request, StatusCode};
     use tower::{service_fn, Layer};
 
-    use super::{text_response, RestConfig, RestLayerStack};
+    use super::{text_response, RestConfig, RestLayerStack, RestServer, SharedService};
 
     #[test]
     fn rest_layer_stack_can_be_used_as_tower_layer() {
@@ -218,5 +275,20 @@ mod tests {
 
         let _service = layer.layer(service);
         assert_eq!(config.graceful_shutdown_timeout, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn rest_server_accepts_make_service() {
+        let config = RestConfig {
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            graceful_shutdown_timeout: Duration::from_secs(5),
+        };
+        let service = service_fn(|_request: Request<super::Body>| async {
+            Ok::<_, Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let server =
+            RestServer::with_make_service_config(config.clone(), SharedService::new(service));
+
+        assert_eq!(server.config().addr, config.addr);
     }
 }

@@ -350,6 +350,7 @@ fn rust_type_to_ent_type(ty: &str) -> String {
     }
     match ty {
         "String" => "string".to_string(),
+        "Vec<u8>" => "bytes".to_string(),
         "rust_decimal::Decimal" => "decimal".to_string(),
         other => other.to_string(),
     }
@@ -1667,7 +1668,7 @@ fn create_default_value_expr(field: &ModelField) -> Option<String> {
         return client_default_value_expr(client_default, &field.ty);
     }
     let default_value = field.default_value.as_deref()?;
-    timestamp_default_value_expr(default_value, &field.ty)
+    client_default_value_expr(default_value, &field.ty)
 }
 
 fn client_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
@@ -1784,6 +1785,16 @@ fn render_model_module(model: &ModelSpec) -> String {
     for field in &model.fields {
         if field.name == model.primary {
             writeln!(&mut out, "    #[sea_orm(primary_key)]").unwrap();
+        }
+        if let Some(source_name) = &field.source_name {
+            if source_name != &field.name {
+                writeln!(
+                    &mut out,
+                    "    #[sea_orm(column_name = \"{}\")]",
+                    source_name
+                )
+                .unwrap();
+            }
         }
         if let Some(comment) = &field.comment {
             writeln!(&mut out, "    /// {}", comment.replace('\n', " ")).unwrap();
@@ -8728,44 +8739,53 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 break;
             }
 
-            if let Some(value) = inner.strip_prefix("table ") {
+            if let Some(value) = ent_field_arg(inner, &["table"]) {
                 table = parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("schema ") {
+            if let Some(value) = ent_field_arg(inner, &["schema"]) {
                 schema_name = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("primary ") {
-                primary = Some(value.trim().to_string());
+            if let Some(value) = ent_field_arg(inner, &["primary"]) {
+                primary = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("cache ") {
+            if ent_field_flag(inner, &["cache"]) {
+                cache = true;
+                continue;
+            }
+            if let Some(value) = ent_field_arg(inner, &["cache"]) {
                 cache = parse_bool(value.trim(), inner_line_no + 1)?;
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("cache_ttl_secs ") {
+            if let Some(value) = ent_field_arg(inner, &["cache_ttl_secs", "cachettlsecs"]) {
                 cache_ttl_secs = Some(parse_u64(value.trim(), inner_line_no + 1)?);
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("negative_cache_ttl_secs ") {
+            if let Some(value) =
+                ent_field_arg(inner, &["negative_cache_ttl_secs", "negativecachettlsecs"])
+            {
                 negative_cache_ttl_secs = Some(parse_u64(value.trim(), inner_line_no + 1)?);
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("cache_key ") {
-                cache_keys = parse_ent_ident_list(value);
+            if let Some(value) = ent_field_arg(inner, &["cache_key", "cachekey"]) {
+                cache_keys = parse_ent_ident_list(value, inner_line_no + 1)?;
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("cache_prefix ") {
+            if let Some(value) = ent_field_arg(inner, &["cache_prefix", "cacheprefix"]) {
                 cache_prefix = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("soft_delete ") {
-                soft_delete = Some(value.trim().to_string());
+            if let Some(value) = ent_field_arg(inner, &["soft_delete", "softdelete"]) {
+                soft_delete = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
                 continue;
             }
-            if let Some(value) = inner.strip_prefix("tenant ") {
-                tenant = Some(value.trim().to_string());
+            if let Some(value) = ent_field_arg(inner, &["tenant"]) {
+                tenant = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+                continue;
+            }
+            if is_ent_ignored_entity_directive(inner) {
                 continue;
             }
             if inner.starts_with("field ") && inner.ends_with('{') {
@@ -8788,12 +8808,14 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 continue;
             }
             if inner.starts_with("edge ") && inner.ends_with('{') {
-                edges.push(parse_ent_edge(inner, &lines, &mut i, inner_line_no + 1)?);
+                if let Some(edge) = parse_ent_edge(inner, &lines, &mut i, inner_line_no + 1)? {
+                    edges.push(edge);
+                }
                 continue;
             }
 
             bail!(
-                "line {}: expected `table`, `schema`, `primary`, `cache`, `cache_key`, `cache_prefix`, `cache_ttl_secs`, `negative_cache_ttl_secs`, `soft_delete`, `tenant`, `field`, `index` or `edge`",
+                "line {}: expected `table`, `schema`, `primary`, `cache`, `cache_key`, `cache_prefix`, `cache_ttl_secs`, `negative_cache_ttl_secs`, `soft_delete`, `tenant`, recognized ent entity metadata directives such as `Annotations(...)`, `Mixin(...)`, `Policy(...)`, `Hooks(...)`, ent-style entity builder calls such as `Table(...)`, `CacheKey(...)`, `Tenant(...)`, `field`, `index` or `edge`",
                 inner_line_no + 1
             );
         }
@@ -8838,6 +8860,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             field_indexes.extend(indexes);
             indexes = field_indexes;
         }
+        normalize_ent_edge_indexes(&mut indexes, &edges);
         normalize_edge_unique_indexes(&mut indexes, &edges);
         normalize_edge_unique_cache_keys(&mut cache_keys, &edges, &fields);
         for key in &cache_keys {
@@ -8901,11 +8924,8 @@ fn parse_ent_field(
         .trim_start_matches("field ")
         .trim_end_matches('{')
         .trim();
-    let Some((name, ty)) = value.split_once(':') else {
-        bail!("line {line_no}: expected `field name: type {{`");
-    };
-    let name = name.trim().to_string();
-    let mut ty = ent_type_to_rust_type(ty.trim());
+    let (name, mut ty, header_directives) = parse_ent_field_header(value, line_no)?;
+    let mut header_directive_index = 0usize;
     let mut source_name = None;
     let mut auto_increment = false;
     let mut default_value = None;
@@ -8919,10 +8939,16 @@ fn parse_ent_field(
     let mut update_default = None;
     let mut client_default_value = None;
 
-    while *i < lines.len() {
-        let (inner_line_no, raw) = lines[*i];
-        *i += 1;
-        let inner = strip_comment(raw).trim();
+    while header_directive_index < header_directives.len() || *i < lines.len() {
+        let (inner_line_no, inner) = if header_directive_index < header_directives.len() {
+            let inner = header_directives[header_directive_index].clone();
+            header_directive_index += 1;
+            (line_no.saturating_sub(1), inner)
+        } else {
+            let (inner_line_no, raw) = lines[*i];
+            *i += 1;
+            (inner_line_no, strip_comment(raw).trim().to_string())
+        };
         if inner.is_empty() {
             continue;
         }
@@ -8946,139 +8972,336 @@ fn parse_ent_field(
                 indexed,
             ));
         }
-        if inner == "primary" {
+        if ent_field_flag(&inner, &["primary"]) {
             primary = true;
             continue;
         }
-        if inner == "unique" {
+        if ent_field_flag(&inner, &["unique"]) {
             unique = true;
             continue;
         }
-        if inner == "index" {
+        if ent_field_flag(&inner, &["index"]) {
             indexed = true;
             continue;
         }
-        if inner == "auto_increment" {
+        if ent_field_flag(&inner, &["auto_increment", "autoincrement"]) {
             auto_increment = true;
             continue;
         }
-        if inner == "immutable" {
+        if ent_field_flag(&inner, &["immutable"]) {
             immutable = true;
             continue;
         }
-        if inner == "sensitive" {
+        if ent_field_flag(&inner, &["sensitive"]) {
             sensitive = true;
             continue;
         }
-        if inner == "optional" {
+        if ent_field_flag(&inner, &["optional", "nillable", "nullable"]) {
             if optional_inner_type(&ty).is_none() {
                 ty = format!("Option<{ty}>");
             }
             continue;
         }
-        if inner == "not_empty" {
+        if ent_field_flag(&inner, &["not_empty", "notempty"]) {
             validation.not_empty = true;
             continue;
         }
-        if inner == "positive" {
+        if ent_field_flag(&inner, &["positive"]) {
             validation.positive = true;
             continue;
         }
-        if inner == "non_negative" {
+        if ent_field_flag(&inner, &["non_negative", "nonnegative"]) {
             validation.non_negative = true;
             continue;
         }
-        if inner == "negative" {
+        if ent_field_flag(&inner, &["negative"]) {
             validation.negative = true;
             continue;
         }
-        if inner == "non_positive" {
+        if ent_field_flag(&inner, &["non_positive", "nonpositive"]) {
             validation.non_positive = true;
             continue;
         }
-        if let Some(value) = inner.strip_prefix("min_len ") {
+        if let Some(value) = ent_field_arg(&inner, &["min_len", "minlen"]) {
             validation.min_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("max_len ") {
+        if let Some(value) = ent_field_arg(&inner, &["max_len", "maxlen"]) {
             validation.max_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("min ") {
+        if let Some(value) = ent_field_arg(&inner, &["min"]) {
             validation.min = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = inner.strip_prefix("max ") {
+        if let Some(value) = ent_field_arg(&inner, &["max"]) {
             validation.max = Some(value.trim().to_string());
             continue;
         }
-        if let Some(value) = inner.strip_prefix("range ") {
+        if let Some(value) = ent_field_arg(&inner, &["range"]) {
             let (min, max) = parse_ent_range_bounds(value.trim(), inner_line_no + 1)?;
             validation.min = Some(min);
             validation.max = Some(max);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("enum ") {
+        if let Some(value) = ent_field_arg(&inner, &["enum", "values"]) {
             validation.enum_values = parse_ent_value_list(value.trim(), inner_line_no + 1)?;
             continue;
         }
-        if let Some(value) = inner.strip_prefix("contains ") {
+        if let Some(value) = ent_field_arg(&inner, &["contains"]) {
             validation.contains = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("starts_with ") {
+        if let Some(value) = ent_field_arg(&inner, &["starts_with", "startswith"]) {
             validation.starts_with =
                 Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("ends_with ") {
+        if let Some(value) = ent_field_arg(&inner, &["ends_with", "endswith"]) {
             validation.ends_with =
                 Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("not_contains ") {
+        if let Some(value) = ent_field_arg(&inner, &["not_contains", "notcontains"]) {
             validation.not_contains =
                 Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("not_starts_with ") {
+        if let Some(value) = ent_field_arg(&inner, &["not_starts_with", "notstartswith"]) {
             validation.not_starts_with =
                 Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("not_ends_with ") {
+        if let Some(value) = ent_field_arg(&inner, &["not_ends_with", "notendswith"]) {
             validation.not_ends_with =
                 Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("update_default ") {
-            update_default = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+        if let Some(value) = ent_field_arg(&inner, &["update_default", "updatedefault"]) {
+            update_default = Some(normalize_ent_default_value(&parse_ent_string_or_ident(
+                value.trim(),
+                inner_line_no + 1,
+            )?));
             continue;
         }
-        if let Some(value) = inner.strip_prefix("client_default ") {
-            client_default_value =
-                Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+        if let Some(value) = ent_field_arg(&inner, &["client_default", "clientdefault"]) {
+            client_default_value = Some(normalize_ent_default_value(&parse_ent_string_or_ident(
+                value.trim(),
+                inner_line_no + 1,
+            )?));
             continue;
         }
-        if let Some(value) = inner.strip_prefix("source ") {
+        if let Some(value) = ent_field_arg(&inner, &["source"]) {
             source_name = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("default ") {
-            default_value = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+        if let Some(value) = ent_field_arg(&inner, &["storage_key", "storagekey"]) {
+            source_name = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("comment ") {
+        if let Some(value) = ent_field_arg(&inner, &["default"]) {
+            default_value = Some(normalize_ent_default_value(&parse_ent_string_or_ident(
+                value.trim(),
+                inner_line_no + 1,
+            )?));
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["default_func", "defaultfunc"]) {
+            default_value = Some(parse_ent_default_func_value(
+                value.trim(),
+                inner_line_no + 1,
+            )?);
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["comment"]) {
             comment = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
+        if is_ent_ignored_metadata_directive(&inner) {
+            continue;
+        }
         bail!(
-            "line {}: expected `primary`, `unique`, `index`, `immutable`, `sensitive`, `optional`, `not_empty`, `positive`, `non_negative`, `negative`, `non_positive`, `min_len`, `max_len`, `min`, `max`, `range`, `enum`, `contains`, `starts_with`, `ends_with`, `not_contains`, `not_starts_with`, `not_ends_with`, `update_default`, `client_default`, `source`, `auto_increment`, `default`, `comment` or `}}`",
+            "line {}: expected `primary`, `unique`, `index`, `immutable`, `sensitive`, `optional`, `not_empty`, `positive`, `non_negative`, `negative`, `non_positive`, `min_len`, `max_len`, `min`, `max`, `range`, `enum`, `contains`, `starts_with`, `ends_with`, `not_contains`, `not_starts_with`, `not_ends_with`, `update_default`, `client_default`, `source`, `storage_key`, `auto_increment`, `default`, `default_func`, `comment`, recognized ent metadata directives such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`, `Annotations(...)`, or `}}`",
             inner_line_no + 1
         );
     }
 
     bail!("line {line_no}: unclosed field block")
+}
+
+fn is_ent_ignored_metadata_directive(value: &str) -> bool {
+    ent_field_arg(
+        value,
+        &[
+            "schema_type",
+            "schematype",
+            "go_type",
+            "gotype",
+            "struct_tag",
+            "structtag",
+            "annotations",
+            "annotation",
+            "comment",
+            "validate",
+            "match",
+        ],
+    )
+    .is_some()
+}
+
+fn is_ent_ignored_entity_directive(value: &str) -> bool {
+    is_ent_ignored_metadata_directive(value)
+        || ent_field_arg(
+            value,
+            &[
+                "mixin",
+                "mixins",
+                "policy",
+                "hooks",
+                "hook",
+                "interceptors",
+                "interceptor",
+            ],
+        )
+        .is_some()
+}
+
+fn parse_ent_field_header(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<(String, String, Vec<String>)> {
+    let colon_before_call = value
+        .find(':')
+        .is_some_and(|colon| value.find('(').map_or(true, |open| colon < open));
+    if colon_before_call {
+        let Some((name, ty)) = value.split_once(':') else {
+            unreachable!("colon_before_call requires a colon");
+        };
+        return Ok((
+            name.trim().to_string(),
+            ent_type_to_rust_type(ty.trim()),
+            Vec::new(),
+        ));
+    }
+    let (builder, args, rest) = parse_ent_call_prefix(value, line_no)?;
+    let builder = builder
+        .rsplit('.')
+        .next()
+        .unwrap_or(builder.as_str())
+        .trim();
+    if builder.is_empty() {
+        bail!("line {line_no}: field type builder is required");
+    }
+    let name = parse_ent_field_builder_name(&args, line_no)?;
+    if name.is_empty() {
+        bail!("line {line_no}: field name is required");
+    }
+    let mut directives = parse_ent_call_chain(rest, line_no)?;
+    if builder.eq_ignore_ascii_case("id") {
+        if parse_ent_value_list(&args, line_no)?.len() != 1 {
+            bail!("line {line_no}: field ID(...) currently supports a single id field; composite IDs are not supported");
+        }
+        directives.push("Primary()".to_string());
+    }
+    Ok((
+        name,
+        ent_field_builder_type_to_rust_type(builder),
+        directives,
+    ))
+}
+
+fn parse_ent_field_builder_name(args: &str, line_no: usize) -> anyhow::Result<String> {
+    let args = args.trim();
+    if args.starts_with('"') {
+        let mut escaped = false;
+        for (offset, ch) in args[1..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                let close = 1 + offset;
+                return parse_ent_string_or_ident(&args[..=close], line_no);
+            }
+        }
+        bail!("line {line_no}: unterminated string literal");
+    }
+    let first = args
+        .split_once(',')
+        .map(|(first, _)| first)
+        .unwrap_or(args)
+        .trim();
+    parse_ent_string_or_ident(first, line_no)
+}
+
+fn parse_ent_call_chain(mut value: &str, line_no: usize) -> anyhow::Result<Vec<String>> {
+    let mut calls = Vec::new();
+    value = value.trim();
+    while !value.is_empty() {
+        let Some(rest) = value.strip_prefix('.') else {
+            bail!("line {line_no}: expected chained field directive call");
+        };
+        let (builder, args, next) = parse_ent_call_prefix(rest, line_no)?;
+        let builder = builder
+            .rsplit('.')
+            .next()
+            .unwrap_or(builder.as_str())
+            .trim();
+        if builder.is_empty() {
+            bail!("line {line_no}: chained field directive name is required");
+        }
+        calls.push(format!("{builder}({args})"));
+        value = next.trim();
+    }
+    Ok(calls)
+}
+
+fn parse_ent_call_prefix(value: &str, line_no: usize) -> anyhow::Result<(String, String, &str)> {
+    let Some(open) = value.find('(') else {
+        bail!("line {line_no}: expected `field name: type {{` or `field Type(\"name\") {{`");
+    };
+    let builder = value[..open].trim();
+    if builder.is_empty() {
+        bail!("line {line_no}: call name is required");
+    }
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in value[open + 1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let close = open + 1 + offset;
+                    return Ok((
+                        builder.to_string(),
+                        value[open + 1..close].trim().to_string(),
+                        &value[close + 1..],
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    bail!("line {line_no}: unterminated call")
 }
 
 fn parse_ent_index(
@@ -9087,44 +9310,72 @@ fn parse_ent_index(
     i: &mut usize,
     line_no: usize,
 ) -> anyhow::Result<ModelIndex> {
-    let name = header
+    let header_value = header
         .trim_start_matches("index ")
         .trim_end_matches('{')
-        .trim()
-        .to_string();
-    if name.is_empty() {
-        bail!("line {line_no}: index name is required");
-    }
+        .trim();
+    let (mut name, header_directives) = parse_ent_index_header(header_value, line_no)?;
+    let mut header_directive_index = 0usize;
     let mut fields = Vec::new();
     let mut unique = false;
 
-    while *i < lines.len() {
-        let (inner_line_no, raw) = lines[*i];
-        *i += 1;
-        let inner = strip_comment(raw).trim();
+    while header_directive_index < header_directives.len() || *i < lines.len() {
+        let (inner_line_no, inner) = if header_directive_index < header_directives.len() {
+            let inner = header_directives[header_directive_index].clone();
+            header_directive_index += 1;
+            (line_no.saturating_sub(1), inner)
+        } else {
+            let (inner_line_no, raw) = lines[*i];
+            *i += 1;
+            (inner_line_no, strip_comment(raw).trim().to_string())
+        };
         if inner.is_empty() {
             continue;
         }
         if inner == "}" {
             if fields.is_empty() {
-                bail!("line {line_no}: index `{name}` must declare fields");
+                let label = name.as_deref().unwrap_or("<anonymous>");
+                bail!("line {line_no}: index `{label}` must declare fields");
             }
+            let name = name.unwrap_or_else(|| inferred_ent_index_name(unique, &fields));
             return Ok(ModelIndex {
                 name,
                 fields,
                 unique,
             });
         }
-        if let Some(value) = inner.strip_prefix("fields ") {
-            fields = parse_ent_ident_list(value);
+        if let Some(value) = ent_field_arg(&inner, &["fields"]) {
+            fields = parse_ent_ident_list(value, inner_line_no + 1)?;
             continue;
         }
-        if inner == "unique" {
+        if let Some(value) = ent_field_arg(&inner, &["edges"]) {
+            fields.extend(
+                parse_ent_ident_list(value, inner_line_no + 1)?
+                    .into_iter()
+                    .map(|edge| ent_edge_index_marker(&edge)),
+            );
+            continue;
+        }
+        if ent_field_flag(&inner, &["unique"]) {
             unique = true;
             continue;
         }
+        if let Some(value) = ent_field_arg(&inner, &["storage_key", "storagekey"]) {
+            let storage_key = parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
+            if storage_key.is_empty() {
+                bail!(
+                    "line {}: index storage_key cannot be empty",
+                    inner_line_no + 1
+                );
+            }
+            name = Some(storage_key);
+            continue;
+        }
+        if is_ent_ignored_metadata_directive(&inner) {
+            continue;
+        }
         bail!(
-            "line {}: expected `fields`, `unique` or `}}`",
+            "line {}: expected `fields`, `edges`, `unique`, `storage_key`, recognized ent metadata directives such as `Annotations(...)`, or ent-style index builder calls such as `Fields(...)`, `Edges(...)`, `Unique()`, `StorageKey(...)` or `}}`",
             inner_line_no + 1
         );
     }
@@ -9132,74 +9383,174 @@ fn parse_ent_index(
     bail!("line {line_no}: unclosed index block")
 }
 
+fn parse_ent_index_header(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("line {line_no}: expected `index name {{` or `index Fields(...) {{`");
+    }
+    if value.contains('(') {
+        let (builder, args, rest) = parse_ent_call_prefix(value, line_no)?;
+        let builder = builder
+            .rsplit('.')
+            .next()
+            .unwrap_or(builder.as_str())
+            .trim();
+        if builder.is_empty() {
+            bail!("line {line_no}: index directive name is required");
+        }
+        let mut directives = vec![format!("{builder}({args})")];
+        directives.extend(parse_ent_call_chain(rest, line_no)?);
+        return Ok((None, directives));
+    }
+    Ok((Some(value.to_string()), Vec::new()))
+}
+
+fn inferred_ent_index_name(unique: bool, fields: &[String]) -> String {
+    let prefix = if unique { "uniq" } else { "idx" };
+    format!("{prefix}_{}", fields.join("_"))
+}
+
+fn ent_edge_index_marker(edge_name: &str) -> String {
+    format!("__edge__{edge_name}")
+}
+
+fn ent_edge_index_marker_name(field: &str) -> Option<&str> {
+    field.strip_prefix("__edge__")
+}
+
+fn normalize_ent_edge_indexes(indexes: &mut Vec<ModelIndex>, edges: &[ModelEdge]) {
+    let mut normalized = Vec::new();
+    for mut index in indexes.drain(..) {
+        let original_fields = index.fields.clone();
+        let original_inferred_name = inferred_ent_index_name(index.unique, &original_fields);
+        let mut fields = Vec::new();
+        for field in original_fields {
+            if let Some(edge_name) = ent_edge_index_marker_name(&field) {
+                if let Some(edge) = edges.iter().find(|edge| edge.name == edge_name) {
+                    fields.push(edge.field.clone());
+                }
+            } else {
+                fields.push(field);
+            }
+        }
+        if fields.is_empty() {
+            continue;
+        }
+        if index.name == original_inferred_name {
+            index.name = inferred_ent_index_name(index.unique, &fields);
+        }
+        index.fields = fields;
+        normalized.push(index);
+    }
+    *indexes = normalized;
+}
+
 fn parse_ent_edge(
     header: &str,
     lines: &[(usize, &str)],
     i: &mut usize,
     line_no: usize,
-) -> anyhow::Result<ModelEdge> {
-    let name = header
+) -> anyhow::Result<Option<ModelEdge>> {
+    let header_value = header
         .trim_start_matches("edge ")
         .trim_end_matches('{')
-        .trim()
-        .to_string();
+        .trim();
+    let (name, mut target, header_directives, inverse) =
+        parse_ent_edge_header(header_value, line_no)?;
+    let mut header_directive_index = 0usize;
     if name.is_empty() {
         bail!("line {line_no}: edge name is required");
     }
-    let mut target = None;
     let mut field = None;
     let mut ref_field = None;
     let mut unique = false;
     let mut required = false;
 
-    while *i < lines.len() {
-        let (inner_line_no, raw) = lines[*i];
-        *i += 1;
-        let inner = strip_comment(raw).trim();
+    while header_directive_index < header_directives.len() || *i < lines.len() {
+        let (inner_line_no, inner) = if header_directive_index < header_directives.len() {
+            let inner = header_directives[header_directive_index].clone();
+            header_directive_index += 1;
+            (line_no.saturating_sub(1), inner)
+        } else {
+            let (inner_line_no, raw) = lines[*i];
+            *i += 1;
+            (inner_line_no, strip_comment(raw).trim().to_string())
+        };
         if inner.is_empty() {
             continue;
         }
         if inner == "}" {
+            if inverse || field.is_none() && ref_field.is_none() {
+                return Ok(None);
+            }
             let Some(target) = target else {
                 bail!("line {line_no}: edge `{name}` must declare `to`");
             };
             let Some(field) = field else {
                 bail!("line {line_no}: edge `{name}` must declare `field`");
             };
-            let Some(ref_field) = ref_field else {
-                bail!("line {line_no}: edge `{name}` must declare `ref`");
-            };
-            return Ok(ModelEdge {
+            let ref_field = ref_field.unwrap_or_else(|| "id".to_string());
+            return Ok(Some(ModelEdge {
                 name,
                 target,
                 field,
                 ref_field,
                 unique,
                 required,
-            });
+            }));
         }
-        if let Some(value) = inner.strip_prefix("to ") {
-            target = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+        if inverse {
+            if ent_field_arg(&inner, &["ref"]).is_some()
+                || ent_field_arg(&inner, &["field"]).is_some()
+                || ent_field_arg(&inner, &["to"]).is_some()
+                || ent_field_arg(&inner, &["from"]).is_some()
+                || ent_field_arg(&inner, &["through"]).is_some()
+                || ent_field_arg(&inner, &["storage_key", "storagekey"]).is_some()
+                || ent_field_flag(&inner, &["unique"])
+                || ent_field_flag(&inner, &["required"])
+                || is_ent_ignored_metadata_directive(&inner)
+            {
+                continue;
+            }
+        }
+        if let Some(value) = ent_field_arg(&inner, &["to"]) {
+            target = Some(clean_ent_type_ref(&parse_ent_string_or_ident(
+                value.trim(),
+                inner_line_no + 1,
+            )?));
             continue;
         }
-        if let Some(value) = inner.strip_prefix("field ") {
-            field = Some(value.trim().to_string());
+        if let Some(value) = ent_field_arg(&inner, &["field"]) {
+            field = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = inner.strip_prefix("ref ") {
-            ref_field = Some(value.trim().to_string());
+        if let Some(value) = ent_field_arg(&inner, &["ref"]) {
+            ref_field = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if inner == "unique" {
+        if ent_field_flag(&inner, &["unique"]) {
             unique = true;
             continue;
         }
-        if inner == "required" {
+        if ent_field_flag(&inner, &["required"]) {
             required = true;
             continue;
         }
+        if ent_field_arg(&inner, &["through"]).is_some() {
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["storage_key", "storagekey"]) {
+            parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
+            continue;
+        }
+        if is_ent_ignored_metadata_directive(&inner) {
+            continue;
+        }
         bail!(
-            "line {}: expected `to`, `field`, `ref`, `unique`, `required` or `}}`",
+            "line {}: expected `to`, `field`, `ref`, `unique`, `required`, `through`, recognized ent metadata directives such as `Annotations(...)`, `StorageKey(...)`, or ent-style edge builder calls such as `To(...)`, `Field(...)`, `Ref(...)`, `Unique()`, `Required()`, `Through(...)` or `}}`",
             inner_line_no + 1
         );
     }
@@ -9207,13 +9558,104 @@ fn parse_ent_edge(
     bail!("line {line_no}: unclosed edge block")
 }
 
-fn parse_ent_ident_list(value: &str) -> Vec<String> {
+fn parse_ent_edge_header(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<(String, Option<String>, Vec<String>, bool)> {
+    if !value.contains('(') {
+        return Ok((value.to_string(), None, Vec::new(), false));
+    }
+    let (builder, args, rest) = parse_ent_call_prefix(value, line_no)?;
+    let builder = builder
+        .rsplit('.')
+        .next()
+        .unwrap_or(builder.as_str())
+        .trim();
+    let inverse = if builder.eq_ignore_ascii_case("to") {
+        false
+    } else if builder.eq_ignore_ascii_case("from") {
+        true
+    } else {
+        bail!("line {line_no}: expected `edge name {{`, `edge To(\"name\", Target) {{`, or `edge From(\"name\", Target) {{`");
+    };
+    let args = parse_ent_value_list(&args, line_no)?;
+    if args.len() != 2 {
+        bail!("line {line_no}: edge {builder}(...) must include edge name and target");
+    }
+    Ok((
+        args[0].clone(),
+        Some(clean_ent_type_ref(&args[1])),
+        parse_ent_call_chain(rest, line_no)?,
+        inverse,
+    ))
+}
+
+fn clean_ent_type_ref(value: &str) -> String {
+    value
+        .trim()
+        .strip_suffix(".Type")
+        .unwrap_or(value.trim())
+        .rsplit('.')
+        .next()
+        .unwrap_or(value.trim())
+        .to_string()
+}
+
+fn parse_ent_ident_list(value: &str, line_no: usize) -> anyhow::Result<Vec<String>> {
     value
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+        .map(|value| parse_ent_string_or_ident(value, line_no))
         .collect()
+}
+
+fn ent_field_flag(value: &str, names: &[&str]) -> bool {
+    let trimmed = value.trim();
+    names.iter().any(|name| {
+        trimmed.eq_ignore_ascii_case(name)
+            || trimmed.eq_ignore_ascii_case(&format!("{name}()"))
+            || trimmed.eq_ignore_ascii_case(&format!("{}()", to_pascal_case(name)))
+    })
+}
+
+fn ent_field_arg<'a>(value: &'a str, names: &[&str]) -> Option<&'a str> {
+    let trimmed = value.trim();
+    for name in names {
+        if trimmed.len() >= name.len() && trimmed[..name.len()].eq_ignore_ascii_case(name) {
+            if let Some(arg) = ent_directive_arg_rest(&trimmed[name.len()..]) {
+                return Some(arg);
+            }
+        }
+        let pascal = to_pascal_case(name);
+        if trimmed.len() >= pascal.len() && trimmed[..pascal.len()].eq_ignore_ascii_case(&pascal) {
+            if let Some(arg) = ent_directive_arg_rest(&trimmed[pascal.len()..]) {
+                return Some(arg);
+            }
+        }
+    }
+    None
+}
+
+fn ent_directive_arg_rest(value: &str) -> Option<&str> {
+    if value.starts_with('(') {
+        return ent_parenthesized_arg(value);
+    }
+    if value.chars().next().is_some_and(char::is_whitespace) {
+        let rest = value.trim();
+        if !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn ent_parenthesized_arg(value: &str) -> Option<&str> {
+    value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_ent_value_list(value: &str, line_no: usize) -> anyhow::Result<Vec<String>> {
@@ -9272,6 +9714,22 @@ fn parse_ent_string_or_ident(value: &str, line_no: usize) -> anyhow::Result<Stri
     Ok(out)
 }
 
+fn normalize_ent_default_value(value: &str) -> String {
+    match value.trim() {
+        "time.Now" | "time.Now()" => "now_millis".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn parse_ent_default_func_value(value: &str, line_no: usize) -> anyhow::Result<String> {
+    let value = parse_ent_string_or_ident(value, line_no)?;
+    let normalized = normalize_ent_default_value(&value);
+    if normalized == "now_millis" {
+        return Ok(normalized);
+    }
+    bail!("line {line_no}: DefaultFunc currently supports time.Now only")
+}
+
 fn ent_type_to_rust_type(ty: &str) -> String {
     let trimmed = ty.trim();
     if let Some(inner) = trimmed.strip_suffix('?') {
@@ -9279,7 +9737,25 @@ fn ent_type_to_rust_type(ty: &str) -> String {
     }
     match trimmed.to_ascii_lowercase().as_str() {
         "decimal" | "numeric" => "rust_decimal::Decimal".to_string(),
+        "int8" => "i8".to_string(),
+        "int16" => "i16".to_string(),
+        "int32" => "i32".to_string(),
+        "int64" => "i64".to_string(),
+        "uint8" => "u8".to_string(),
+        "uint16" => "u16".to_string(),
+        "uint32" => "u32".to_string(),
+        "uint64" => "u64".to_string(),
+        "bytes" | "byte" => "Vec<u8>".to_string(),
+        "enum" => "String".to_string(),
         _ => normalize_dsl_model_type(trimmed),
+    }
+}
+
+fn ent_field_builder_type_to_rust_type(builder: &str) -> String {
+    match builder.trim().to_ascii_lowercase().as_str() {
+        "id" => "i64".to_string(),
+        "time" => "i64".to_string(),
+        _ => ent_type_to_rust_type(builder),
     }
 }
 
@@ -10844,6 +11320,417 @@ mod tests {
     }
 
     #[test]
+    fn ent_indexes_accept_builder_style_calls() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field tenant_id: string {
+            }
+            field code: string {
+            }
+            index tenant_code {
+                Fields("tenant_id", "code")
+                Unique()
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert!(model.indexes.iter().any(|index| {
+            index.unique && index.name == "tenant_code" && index.fields == ["tenant_id", "code"]
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("index tenant_code {"));
+        assert!(ent.contains("    fields tenant_id, code"));
+        assert!(ent.contains("    unique"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "pub async fn find_by_tenant_id_and_code(&self, tenant_id: String, code: String) -> anyhow::Result<Option<Model>>"
+        ));
+        assert!(sea_orm.contains(
+            "self.query().where_(tenant_id_eq(tenant_id)).where_(code_eq(code)).first().await"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "pub async fn find_by_tenant_id_and_code(db: &mut dyn toasty::Executor, tenant_id: &String, code: &String) -> toasty::Result<Option<User>>"
+        ));
+        assert!(toasty.contains("User::query(db).where_(tenant_id_eq(tenant_id.clone())).where_(code_eq(code.clone())).first().await"));
+    }
+
+    #[test]
+    fn ent_indexes_accept_chained_builder_style_headers() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field tenant_id: string {
+            }
+            field code: string {
+            }
+            index Fields("tenant_id", "code").Unique().StorageKey("tenant_code") {
+            }
+            index Fields("code") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert!(model.indexes.iter().any(|index| {
+            index.unique && index.name == "tenant_code" && index.fields == ["tenant_id", "code"]
+        }));
+        assert!(model
+            .indexes
+            .iter()
+            .any(|index| !index.unique && index.name == "idx_code" && index.fields == ["code"]));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("index tenant_code {"));
+        assert!(ent.contains("    fields tenant_id, code"));
+        assert!(ent.contains("    unique"));
+        assert!(ent.contains("field code: string {\n    index\n  }"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "pub async fn find_by_tenant_id_and_code(&self, tenant_id: String, code: String) -> anyhow::Result<Option<Model>>"
+        ));
+        assert!(sea_orm.contains(
+            "pub async fn list_by_code(&self, code: String) -> anyhow::Result<Vec<Model>>"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "pub async fn find_by_tenant_id_and_code(db: &mut dyn toasty::Executor, tenant_id: &String, code: &String) -> toasty::Result<Option<User>>"
+        ));
+        assert!(toasty.contains(
+            "pub async fn list_by_code(db: &mut dyn toasty::Executor, code: &String) -> toasty::Result<Vec<User>>"
+        ));
+    }
+
+    #[test]
+    fn ent_indexes_on_edges_map_to_local_fk_fields() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field Int64("id").Primary() {
+            }
+            field Int64("tenant_id") {
+            }
+            field Int64("user_id") {
+            }
+            edge To("user", User.Type).Field("user_id") {
+            }
+            index Edges("user").Unique() {
+            }
+            index Fields("tenant_id").Edges("user") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.indexes.iter().any(|index| index.unique
+            && index.name == "uniq_user_id"
+            && index.fields == ["user_id"]));
+        assert!(profile.indexes.iter().any(|index| {
+            !index.unique
+                && index.name == "idx_tenant_id_user_id"
+                && index.fields == ["tenant_id", "user_id"]
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field user_id: i64 {\n    unique\n  }"));
+        assert!(ent.contains("index idx_tenant_id_user_id {"));
+        assert!(ent.contains("    fields tenant_id, user_id"));
+    }
+
+    #[test]
+    fn ent_indexes_on_unresolved_edges_are_parse_compatible_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            index Edges("groups").Unique() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        assert!(models[0].indexes.is_empty());
+        let ent = render_ent_schema(&models);
+        assert!(!ent.contains("index"));
+    }
+
+    #[test]
+    fn ent_entity_directives_accept_builder_style_calls() {
+        let source = r#"
+        entity User {
+            Table("accounts")
+            Schema("public")
+            Cache()
+            CacheKey("id", "email")
+            CachePrefix("acct")
+            CacheTtlSecs(600)
+            NegativeCacheTtlSecs(30)
+            Tenant("tenant_id")
+            SoftDelete("deleted")
+
+            field id: i64 {
+                primary
+            }
+            field tenant_id: string {
+            }
+            field email: string {
+                unique
+            }
+            field deleted: bool {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.table, "accounts");
+        assert_eq!(model.schema_name.as_deref(), Some("public"));
+        assert!(model.cache);
+        assert_eq!(model.cache_keys, vec!["id", "email"]);
+        assert_eq!(model.cache_prefix.as_deref(), Some("acct"));
+        assert_eq!(model.cache_ttl_secs, Some(600));
+        assert_eq!(model.negative_cache_ttl_secs, Some(30));
+        assert_eq!(model.tenant.as_deref(), Some("tenant_id"));
+        assert_eq!(model.soft_delete.as_deref(), Some("deleted"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("table \"accounts\""));
+        assert!(ent.contains("schema \"public\""));
+        assert!(ent.contains("cache true"));
+        assert!(ent.contains("cache_ttl_secs 600"));
+        assert!(ent.contains("negative_cache_ttl_secs 30"));
+        assert!(ent.contains("cache_key id, email"));
+        assert!(ent.contains("cache_prefix \"acct\""));
+        assert!(ent.contains("tenant tenant_id"));
+        assert!(ent.contains("soft_delete deleted"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("#[sea_orm(schema_name = \"public\", table_name = \"accounts\")]"));
+        assert!(sea_orm.contains("pub async fn find_by_id_for_tenant_id"));
+        assert!(sea_orm.contains("pub async fn soft_delete_by_id"));
+    }
+
+    #[test]
+    fn ent_entity_metadata_directives_are_accepted_as_noops() {
+        let source = r#"
+        entity User {
+            Table("users")
+            Annotations(entgql.QueryField(), entsql.Annotation{Table: "users"})
+            Mixin(TimeMixin{})
+            Policy(policy.AlwaysAllow())
+            Hooks(UserHook())
+            Interceptors(UserInterceptor())
+
+            field Int64("id").Primary() {
+            }
+            field String("email") {
+                Unique()
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.name, "User");
+        assert_eq!(model.table, "users");
+        assert!(model
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["email"]));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("entity User {"));
+        assert!(ent.contains("table \"users\""));
+        assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("unique"));
+        assert!(!ent.contains("Annotations"));
+        assert!(!ent.contains("Mixin"));
+        assert!(!ent.contains("Policy"));
+        assert!(!ent.contains("Hooks"));
+        assert!(!ent.contains("Interceptors"));
+    }
+
+    #[test]
+    fn ent_fields_accept_builder_style_headers() {
+        let source = r#"
+        entity User {
+            Table("users")
+            field Int64("id") {
+                Primary()
+            }
+            field String("email") {
+                Unique()
+                NotEmpty()
+            }
+            field Bool("active") {
+                Default("true")
+            }
+            field fields.String("nickname") {
+                Optional()
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "id")
+            .expect("id field");
+        assert_eq!(id.ty, "i64");
+        let email = model
+            .fields
+            .iter()
+            .find(|field| field.name == "email")
+            .expect("email field");
+        assert_eq!(email.ty, "String");
+        assert!(email.validation.not_empty);
+        let active = model
+            .fields
+            .iter()
+            .find(|field| field.name == "active")
+            .expect("active field");
+        assert_eq!(active.ty, "bool");
+        assert_eq!(active.default_value.as_deref(), Some("true"));
+        let nickname = model
+            .fields
+            .iter()
+            .find(|field| field.name == "nickname")
+            .expect("nickname field");
+        assert_eq!(nickname.ty, "Option<String>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field id: i64 {"));
+        assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("field active: bool {"));
+        assert!(ent.contains("field nickname: string? {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub id: i64"));
+        assert!(sea_orm.contains("pub email: String"));
+        assert!(sea_orm.contains("pub active: bool"));
+        assert!(sea_orm.contains("email validation failed: must not be empty"));
+    }
+
+    #[test]
+    fn ent_fields_accept_chained_builder_style_headers() {
+        let source = r#"
+        entity User {
+            Table("users")
+            field Int64("id").Primary() {
+            }
+            field String("email").StorageKey("email_address").Unique().NotEmpty().ClientDefault("guest@example.com") {
+            }
+            field String("nickname").Optional().Comment("Public nickname") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.primary, "id");
+        let email = model
+            .fields
+            .iter()
+            .find(|field| field.name == "email")
+            .expect("email field");
+        assert_eq!(email.source_name.as_deref(), Some("email_address"));
+        assert!(email.validation.not_empty);
+        assert_eq!(
+            email.client_default_value.as_deref(),
+            Some("guest@example.com")
+        );
+        assert!(model
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["email"]));
+        let nickname = model
+            .fields
+            .iter()
+            .find(|field| field.name == "nickname")
+            .expect("nickname field");
+        assert_eq!(nickname.ty, "Option<String>");
+        assert_eq!(nickname.comment.as_deref(), Some("Public nickname"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field id: i64 {"));
+        assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("source \"email_address\""));
+        assert!(ent.contains("not_empty"));
+        assert!(ent.contains("client_default \"guest@example.com\""));
+        assert!(ent.contains("field nickname: string? {"));
+        assert!(ent.contains("comment \"Public nickname\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("#[sea_orm(column_name = \"email_address\")]"));
+        assert!(sea_orm.contains(
+            "email: self.email.map(Set).unwrap_or_else(|| Set(\"guest@example.com\".to_string()))"
+        ));
+        assert!(sea_orm.contains("email validation failed: must not be empty"));
+    }
+
+    #[test]
+    fn ent_enum_field_builder_values_generate_enum_validation() {
+        let source = r#"
+        entity User {
+            Table("users")
+            field Int64("id").Primary() {
+            }
+            field Enum("state").Values("active", "disabled").Default("active") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let state = model
+            .fields
+            .iter()
+            .find(|field| field.name == "state")
+            .expect("state field");
+        assert_eq!(state.ty, "String");
+        assert_eq!(state.validation.enum_values, ["active", "disabled"]);
+        assert_eq!(state.default_value.as_deref(), Some("active"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field state: string {"));
+        assert!(ent.contains("enum \"active\", \"disabled\""));
+        assert!(ent.contains("default \"active\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub state: String"));
+        assert!(sea_orm.contains("!matches!(value.as_str(), \"active\" | \"disabled\")"));
+        assert!(sea_orm.contains("state validation failed: value is not allowed"));
+    }
+
+    #[test]
     fn ent_optional_field_directive_generates_nullable_field() {
         let source = r#"
         entity User {
@@ -10881,6 +11768,115 @@ mod tests {
         assert!(toasty.contains("pub fn clear_nickname(mut self) -> Self"));
         assert!(toasty.contains("NicknameIsNull"));
         assert!(toasty.contains("pub fn nickname_is_null() -> UserPredicate"));
+    }
+
+    #[test]
+    fn ent_storage_key_maps_field_to_sea_orm_column_name() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field display_name: string {
+                storage_key "display-name"
+                index
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let display_name = model
+            .fields
+            .iter()
+            .find(|field| field.name == "display_name")
+            .expect("display_name field");
+        assert_eq!(display_name.source_name.as_deref(), Some("display-name"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field display_name: string {"));
+        assert!(ent.contains("source \"display-name\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("#[sea_orm(column_name = \"display-name\")]"));
+        assert!(sea_orm.contains("pub display_name: String"));
+        assert!(sea_orm.contains(
+            "pub async fn list_by_display_name(&self, display_name: String) -> anyhow::Result<Vec<Model>>"
+        ));
+        assert!(sea_orm.contains(
+            "UserPredicate::DisplayNameEq(value) => Condition::all().add(Column::DisplayName.eq(value.clone()))"
+        ));
+    }
+
+    #[test]
+    fn ent_field_directives_accept_builder_style_calls() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                Primary()
+            }
+            field display_name: string {
+                StorageKey("display-name")
+                Unique()
+                Sensitive()
+                MinLen(3)
+                ClientDefault("guest")
+            }
+            field nickname: string {
+                Optional()
+            }
+            field bio: string {
+                Nillable()
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.primary, "id");
+
+        let display_name = model
+            .fields
+            .iter()
+            .find(|field| field.name == "display_name")
+            .expect("display_name field");
+        assert_eq!(display_name.source_name.as_deref(), Some("display-name"));
+        assert!(display_name.sensitive);
+        assert_eq!(display_name.validation.min_len, Some(3));
+        assert_eq!(display_name.client_default_value.as_deref(), Some("guest"));
+
+        let nickname = model
+            .fields
+            .iter()
+            .find(|field| field.name == "nickname")
+            .expect("nickname field");
+        assert_eq!(nickname.ty, "Option<String>");
+        let bio = model
+            .fields
+            .iter()
+            .find(|field| field.name == "bio")
+            .expect("bio field");
+        assert_eq!(bio.ty, "Option<String>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("source \"display-name\""));
+        assert!(ent.contains("unique"));
+        assert!(ent.contains("sensitive"));
+        assert!(ent.contains("min_len 3"));
+        assert!(ent.contains("client_default \"guest\""));
+        assert!(ent.contains("field nickname: string? {"));
+        assert!(ent.contains("field bio: string? {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("#[sea_orm(column_name = \"display-name\")]"));
+        assert!(
+            sea_orm.contains(
+                "display_name: self.display_name.map(Set).unwrap_or_else(|| Set(\"guest\".to_string()))"
+            )
+        );
+        assert!(sea_orm.contains("display_name validation failed: length must be at least 3"));
     }
 
     #[test]
@@ -11340,6 +12336,511 @@ mod tests {
     }
 
     #[test]
+    fn ent_time_now_defaults_normalize_to_timestamp_defaults() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field Int64("created_at").Default(time.Now) {
+            }
+            field Int64("updated_at").UpdateDefault(time.Now()) {
+            }
+            field Int64("seen_at").ClientDefault(time.Now) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let created_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_at")
+            .expect("created_at field");
+        assert_eq!(created_at.default_value.as_deref(), Some("now_millis"));
+        let updated_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "updated_at")
+            .expect("updated_at field");
+        assert_eq!(updated_at.update_default.as_deref(), Some("now_millis"));
+        let seen_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "seen_at")
+            .expect("seen_at field");
+        assert_eq!(seen_at.client_default_value.as_deref(), Some("now_millis"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"now_millis\""));
+        assert!(ent.contains("update_default now_millis"));
+        assert!(ent.contains("client_default \"now_millis\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "created_at: self.created_at.map(Set).unwrap_or_else(|| Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()))"
+        ));
+        assert!(sea_orm.contains(
+            "if self.updated_at.is_none() { active.updated_at = Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()); }"
+        ));
+        assert!(sea_orm.contains(
+            "seen_at: self.seen_at.map(Set).unwrap_or_else(|| Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()))"
+        ));
+    }
+
+    #[test]
+    fn ent_default_func_time_now_generates_timestamp_default() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field Time("created_at").DefaultFunc(time.Now) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let created_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_at")
+            .expect("created_at field");
+        assert_eq!(created_at.ty, "i64");
+        assert_eq!(created_at.default_value.as_deref(), Some("now_millis"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"now_millis\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "created_at: self.created_at.map(Set).unwrap_or_else(|| Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()))"
+        ));
+    }
+
+    #[test]
+    fn ent_default_func_rejects_unsupported_functions() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                table "users"
+                field String("id").Primary() {
+                    DefaultFunc(uuid.NewString)
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("unsupported default func");
+
+        assert!(err
+            .to_string()
+            .contains("DefaultFunc currently supports time.Now only"));
+    }
+
+    #[test]
+    fn ent_time_field_builder_generates_epoch_millis_timestamp() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field Time("created_at").Default(time.Now) {
+            }
+            field Time("updated_at").UpdateDefault(time.Now) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let created_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_at")
+            .expect("created_at field");
+        assert_eq!(created_at.ty, "i64");
+        assert_eq!(created_at.default_value.as_deref(), Some("now_millis"));
+        let updated_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "updated_at")
+            .expect("updated_at field");
+        assert_eq!(updated_at.ty, "i64");
+        assert_eq!(updated_at.update_default.as_deref(), Some("now_millis"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field created_at: i64 {"));
+        assert!(ent.contains("default \"now_millis\""));
+        assert!(ent.contains("field updated_at: i64 {"));
+        assert!(ent.contains("update_default now_millis"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub created_at: i64"));
+        assert!(sea_orm.contains(
+            "created_at: self.created_at.map(Set).unwrap_or_else(|| Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()))"
+        ));
+        assert!(sea_orm.contains(
+            "if self.updated_at.is_none() { active.updated_at = Set(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or_default()); }"
+        ));
+    }
+
+    #[test]
+    fn ent_field_builders_accept_extra_go_type_arguments() {
+        let source = r#"
+        entity User {
+            table "users"
+            field UUID("public_id", uuid.UUID{}).Unique() {
+            }
+            field JSON("metadata", map[string]any{}).Optional().StorageKey("metadata_json") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let public_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "public_id")
+            .expect("public_id field");
+        assert_eq!(public_id.ty, "String");
+        assert!(model
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["public_id"]));
+        let metadata = model
+            .fields
+            .iter()
+            .find(|field| field.name == "metadata")
+            .expect("metadata field");
+        assert_eq!(metadata.ty, "Option<String>");
+        assert_eq!(metadata.source_name.as_deref(), Some("metadata_json"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field public_id: string {"));
+        assert!(ent.contains("field metadata: string? {"));
+        assert!(ent.contains("source \"metadata_json\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub public_id: String"));
+        assert!(sea_orm.contains("pub metadata: Option<String>"));
+        assert!(sea_orm.contains("#[sea_orm(column_name = \"metadata_json\")]"));
+    }
+
+    #[test]
+    fn ent_common_field_builder_type_aliases_map_to_roze_types() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field Text("bio").Optional() {
+            }
+            field Uint("visits").Default(7) {
+            }
+            field Float("ratio").Default(1.5) {
+            }
+            field Bytes("payload").Optional() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let bio = model
+            .fields
+            .iter()
+            .find(|field| field.name == "bio")
+            .expect("bio field");
+        assert_eq!(bio.ty, "Option<String>");
+        let visits = model
+            .fields
+            .iter()
+            .find(|field| field.name == "visits")
+            .expect("visits field");
+        assert_eq!(visits.ty, "u32");
+        assert_eq!(visits.default_value.as_deref(), Some("7"));
+        let ratio = model
+            .fields
+            .iter()
+            .find(|field| field.name == "ratio")
+            .expect("ratio field");
+        assert_eq!(ratio.ty, "f32");
+        assert_eq!(ratio.default_value.as_deref(), Some("1.5"));
+        let payload = model
+            .fields
+            .iter()
+            .find(|field| field.name == "payload")
+            .expect("payload field");
+        assert_eq!(payload.ty, "Option<Vec<u8>>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field bio: string? {"));
+        assert!(ent.contains("field visits: u32 {"));
+        assert!(ent.contains("field ratio: f32 {"));
+        assert!(ent.contains("field payload: bytes? {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub bio: Option<String>"));
+        assert!(sea_orm.contains("pub visits: u32"));
+        assert!(sea_orm.contains("pub ratio: f32"));
+        assert!(sea_orm.contains("pub payload: Option<Vec<u8>>"));
+        assert!(sea_orm.contains("visits: self.visits.map(Set).unwrap_or_else(|| Set(7))"));
+        assert!(sea_orm.contains("ratio: self.ratio.map(Set).unwrap_or_else(|| Set(1.5))"));
+    }
+
+    #[test]
+    fn ent_id_field_builder_generates_primary_i64() {
+        let source = r#"
+        entity User {
+            Table("users")
+            field String("tenant_id") {
+            }
+            field ID("id") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.primary, "id");
+        let id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "id")
+            .expect("id field");
+        assert_eq!(id.ty, "i64");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field id: i64 {"));
+        assert!(ent.contains("primary"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub id: i64"));
+    }
+
+    #[test]
+    fn ent_id_field_builder_rejects_composite_ids() {
+        let source = r#"
+        entity Membership {
+            Table("memberships")
+            field ID("user_id", "group_id") {
+            }
+        }
+        "#;
+
+        let err = parse_models_with_format(source, ModelFormat::Ent)
+            .expect_err("composite ID should be rejected");
+        assert!(err.to_string().contains("composite IDs are not supported"));
+    }
+
+    #[test]
+    fn ent_default_literals_generate_create_assignments() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field Bool("active").Default(true) {
+            }
+            field Int("score").Default(18) {
+            }
+            field String("role").Default("member") {
+            }
+            field String("nickname").Optional().Default("guest") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let active = model
+            .fields
+            .iter()
+            .find(|field| field.name == "active")
+            .expect("active field");
+        assert_eq!(active.default_value.as_deref(), Some("true"));
+        let score = model
+            .fields
+            .iter()
+            .find(|field| field.name == "score")
+            .expect("score field");
+        assert_eq!(score.default_value.as_deref(), Some("18"));
+        let role = model
+            .fields
+            .iter()
+            .find(|field| field.name == "role")
+            .expect("role field");
+        assert_eq!(role.default_value.as_deref(), Some("member"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"true\""));
+        assert!(ent.contains("default \"18\""));
+        assert!(ent.contains("default \"member\""));
+        assert!(ent.contains("field nickname: string? {"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("active: self.active.map(Set).unwrap_or_else(|| Set(true))"));
+        assert!(sea_orm.contains("score: self.score.map(Set).unwrap_or_else(|| Set(18))"));
+        assert!(sea_orm
+            .contains("role: self.role.map(Set).unwrap_or_else(|| Set(\"member\".to_string()))"));
+        assert!(sea_orm.contains(
+            "nickname: self.nickname.map(Set).unwrap_or_else(|| Set(Some(\"guest\".to_string())))"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "if let Some(value) = self.active { create = create.active(value); } else { create = create.active(true); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.score { create = create.score(value); } else { create = create.score(18); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.role { create = create.role(value); } else { create = create.role(\"member\".to_string()); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.nickname { create = create.nickname(value); } else { create = create.nickname(Some(\"guest\".to_string())); }"
+        ));
+    }
+
+    #[test]
+    fn ent_field_metadata_directives_are_accepted_as_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field String("email").StructTag(`json:"email,omitempty"`).Annotations(entgql.OrderField("EMAIL")) {
+                Unique()
+                SchemaType(map[string]string{dialect.Postgres: "citext"})
+                GoType(sql.NullString{})
+            }
+            field JSON("metadata", map[string]any{}) {
+                Optional()
+                Annotations(entgql.Skip())
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let email = model
+            .fields
+            .iter()
+            .find(|field| field.name == "email")
+            .expect("email field");
+        assert_eq!(email.ty, "String");
+        assert!(model
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["email"]));
+        let metadata = model
+            .fields
+            .iter()
+            .find(|field| field.name == "metadata")
+            .expect("metadata field");
+        assert_eq!(metadata.ty, "Option<String>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("unique"));
+        assert!(ent.contains("field metadata: string? {"));
+        assert!(!ent.contains("SchemaType"));
+        assert!(!ent.contains("GoType"));
+        assert!(!ent.contains("StructTag"));
+        assert!(!ent.contains("Annotations"));
+    }
+
+    #[test]
+    fn ent_go_side_field_validators_are_accepted_as_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field String("email").NotEmpty().Match(regexp.MustCompile("^[^@]+@[^@]+$")) {
+                Validate(func(value string) error { return nil })
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let email = model
+            .fields
+            .iter()
+            .find(|field| field.name == "email")
+            .expect("email field");
+        assert_eq!(email.ty, "String");
+        assert!(email.validation.not_empty);
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("not_empty"));
+        assert!(!ent.contains("Match"));
+        assert!(!ent.contains("Validate"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("email validation failed: must not be empty"));
+    }
+
+    #[test]
+    fn ent_edge_and_index_metadata_directives_are_accepted_as_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            field String("tenant_id") {
+            }
+            edge To("user", User.Type).Field("user_id").Ref("id").Unique().Annotations(entgql.Bind()) {
+                StorageKey("profile_user_fk")
+                Comment("owner relation")
+            }
+            index Fields("tenant_id", "user_id").Unique().Annotations(entgql.OrderField("TENANT_USER")) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: true,
+            required: false,
+        }));
+        assert!(profile.indexes.iter().any(|index| {
+            index.unique
+                && index.name == "uniq_tenant_id_user_id"
+                && index.fields == ["tenant_id", "user_id"]
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    to User"));
+        assert!(ent.contains("    field user_id"));
+        assert!(ent.contains("    unique"));
+        assert!(ent.contains("index uniq_tenant_id_user_id {"));
+        assert!(ent.contains("    fields tenant_id, user_id"));
+        assert!(!ent.contains("Annotations"));
+        assert!(!ent.contains("StorageKey(\"profile_user_fk\")"));
+        assert!(!ent.contains("Comment(\"owner relation\")"));
+    }
+
+    #[test]
     fn ent_update_default_rejects_immutable_fields() {
         let err = parse_models_with_format(
             r#"
@@ -11646,6 +13147,317 @@ mod tests {
         let rendered = render_model_module(profile);
         assert!(rendered.contains("pub async fn find_by_user_id"));
         assert!(!rendered.contains("pub fn clear_user(mut self) -> Self"));
+    }
+
+    #[test]
+    fn ent_edges_accept_builder_style_calls() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field id: i64 {
+                primary
+            }
+            field user_id: i64 {
+            }
+            edge user {
+                To("User")
+                Field("user_id")
+                Ref("id")
+                Unique()
+                Required()
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: true,
+            required: true,
+        }));
+        assert!(profile
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["user_id"]));
+        assert!(profile.cache_keys.iter().any(|key| key == "user_id"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    to User"));
+        assert!(ent.contains("    field user_id"));
+        assert!(ent.contains("    ref id"));
+        assert!(ent.contains("    unique"));
+        assert!(ent.contains("    required"));
+
+        let sea_orm = render_model_module(profile);
+        assert!(sea_orm.contains(
+            "pub async fn query_user(&self, repo: &crate::model::UserRepository<'_>) -> anyhow::Result<Option<crate::model::UserModel>>"
+        ));
+        assert!(
+            sea_orm.contains("pub fn set_user(mut self, target: &crate::model::UserModel) -> Self")
+        );
+
+        let toasty = render_toasty_model_module(profile);
+        assert!(toasty.contains("pub async fn query_user(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Option<crate::model::User>>"));
+        assert!(toasty.contains("pub fn set_user(mut self, target: &crate::model::User) -> Self"));
+    }
+
+    #[test]
+    fn ent_edges_accept_chained_builder_style_headers() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field id: i64 {
+                primary
+            }
+            field user_id: i64 {
+            }
+            edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: true,
+            required: true,
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    to User"));
+        assert!(ent.contains("    field user_id"));
+        assert!(ent.contains("    ref id"));
+        assert!(ent.contains("    unique"));
+        assert!(ent.contains("    required"));
+
+        let sea_orm = render_model_module(profile);
+        assert!(sea_orm.contains("pub async fn query_user(&self, repo: &crate::model::UserRepository<'_>) -> anyhow::Result<Option<crate::model::UserModel>>"));
+        assert!(
+            sea_orm.contains("pub fn set_user(mut self, target: &crate::model::UserModel) -> Self")
+        );
+    }
+
+    #[test]
+    fn ent_inverse_from_edges_are_parse_compatible_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            edge From("profile", Profile.Type).Ref("user").Unique() {
+                Annotations(entgql.Bind())
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            edge To("user", User.Type).Field("user_id").Ref("id").Unique() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let user = models
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("user");
+        assert!(user.edges.is_empty());
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: true,
+            required: false,
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(!ent.contains("edge profile"));
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    field user_id"));
+        assert!(ent.contains("    unique"));
+    }
+
+    #[test]
+    fn ent_through_edges_without_local_fk_are_parse_compatible_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            edge To("groups", Group.Type).Through("memberships", Membership.Type) {
+                Annotations(entgql.RelayConnection())
+            }
+        }
+
+        entity Group {
+            table "groups"
+            field Int64("id").Primary() {
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            edge To("user", User.Type).Field("user_id").Ref("id").Unique() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let user = models
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("user");
+        assert!(user.edges.is_empty());
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: true,
+            required: false,
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(!ent.contains("edge groups"));
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    field user_id"));
+    }
+
+    #[test]
+    fn ent_to_edges_without_local_fk_are_parse_compatible_noops() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            edge To("groups", Group.Type) {
+                Unique()
+                Annotations(entgql.RelayConnection())
+            }
+        }
+
+        entity Group {
+            table "groups"
+            field Int64("id").Primary() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let user = models
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("user");
+        assert!(user.edges.is_empty());
+
+        let ent = render_ent_schema(&models);
+        assert!(!ent.contains("edge groups"));
+    }
+
+    #[test]
+    fn ent_to_edges_with_field_default_ref_to_id() {
+        let source = r#"
+            entity User {
+                table "users"
+                field Int64("id").Primary() {
+                }
+            }
+
+            entity Profile {
+                table "profiles"
+                field Int64("id").Primary() {
+                }
+                field Int64("user_id") {
+                }
+                edge To("user", User.Type).Field("user_id") {
+                }
+            }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let profile = models
+            .iter()
+            .find(|model| model.name == "Profile")
+            .expect("profile");
+        assert!(profile.edges.contains(&ModelEdge {
+            name: "user".to_string(),
+            target: "User".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: false,
+            required: false,
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge user {"));
+        assert!(ent.contains("    field user_id"));
+        assert!(ent.contains("    ref id"));
+    }
+
+    #[test]
+    fn ent_to_edges_with_ref_without_field_still_fail() {
+        let err = parse_models_with_format(
+            r#"
+            entity Profile {
+                table "profiles"
+                field Int64("id").Primary() {
+                }
+                edge To("user", User.Type).Ref("id") {
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("missing local fk field");
+
+        assert!(err.to_string().contains("edge `user` must declare `field`"));
     }
 
     #[test]

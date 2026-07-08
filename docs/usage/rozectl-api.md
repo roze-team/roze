@@ -372,8 +372,15 @@ tasks before returning.
 Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/governance-baseline.yaml`, `ops/prometheus-rules.yaml`, and
 `ops/grafana-dashboard.json`, `ops/slo.yaml`, and
-`ops/failure-injection-plan.yaml`, and `ops/release-rollout.yaml`. The runbook
-records the generated service boundary, required production gates,
+`ops/failure-injection-plan.yaml`, `ops/release-rollout.yaml`, and
+`ops/incident-response.yaml`, `ops/capacity-plan.yaml`, and
+`ops/security-readiness.yaml`, `ops/production-gate.yaml`, and
+`ops/regeneration-policy.yaml`, `ops/client-contract.yaml`, and
+`ops/config-governance.yaml`, `ops/reliable-events.yaml`, and
+`ops/dependency-governance.yaml`, `ops/data-consistency.yaml`, and
+`ops/observability-contract.yaml`, `ops/runtime-hardening.yaml`, and
+`ops/error-contract.yaml`. The runbook records the generated service
+boundary, required production gates,
 `scripts/production-evidence.sh --area generated-services`, and lifecycle
 summary collection with `--lifecycle-summary`. The YAML baseline is
 machine-readable for CI/platform checks and captures the go-zero inspired
@@ -392,9 +399,41 @@ load-shedding pressure, invalid config reload, and restart recovery, with the
 metrics, traces, logs, recovery time, and rollback notes required for each
 scenario. The release rollout plan defines preflight, canary, progressive
 rollout, full rollout, post-release observation, blue-green checks, and rollback
-evidence. Treat the runbook, YAML baseline, alert rules, dashboard, SLO file,
-failure-injection plan, and release rollout plan as the default promotion
-checklist for each generated service.
+evidence. The incident response playbook maps generated alerts to severity,
+confirmation queries, mitigation, rollback criteria, escalation, and postmortem
+evidence. The capacity plan defines baseline characterization, step load, burst,
+24h soak, 72h soak, scale-out, scale-in, resource trend, and owner signoff
+evidence. The security readiness plan defines authentication, authorization,
+tenant isolation, key rotation, mTLS, audit log, sensitive data, and dependency
+security evidence. The production gate file ties every generated production
+asset into a CI/platform-readable promotion contract with blocking rules and
+controlled-production versus broad-production-stable levels. The regeneration
+policy defines generator-owned files, preserved extension points, IDL drift
+classification, breaking-change gates, and evidence refresh rules. The client
+contract defines SDK/OpenAPI/proto projection, typed errors, auth injection,
+timeout, retry budget, cancellation, and trace propagation evidence. The config
+governance plan defines schema validation, diff/version, audit, canary reload,
+rollback, listener isolation, and snapshot restore evidence. The reliable events
+plan defines event envelopes, idempotency, outbox/inbox, DLQ, replay, lag
+metrics, retry budget, and retry storm protection evidence. The dependency
+governance plan defines downstream inventory, discovery, load balancing,
+deadline propagation, circuit breakers, bulkheads, fallback, and outlier
+evidence. The data consistency plan defines transaction boundaries, idempotent
+writes, migrations, outbox/DTM/Saga, read-write consistency, reconciliation,
+backup restore, and data rollback evidence. The observability contract defines
+metrics, logs, traces, profiles, sampling, label cardinality, debug queries, and
+evidence retention. The runtime hardening contract defines timeout, rate limit,
+circuit breaker, load shedding, retry budget, deadline propagation, graceful
+shutdown, backpressure, and resource guard evidence. The error contract defines
+typed errors, transport status mapping, retryability, trace correlation, client
+behavior, redaction, and failure metrics.
+Treat the runbook, YAML baseline, alert rules, dashboard, SLO file,
+failure-injection plan, release rollout plan, incident response playbook,
+capacity plan, security readiness plan, production gate, regeneration policy,
+client contract, config governance plan, reliable events plan, and dependency
+governance plan, data consistency plan, observability contract, runtime
+hardening contract, and error contract as the default promotion checklist for
+each generated service.
 
 Generate client SDKs:
 
@@ -1026,6 +1065,31 @@ SeaORM-style modules. Model generation first writes a complete
 `src/model/schema.ent` file, then generates Rust model code from that `.ent`
 schema. SQL, DSL, and database inspection are import paths into `.ent`; `.ent`
 is the model codegen source.
+Entity-level directives accept both lowercase `.ent` form and builder-style
+calls such as `Table("users")`, `Schema("public")`, `Cache()`,
+`CacheKey("id", "email")`, `Tenant("tenant_id")`, and
+`SoftDelete("deleted")`; round-trip rendering normalizes them to lowercase
+directives.
+Entity-level ent metadata directives such as `Annotations(...)`, `Mixin(...)`,
+`Policy(...)`, `Hooks(...)`, and `Interceptors(...)` are accepted as
+parse-compatible no-ops and omitted from Roze round-trip rendering.
+Fields can be declared with either `field name: type { ... }` or ent-style
+builder headers such as `field String("email") { ... }`,
+`field Int64("id") { ... }`, and `field fields.String("nickname") { ... }`;
+field headers can also chain directives such as
+`field String("email").Unique().NotEmpty() { ... }`. Round-trip rendering
+normalizes them to `field name: type`.
+Builder headers may include entgo's extra Go type sample argument, such as
+`field JSON("metadata", map[string]any{})` or
+`field UUID("public_id", uuid.UUID{})`; Roze uses the first argument as the
+field name and maps JSON/UUID to its string-backed model representation.
+Common ent field builders map to Roze model types, including `Text(...)` to
+`string`, `Uint(...)` to `u32`, `Float(...)` to `f32`, and `Bytes(...)` to
+`bytes`/`Vec<u8>`.
+`field ID("id")` maps to an `i64` primary field even when it is not the first
+declared field. Composite entgo IDs such as `ID("user_id", "group_id")` are
+not generated implicitly; model them as explicit fields and indexes until Roze
+adds first-class composite primary-key generation.
 `.ent` schemas can declare entity relationships with edge blocks:
 
 ```text
@@ -1063,12 +1127,73 @@ supported; composite foreign keys are rejected with a clear error until the
 relation generator grows composite edge semantics.
 `.ent` edges can declare `unique`; Roze normalizes that into a single-field
 unique index on the local edge field and generates unique lookup helpers.
+Edge blocks also accept ent-style builder calls such as `To("User")`,
+`Field("user_id")`, `Ref("id")`, `Unique()`, and `Required()`; round-trip
+rendering normalizes them to lowercase `.ent` directives.
+Edge headers can also use chained ent-style syntax such as
+`edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required()`;
+round-trip rendering normalizes that form to `edge user { ... }`.
+Inverse ent-style edges such as `edge From("profile", Profile.Type).Ref("user")`
+are accepted as parse-compatible no-ops because they do not declare a local
+foreign-key field for Roze to generate; define the owning `To(...)` edge on the
+entity with the local FK field to generate repository helpers.
+Many-to-many ent-style edges such as
+`edge To("groups", Group.Type).Through("memberships", Membership.Type)` are
+also accepted as parse-compatible no-ops when they do not declare a local
+`Field(...)`/`Ref(...)`; model the join entity explicitly when Roze should
+generate repositories for that relationship.
+Plain ent-style `edge To("groups", Group.Type)` declarations without local
+`Field(...)`/`Ref(...)` are treated the same way; if either `Field(...)` or
+`Ref(...)` is present, both must be present so Roze can generate a concrete
+local-FK relationship.
+Owning ent-style edges with `Field("user_id")` but no `Ref(...)` default the
+reference field to `id`, matching the common entgo convention of pointing to
+the target primary key.
 `.ent` fields can declare `unique`; Roze normalizes that into a single-field
 unique index and generates the same unique lookup helpers as an explicit
 `index ... { unique }` block.
 `.ent` fields can declare `index`; Roze normalizes that into a single-field
 non-unique index and generates `list_by_<field>` helpers for Toasty and SeaORM
 repositories.
+Index blocks accept ent-style builder calls such as `Fields("tenant_id",
+"code")` and `Unique()`; round-trip rendering normalizes them to lowercase
+`.ent` directives.
+Index headers can also use chained ent-style syntax such as
+`index Fields("tenant_id", "code").Unique().StorageKey("tenant_code")`;
+`StorageKey(...)` becomes the Roze index name, and unnamed indexes are
+assigned stable `idx_<field>` or `uniq_<field>` names during normalization.
+Index builders with `Edges("user")` map to the owning edge's local FK field
+when that edge declares one, such as `user_id`; unresolved edge-only indexes
+are accepted as parse-compatible no-ops because Roze cannot generate a concrete
+database index without a local field.
+`.ent` fields can declare `source <column>` or `storage_key <column>` when the
+logical schema field name differs from the physical database column; SeaORM
+models emit a matching field-level `column_name` attribute.
+Field directives also accept ent-style builder calls such as `Optional()`,
+`Nillable()`, `Unique()`, `Sensitive()`, `StorageKey("column")`,
+`MinLen(3)`, and `ClientDefault("value")`; Roze normalizes them back to the
+lowercase schema form during round-trip rendering.
+Enum field builders such as `field Enum("state").Values("active", "disabled")`
+map to a Roze `string` field with generated enum-value validation.
+Timestamp defaults accept ent-style `Default(time.Now)`,
+`DefaultFunc(time.Now)`, `UpdateDefault(time.Now)`, and
+`ClientDefault(time.Now)` and normalize them to Roze's numeric `now_millis`
+timestamp default for `i64`/`u64` timestamp fields.
+The ent-style `field Time("created_at").Default(time.Now)` builder maps to a
+Roze `i64` epoch-millis timestamp field and uses the same numeric timestamp
+default generation.
+Literal defaults such as `Default(true)`, `Default(18)`, and
+`Default("member")` are used by generated create builders for bool, primitive
+numeric, string, and nullable variants of those fields.
+Roze also accepts common ent metadata directives on fields, edges, and indexes,
+such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`,
+`Annotations(...)`, and edge `StorageKey(...)`, as parse-compatible no-ops;
+round-trip rendering keeps the normalized Roze schema and omits those
+metadata-only directives.
+Go-side field validators such as `Validate(...)` and `Match(...)` are accepted
+as parse-compatible no-ops; use Roze-supported validators such as `NotEmpty()`,
+`MinLen(...)`, `MaxLen(...)`, `Enum(...)`, and numeric bounds when generated
+Rust validation is required.
 `.ent` fields can declare `immutable`; Roze keeps them available on create
 builders but omits them from update, update-many, and edge update setters.
 `.ent` fields can declare `optional`; Roze treats that as the nullable

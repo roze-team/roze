@@ -15,6 +15,8 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub rpc_client: Option<RpcClientConfig>,
     #[serde(default)]
+    pub rpc_clients: BTreeMap<String, RpcClientConfig>,
+    #[serde(default)]
     pub registry: Option<RegistryConfig>,
     #[serde(default)]
     pub database: Option<DatabaseConfig>,
@@ -37,6 +39,16 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub telemetry: Option<TelemetryConfig>,
     pub governance: GovernanceConfig,
+}
+
+impl ServiceConfig {
+    pub fn rpc_client_config(&self, name: &str) -> Option<RpcClientConfig> {
+        self.rpc_client_config_ref(name).cloned()
+    }
+
+    pub fn rpc_client_config_ref(&self, name: &str) -> Option<&RpcClientConfig> {
+        self.rpc_clients.get(name).or(self.rpc_client.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1328,6 +1340,58 @@ key = "order.rpc"
         assert_eq!(etcd.hosts, vec!["127.0.0.1:2379", "127.0.0.2:2379"]);
         assert_eq!(etcd.key, "order.rpc");
         assert_eq!(etcd.pass, None);
+    }
+
+    #[test]
+    fn loads_named_rpc_client_configs() {
+        let source = r#"
+name: demo
+rpc_client:
+  endpoints: ["127.0.0.1:4000"]
+rpc_clients:
+  order:
+    etcd:
+      hosts: ["http://127.0.0.1:2379"]
+      key: shop-order-rpc
+    timeout_ms: 1500
+  payment:
+    endpoints: ["127.0.0.1:4005"]
+governance: {}
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let order = config.rpc_client_config("order").expect("order client");
+        assert_eq!(order.timeout_ms, 1500);
+        let order_etcd = order.etcd.expect("order etcd");
+        assert_eq!(order_etcd.key, "shop-order-rpc");
+        assert_eq!(order_etcd.hosts, vec!["http://127.0.0.1:2379"]);
+
+        let payment = config
+            .rpc_client_config_ref("payment")
+            .expect("payment client");
+        assert_eq!(payment.endpoints, vec!["127.0.0.1:4005"]);
+
+        let fallback = config
+            .rpc_client_config("catalog")
+            .expect("fallback client");
+        assert_eq!(fallback.endpoints, vec!["127.0.0.1:4000"]);
+
+        let source = r#"
+name: demo
+governance: {}
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+        assert!(config.rpc_client_config("missing").is_none());
     }
 
     #[test]
