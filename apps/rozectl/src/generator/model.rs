@@ -1468,27 +1468,43 @@ fn render_field_validation_checks(out: &mut String, fields: &[&ModelField], resu
 
 fn render_field_validation_body(out: &mut String, field: &ModelField, result_kind: &str) {
     let message_prefix = format!("{} validation failed", field.name);
+    let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
     if field.validation.not_empty {
+        let condition = if validation_ty == "Vec<u8>" {
+            "value.is_empty()"
+        } else {
+            "value.trim().is_empty()"
+        };
         render_validation_return(
             out,
             result_kind,
-            "value.trim().is_empty()",
+            condition,
             &format!("{message_prefix}: must not be empty"),
         );
     }
     if let Some(min_len) = field.validation.min_len {
+        let len_expr = if validation_ty == "Vec<u8>" {
+            "value.len()"
+        } else {
+            "value.chars().count()"
+        };
         render_validation_return(
             out,
             result_kind,
-            &format!("value.chars().count() < {min_len}"),
+            &format!("{len_expr} < {min_len}"),
             &format!("{message_prefix}: length must be at least {min_len}"),
         );
     }
     if let Some(max_len) = field.validation.max_len {
+        let len_expr = if validation_ty == "Vec<u8>" {
+            "value.len()"
+        } else {
+            "value.chars().count()"
+        };
         render_validation_return(
             out,
             result_kind,
-            &format!("value.chars().count() > {max_len}"),
+            &format!("{len_expr} > {max_len}"),
             &format!("{message_prefix}: length must be at most {max_len}"),
         );
     }
@@ -1737,6 +1753,11 @@ fn client_default_value_expr(default_value: &str, ty: &str) -> Option<String> {
 }
 
 fn go_slice_default_value_expr(default_value: &str, inner_ty: &str) -> Option<String> {
+    if inner_ty == "u8" {
+        if let Some(value) = go_byte_string_default_value_expr(default_value) {
+            return Some(value);
+        }
+    }
     let (go_ty, body) = parse_go_slice_literal(default_value)?;
     if !go_slice_type_matches(go_ty, inner_ty) {
         return None;
@@ -1750,6 +1771,21 @@ fn go_slice_default_value_expr(default_value: &str, inner_ty: &str) -> Option<St
         .map(|item| go_slice_item_expr(item, inner_ty))
         .collect::<Option<Vec<_>>>()?;
     Some(format!("vec![{}]", values.join(", ")))
+}
+
+fn go_byte_string_default_value_expr(default_value: &str) -> Option<String> {
+    let value = default_value.trim();
+    let rest = value
+        .strip_prefix("[]byte(")
+        .or_else(|| value.strip_prefix("[]uint8("))?;
+    let raw = rest.strip_suffix(')')?.trim();
+    let bytes = parse_ent_string_or_ident(raw, 0).ok()?.into_bytes();
+    let values = bytes
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("vec![{values}]"))
 }
 
 fn parse_go_slice_literal(value: &str) -> Option<(&str, &str)> {
@@ -1773,6 +1809,8 @@ fn go_slice_type_matches(go_ty: &str, inner_ty: &str) -> bool {
             | ("int32", "i32")
             | ("int64", "i64")
             | ("uint", "u32")
+            | ("byte", "u8")
+            | ("uint8", "u8")
             | ("uint32", "u32")
             | ("uint64", "u64")
             | ("float32", "f32")
@@ -1790,6 +1828,7 @@ fn go_slice_item_expr(item: &str, inner_ty: &str) -> Option<String> {
         "bool" if matches!(item, "true" | "false") => Some(item.to_string()),
         "i32" => item.parse::<i32>().ok().map(|_| item.to_string()),
         "i64" => item.parse::<i64>().ok().map(|_| item.to_string()),
+        "u8" => item.parse::<u8>().ok().map(|_| item.to_string()),
         "u32" => item.parse::<u32>().ok().map(|_| item.to_string()),
         "u64" => item.parse::<u64>().ok().map(|_| item.to_string()),
         "f32" => item.parse::<f32>().ok().map(|_| item.to_string()),
@@ -8198,23 +8237,32 @@ fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
         if field.validation == ModelFieldValidation::default() {
             continue;
         }
-        let has_string_validation = field.validation.not_empty
+        let has_length_validation = field.validation.not_empty
             || field.validation.min_len.is_some()
-            || field.validation.max_len.is_some()
-            || !field.validation.enum_values.is_empty()
+            || field.validation.max_len.is_some();
+        let has_string_validation = !field.validation.enum_values.is_empty()
             || field.validation.contains.is_some()
             || field.validation.starts_with.is_some()
             || field.validation.ends_with.is_some()
             || field.validation.not_contains.is_some()
             || field.validation.not_starts_with.is_some()
             || field.validation.not_ends_with.is_some();
+        let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+        if has_length_validation && !matches!(validation_ty, "String" | "Vec<u8>") {
+            bail!(
+                "model `{}` field `{}` length validation currently supports String, Option<String>, Vec<u8>, or Option<Vec<u8>>, got `{}`",
+                model.name,
+                model_field_source_label(field),
+                field.ty
+            );
+        }
         let has_numeric_validation = field.validation.positive
             || field.validation.non_negative
             || field.validation.negative
             || field.validation.non_positive
             || field.validation.min.is_some()
             || field.validation.max.is_some();
-        if has_string_validation && !matches!(field.ty.as_str(), "String" | "Option<String>") {
+        if has_string_validation && validation_ty != "String" {
             bail!(
                 "model `{}` field `{}` validation currently supports String or Option<String>, got `{}`",
                 model.name,
@@ -8223,7 +8271,6 @@ fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
             );
         }
         if has_numeric_validation {
-            let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
             if !is_primitive_numeric_validation_type(validation_ty) {
                 bail!(
                     "model `{}` field `{}` numeric validation currently supports primitive numeric fields, got `{}`",
@@ -9296,6 +9343,8 @@ fn is_ent_ignored_metadata_directive(value: &str) -> bool {
             "gotype",
             "struct_tag",
             "structtag",
+            "value_scanner",
+            "valuescanner",
             "annotations",
             "annotation",
             "comment",
@@ -12472,6 +12521,59 @@ mod tests {
     }
 
     #[test]
+    fn ent_bytes_field_length_validators_generate_mutation_checks() {
+        let source = r#"
+        entity User {
+            table "users"
+            field id: i64 {
+                primary
+            }
+            field Bytes("payload").Optional().NotEmpty().MinLen(2).MaxLen(8) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let payload = model
+            .fields
+            .iter()
+            .find(|field| field.name == "payload")
+            .expect("payload field");
+        assert_eq!(payload.ty, "Option<Vec<u8>>");
+        assert!(payload.validation.not_empty);
+        assert_eq!(payload.validation.min_len, Some(2));
+        assert_eq!(payload.validation.max_len, Some(8));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field payload: bytes? {"));
+        assert!(ent.contains("not_empty"));
+        assert!(ent.contains("min_len 2"));
+        assert!(ent.contains("max_len 8"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("if let Some(Some(value)) = self.payload.as_ref() {"));
+        assert!(sea_orm.contains(
+            "if value.is_empty() { anyhow::bail!(\"payload validation failed: must not be empty\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.len() < 2 { anyhow::bail!(\"payload validation failed: length must be at least 2\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.len() > 8 { anyhow::bail!(\"payload validation failed: length must be at most 8\"); }"
+        ));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains("if let Some(Some(value)) = self.payload.as_ref() {"));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"payload validation failed: must not be empty\"));"
+        ));
+        assert!(toasty.contains(
+            "return Err(toasty::Error::invalid_record_count(\"payload validation failed: length must be at least 2\"));"
+        ));
+    }
+
+    #[test]
     fn ent_field_validators_reject_non_string_fields() {
         let err = parse_models_with_format(
             r#"
@@ -12488,7 +12590,7 @@ mod tests {
         .expect_err("invalid validator target");
 
         assert!(err.to_string().contains(
-            "model `User` field `id` validation currently supports String or Option<String>"
+            "model `User` field `id` length validation currently supports String, Option<String>, Vec<u8>, or Option<Vec<u8>>"
         ));
     }
 
@@ -13090,7 +13192,9 @@ mod tests {
             }
             field Float64("weight").Default(2.5) {
             }
-            field Bytes("payload").Optional() {
+            field Bytes("payload").Optional().Default([]byte{1, 2, 255}) {
+            }
+            field Bytes("seed").Default([]byte("ok")) {
             }
         }
         "#;
@@ -13137,6 +13241,14 @@ mod tests {
             .find(|field| field.name == "payload")
             .expect("payload field");
         assert_eq!(payload.ty, "Option<Vec<u8>>");
+        assert_eq!(payload.default_value.as_deref(), Some("[]byte{1, 2, 255}"));
+        let seed = model
+            .fields
+            .iter()
+            .find(|field| field.name == "seed")
+            .expect("seed field");
+        assert_eq!(seed.ty, "Vec<u8>");
+        assert_eq!(seed.default_value.as_deref(), Some("[]byte(\"ok\")"));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field bio: string? {"));
@@ -13145,6 +13257,9 @@ mod tests {
         assert!(ent.contains("field score: f32 {"));
         assert!(ent.contains("field weight: f64 {"));
         assert!(ent.contains("field payload: bytes? {"));
+        assert!(ent.contains("default \"[]byte{1, 2, 255}\""));
+        assert!(ent.contains("field seed: bytes {"));
+        assert!(ent.contains("default \"[]byte(\\\"ok\\\")\""));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub bio: Option<String>"));
@@ -13153,10 +13268,23 @@ mod tests {
         assert!(sea_orm.contains("pub score: f32"));
         assert!(sea_orm.contains("pub weight: f64"));
         assert!(sea_orm.contains("pub payload: Option<Vec<u8>>"));
+        assert!(sea_orm.contains("pub seed: Vec<u8>"));
         assert!(sea_orm.contains("visits: self.visits.map(Set).unwrap_or_else(|| Set(7))"));
         assert!(sea_orm.contains("ratio: self.ratio.map(Set).unwrap_or_else(|| Set(1.5))"));
         assert!(sea_orm.contains("score: self.score.map(Set).unwrap_or_else(|| Set(0.5))"));
         assert!(sea_orm.contains("weight: self.weight.map(Set).unwrap_or_else(|| Set(2.5))"));
+        assert!(sea_orm.contains(
+            "payload: self.payload.map(Set).unwrap_or_else(|| Set(Some(vec![1, 2, 255])))"
+        ));
+        assert!(sea_orm.contains("seed: self.seed.map(Set).unwrap_or_else(|| Set(vec![111, 107]))"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "if let Some(value) = self.payload { create = create.payload(value); } else { create = create.payload(Some(vec![1, 2, 255])); }"
+        ));
+        assert!(toasty.contains(
+            "if let Some(value) = self.seed { create = create.seed(value); } else { create = create.seed(vec![111, 107]); }"
+        ));
     }
 
     #[test]
@@ -13460,13 +13588,14 @@ mod tests {
         let source = r#"
         entity User {
             table "users"
-            field String("email").StructTag(`json:"email,omitempty"`).Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email") {
+            field String("email").StructTag(`json:"email,omitempty"`).ValueScanner(field.TextValueScanner[*big.Int]{}).Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email") {
                 Unique()
                 SchemaType(map[string]string{dialect.Postgres: "citext"})
                 GoType(sql.NullString{})
             }
             field JSON("metadata", map[string]any{}) {
                 Optional()
+                ValueScanner(field.JSONValueScanner[map[string]any]{})
                 Annotations(entgql.Skip())
                 Deprecated("metadata_v2")
             }
@@ -13499,6 +13628,7 @@ mod tests {
         assert!(!ent.contains("SchemaType"));
         assert!(!ent.contains("GoType"));
         assert!(!ent.contains("StructTag"));
+        assert!(!ent.contains("ValueScanner"));
         assert!(!ent.contains("Annotations"));
         assert!(!ent.contains("Deprecated"));
     }

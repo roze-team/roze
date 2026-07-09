@@ -153,6 +153,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("    inner: ProtoClient<Channel>,\n");
     out.push_str("    options: roze_rpc::rpc::RpcClientOptions,\n");
     out.push_str("    client_config: Option<roze_config::RpcClientConfig>,\n");
+    out.push_str("    governance: Option<roze_config::GovernanceConfig>,\n");
     out.push_str("}\n\n");
     out.push_str("impl RpcClient {\n");
     out.push_str("    pub fn new(channel: Channel) -> Self {\n");
@@ -160,6 +161,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("            inner: ProtoClient::new(channel),\n");
     out.push_str("            options: roze_rpc::rpc::RpcClientOptions::default(),\n");
     out.push_str("            client_config: None,\n");
+    out.push_str("            governance: None,\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -169,6 +171,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("            inner: ProtoClient::new(channel),\n");
     out.push_str("            options,\n");
     out.push_str("            client_config: None,\n");
+    out.push_str("            governance: None,\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -179,7 +182,14 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("            inner: ProtoClient::new(channel),\n");
     out.push_str("            options,\n");
     out.push_str("            client_config: Some(config),\n");
+    out.push_str("            governance: None,\n");
     out.push_str("        }\n");
+    out.push_str("    }\n\n");
+    out.push_str(
+        "    pub fn with_governance(mut self, governance: roze_config::GovernanceConfig) -> Self {\n",
+    );
+    out.push_str("        self.governance = Some(governance);\n");
+    out.push_str("        self\n");
     out.push_str("    }\n\n");
     out.push_str("    pub fn inner_mut(&mut self) -> &mut ProtoClient<Channel> {\n");
     out.push_str("        &mut self.inner\n");
@@ -230,11 +240,12 @@ pub fn render_client(spec: &ApiSpec) -> String {
         let handler = resolved_handler_name(route);
         let retry_request_expr = retry_request_template_expr(spec, &route.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
             request = proto_type_name(&route.request),
             response = proto_type_name(&route.response),
-            retry_request_expr = retry_request_expr
+            retry_request_expr = retry_request_expr,
+            governance_key = handler.clone()
         ));
     }
 
@@ -242,11 +253,12 @@ pub fn render_client(spec: &ApiSpec) -> String {
         let method_name = to_snake_case(&method.name);
         let retry_request_expr = retry_request_template_expr(spec, &method.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
             request = proto_type_name(&method.request),
             response = proto_type_name(&method.response),
-            retry_request_expr = retry_request_expr
+            retry_request_expr = retry_request_expr,
+            governance_key = &method.name
         ));
     }
 
@@ -1171,9 +1183,14 @@ mod tests {
 
         let client = render_client(&spec);
         assert!(client.contains("client_config: Option<roze_config::RpcClientConfig>"));
+        assert!(client.contains("governance: Option<roze_config::GovernanceConfig>"));
+        assert!(client.contains("pub fn with_governance"));
         assert!(client.contains("pub async fn connect_from_config"));
         assert!(client.contains("RpcClientOptions::from_config(&config)"));
         assert!(client.contains("roze_rpc::rpc::client_request("));
+        assert!(client.contains("roze_rpc::rpc::retry_status_for_method("));
+        assert!(client.contains("governance.as_ref()"));
+        assert!(client.contains("\"GetUser\""));
         assert!(client.contains("let request_template = req;"));
         assert!(client.contains("client_request(request_template, &context"));
         assert!(client.contains("client_request(request_template.clone(), &context"));

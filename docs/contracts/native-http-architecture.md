@@ -167,11 +167,18 @@ let app = Router::new()
   it supports `iter()` and `for (key, value) in &params`
 - `RawQuery` exposes the unparsed URI query string for signature checks,
   gateway policy, observability, and proxy-style handlers
+- `Query<T>::try_from_uri(&Uri)` and `Query<T>::optional_from_uri(&Uri)`
+  expose typed query parsing outside request extraction, so middleware,
+  gateway policy, and tests reuse the same parser as the extractor
 - `RawForm` exposes raw urlencoded form data, reading the query string for GET
   requests and requiring `application/x-www-form-urlencoded` bodies for other
   methods
 - raw body extraction with `Bytes` and `String` for webhook, signature,
   proxy, and debugging handlers that need the body without DTO parsing
+- `DefaultBodyLimit` provides Axum-style extractor-local body limits: `Bytes`,
+  `String`, `Json`, `Form`, and `RawForm` honor the default 2MiB limit, route
+  layers can override it with `DefaultBodyLimit::max(bytes)`, and trusted
+  endpoints can call `DefaultBodyLimit::disable()`
 - direct extraction of common HTTP request parts such as `Method`, `Uri`,
   `Version`, and `HeaderMap` without consuming the body
 - `Host` extraction from the `Host` header or URI authority for
@@ -187,8 +194,8 @@ let app = Router::new()
 - binary `IntoResponse` bodies for `Bytes`, `Vec<u8>`, byte slices, and byte
   arrays with `application/octet-stream`
 - `roze_http::body` centralizes body construction and collection helpers,
-  including `to_bytes(body, limit)` for bounded body reads in middleware,
-  tests, and low-level handlers
+  including `to_bytes(body, limit)` for the bounded reads used by extractors,
+  middleware, tests, and low-level handlers
 - `Html<T>` response helper for HTML bodies with `text/html; charset=utf-8`
   content type
 - `Form<T>` can be used as a response wrapper for

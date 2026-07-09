@@ -5,10 +5,11 @@ use std::{
 
 use roze_context::Context;
 use roze_error::RozeError;
-use roze_resilience::{BreakerRegistry, RateLimitRegistry};
+use roze_resilience::{BreakerRegistry, RateLimitRegistry, SheddingRegistry};
 
 static ROUTE_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
 static ROUTE_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
+static ROUTE_SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct CommonMiddlewareConfig {
@@ -144,6 +145,7 @@ pub struct RouteGuard {
     method: String,
     started: Instant,
     breaker: Option<RouteBreakerConfig>,
+    shedding: Option<RouteSheddingConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +153,7 @@ pub struct RoutePolicy {
     pub timeout: Option<Duration>,
     pub rate_limit: Option<RouteRateLimitConfig>,
     pub breaker: Option<RouteBreakerConfig>,
+    pub shedding: Option<RouteSheddingConfig>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -165,6 +168,16 @@ pub struct RouteBreakerConfig {
     pub reset_timeout: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RouteSheddingConfig {
+    pub concurrency: usize,
+    pub window: Duration,
+    pub min_samples: u64,
+    pub max_avg_latency: Duration,
+    pub max_failure_ratio_per_mille: u32,
+    pub cool_down: Duration,
+}
+
 pub fn route_policy(
     governance: Option<&roze_config::GovernanceConfig>,
     route: &str,
@@ -174,6 +187,7 @@ pub fn route_policy(
             timeout: None,
             rate_limit: None,
             breaker: None,
+            shedding: None,
         };
     };
     let route_config = governance.routes.get(route);
@@ -195,6 +209,17 @@ pub fn route_policy(
             .map(|config| RouteBreakerConfig {
                 failure_threshold: config.failure_threshold,
                 reset_timeout: Duration::from_millis(config.reset_timeout_ms),
+            }),
+        shedding: route_config
+            .and_then(|route| route.shedding)
+            .or(governance.shedding)
+            .map(|config| RouteSheddingConfig {
+                concurrency: config.concurrency,
+                window: Duration::from_millis(config.window_ms),
+                min_samples: config.min_samples,
+                max_avg_latency: Duration::from_millis(config.max_avg_latency_ms),
+                max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
+                cool_down: Duration::from_millis(config.cool_down_ms),
             }),
     }
 }
@@ -230,6 +255,15 @@ pub fn begin_route(
     if policy.breaker.is_some() {
         roze_metrics::record_resilience_decision("http", "breaker", "allowed");
     }
+    if let Some(config) = &policy.shedding {
+        match enforce_route_shedding(&key, config) {
+            Ok(()) => roze_metrics::record_resilience_decision("http", "load_shedding", "allowed"),
+            Err(err) => {
+                roze_metrics::record_resilience_decision("http", "load_shedding", "shed");
+                return Err(err);
+            }
+        }
+    }
     let request_ctx = match policy.timeout {
         Some(timeout) => request_ctx.with_timeout(timeout),
         None => request_ctx,
@@ -243,6 +277,7 @@ pub fn begin_route(
             method,
             started: Instant::now(),
             breaker: policy.breaker,
+            shedding: policy.shedding,
         },
     ))
 }
@@ -254,6 +289,10 @@ pub fn finish_route(guard: RouteGuard, success: bool, status: impl Into<String>)
     if let Some(config) = guard.breaker {
         let breaker_success = success || !status.starts_with('5');
         route_breaker_record(&guard.key, breaker_success, &config);
+    }
+    if let Some(config) = guard.shedding {
+        let shedding_success = success || !status.starts_with('5');
+        route_shedding_record(&guard.key, shedding_success, elapsed, &config);
     }
     roze_metrics::record_http_route(guard.service, guard.route, guard.method, status, elapsed);
 }
@@ -295,6 +334,42 @@ fn route_breaker_record(key: &str, success: bool, config: &RouteBreakerConfig) {
             reset_timeout: config.reset_timeout,
         },
     );
+}
+
+fn enforce_route_shedding(key: &str, config: &RouteSheddingConfig) -> Result<(), RozeError> {
+    if ROUTE_SHEDDERS
+        .get_or_init(SheddingRegistry::new)
+        .allow(key, route_shedding_config(*config))
+    {
+        Ok(())
+    } else {
+        Err(RozeError::Unavailable("load shed".to_string()))
+    }
+}
+
+fn route_shedding_record(
+    key: &str,
+    success: bool,
+    elapsed: Duration,
+    config: &RouteSheddingConfig,
+) {
+    ROUTE_SHEDDERS.get_or_init(SheddingRegistry::new).record(
+        key,
+        success,
+        elapsed,
+        route_shedding_config(*config),
+    );
+}
+
+fn route_shedding_config(config: RouteSheddingConfig) -> roze_resilience::SheddingConfig {
+    roze_resilience::SheddingConfig {
+        concurrency: config.concurrency,
+        window: config.window,
+        min_samples: config.min_samples,
+        max_avg_latency: config.max_avg_latency,
+        max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
+        cool_down: config.cool_down,
+    }
 }
 
 pub fn idempotency_key_from_headers<'a>(
@@ -434,5 +509,42 @@ mod tests {
             Some(&governance),
         );
         assert!(matches!(next, Err(RozeError::Unavailable(message)) if message == "circuit open"));
+    }
+
+    #[test]
+    fn begin_route_sheds_when_concurrency_is_full() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let route = format!("shed_{}", std::process::id());
+        governance.routes.insert(
+            route.clone(),
+            roze_config::RouteGovernanceConfig {
+                shedding: Some(roze_config::SheddingConfig {
+                    concurrency: 1,
+                    window_ms: 1_000,
+                    min_samples: 10,
+                    max_avg_latency_ms: 1_000,
+                    max_failure_ratio_per_mille: 500,
+                    cool_down_ms: 60_000,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let first = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(first.is_ok());
+        let second = begin_route(
+            "svc".to_string(),
+            route,
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(matches!(second, Err(RozeError::Unavailable(message)) if message == "load shed"));
     }
 }

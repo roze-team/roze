@@ -6,17 +6,100 @@ use std::{
 
 use bytes::Bytes;
 use http::{header, request::Parts as HttpParts, HeaderMap, Method, Uri, Version};
-use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
+use tower::{util::BoxCloneService, Layer, Service};
 
 use crate::{
+    body::{self, BodyError},
     response::{IntoResponse, Json},
-    rest::IncomingRequest,
+    rest::{HttpResponse, IncomingRequest},
     router::{MatchedPath, RouteParams},
 };
 
 pub type Request = IncomingRequest;
 pub type ExtractFuture<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
+pub const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultBodyLimit {
+    kind: DefaultBodyLimitKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DefaultBodyLimitKind {
+    Disable,
+    Limit(usize),
+}
+
+impl DefaultBodyLimit {
+    pub const fn disable() -> Self {
+        Self {
+            kind: DefaultBodyLimitKind::Disable,
+        }
+    }
+
+    pub const fn max(limit: usize) -> Self {
+        Self {
+            kind: DefaultBodyLimitKind::Limit(limit),
+        }
+    }
+
+    pub fn apply(self, request: &mut IncomingRequest) {
+        request.extensions_mut().insert(self.kind);
+    }
+}
+
+impl Layer<BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallible>>
+    for DefaultBodyLimit
+{
+    type Service = DefaultBodyLimitService;
+
+    fn layer(
+        &self,
+        inner: BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallible>,
+    ) -> Self::Service {
+        DefaultBodyLimitService {
+            kind: self.kind,
+            inner,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DefaultBodyLimitService {
+    kind: DefaultBodyLimitKind,
+    inner: BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallible>,
+}
+
+impl std::fmt::Debug for DefaultBodyLimitService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DefaultBodyLimitService")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Service<IncomingRequest> for DefaultBodyLimitService {
+    type Response = HttpResponse;
+    type Error = std::convert::Infallible;
+    type Future = Pin<
+        Box<dyn Future<Output = Result<HttpResponse, std::convert::Infallible>> + Send + 'static>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: IncomingRequest) -> Self::Future {
+        request.extensions_mut().insert(self.kind);
+        let mut inner = self.inner.clone();
+        Box::pin(async move { inner.call(request).await })
+    }
+}
 
 pub trait FromRequestParts: Sized {
     type Rejection: IntoResponse;
@@ -286,16 +369,27 @@ impl FromRequest for Bytes {
     type Rejection = roze_error::RozeError;
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
-        Box::pin(async move {
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
-                .to_bytes();
-            Ok(body)
-        })
+        Box::pin(async move { collect_limited_body(request).await })
     }
+}
+
+async fn collect_limited_body(request: IncomingRequest) -> Result<Bytes, roze_error::RozeError> {
+    let kind = request
+        .extensions()
+        .get::<DefaultBodyLimitKind>()
+        .copied()
+        .unwrap_or(DefaultBodyLimitKind::Limit(DEFAULT_BODY_LIMIT));
+    let limit = match kind {
+        DefaultBodyLimitKind::Disable => usize::MAX,
+        DefaultBodyLimitKind::Limit(limit) => limit,
+    };
+    body::to_bytes(request.into_body(), limit)
+        .await
+        .map_err(body_error_to_bad_request)
+}
+
+fn body_error_to_bad_request(error: BodyError) -> roze_error::RozeError {
+    roze_error::RozeError::BadRequest(error.to_string())
 }
 
 impl FromRequest for String {
@@ -694,6 +788,7 @@ impl OptionalFromRequestParts for RawQuery {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Query<T>(pub T);
 
 impl<T> Deref for Query<T> {
@@ -710,6 +805,30 @@ impl<T> DerefMut for Query<T> {
     }
 }
 
+impl<T> Query<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn try_from_uri(uri: &Uri) -> Result<Self, roze_error::RozeError> {
+        let query = uri.query().unwrap_or_default();
+        let value = serde_urlencoded::from_str(query)
+            .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
+        Ok(Self(value))
+    }
+
+    pub fn optional_from_uri(uri: &Uri) -> Result<Option<Self>, roze_error::RozeError> {
+        let Some(query) = uri.query() else {
+            return Ok(None);
+        };
+        if query.is_empty() {
+            return Ok(None);
+        }
+        let value = serde_urlencoded::from_str(query)
+            .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
+        Ok(Some(Self(value)))
+    }
+}
+
 impl<T> FromRequest for Query<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -717,12 +836,7 @@ where
     type Rejection = roze_error::RozeError;
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
-        Box::pin(async move {
-            let query = request.uri().query().unwrap_or_default();
-            let value = serde_urlencoded::from_str(query)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Self(value))
-        })
+        Box::pin(async move { Self::try_from_uri(request.uri()) })
     }
 }
 
@@ -733,12 +847,8 @@ where
     type Rejection = roze_error::RozeError;
 
     fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
-        let query = parts.uri.query().unwrap_or_default().to_string();
-        Box::pin(async move {
-            let value = serde_urlencoded::from_str(&query)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Self(value))
-        })
+        let result = Self::try_from_uri(&parts.uri);
+        Box::pin(async move { result })
     }
 }
 
@@ -751,15 +861,7 @@ where
     fn optional_from_request(
         request: IncomingRequest,
     ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
-        let query = request.uri().query().unwrap_or_default().to_string();
-        Box::pin(async move {
-            if query.is_empty() {
-                return Ok(None);
-            }
-            let value = serde_urlencoded::from_str(&query)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Some(Self(value)))
-        })
+        Box::pin(async move { Self::optional_from_uri(request.uri()) })
     }
 }
 
@@ -772,15 +874,8 @@ where
     fn optional_from_request_parts(
         parts: &mut HttpParts,
     ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
-        let query = parts.uri.query().unwrap_or_default().to_string();
-        Box::pin(async move {
-            if query.is_empty() {
-                return Ok(None);
-            }
-            let value = serde_urlencoded::from_str(&query)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Some(Self(value)))
-        })
+        let result = Self::optional_from_uri(&parts.uri);
+        Box::pin(async move { result })
     }
 }
 
@@ -801,12 +896,7 @@ impl FromRequest for RawForm {
                     "expected application/x-www-form-urlencoded content type".to_string(),
                 ));
             }
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
-                .to_bytes();
+            let body = Bytes::from_request(request).await?;
             Ok(Self(body))
         })
     }
@@ -849,12 +939,7 @@ where
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
         Box::pin(async move {
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
-                .to_bytes();
+            let body = Bytes::from_request(request).await?;
             let value = serde_urlencoded::from_bytes(&body)
                 .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
             Ok(Self(value))
@@ -872,12 +957,7 @@ where
         request: IncomingRequest,
     ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
         Box::pin(async move {
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
-                .to_bytes();
+            let body = Bytes::from_request(request).await?;
             if body.is_empty() {
                 return Ok(None);
             }
@@ -1265,12 +1345,7 @@ where
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
         Box::pin(async move {
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
-                .to_bytes();
+            let body = Bytes::from_request(request).await?;
             let value = serde_json::from_slice(&body)
                 .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
             Ok(Self(value))
@@ -1288,12 +1363,7 @@ where
         request: IncomingRequest,
     ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
         Box::pin(async move {
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?
-                .to_bytes();
+            let body = Bytes::from_request(request).await?;
             if body.is_empty() {
                 return Ok(None);
             }
@@ -1348,6 +1418,48 @@ mod tests {
         let body = Bytes::from_request(request).await.expect("bytes body");
 
         assert_eq!(&body[..], b"raw-body");
+    }
+
+    #[tokio::test]
+    async fn default_body_limit_rejects_large_bytes_body() {
+        let body = vec![b'a'; DEFAULT_BODY_LIMIT + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .body(rest::full_body(body))
+            .unwrap();
+
+        let error = Bytes::from_request(request).await.unwrap_err();
+
+        assert_eq!(error.code(), 400);
+    }
+
+    #[tokio::test]
+    async fn default_body_limit_can_be_overridden_per_request() {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .body(rest::full_body("roze"))
+            .unwrap();
+        DefaultBodyLimit::max(3).apply(&mut request);
+
+        let error = Bytes::from_request(request).await.unwrap_err();
+
+        assert_eq!(error.code(), 400);
+    }
+
+    #[tokio::test]
+    async fn default_body_limit_can_be_disabled_per_request() {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .body(rest::full_body("roze"))
+            .unwrap();
+        DefaultBodyLimit::disable().apply(&mut request);
+
+        let body = Bytes::from_request(request).await.expect("bytes body");
+
+        assert_eq!(&body[..], b"roze");
     }
 
     #[tokio::test]
@@ -1564,6 +1676,38 @@ mod tests {
                 name: "roze".to_string()
             }
         );
+    }
+
+    #[test]
+    fn query_try_from_uri_deserializes_query_string() {
+        let uri: Uri = "/users?name=roze".parse().unwrap();
+
+        let Query(payload) = Query::<Payload>::try_from_uri(&uri).expect("query from uri");
+
+        assert_eq!(
+            payload,
+            Payload {
+                name: "roze".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn query_optional_from_uri_returns_none_without_query() {
+        let uri: Uri = "/users".parse().unwrap();
+
+        let query = Query::<Payload>::optional_from_uri(&uri).expect("optional query");
+
+        assert!(query.is_none());
+    }
+
+    #[test]
+    fn query_try_from_uri_preserves_parse_errors() {
+        let uri: Uri = "/users?other=roze".parse().unwrap();
+
+        let error = Query::<Payload>::try_from_uri(&uri).unwrap_err();
+
+        assert_eq!(error.code(), 400);
     }
 
     #[tokio::test]

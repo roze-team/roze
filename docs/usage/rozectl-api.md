@@ -744,9 +744,16 @@ enforce route-specific timeout overrides from `governance.routes`. Set
 long-running logic.
 Generated REST and RPC `config.yaml` files now include per-route or per-method
 `governance.routes` entries by default: timeout, retry budget, rate limit, and
-circuit breaker settings are explicit for every generated operation. REST
-`GET`/`HEAD` routes default to two retry attempts, while mutating routes default
-to one attempt so non-idempotent writes are not retried accidentally.
+circuit breaker, and load-shedding settings are explicit for every generated
+operation. REST `GET`/`HEAD` routes default to two retry attempts, while
+mutating routes default to one attempt so non-idempotent writes are not retried
+accidentally. REST and RPC runtimes consume those route/method settings:
+concurrency pressure, high latency, or elevated failure ratio can shed load
+before worker saturation turns into a wider outage.
+Generated RPC clients can also be bound to a `GovernanceConfig` with
+`with_governance`; each client method then reads its `governance.routes`
+retry policy, applies method-specific retry attempts and backoff caps, and uses
+the generated retry budget to avoid retry storms.
 
 Business logic should not pass or construct `trace_id` values. Use
 `tracing::info!`, `tracing::warn!`, and `tracing::error!` directly in
@@ -1129,6 +1136,9 @@ compilable; keep domain-specific typed conversion in application extensions.
 Common ent field builders map to Roze model types, including `Text(...)` to
 `string`, `Uint(...)` to `u32`, `Float(...)`/`Float64(...)` to `f64`,
 `Float32(...)` to `f32`, and `Bytes(...)` to `bytes`/`Vec<u8>`.
+`Bytes(...)` fields also accept explicit Go byte-slice defaults such as
+`Default([]byte{1, 2, 255})` and `Default([]byte("seed"))`, which generate
+`Vec<u8>` create defaults.
 Network-oriented builders such as `IP(...)`, `MAC(...)`, and `URL(...)` map to
 string-backed fields; `IPs(...)` maps to `Vec<String>` and supports the same Go
 slice defaults as other plural string builders.
@@ -1254,6 +1264,7 @@ Literal defaults such as `Default(true)`, `Default(18)`, and
 numeric, string, and nullable variants of those fields.
 Roze also accepts common ent metadata directives on fields, edges, and indexes,
 such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`,
+`ValueScanner(...)`,
 `Annotations(...)`, `Deprecated(...)`, edge `StorageKey(...)`, and index
 `Where(...)`, as parse-compatible no-ops; round-trip rendering keeps the
 normalized Roze schema and omits those metadata-only directives. Partial index
@@ -1273,9 +1284,10 @@ field as `<sensitive>`.
 `.ent` string fields can declare `not_empty`, `min_len <n>`, `max_len <n>`,
 `enum <value>, <value>`, `contains <value>`, `starts_with <value>`, and
 `ends_with <value>`, plus `not_contains <value>`, `not_starts_with <value>`,
-and `not_ends_with <value>`; Roze validates those constraints in generated
-create, update-one, and update-many builders before writing through Toasty or
-SeaORM.
+and `not_ends_with <value>`. Bytes fields can use the length validators
+`not_empty`, `min_len <n>`, and `max_len <n>` with byte-length semantics. Roze
+validates those constraints in generated create, update-one, and update-many
+builders before writing through Toasty or SeaORM.
 `.ent` primitive numeric fields can declare `positive`, `non_negative`,
 `negative`, `non_positive`, `min <n>`, `max <n>`, and
 `range <min>, <max>`; Roze validates those bounds in the same generated
