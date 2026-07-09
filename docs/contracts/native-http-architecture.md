@@ -22,6 +22,9 @@ Axum and must not expose Axum types in generated services or framework crates.
 - Split path matching from method dispatch. Roze uses `matchit` directly for
   route templates such as `/users/{id}`, then dispatches to a Roze-owned
   `MethodRouter`.
+- Keep path definitions explicit. Route paths and nest prefixes must be
+  non-empty and start with `/`; Roze rejects invalid paths during router
+  construction instead of silently normalizing them.
 - Keep middleware separate from routing. Cross-cutting behavior belongs in
   Tower layers or Roze middleware primitives, not inside business handlers.
 
@@ -65,6 +68,11 @@ let app = Router::new()
 - `any` and `any_service` endpoints for method-independent handlers/services
 - `MethodFilter` plus `on` and `on_service` for registering one
   handler/service against multiple standard HTTP methods
+- `MethodFilter::ALL`, `from_method`, `matches`, `methods`, `intersects`,
+  `without`, `complement`, and bitwise union/intersection/difference/not
+  operators make the same
+  standard-method set reusable in gateway policy, middleware, tests, and
+  generated route inspection
 - `MethodRouter` implements Tower `Service` directly and exposes
   `into_make_service` / `into_make_service_with_connect_info::<T>` for
   standalone method-only services that do not need path routing
@@ -79,6 +87,8 @@ let app = Router::new()
   `MethodRouter::post_service`, so generated routes can attach Tower services
   without wrapping them as handlers
 - `405 Method Not Allowed` responses include an `Allow` header for known paths
+  and standalone method routers; empty method routers return an empty `Allow`
+  header rather than omitting it
 - route-level and router-level `method_not_allowed_fallback` /
   `method_not_allowed_fallback_service` hooks for generated services that need
   custom 405 payloads from handlers or Tower services

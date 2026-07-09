@@ -9050,6 +9050,9 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         }
         let mut field_indexes = Vec::new();
         for field in unique_fields {
+            if field == primary && field == "id" {
+                continue;
+            }
             if !indexes
                 .iter()
                 .any(|index| index.unique && index.fields == [field.clone()])
@@ -9248,6 +9251,12 @@ fn parse_ent_field(
             validation.max_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
+        if let Some(value) = ent_field_arg(&inner, &["validate"]) {
+            if let Some(max_len) = parse_ent_max_rune_count_validator(value, inner_line_no + 1)? {
+                validation.max_len = Some(max_len);
+                continue;
+            }
+        }
         if let Some(value) = ent_field_arg(&inner, &["min"]) {
             validation.min = Some(value.trim().to_string());
             continue;
@@ -9343,6 +9352,21 @@ fn parse_ent_field(
     }
 
     bail!("line {line_no}: unclosed field block")
+}
+
+fn parse_ent_max_rune_count_validator(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<Option<usize>> {
+    let trimmed = value.trim();
+    let Some(open) = trimmed.find("MaxRuneCount(") else {
+        return Ok(None);
+    };
+    let args = &trimmed[open + "MaxRuneCount".len()..];
+    let Some(value) = ent_directive_arg_rest(args) else {
+        bail!("line {line_no}: MaxRuneCount validator must include a length");
+    };
+    Ok(Some(parse_usize(value.trim(), line_no)?))
 }
 
 fn is_ent_ignored_metadata_directive(value: &str) -> bool {
@@ -9728,7 +9752,7 @@ fn parse_ent_edge(
             continue;
         }
         if inner == "}" {
-            if inverse || field.is_none() && ref_field.is_none() {
+            if inverse && field.is_none() || field.is_none() && ref_field.is_none() {
                 return Ok(None);
             }
             let Some(target) = target else {
@@ -9748,14 +9772,9 @@ fn parse_ent_edge(
             }));
         }
         if inverse {
-            if ent_field_arg(&inner, &["ref"]).is_some()
-                || ent_field_arg(&inner, &["field"]).is_some()
-                || ent_field_arg(&inner, &["to"]).is_some()
+            if ent_field_arg(&inner, &["to"]).is_some()
                 || ent_field_arg(&inner, &["from"]).is_some()
                 || ent_field_arg(&inner, &["through"]).is_some()
-                || ent_field_arg(&inner, &["storage_key", "storagekey"]).is_some()
-                || ent_field_flag(&inner, &["unique"])
-                || ent_field_flag(&inner, &["required"])
                 || ent_field_flag(&inner, &["immutable"])
                 || is_ent_ignored_metadata_directive(&inner)
             {
@@ -13260,6 +13279,14 @@ mod tests {
             }
             field Text("bio").Optional() {
             }
+            field Int8("tiny_delta").Default(-8) {
+            }
+            field Int16("small_delta").Default(-16) {
+            }
+            field Int("age").Default(18) {
+            }
+            field Int32("rank").Default(32) {
+            }
             field Uint("visits").Default(7) {
             }
             field Uint8("tiny").Default(8) {
@@ -13291,6 +13318,34 @@ mod tests {
             .find(|field| field.name == "bio")
             .expect("bio field");
         assert_eq!(bio.ty, "Option<String>");
+        let tiny_delta = model
+            .fields
+            .iter()
+            .find(|field| field.name == "tiny_delta")
+            .expect("tiny_delta field");
+        assert_eq!(tiny_delta.ty, "i8");
+        assert_eq!(tiny_delta.default_value.as_deref(), Some("-8"));
+        let small_delta = model
+            .fields
+            .iter()
+            .find(|field| field.name == "small_delta")
+            .expect("small_delta field");
+        assert_eq!(small_delta.ty, "i16");
+        assert_eq!(small_delta.default_value.as_deref(), Some("-16"));
+        let age = model
+            .fields
+            .iter()
+            .find(|field| field.name == "age")
+            .expect("age field");
+        assert_eq!(age.ty, "i32");
+        assert_eq!(age.default_value.as_deref(), Some("18"));
+        let rank = model
+            .fields
+            .iter()
+            .find(|field| field.name == "rank")
+            .expect("rank field");
+        assert_eq!(rank.ty, "i32");
+        assert_eq!(rank.default_value.as_deref(), Some("32"));
         let visits = model
             .fields
             .iter()
@@ -13364,6 +13419,10 @@ mod tests {
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field bio: string? {"));
+        assert!(ent.contains("field tiny_delta: i8 {"));
+        assert!(ent.contains("field small_delta: i16 {"));
+        assert!(ent.contains("field age: i32 {"));
+        assert!(ent.contains("field rank: i32 {"));
         assert!(ent.contains("field visits: u32 {"));
         assert!(ent.contains("field tiny: u8 {"));
         assert!(ent.contains("field small: u16 {"));
@@ -13379,6 +13438,10 @@ mod tests {
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub bio: Option<String>"));
+        assert!(sea_orm.contains("pub tiny_delta: i8"));
+        assert!(sea_orm.contains("pub small_delta: i16"));
+        assert!(sea_orm.contains("pub age: i32"));
+        assert!(sea_orm.contains("pub rank: i32"));
         assert!(sea_orm.contains("pub visits: u32"));
         assert!(sea_orm.contains("pub tiny: u8"));
         assert!(sea_orm.contains("pub small: u16"));
@@ -13389,6 +13452,12 @@ mod tests {
         assert!(sea_orm.contains("pub weight: f64"));
         assert!(sea_orm.contains("pub payload: Option<Vec<u8>>"));
         assert!(sea_orm.contains("pub seed: Vec<u8>"));
+        assert!(sea_orm.contains("tiny_delta: self.tiny_delta.map(Set).unwrap_or_else(|| Set(-8))"));
+        assert!(
+            sea_orm.contains("small_delta: self.small_delta.map(Set).unwrap_or_else(|| Set(-16))")
+        );
+        assert!(sea_orm.contains("age: self.age.map(Set).unwrap_or_else(|| Set(18))"));
+        assert!(sea_orm.contains("rank: self.rank.map(Set).unwrap_or_else(|| Set(32))"));
         assert!(sea_orm.contains("visits: self.visits.map(Set).unwrap_or_else(|| Set(7))"));
         assert!(sea_orm.contains("tiny: self.tiny.map(Set).unwrap_or_else(|| Set(8))"));
         assert!(sea_orm.contains("small: self.small.map(Set).unwrap_or_else(|| Set(16))"));
@@ -13477,6 +13546,54 @@ mod tests {
         assert!(sea_orm.contains(
             "id: self.id.map(Set).unwrap_or_else(|| Set(uuid::Uuid::now_v7().to_string()))"
         ));
+    }
+
+    #[test]
+    fn ent_string_id_override_preserves_constraints_without_redundant_unique_index() {
+        let source = r#"
+        entity Pet {
+            table "pets"
+            field String("name") {
+            }
+            field String("id").MaxLen(25).NotEmpty().Unique().Immutable() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.primary, "id");
+        assert!(!model
+            .indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["id"]));
+        let id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "id")
+            .expect("id field");
+        assert_eq!(id.ty, "String");
+        assert!(id.immutable);
+        assert!(id.validation.not_empty);
+        assert_eq!(id.validation.max_len, Some(25));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field id: string {"));
+        assert!(ent.contains("    primary"));
+        assert!(ent.contains("    immutable"));
+        assert!(ent.contains("    not_empty"));
+        assert!(ent.contains("    max_len 25"));
+        assert!(!ent.contains("index uniq_id"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("#[sea_orm(primary_key)]"));
+        assert!(sea_orm.contains(
+            "if value.trim().is_empty() { anyhow::bail!(\"id validation failed: must not be empty\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.chars().count() > 25 { anyhow::bail!(\"id validation failed: length must be at most 25\"); }"
+        ));
+        assert!(!sea_orm.contains("IdUnique"));
     }
 
     #[test]
@@ -13854,6 +13971,8 @@ mod tests {
             field String("email").NotEmpty().Match(regexp.MustCompile("^[^@]+@[^@]+$")) {
                 Validate(func(value string) error { return nil })
             }
+            field String("nickname").Validate(MaxRuneCount(20)) {
+            }
         }
         "#;
 
@@ -13866,15 +13985,27 @@ mod tests {
             .expect("email field");
         assert_eq!(email.ty, "String");
         assert!(email.validation.not_empty);
+        let nickname = model
+            .fields
+            .iter()
+            .find(|field| field.name == "nickname")
+            .expect("nickname field");
+        assert_eq!(nickname.ty, "String");
+        assert_eq!(nickname.validation.max_len, Some(20));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field email: string {"));
         assert!(ent.contains("not_empty"));
+        assert!(ent.contains("field nickname: string {"));
+        assert!(ent.contains("max_len 20"));
         assert!(!ent.contains("Match"));
         assert!(!ent.contains("Validate"));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("email validation failed: must not be empty"));
+        assert!(sea_orm.contains(
+            "if value.chars().count() > 20 { anyhow::bail!(\"nickname validation failed: length must be at most 20\"); }"
+        ));
     }
 
     #[test]
@@ -14425,6 +14556,53 @@ mod tests {
         assert!(ent.contains("edge user {"));
         assert!(ent.contains("    field user_id"));
         assert!(ent.contains("    unique"));
+    }
+
+    #[test]
+    fn ent_from_edges_with_local_field_generate_relationship() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+        }
+
+        entity Post {
+            table "posts"
+            field Int64("id").Primary() {
+            }
+            field Int64("author_id").Optional().StorageKey("post_author") {
+            }
+            edge From("author", User.Type).Field("author_id").Unique().Required().StorageKey(edge.Column("post_author")) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let post = models
+            .iter()
+            .find(|model| model.name == "Post")
+            .expect("post");
+        assert!(post.edges.contains(&ModelEdge {
+            name: "author".to_string(),
+            target: "User".to_string(),
+            field: "author_id".to_string(),
+            ref_field: "id".to_string(),
+            unique: true,
+            required: true,
+        }));
+        assert!(post.indexes.iter().any(|index| {
+            index.name == "uniq_author_id" && index.unique && index.fields == ["author_id"]
+        }));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge author {"));
+        assert!(ent.contains("    to User"));
+        assert!(ent.contains("    field author_id"));
+        assert!(ent.contains("    ref id"));
+        assert!(ent.contains("    unique"));
+        assert!(ent.contains("    required"));
+        assert!(!ent.contains("StorageKey(edge.Column"));
     }
 
     #[test]

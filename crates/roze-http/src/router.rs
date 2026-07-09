@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     fmt,
     future::{ready, Future, Ready},
-    ops::{BitOr, Deref},
+    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -56,16 +56,39 @@ impl MethodFilter {
     pub const OPTIONS: Self = Self(1 << 6);
     pub const TRACE: Self = Self(1 << 7);
     pub const CONNECT: Self = Self(1 << 8);
+    pub const ALL: Self = Self(
+        Self::GET.0
+            | Self::POST.0
+            | Self::PUT.0
+            | Self::PATCH.0
+            | Self::DELETE.0
+            | Self::HEAD.0
+            | Self::OPTIONS.0
+            | Self::TRACE.0
+            | Self::CONNECT.0,
+    );
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    pub fn complement(self) -> Self {
+        Self::ALL.without(self)
     }
 
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    fn from_known_method(method: &Method) -> Option<Self> {
+    pub fn from_method(method: &Method) -> Option<Self> {
         match *method {
             Method::GET => Some(Self::GET),
             Method::POST => Some(Self::POST),
@@ -80,7 +103,11 @@ impl MethodFilter {
         }
     }
 
-    fn methods(self) -> Vec<Method> {
+    pub fn matches(self, method: &Method) -> bool {
+        Self::from_method(method).is_some_and(|filter| self.contains(filter))
+    }
+
+    pub fn methods(self) -> Vec<Method> {
         [
             (Self::GET, Method::GET),
             (Self::POST, Method::POST),
@@ -103,6 +130,48 @@ impl BitOr for MethodFilter {
 
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for MethodFilter {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl BitAnd for MethodFilter {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl BitAndAssign for MethodFilter {
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
+    }
+}
+
+impl Sub for MethodFilter {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.without(rhs)
+    }
+}
+
+impl SubAssign for MethodFilter {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 &= !rhs.0;
+    }
+}
+
+impl Not for MethodFilter {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        self.complement()
     }
 }
 
@@ -1115,7 +1184,7 @@ impl MethodRouter {
         let mut filter = MethodFilter::default();
         for endpoint in &self.endpoints {
             let method = endpoint.method.as_ref()?;
-            filter = filter | MethodFilter::from_known_method(method)?;
+            filter |= MethodFilter::from_method(method)?;
         }
         (!filter.is_empty()).then_some(filter)
     }
@@ -1670,26 +1739,13 @@ fn allow_header(group: &RouteGroup) -> Option<String> {
     if group.routes.iter().any(|route| route.method.is_none()) {
         return None;
     }
-    let mut methods = group
-        .routes
-        .iter()
-        .filter_map(|route| route.method.as_ref())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if group
-        .routes
-        .iter()
-        .any(|route| route.method.as_ref() == Some(&Method::GET))
-    {
-        methods.push(Method::HEAD.to_string());
-    }
-    methods.sort();
-    methods.dedup();
-    if methods.is_empty() {
-        None
-    } else {
-        Some(methods.join(", "))
-    }
+    Some(allow_header_from_methods(
+        group
+            .routes
+            .iter()
+            .filter_map(|route| route.method.as_ref())
+            .cloned(),
+    ))
 }
 
 fn method_router_allow_header(method_router: &MethodRouter) -> Option<String> {
@@ -1700,34 +1756,36 @@ fn method_router_allow_header(method_router: &MethodRouter) -> Option<String> {
     {
         return None;
     }
-    let mut methods = method_router
-        .endpoints
-        .iter()
-        .filter_map(|endpoint| endpoint.method.as_ref())
-        .map(ToString::to_string)
+    Some(allow_header_from_methods(
+        method_router
+            .endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.method.as_ref())
+            .cloned(),
+    ))
+}
+
+fn allow_header_from_methods(methods: impl IntoIterator<Item = Method>) -> String {
+    let mut methods = methods
+        .into_iter()
+        .map(|method| method.to_string())
         .collect::<Vec<_>>();
-    if method_router
-        .endpoints
-        .iter()
-        .any(|endpoint| endpoint.method.as_ref() == Some(&Method::GET))
-    {
+    if methods.iter().any(|method| method == Method::GET.as_str()) {
         methods.push(Method::HEAD.to_string());
     }
     methods.sort();
     methods.dedup();
-    if methods.is_empty() {
-        None
-    } else {
-        Some(methods.join(", "))
-    }
+    methods.join(", ")
 }
 
 fn normalize_path(path: String) -> String {
-    if path.starts_with('/') {
-        path
-    } else {
-        format!("/{path}")
+    if path.is_empty() {
+        panic!("route path must not be empty");
     }
+    if !path.starts_with('/') {
+        panic!("route path must start with `/`");
+    }
+    path
 }
 
 fn normalize_nest_prefix(prefix: String) -> String {
@@ -2140,6 +2198,48 @@ mod tests {
         assert_eq!(
             response.headers().get(header::ALLOW),
             Some(&HeaderValue::from_static("GET, HEAD, POST"))
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_method_router_returns_empty_allow_header() {
+        let mut service = MethodRouter::new();
+        let response = service
+            .call(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response.headers().get(header::ALLOW),
+            Some(&HeaderValue::from_static(""))
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_method_router_route_returns_empty_allow_header() {
+        let mut router = Router::new().route("/empty", MethodRouter::new());
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/empty")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response.headers().get(header::ALLOW),
+            Some(&HeaderValue::from_static(""))
         );
     }
 
@@ -2912,6 +3012,27 @@ mod tests {
         let _router = left.merge(right);
     }
 
+    #[test]
+    #[should_panic(expected = "route path must not be empty")]
+    fn route_panics_on_empty_path() {
+        let _router = Router::new().route("", get(|| async { "empty" }));
+    }
+
+    #[test]
+    #[should_panic(expected = "route path must start with `/`")]
+    fn route_panics_on_path_without_leading_slash() {
+        let _router = Router::new().route("users", get(|| async { "users" }));
+    }
+
+    #[test]
+    #[should_panic(expected = "route path must start with `/`")]
+    fn nest_panics_on_prefix_without_leading_slash() {
+        let _router = Router::new().nest(
+            "api",
+            Router::new().route("/users", get(|| async { "users" })),
+        );
+    }
+
     #[tokio::test]
     async fn any_routes_all_methods() {
         let mut router = Router::new().route("/events", any(|| async { "accepted" }));
@@ -3166,6 +3287,88 @@ mod tests {
             .method_not_allowed_fallback(|| async { "fallback" })
             .method_filter()
             .is_none());
+    }
+
+    #[test]
+    fn method_filter_matches_and_expands_standard_methods() {
+        let filter = MethodFilter::GET | MethodFilter::POST;
+        assert_eq!(
+            MethodFilter::from_method(&Method::GET),
+            Some(MethodFilter::GET)
+        );
+        assert!(filter.matches(&Method::GET));
+        assert!(filter.matches(&Method::POST));
+        assert!(!filter.matches(&Method::DELETE));
+        assert!(!filter.matches(&Method::HEAD));
+        assert_eq!(filter.methods(), vec![Method::GET, Method::POST]);
+        let brew = Method::from_bytes(b"BREW").unwrap();
+        assert_eq!(MethodFilter::from_method(&brew), None);
+        assert!(!filter.matches(&brew));
+    }
+
+    #[test]
+    fn method_filter_supports_assigning_union() {
+        let mut filter = MethodFilter::GET;
+        filter |= MethodFilter::DELETE;
+        assert!(filter.contains(MethodFilter::GET));
+        assert!(filter.contains(MethodFilter::DELETE));
+        assert_eq!(filter.methods(), vec![Method::GET, Method::DELETE]);
+    }
+
+    #[test]
+    fn method_filter_supports_intersection_and_difference() {
+        let read_methods = MethodFilter::GET | MethodFilter::HEAD | MethodFilter::OPTIONS;
+        let cacheable_methods = MethodFilter::GET | MethodFilter::HEAD;
+        let mut overlap = read_methods & cacheable_methods;
+
+        assert!(read_methods.intersects(cacheable_methods));
+        assert!(!MethodFilter::POST.intersects(cacheable_methods));
+        assert_eq!(overlap.methods(), vec![Method::GET, Method::HEAD]);
+
+        overlap -= MethodFilter::HEAD;
+        assert_eq!(overlap.methods(), vec![Method::GET]);
+
+        let mut write_methods = MethodFilter::POST | MethodFilter::PUT | MethodFilter::DELETE;
+        write_methods &= MethodFilter::POST | MethodFilter::PATCH;
+        assert_eq!(write_methods.methods(), vec![Method::POST]);
+
+        let without_delete =
+            (MethodFilter::POST | MethodFilter::PUT | MethodFilter::DELETE) - MethodFilter::DELETE;
+        assert_eq!(without_delete.methods(), vec![Method::POST, Method::PUT]);
+        assert_eq!(
+            (MethodFilter::GET | MethodFilter::POST)
+                .without(MethodFilter::POST)
+                .methods(),
+            vec![Method::GET]
+        );
+    }
+
+    #[test]
+    fn method_filter_supports_all_and_complement() {
+        assert_eq!(
+            MethodFilter::ALL.methods(),
+            vec![
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+                Method::HEAD,
+                Method::OPTIONS,
+                Method::TRACE,
+                Method::CONNECT,
+            ]
+        );
+
+        let non_read_methods = !(MethodFilter::GET | MethodFilter::HEAD);
+        assert!(!non_read_methods.matches(&Method::GET));
+        assert!(!non_read_methods.matches(&Method::HEAD));
+        assert!(non_read_methods.matches(&Method::POST));
+        assert!(non_read_methods.matches(&Method::CONNECT));
+        assert_eq!(
+            MethodFilter::POST.complement(),
+            MethodFilter::ALL - MethodFilter::POST
+        );
     }
 
     #[tokio::test]

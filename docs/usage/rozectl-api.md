@@ -391,10 +391,14 @@ Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/observability-contract.yaml`, `ops/runtime-hardening.yaml`, and
 `ops/error-contract.yaml`, `ops/deployment-topology.yaml`, and
 `ops/service-communication.yaml`, `ops/cache-governance.yaml`, and
-`ops/data-access-governance.yaml`, and `ops/interface-governance.yaml`. The runbook records the generated service
+`ops/data-access-governance.yaml`, `ops/interface-governance.yaml`, and
+`ops/production-verify.ps1`. The runbook records the generated service
 boundary, required production gates,
 `scripts/production-evidence.sh --area generated-services`, and lifecycle
-summary collection with `--lifecycle-summary`. The YAML baseline is
+summary collection with `--lifecycle-summary`. Run
+`powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` in CI to
+fail fast on missing generated ops assets, format drift, compile errors, and
+test failures before collecting long-run evidence. The YAML baseline is
 machine-readable for CI/platform checks and captures the go-zero inspired
 architecture baseline Roze expects before broad rollout: simple IDL-first
 ownership, timeout, rate limit, circuit breaker, load shedding, retry budget,
@@ -1151,9 +1155,11 @@ Custom entgo `Other(...)` field builders are accepted with the same first-arg
 name parsing and map to string-backed fields so generated repositories stay
 compilable; keep domain-specific typed conversion in application extensions.
 Common ent field builders map to Roze model types, including `Text(...)` to
-`string`, `Uint(...)`/`Uint32(...)` to `u32`, `Uint8(...)` to `u8`,
-`Uint16(...)` to `u16`, `Uint64(...)` to `u64`, `Float(...)`/`Float64(...)` to
-`f64`, `Float32(...)` to `f32`, and `Bytes(...)` to `bytes`/`Vec<u8>`.
+`string`, `Int8(...)` to `i8`, `Int16(...)` to `i16`,
+`Int(...)`/`Int32(...)` to `i32`, `Int64(...)` to `i64`,
+`Uint(...)`/`Uint32(...)` to `u32`, `Uint8(...)` to `u8`,
+`Uint16(...)` to `u16`, `Uint64(...)` to `u64`, `Float(...)`/`Float64(...)`
+to `f64`, `Float32(...)` to `f32`, and `Bytes(...)` to `bytes`/`Vec<u8>`.
 `Bytes(...)` fields also accept explicit Go byte-slice defaults such as
 `Default([]byte{1, 2, 255})` and `Default([]byte("seed"))`, which generate
 `Vec<u8>` create defaults.
@@ -1180,7 +1186,10 @@ Rust create builders.
 declared field. When an ent-style schema does not declare `primary`
 explicitly, Roze prefers a field named `id` over the first declared field,
 matching entgo's builtin-id/override convention for declarations such as
-`field UUID("id", uuid.UUID{}).Default(uuid.New).StorageKey("oid")`.
+`field UUID("id", uuid.UUID{}).Default(uuid.New).StorageKey("oid")` or
+`field String("id").MaxLen(25).NotEmpty().Unique().Immutable()`. Because the
+primary key is already unique, a `Unique()` directive on the primary `id` field
+does not generate a redundant `uniq_id` index.
 Composite entgo IDs such as `ID("user_id", "group_id")` are not generated
 implicitly; model them as explicit fields and indexes until Roze adds
 first-class composite primary-key generation.
@@ -1230,9 +1239,11 @@ Edge headers can also use chained ent-style syntax such as
 `edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required()`;
 round-trip rendering normalizes that form to `edge user { ... }`.
 Inverse ent-style edges such as `edge From("profile", Profile.Type).Ref("user")`
-are accepted as parse-compatible no-ops because they do not declare a local
-foreign-key field for Roze to generate; define the owning `To(...)` edge on the
-entity with the local FK field to generate repository helpers.
+are accepted as parse-compatible no-ops when they do not declare a local
+foreign-key field for Roze to generate. If an inverse edge declares a local
+field, such as `edge From("author", User.Type).Field("author_id").Unique()`,
+Roze treats it as a concrete local-FK relationship and generates the same
+repository helpers as an owning `To(...)` edge.
 Many-to-many ent-style edges such as
 `edge To("groups", Group.Type).Through("memberships", Membership.Type)` are
 also accepted as parse-compatible no-ops when they do not declare a local
@@ -1308,10 +1319,12 @@ conditions, database-side default expressions, collation/charset hints, and
 index prefix/type/order/include/operator-class hints are accepted for entgo
 input compatibility, but Roze does not emit partial-index, default-expression,
 collation/charset, or dialect-specific index DDL from them yet.
-Go-side field validators such as `Validate(...)` and `Match(...)` are accepted
-as parse-compatible no-ops; use Roze-supported validators such as `NotEmpty()`,
-`MinLen(...)`, `MaxLen(...)`, `Enum(...)`, and numeric bounds when generated
-Rust validation is required.
+Go-side field validators such as custom `Validate(...)` functions and
+`Match(...)` are accepted as parse-compatible no-ops; use Roze-supported
+validators such as `NotEmpty()`, `MinLen(...)`, `MaxLen(...)`, `Enum(...)`,
+and numeric bounds when generated Rust validation is required. The common ent
+pattern `Validate(MaxRuneCount(n))` is recognized and normalized to Roze
+`max_len n`, using Rust character-count validation in generated builders.
 `.ent` fields can declare `immutable`; Roze keeps them available on create
 builders but omits them from update, update-many, and edge update setters.
 `.ent` fields can declare `optional`; Roze treats that as the nullable
