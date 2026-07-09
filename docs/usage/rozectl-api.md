@@ -750,10 +750,26 @@ mutating routes default to one attempt so non-idempotent writes are not retried
 accidentally. REST and RPC runtimes consume those route/method settings:
 concurrency pressure, high latency, or elevated failure ratio can shed load
 before worker saturation turns into a wider outage.
+Generated configs also include explicit global and per-route/per-method
+`fallback` entries. They default to `enabled: false`, so services fail closed
+until an operator enables a documented degradation response; the REST/RPC
+runtime policy helpers resolve route/method fallback before global fallback and
+ignore disabled entries. Generated adapters apply fallback only to server-side
+errors, so validation and authorization failures are not hidden by degradation
+responses. REST fallback responses use the configured status, JSON body, and
+headers; RPC fallback responses surface fallback status/body/headers in gRPC
+metadata, and `roze_rpc::rpc::error_from_status` restores them as
+`RozeError::Fallback` for typed clients.
 Generated RPC clients can also be bound to a `GovernanceConfig` with
 `with_governance`; each client method then reads its `governance.routes`
 retry policy, applies method-specific retry attempts and backoff caps, and uses
 the generated retry budget to avoid retry storms.
+`rpc_client.balancer` selects the client-side balancing strategy for discovery
+mode, with `power_of_two_choices` as the default and `first_available`,
+`round_robin`, `weighted_round_robin`, and `health_aware` available when the
+registry supplies the needed instance metadata. Static `rpc_client.endpoints`
+use the same balancer setting, so single-binary deployments and registry-backed
+deployments exercise the same client selection contract.
 
 Business logic should not pass or construct `trace_id` values. Use
 `tracing::info!`, `tracing::warn!`, and `tracing::error!` directly in
@@ -1129,13 +1145,15 @@ like `Default(map[string]any{"theme": "dark", "beta": true})` or
 normalize to JSON object strings for generated create builders.
 Simple Go slice defaults such as `Default([]string{"new", "hot"})` and
 `Default([]interface{}{true, 3, "ok", nil})` on string-backed JSON fields
-normalize to JSON array strings.
+normalize to JSON array strings. Simple custom Go slice defaults such as
+`Default([]http.Dir{"/tmp"})` normalize the literal items the same way.
 Custom entgo `Other(...)` field builders are accepted with the same first-arg
 name parsing and map to string-backed fields so generated repositories stay
 compilable; keep domain-specific typed conversion in application extensions.
 Common ent field builders map to Roze model types, including `Text(...)` to
-`string`, `Uint(...)` to `u32`, `Float(...)`/`Float64(...)` to `f64`,
-`Float32(...)` to `f32`, and `Bytes(...)` to `bytes`/`Vec<u8>`.
+`string`, `Uint(...)`/`Uint32(...)` to `u32`, `Uint8(...)` to `u8`,
+`Uint16(...)` to `u16`, `Uint64(...)` to `u64`, `Float(...)`/`Float64(...)` to
+`f64`, `Float32(...)` to `f32`, and `Bytes(...)` to `bytes`/`Vec<u8>`.
 `Bytes(...)` fields also accept explicit Go byte-slice defaults such as
 `Default([]byte{1, 2, 255})` and `Default([]byte("seed"))`, which generate
 `Vec<u8>` create defaults.
@@ -1143,10 +1161,14 @@ Network-oriented builders such as `IP(...)`, `MAC(...)`, and `URL(...)` map to
 string-backed fields; `IPs(...)` maps to `Vec<String>` and supports the same Go
 slice defaults as other plural string builders.
 Plural scalar builders map to Rust vectors, including `Strings(...)` to
-`Vec<String>`, `Ints(...)` to `Vec<i32>`, `Int64s(...)` to `Vec<i64>`,
-`Uints(...)` to `Vec<u32>`, `Floats(...)`/`Float64s(...)` to `Vec<f64>`,
-`Float32s(...)` to `Vec<f32>`, and `Bools(...)` to `Vec<bool>`; round-trip
-`.ent` rendering writes these as `[]string`, `[]i32`, and similar array types.
+`Vec<String>`, `Int8s(...)` to `Vec<i8>`, `Int16s(...)` to `Vec<i16>`,
+`Ints(...)`/`Int32s(...)` to `Vec<i32>`, `Int64s(...)` to `Vec<i64>`,
+`Uint8s(...)` to `Vec<u8>`, `Uint16s(...)` to `Vec<u16>`,
+`Uints(...)`/`Uint32s(...)` to `Vec<u32>`, `Uint64s(...)` to `Vec<u64>`,
+`Floats(...)`/`Float64s(...)` to `Vec<f64>`, `Float32s(...)` to `Vec<f32>`,
+and `Bools(...)` to `Vec<bool>`; round-trip `.ent` rendering writes these as
+`[]string`, `[]i32`, and similar array types. Because Roze treats
+`Vec<u8>` as bytes, `Uint8s(...)` round-trips as `bytes`.
 Go slice defaults for those plural scalar builders, such as
 `Default([]string{"new", "hot"})` or `Default([]int{1, 2})`, are used by
 generated Rust create builders as `vec![...]` defaults.
@@ -1155,9 +1177,13 @@ generated Rust create builders as `vec![...]` defaults.
 `Default(5 * time.Second)` are normalized to numeric nanoseconds for generated
 Rust create builders.
 `field ID("id")` maps to an `i64` primary field even when it is not the first
-declared field. Composite entgo IDs such as `ID("user_id", "group_id")` are
-not generated implicitly; model them as explicit fields and indexes until Roze
-adds first-class composite primary-key generation.
+declared field. When an ent-style schema does not declare `primary`
+explicitly, Roze prefers a field named `id` over the first declared field,
+matching entgo's builtin-id/override convention for declarations such as
+`field UUID("id", uuid.UUID{}).Default(uuid.New).StorageKey("oid")`.
+Composite entgo IDs such as `ID("user_id", "group_id")` are not generated
+implicitly; model them as explicit fields and indexes until Roze adds
+first-class composite primary-key generation.
 `.ent` schemas can declare entity relationships with edge blocks:
 
 ```text
@@ -1196,8 +1222,10 @@ relation generator grows composite edge semantics.
 `.ent` edges can declare `unique`; Roze normalizes that into a single-field
 unique index on the local edge field and generates unique lookup helpers.
 Edge blocks also accept ent-style builder calls such as `To("User")`,
-`Field("user_id")`, `Ref("id")`, `Unique()`, and `Required()`; round-trip
-rendering normalizes them to lowercase `.ent` directives.
+`Field("user_id")`, `Ref("id")`, `Unique()`, `Required()`, and edge-level
+`Immutable()`; round-trip rendering normalizes generated relationship
+directives to lowercase `.ent` directives and omits edge metadata-only
+directives such as `Immutable()`.
 Edge headers can also use chained ent-style syntax such as
 `edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required()`;
 round-trip rendering normalizes that form to `edge user { ... }`.
@@ -1229,6 +1257,11 @@ repositories.
 Index blocks accept ent-style builder calls such as `Fields("tenant_id",
 "code")` and `Unique()`; round-trip rendering normalizes them to lowercase
 `.ent` directives.
+Roze accepts ent/Atlas index annotation helpers such as `Prefix(...)`,
+`PrefixColumn(...)`, `Desc()`, `DescColumns(...)`, `IndexType(...)`,
+`IndexTypes(...)`, `IncludeColumns(...)`, `IndexWhere(...)`, and
+`OpClass(...)` as parse-compatible metadata no-ops, matching entgo schemas that
+carry dialect-specific index hints.
 Index headers can also use chained ent-style syntax such as
 `index Fields("tenant_id", "code").Unique().StorageKey("tenant_code")`;
 `StorageKey(...)` becomes the Roze index name, and unnamed indexes are
@@ -1252,10 +1285,11 @@ Timestamp defaults accept ent-style `Default(time.Now)`,
 `DefaultFunc(time.Now)`, `UpdateDefault(time.Now)`, and
 `ClientDefault(time.Now)` and normalize them to Roze's numeric `now_millis`
 timestamp default for `i64`/`u64` timestamp fields.
-UUID defaults accept ent-style `DefaultFunc(uuid.NewString)` and
-`DefaultFunc(uuid.New)` for `UUID(...)`/string-backed fields; generated Rust
-create builders use `uuid::Uuid::now_v7().to_string()` and model generation
-adds the `uuid` dependency when needed.
+UUID defaults accept ent-style `DefaultFunc(uuid.NewString)`,
+`DefaultFunc(uuid.New)`, and `DefaultFunc(uuid.NewV7)` for
+`UUID(...)`/string-backed fields; generated Rust create builders use
+`uuid::Uuid::now_v7().to_string()` and model generation adds the `uuid`
+dependency when needed.
 The ent-style `field Time("created_at").Default(time.Now)` builder maps to a
 Roze `i64` epoch-millis timestamp field and uses the same numeric timestamp
 default generation.
@@ -1264,12 +1298,16 @@ Literal defaults such as `Default(true)`, `Default(18)`, and
 numeric, string, and nullable variants of those fields.
 Roze also accepts common ent metadata directives on fields, edges, and indexes,
 such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`,
-`ValueScanner(...)`,
-`Annotations(...)`, `Deprecated(...)`, edge `StorageKey(...)`, and index
-`Where(...)`, as parse-compatible no-ops; round-trip rendering keeps the
+`ValueScanner(...)`, `DefaultExpr(...)`, `DefaultExprs(...)`,
+`Collation(...)`, `Charset(...)`, `Annotations(...)`, `Deprecated(...)`, edge
+`StorageKey(...)`, and index `Where(...)`/Atlas index annotation helpers, as
+parse-compatible no-ops;
+round-trip rendering keeps the
 normalized Roze schema and omits those metadata-only directives. Partial index
-conditions are accepted for entgo input compatibility, but Roze does not emit
-partial-index DDL from them yet.
+conditions, database-side default expressions, collation/charset hints, and
+index prefix/type/order/include/operator-class hints are accepted for entgo
+input compatibility, but Roze does not emit partial-index, default-expression,
+collation/charset, or dialect-specific index DDL from them yet.
 Go-side field validators such as `Validate(...)` and `Match(...)` are accepted
 as parse-compatible no-ops; use Roze-supported validators such as `NotEmpty()`,
 `MinLen(...)`, `MaxLen(...)`, `Enum(...)`, and numeric bounds when generated
@@ -1285,7 +1323,8 @@ field as `<sensitive>`.
 `enum <value>, <value>`, `contains <value>`, `starts_with <value>`, and
 `ends_with <value>`, plus `not_contains <value>`, `not_starts_with <value>`,
 and `not_ends_with <value>`. Bytes fields can use the length validators
-`not_empty`, `min_len <n>`, and `max_len <n>` with byte-length semantics. Roze
+`not_empty`, `min_len <n>`, and `max_len <n>` with byte-length semantics.
+Entgo's `Size(n)` builder is accepted as a `MaxLen(n)`/`max_len n` alias. Roze
 validates those constraints in generated create, update-one, and update-many
 builders before writing through Toasty or SeaORM.
 `.ent` primitive numeric fields can declare `positive`, `non_negative`,

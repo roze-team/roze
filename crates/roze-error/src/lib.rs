@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 tokio::task_local! {
@@ -40,6 +43,12 @@ pub enum RozeError {
     Unavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
+    #[error("fallback response: {status}")]
+    Fallback {
+        status: u16,
+        body: Option<Value>,
+        headers: BTreeMap<String, String>,
+    },
 }
 
 impl RozeError {
@@ -52,6 +61,7 @@ impl RozeError {
             RozeError::NotFound(_) => "not_found",
             RozeError::Unavailable(_) => "unavailable",
             RozeError::Internal(_) => "internal",
+            RozeError::Fallback { .. } => "fallback",
         }
     }
 
@@ -64,6 +74,7 @@ impl RozeError {
             RozeError::NotFound(_) => 404,
             RozeError::Unavailable(_) => 503,
             RozeError::Internal(_) => 500,
+            RozeError::Fallback { status, .. } => i32::from(*status),
         }
     }
 
@@ -76,6 +87,7 @@ impl RozeError {
             RozeError::NotFound(msg) => msg.clone(),
             RozeError::Unavailable(msg) => msg.clone(),
             RozeError::Internal(msg) => msg.clone(),
+            RozeError::Fallback { body, .. } => fallback_message(body.as_ref()),
         }
     }
 
@@ -85,6 +97,7 @@ impl RozeError {
             RozeError::NotFound(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Unavailable(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Internal(msg) if !msg.is_empty() => msg.clone(),
+            RozeError::Fallback { body, .. } => fallback_message(body.as_ref()),
             _ => localized_error_message(self.kind(), locale.as_ref()).to_string(),
         }
     }
@@ -109,8 +122,44 @@ impl RozeError {
             RozeError::NotFound(_) => StatusCode::NOT_FOUND,
             RozeError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             RozeError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            RozeError::Fallback { status, .. } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
+            }
         }
     }
+
+    pub fn fallback_response(
+        status: u16,
+        body: Option<Value>,
+        headers: BTreeMap<String, String>,
+    ) -> Self {
+        RozeError::Fallback {
+            status,
+            body,
+            headers,
+        }
+    }
+
+    pub fn fallback_body(&self) -> Option<&Value> {
+        match self {
+            RozeError::Fallback { body, .. } => body.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn fallback_headers(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            RozeError::Fallback { headers, .. } => Some(headers),
+            _ => None,
+        }
+    }
+}
+
+fn fallback_message(body: Option<&Value>) -> String {
+    body.and_then(|body| body.get("message").and_then(Value::as_str))
+        .or_else(|| body.and_then(|body| body.get("msg").and_then(Value::as_str)))
+        .unwrap_or("fallback")
+        .to_string()
 }
 
 pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
@@ -130,6 +179,7 @@ pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
             "rate_limited" => "rate limited",
             "not_found" => "not found",
             "unavailable" => "service unavailable",
+            "fallback" => "fallback",
             "internal" => "internal server error",
             _ => "internal server error",
         },
@@ -250,6 +300,10 @@ mod tests {
         assert_eq!(RozeError::NotFound("x".into()).code(), 404);
         assert_eq!(RozeError::Unavailable("x".into()).code(), 503);
         assert_eq!(RozeError::Internal("x".into()).code(), 500);
+        assert_eq!(
+            RozeError::fallback_response(598, None, BTreeMap::new()).code(),
+            598
+        );
     }
 
     #[test]
@@ -257,6 +311,27 @@ mod tests {
         let err = RozeError::Unauthorized;
         assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
         assert_eq!(err.response_body().code, 401);
+    }
+
+    #[test]
+    fn builds_fallback_error() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-roze-fallback".to_string(), "route".to_string());
+        let err = RozeError::fallback_response(
+            598,
+            Some(serde_json::json!({"message": "degraded"})),
+            headers,
+        );
+
+        assert_eq!(err.kind(), "fallback");
+        assert_eq!(err.status_code(), StatusCode::from_u16(598).unwrap());
+        assert_eq!(err.message(), "degraded");
+        assert_eq!(
+            err.fallback_headers()
+                .and_then(|headers| headers.get("x-roze-fallback"))
+                .map(String::as_str),
+            Some("route")
+        );
     }
 
     #[tokio::test]

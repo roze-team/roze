@@ -65,6 +65,11 @@ let app = Router::new()
 - `any` and `any_service` endpoints for method-independent handlers/services
 - `MethodFilter` plus `on` and `on_service` for registering one
   handler/service against multiple standard HTTP methods
+- `MethodRouter` implements Tower `Service` directly and exposes
+  `into_make_service` / `into_make_service_with_connect_info::<T>` for
+  standalone method-only services that do not need path routing
+- `MethodRouter::merge` composes distinct method endpoints and rejects
+  overlapping method handlers or overlapping method-not-allowed fallbacks
 - standard method helpers for GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS,
   TRACE, and CONNECT
 - GET routes implicitly satisfy HEAD requests when no explicit HEAD route is
@@ -74,11 +79,16 @@ let app = Router::new()
   `MethodRouter::post_service`, so generated routes can attach Tower services
   without wrapping them as handlers
 - `405 Method Not Allowed` responses include an `Allow` header for known paths
-- route-level and router-level `method_not_allowed_fallback` hooks for
-  generated services that need custom 405 payloads
+- route-level and router-level `method_not_allowed_fallback` /
+  `method_not_allowed_fallback_service` hooks for generated services that need
+  custom 405 payloads from handlers or Tower services
 - route nesting with `Router::nest(prefix, router)`
 - service nesting with `Router::nest_service(prefix, service)`
 - router composition with `Router::merge(router)`
+- `Router::merge` follows explicit fallback composition rules: a default
+  fallback can be replaced by the merged router's custom fallback, while merging
+  two routers that both define custom fallbacks is rejected instead of silently
+  choosing one
 - `Router::merge` accepts any `Into<Router>`, and `MethodRouter` converts into
   a root-path router for compact composition
 - service-backed route registration
@@ -93,6 +103,10 @@ let app = Router::new()
   handler service without wrapping an entire router
 - handler-level `Handler::with_state_from_ref::<Outer, Inner>` for injecting
   both an application state and an explicit substate into one handler service
+- handler-level `Handler::into_make_service` and
+  `Handler::into_make_service_with_connect_info::<T>` for serving a standalone
+  Roze handler through the same make-service boundary as routers, including
+  connection metadata injection through `ConnectInfo<T>`
 - `Router::as_service` and `Router::into_service` adapters for tests and
   Tower call sites that need an explicit service value
 - `Router::into_make_service` and `RestServer::from_make_service` for the
@@ -109,7 +123,11 @@ let app = Router::new()
   infallible HTTP service boundary by mapping handler, route, and router layer
   errors into `IntoResponse` values
 - `Router::route_layer` for layers that apply only to matched routes and leave
-  fallback responses untouched
+  fallback responses untouched; calling it before any routes have been
+  registered is rejected because it would otherwise be a silent no-op
+- `MethodRouter::route_layer` for layers that apply only to method endpoints
+  and leave method-not-allowed fallback responses untouched; calling it before
+  any method endpoint has been registered is rejected for the same reason
 - `middleware::from_fn` and `middleware::Next` for Axum-style function
   middleware over Roze-owned extractors, supporting parts extractors before the
   body-consuming request extractor and explicit continuation through
@@ -125,6 +143,10 @@ let app = Router::new()
 - `middleware::from_extractor::<E>()` for extractor-backed middleware that
   validates request parts, discards successful extractor values, and returns
   extractor rejections as responses without calling downstream services
+- `middleware::from_extractor_with_state::<E, S>(state)` for extractor-backed
+  middleware with explicit middleware-local state injected before validation,
+  so reusable guard extractors can read `State<T>` or `Extension<T>` without
+  wrapping an entire router
 - `Extension<T>` implements `Layer`, and `middleware::AddExtensionLayer` /
   `AddExtension` can insert cloned values into request extensions for
   downstream `Extension<T>` and `State<T>`-style extraction
@@ -133,6 +155,9 @@ let app = Router::new()
 - route presence introspection with `has_routes`
 - `Debug` summaries for `Router` and `MethodRouter` expose route/method
   structure without depending on handler or service internals
+- `MethodRouter::method_filter` reports only the methods that still use the
+  default 405 behavior; it returns `None` when `any` or a custom
+  method-not-allowed fallback changes that default method contract
 - router and method-router state injection with `with_state`, consumed through
   `State<T>`
 - `FromRef` plus router, method-router, and handler
@@ -162,6 +187,10 @@ let app = Router::new()
   `roze_http::extract::Request` / `roze_http::Request` aliases, `RawRequest`,
   `Parts`, `Path<T>`, `RawPathParams`, `RawQuery`, `RawForm`, `Query<T>`,
   `Form<T>`, `Json<T>`, and `OriginalUri`
+- `Path<T>::from_params(&RouteParams)` and
+  `Path<T>::optional_from_params(Option<&RouteParams>)` expose typed path
+  parsing outside request extraction, so middleware and tests reuse the same
+  parser as the extractor
 - `RawPathParams` exposes named route captures without deserializing them,
   useful for route-aware middleware, audit logs, and generic gateway policy;
   it supports `iter()` and `for (key, value) in &params`
@@ -182,6 +211,9 @@ let app = Router::new()
 - `Json<T>::from_bytes(&[u8])` exposes the same JSON decoding path used by the
   request extractor for middleware, pre-buffered request flows, and focused
   tests
+- `Form<T>::from_bytes(&[u8])` exposes the same urlencoded decoding path used
+  by the request extractor, and `RawForm` follows Axum's GET/HEAD query-string
+  semantics before falling back to urlencoded request bodies for other methods
 - direct extraction of common HTTP request parts such as `Method`, `Uri`,
   `Version`, and `HeaderMap` without consuming the body
 - `Host` extraction from the `Host` header or URI authority for

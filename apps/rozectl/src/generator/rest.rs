@@ -950,7 +950,10 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         "    let timeout_enabled = ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n",
         handler = handler
     ));
-    out.push_str("    match result {\n        Ok(resp) => {\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }\n    }\n");
+    out.push_str(&format!(
+        "    match result {{\n        Ok(resp) => {{\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }}\n        Err(mut err) => {{\n            err = roze_middleware::apply_fallback(\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
+        handler = handler
+    ));
     out.push_str("}\n\n");
 
     out
@@ -2294,6 +2297,9 @@ mod tests {
         assert!(handlers.contains(".route(\"/logout\", post(logout))"));
         assert!(handlers.contains("let req = EmptyReq {};"));
         assert!(handlers.contains("Result<ApiResponse<EmptyResp>, RozeError>"));
+        assert!(handlers.contains("roze_middleware::apply_fallback("));
+        assert!(handlers
+            .contains("roze_middleware::route_fallback(Some(&ctx.config.governance), \"health\")"));
 
         let logic = render_logic(&spec);
         assert!(logic.contains("Ok(EmptyResp::default())"));

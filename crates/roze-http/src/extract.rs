@@ -577,6 +577,7 @@ impl OptionalFromRequest for MatchedPath {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Path<T>(pub T);
 
 impl<T> Deref for Path<T> {
@@ -593,6 +594,30 @@ impl<T> DerefMut for Path<T> {
     }
 }
 
+impl<T> Path<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn from_params(params: &RouteParams) -> Result<Self, roze_error::RozeError> {
+        let encoded = params.encoded();
+        let value = serde_urlencoded::from_str(&encoded)
+            .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
+        Ok(Self(value))
+    }
+
+    pub fn optional_from_params(
+        params: Option<&RouteParams>,
+    ) -> Result<Option<Self>, roze_error::RozeError> {
+        let Some(params) = params else {
+            return Ok(None);
+        };
+        if params.is_empty() {
+            return Ok(None);
+        }
+        Self::from_params(params).map(Some)
+    }
+}
+
 impl<T> FromRequest for Path<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -605,11 +630,8 @@ where
                 .extensions()
                 .get::<RouteParams>()
                 .cloned()
-                .unwrap_or_default()
-                .encoded();
-            let value = serde_urlencoded::from_str(&params)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Self(value))
+                .unwrap_or_default();
+            Self::from_params(&params)
         })
     }
 }
@@ -625,13 +647,8 @@ where
             .extensions
             .get::<RouteParams>()
             .cloned()
-            .unwrap_or_default()
-            .encoded();
-        Box::pin(async move {
-            let value = serde_urlencoded::from_str(&params)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Self(value))
-        })
+            .unwrap_or_default();
+        Box::pin(async move { Self::from_params(&params) })
     }
 }
 
@@ -644,20 +661,8 @@ where
     fn optional_from_request_parts(
         parts: &mut HttpParts,
     ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
-        let params = parts
-            .extensions
-            .get::<RouteParams>()
-            .cloned()
-            .unwrap_or_default()
-            .encoded();
-        Box::pin(async move {
-            if params.is_empty() {
-                return Ok(None);
-            }
-            let value = serde_urlencoded::from_str(&params)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Some(Self(value)))
-        })
+        let params = parts.extensions.get::<RouteParams>().cloned();
+        Box::pin(async move { Self::optional_from_params(params.as_ref()) })
     }
 }
 
@@ -887,7 +892,7 @@ impl FromRequest for RawForm {
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
         Box::pin(async move {
-            if request.method() == Method::GET {
+            if request.method() == Method::GET || request.method() == Method::HEAD {
                 let query = request.uri().query().unwrap_or_default();
                 return Ok(Self(Bytes::copy_from_slice(query.as_bytes())));
             }
@@ -915,6 +920,7 @@ fn has_urlencoded_content_type(headers: &HeaderMap) -> bool {
         })
 }
 
+#[derive(Clone, Debug)]
 pub struct Form<T>(pub T);
 
 impl<T> Deref for Form<T> {
@@ -931,6 +937,17 @@ impl<T> DerefMut for Form<T> {
     }
 }
 
+impl<T> Form<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, roze_error::RozeError> {
+        let value = serde_urlencoded::from_bytes(bytes)
+            .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
+        Ok(Self(value))
+    }
+}
+
 impl<T> FromRequest for Form<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -940,9 +957,7 @@ where
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
         Box::pin(async move {
             let body = Bytes::from_request(request).await?;
-            let value = serde_urlencoded::from_bytes(&body)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Self(value))
+            Self::from_bytes(&body)
         })
     }
 }
@@ -961,9 +976,7 @@ where
             if body.is_empty() {
                 return Ok(None);
             }
-            let value = serde_urlencoded::from_bytes(&body)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Some(Self(value)))
+            Self::from_bytes(&body).map(Some)
         })
     }
 }
@@ -1760,6 +1773,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn path_from_params_deserializes_route_params() {
+        let params = RouteParams::from_pairs([("name".to_string(), "roze".to_string())]);
+
+        let Path(payload) = Path::<Payload>::from_params(&params).expect("path from params");
+
+        assert_eq!(
+            payload,
+            Payload {
+                name: "roze".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn path_optional_from_params_returns_none_without_params() {
+        let path = Path::<Payload>::optional_from_params(None).expect("optional path params");
+
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn path_from_params_preserves_parse_errors() {
+        let params = RouteParams::from_pairs([("other".to_string(), "roze".to_string())]);
+
+        let error = Path::<Payload>::from_params(&params).unwrap_err();
+
+        assert_eq!(error.code(), 400);
+    }
+
     #[tokio::test]
     async fn extracts_raw_path_params_without_deserializing() {
         let mut request = Request::builder()
@@ -1900,6 +1943,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_form_extracts_query_for_head_requests() {
+        let request = Request::builder()
+            .method("HEAD")
+            .uri("/users?page=0&size=10")
+            .body(rest::empty_body())
+            .unwrap();
+
+        let RawForm(form) = RawForm::from_request(request).await.expect("raw form");
+        assert_eq!(&form[..], b"page=0&size=10");
+    }
+
+    #[tokio::test]
     async fn raw_form_extracts_urlencoded_body() {
         let request = Request::builder()
             .method("POST")
@@ -1913,6 +1968,25 @@ mod tests {
 
         let RawForm(form) = RawForm::from_request(request).await.expect("raw form");
         assert_eq!(&form[..], b"username=user&password=secure%20password");
+    }
+
+    #[test]
+    fn form_from_bytes_deserializes_urlencoded_body() {
+        let Form(payload) = Form::<Payload>::from_bytes(b"name=roze").expect("form from bytes");
+
+        assert_eq!(
+            payload,
+            Payload {
+                name: "roze".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn form_from_bytes_preserves_parse_errors() {
+        let error = Form::<Payload>::from_bytes(b"other=roze").unwrap_err();
+
+        assert_eq!(error.code(), 400);
     }
 
     #[tokio::test]

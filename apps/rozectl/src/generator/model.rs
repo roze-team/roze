@@ -1805,12 +1805,15 @@ fn go_slice_type_matches(go_ty: &str, inner_ty: &str) -> bool {
         (go_ty.trim(), inner_ty.trim()),
         ("string", "String")
             | ("bool", "bool")
+            | ("int8", "i8")
+            | ("int16", "i16")
             | ("int", "i32")
             | ("int32", "i32")
             | ("int64", "i64")
             | ("uint", "u32")
             | ("byte", "u8")
             | ("uint8", "u8")
+            | ("uint16", "u16")
             | ("uint32", "u32")
             | ("uint64", "u64")
             | ("float32", "f32")
@@ -1826,9 +1829,12 @@ fn go_slice_item_expr(item: &str, inner_ty: &str) -> Option<String> {
             .ok()
             .map(|value| format!("{value:?}.to_string()")),
         "bool" if matches!(item, "true" | "false") => Some(item.to_string()),
+        "i8" => item.parse::<i8>().ok().map(|_| item.to_string()),
+        "i16" => item.parse::<i16>().ok().map(|_| item.to_string()),
         "i32" => item.parse::<i32>().ok().map(|_| item.to_string()),
         "i64" => item.parse::<i64>().ok().map(|_| item.to_string()),
         "u8" => item.parse::<u8>().ok().map(|_| item.to_string()),
+        "u16" => item.parse::<u16>().ok().map(|_| item.to_string()),
         "u32" => item.parse::<u32>().ok().map(|_| item.to_string()),
         "u64" => item.parse::<u64>().ok().map(|_| item.to_string()),
         "f32" => item.parse::<f32>().ok().map(|_| item.to_string()),
@@ -9029,7 +9035,13 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         if fields.is_empty() {
             bail!("entity `{name}` must declare at least one field");
         }
-        let primary = primary.unwrap_or_else(|| fields[0].name.clone());
+        let primary = primary.unwrap_or_else(|| {
+            fields
+                .iter()
+                .find(|field| field.name == "id")
+                .map(|field| field.name.clone())
+                .unwrap_or_else(|| fields[0].name.clone())
+        });
         if !fields.iter().any(|field| field.name == primary) {
             bail!("entity `{name}` primary field `{primary}` not found in fields");
         }
@@ -9232,7 +9244,7 @@ fn parse_ent_field(
             validation.min_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = ent_field_arg(&inner, &["max_len", "maxlen"]) {
+        if let Some(value) = ent_field_arg(&inner, &["max_len", "maxlen", "size"]) {
             validation.max_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
@@ -9334,6 +9346,9 @@ fn parse_ent_field(
 }
 
 fn is_ent_ignored_metadata_directive(value: &str) -> bool {
+    if ent_field_flag(value, &["desc"]) {
+        return true;
+    }
     ent_field_arg(
         value,
         &[
@@ -9345,6 +9360,12 @@ fn is_ent_ignored_metadata_directive(value: &str) -> bool {
             "structtag",
             "value_scanner",
             "valuescanner",
+            "default_expr",
+            "defaultexpr",
+            "default_exprs",
+            "defaultexprs",
+            "collation",
+            "charset",
             "annotations",
             "annotation",
             "comment",
@@ -9352,6 +9373,22 @@ fn is_ent_ignored_metadata_directive(value: &str) -> bool {
             "validate",
             "match",
             "where",
+            "prefix",
+            "prefix_column",
+            "prefixcolumn",
+            "desc",
+            "desc_columns",
+            "desccolumns",
+            "index_type",
+            "indextype",
+            "index_types",
+            "indextypes",
+            "include_columns",
+            "includecolumns",
+            "index_where",
+            "indexwhere",
+            "op_class",
+            "opclass",
         ],
     )
     .is_some()
@@ -9719,6 +9756,7 @@ fn parse_ent_edge(
                 || ent_field_arg(&inner, &["storage_key", "storagekey"]).is_some()
                 || ent_field_flag(&inner, &["unique"])
                 || ent_field_flag(&inner, &["required"])
+                || ent_field_flag(&inner, &["immutable"])
                 || is_ent_ignored_metadata_directive(&inner)
             {
                 continue;
@@ -9748,6 +9786,9 @@ fn parse_ent_edge(
         }
         if ent_field_flag(&inner, &["required"]) {
             required = true;
+            continue;
+        }
+        if ent_field_flag(&inner, &["immutable"]) {
             continue;
         }
         if ent_field_arg(&inner, &["through"]).is_some() {
@@ -10153,7 +10194,9 @@ fn parse_ent_default_func_value(value: &str, line_no: usize) -> anyhow::Result<S
     if matches!(normalized.as_str(), "now_millis" | "uuid_new_string") {
         return Ok(normalized);
     }
-    bail!("line {line_no}: DefaultFunc currently supports time.Now and uuid.NewString only")
+    bail!(
+        "line {line_no}: DefaultFunc currently supports time.Now, uuid.NewString, uuid.New, and uuid.NewV7 only"
+    )
 }
 
 fn ent_type_to_rust_type(ty: &str) -> String {
@@ -10183,14 +10226,21 @@ fn ent_field_builder_type_to_rust_type(builder: &str) -> String {
         "id" => "i64".to_string(),
         "time" => "i64".to_string(),
         "ip" | "mac" | "url" | "other" => "String".to_string(),
+        "uint" => "u32".to_string(),
         "float" | "float64" => "f64".to_string(),
         "float32" => "f32".to_string(),
         "ips" => "Vec<String>".to_string(),
         "strings" => "Vec<String>".to_string(),
         "bools" => "Vec<bool>".to_string(),
+        "int8s" => "Vec<i8>".to_string(),
+        "int16s" => "Vec<i16>".to_string(),
         "ints" => "Vec<i32>".to_string(),
+        "int32s" => "Vec<i32>".to_string(),
         "int64s" => "Vec<i64>".to_string(),
+        "uint8s" => "Vec<u8>".to_string(),
+        "uint16s" => "Vec<u16>".to_string(),
         "uints" => "Vec<u32>".to_string(),
+        "uint32s" => "Vec<u32>".to_string(),
         "uint64s" => "Vec<u64>".to_string(),
         "floats" | "float64s" => "Vec<f64>".to_string(),
         "float32s" => "Vec<f32>".to_string(),
@@ -12528,7 +12578,7 @@ mod tests {
             field id: i64 {
                 primary
             }
-            field Bytes("payload").Optional().NotEmpty().MinLen(2).MaxLen(8) {
+            field Bytes("payload").Optional().NotEmpty().MinLen(2).Size(8) {
             }
         }
         "#;
@@ -12978,6 +13028,8 @@ mod tests {
             }
             field UUID("invite_id", uuid.UUID{}).Optional().DefaultFunc(uuid.New) {
             }
+            field UUID("trace_id", uuid.UUID{}).DefaultFunc(uuid.NewV7) {
+            }
         }
         "#;
 
@@ -12997,6 +13049,13 @@ mod tests {
             .expect("invite_id field");
         assert_eq!(invite_id.ty, "Option<String>");
         assert_eq!(invite_id.default_value.as_deref(), Some("uuid_new_string"));
+        let trace_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "trace_id")
+            .expect("trace_id field");
+        assert_eq!(trace_id.ty, "String");
+        assert_eq!(trace_id.default_value.as_deref(), Some("uuid_new_string"));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("default \"uuid_new_string\""));
@@ -13004,10 +13063,12 @@ mod tests {
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("public_id: self.public_id.map(Set).unwrap_or_else(|| Set(uuid::Uuid::now_v7().to_string()))"));
         assert!(sea_orm.contains("invite_id: self.invite_id.map(Set).unwrap_or_else(|| Set(Some(uuid::Uuid::now_v7().to_string())))"));
+        assert!(sea_orm.contains("trace_id: self.trace_id.map(Set).unwrap_or_else(|| Set(uuid::Uuid::now_v7().to_string()))"));
 
         let toasty = render_toasty_model_module(model);
         assert!(toasty.contains("if let Some(value) = self.public_id { create = create.public_id(value); } else { create = create.public_id(uuid::Uuid::now_v7().to_string()); }"));
         assert!(toasty.contains("if let Some(value) = self.invite_id { create = create.invite_id(value); } else { create = create.invite_id(Some(uuid::Uuid::now_v7().to_string())); }"));
+        assert!(toasty.contains("if let Some(value) = self.trace_id { create = create.trace_id(value); } else { create = create.trace_id(uuid::Uuid::now_v7().to_string()); }"));
     }
 
     #[test]
@@ -13027,7 +13088,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("DefaultFunc currently supports time.Now and uuid.NewString only"));
+            .contains("DefaultFunc currently supports time.Now, uuid.NewString, uuid.New, and uuid.NewV7 only"));
     }
 
     #[test]
@@ -13090,6 +13151,8 @@ mod tests {
             }
             field JSON("flags", []interface{}{}).Default([]interface{}{true, 3, "ok", nil}) {
             }
+            field JSON("dirs", []http.Dir{}).Default([]http.Dir{"/tmp"}) {
+            }
             field Other("profile", &Profile{}).Optional().StorageKey("profile_json").Default("{}") {
             }
         }
@@ -13135,6 +13198,13 @@ mod tests {
             flags.default_value.as_deref(),
             Some(r#"[true,3,"ok",null]"#)
         );
+        let dirs = model
+            .fields
+            .iter()
+            .find(|field| field.name == "dirs")
+            .expect("dirs field");
+        assert_eq!(dirs.ty, "String");
+        assert_eq!(dirs.default_value.as_deref(), Some(r#"["/tmp"]"#));
         let profile = model
             .fields
             .iter()
@@ -13155,6 +13225,8 @@ mod tests {
         assert!(ent.contains("default \"[\\\"new\\\",\\\"hot\\\"]\""));
         assert!(ent.contains("field flags: string {"));
         assert!(ent.contains("default \"[true,3,\\\"ok\\\",null]\""));
+        assert!(ent.contains("field dirs: string {"));
+        assert!(ent.contains("default \"[\\\"/tmp\\\"]\""));
         assert!(ent.contains("field profile: string? {"));
         assert!(ent.contains("source \"profile_json\""));
         assert!(ent.contains("default \"{}\""));
@@ -13164,11 +13236,15 @@ mod tests {
         assert!(sea_orm.contains("pub metadata: Option<String>"));
         assert!(sea_orm.contains("pub labels: Option<String>"));
         assert!(sea_orm.contains("pub flags: String"));
+        assert!(sea_orm.contains("pub dirs: String"));
         assert!(sea_orm.contains("pub profile: Option<String>"));
         assert!(sea_orm.contains("#[sea_orm(column_name = \"metadata_json\")]"));
         assert!(sea_orm.contains("metadata: self.metadata.map(Set).unwrap_or_else(|| Set(Some(\"{\\\"theme\\\":\\\"dark\\\",\\\"beta\\\":true,\\\"retry\\\":3}\".to_string())))"));
         assert!(sea_orm.contains("labels: self.labels.map(Set).unwrap_or_else(|| Set(Some(\"[\\\"new\\\",\\\"hot\\\"]\".to_string())))"));
         assert!(sea_orm.contains("flags: self.flags.map(Set).unwrap_or_else(|| Set(\"[true,3,\\\"ok\\\",null]\".to_string()))"));
+        assert!(sea_orm.contains(
+            "dirs: self.dirs.map(Set).unwrap_or_else(|| Set(\"[\\\"/tmp\\\"]\".to_string()))"
+        ));
         assert!(sea_orm.contains("#[sea_orm(column_name = \"profile_json\")]"));
         assert!(sea_orm.contains(
             "profile: self.profile.map(Set).unwrap_or_else(|| Set(Some(\"{}\".to_string())))"
@@ -13185,6 +13261,14 @@ mod tests {
             field Text("bio").Optional() {
             }
             field Uint("visits").Default(7) {
+            }
+            field Uint8("tiny").Default(8) {
+            }
+            field Uint16("small").Default(16) {
+            }
+            field Uint32("medium").Default(32) {
+            }
+            field Uint64("large").Default(64) {
             }
             field Float("ratio").Default(1.5) {
             }
@@ -13214,6 +13298,34 @@ mod tests {
             .expect("visits field");
         assert_eq!(visits.ty, "u32");
         assert_eq!(visits.default_value.as_deref(), Some("7"));
+        let tiny = model
+            .fields
+            .iter()
+            .find(|field| field.name == "tiny")
+            .expect("tiny field");
+        assert_eq!(tiny.ty, "u8");
+        assert_eq!(tiny.default_value.as_deref(), Some("8"));
+        let small = model
+            .fields
+            .iter()
+            .find(|field| field.name == "small")
+            .expect("small field");
+        assert_eq!(small.ty, "u16");
+        assert_eq!(small.default_value.as_deref(), Some("16"));
+        let medium = model
+            .fields
+            .iter()
+            .find(|field| field.name == "medium")
+            .expect("medium field");
+        assert_eq!(medium.ty, "u32");
+        assert_eq!(medium.default_value.as_deref(), Some("32"));
+        let large = model
+            .fields
+            .iter()
+            .find(|field| field.name == "large")
+            .expect("large field");
+        assert_eq!(large.ty, "u64");
+        assert_eq!(large.default_value.as_deref(), Some("64"));
         let ratio = model
             .fields
             .iter()
@@ -13253,6 +13365,10 @@ mod tests {
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field bio: string? {"));
         assert!(ent.contains("field visits: u32 {"));
+        assert!(ent.contains("field tiny: u8 {"));
+        assert!(ent.contains("field small: u16 {"));
+        assert!(ent.contains("field medium: u32 {"));
+        assert!(ent.contains("field large: u64 {"));
         assert!(ent.contains("field ratio: f64 {"));
         assert!(ent.contains("field score: f32 {"));
         assert!(ent.contains("field weight: f64 {"));
@@ -13264,12 +13380,20 @@ mod tests {
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub bio: Option<String>"));
         assert!(sea_orm.contains("pub visits: u32"));
+        assert!(sea_orm.contains("pub tiny: u8"));
+        assert!(sea_orm.contains("pub small: u16"));
+        assert!(sea_orm.contains("pub medium: u32"));
+        assert!(sea_orm.contains("pub large: u64"));
         assert!(sea_orm.contains("pub ratio: f64"));
         assert!(sea_orm.contains("pub score: f32"));
         assert!(sea_orm.contains("pub weight: f64"));
         assert!(sea_orm.contains("pub payload: Option<Vec<u8>>"));
         assert!(sea_orm.contains("pub seed: Vec<u8>"));
         assert!(sea_orm.contains("visits: self.visits.map(Set).unwrap_or_else(|| Set(7))"));
+        assert!(sea_orm.contains("tiny: self.tiny.map(Set).unwrap_or_else(|| Set(8))"));
+        assert!(sea_orm.contains("small: self.small.map(Set).unwrap_or_else(|| Set(16))"));
+        assert!(sea_orm.contains("medium: self.medium.map(Set).unwrap_or_else(|| Set(32))"));
+        assert!(sea_orm.contains("large: self.large.map(Set).unwrap_or_else(|| Set(64))"));
         assert!(sea_orm.contains("ratio: self.ratio.map(Set).unwrap_or_else(|| Set(1.5))"));
         assert!(sea_orm.contains("score: self.score.map(Set).unwrap_or_else(|| Set(0.5))"));
         assert!(sea_orm.contains("weight: self.weight.map(Set).unwrap_or_else(|| Set(2.5))"));
@@ -13315,6 +13439,44 @@ mod tests {
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("pub id: i64"));
+    }
+
+    #[test]
+    fn ent_named_id_field_defaults_to_primary() {
+        let source = r#"
+        entity Blob {
+            table "blobs"
+            field String("name") {
+            }
+            field UUID("id", uuid.UUID{}).Default(uuid.New).StorageKey("oid") {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        assert_eq!(model.primary, "id");
+        let id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "id")
+            .expect("id field");
+        assert_eq!(id.ty, "String");
+        assert_eq!(id.source_name.as_deref(), Some("oid"));
+        assert_eq!(id.default_value.as_deref(), Some("uuid_new_string"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field id: string {"));
+        assert!(ent.contains("    primary"));
+        assert!(ent.contains("    source \"oid\""));
+        assert!(ent.contains("    default \"uuid_new_string\""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("#[sea_orm(primary_key)]"));
+        assert!(sea_orm.contains("#[sea_orm(column_name = \"oid\")]"));
+        assert!(sea_orm.contains(
+            "id: self.id.map(Set).unwrap_or_else(|| Set(uuid::Uuid::now_v7().to_string()))"
+        ));
     }
 
     #[test]
@@ -13387,11 +13549,23 @@ mod tests {
             }
             field Strings("tags").Optional().Default([]string{"new", "hot"}) {
             }
+            field Int8s("tiny_scores").Default([]int8{1, 2}) {
+            }
+            field Int16s("small_scores").Default([]int16{3, 4}) {
+            }
             field Ints("scores").Default([]int{1, 2}) {
+            }
+            field Int32s("rankings").Default([]int32{5, 6}) {
             }
             field Int64s("checkpoints") {
             }
+            field Uint8s("tiny_views").Default([]uint8{7, 8}) {
+            }
+            field Uint16s("small_views").Default([]uint16{9, 10}) {
+            }
             field Uints("views") {
+            }
+            field Uint32s("daily_views").Default([]uint32{11, 12}) {
             }
             field Float32s("ratios").Default([]float32{0.5, 1.5}) {
             }
@@ -13421,18 +13595,30 @@ mod tests {
                 .and_then(|field| field.default_value.as_deref()),
             Some("[]string{\"new\", \"hot\"}")
         );
+        assert_eq!(field_ty("tiny_scores"), "Vec<i8>");
+        assert_eq!(field_ty("small_scores"), "Vec<i16>");
         assert_eq!(field_ty("scores"), "Vec<i32>");
+        assert_eq!(field_ty("rankings"), "Vec<i32>");
         assert_eq!(field_ty("checkpoints"), "Vec<i64>");
+        assert_eq!(field_ty("tiny_views"), "Vec<u8>");
+        assert_eq!(field_ty("small_views"), "Vec<u16>");
         assert_eq!(field_ty("views"), "Vec<u32>");
+        assert_eq!(field_ty("daily_views"), "Vec<u32>");
         assert_eq!(field_ty("ratios"), "Vec<f32>");
         assert_eq!(field_ty("weights"), "Vec<f64>");
         assert_eq!(field_ty("flags"), "Vec<bool>");
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field tags: []string? {"));
+        assert!(ent.contains("field tiny_scores: []i8 {"));
+        assert!(ent.contains("field small_scores: []i16 {"));
         assert!(ent.contains("field scores: []i32 {"));
+        assert!(ent.contains("field rankings: []i32 {"));
         assert!(ent.contains("field checkpoints: []i64 {"));
+        assert!(ent.contains("field tiny_views: bytes {"));
+        assert!(ent.contains("field small_views: []u16 {"));
         assert!(ent.contains("field views: []u32 {"));
+        assert!(ent.contains("field daily_views: []u32 {"));
         assert!(ent.contains("field ratios: []f32 {"));
         assert!(ent.contains("field weights: []f64 {"));
         assert!(ent.contains("field flags: []bool {"));
@@ -13445,14 +13631,36 @@ mod tests {
             "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
         ));
         assert!(sea_orm.contains("pub tags: Option<Vec<String>>"));
+        assert!(sea_orm.contains("pub tiny_scores: Vec<i8>"));
+        assert!(sea_orm.contains("pub small_scores: Vec<i16>"));
         assert!(sea_orm.contains("pub scores: Vec<i32>"));
+        assert!(sea_orm.contains("pub rankings: Vec<i32>"));
         assert!(sea_orm.contains("pub checkpoints: Vec<i64>"));
+        assert!(sea_orm.contains("pub tiny_views: Vec<u8>"));
+        assert!(sea_orm.contains("pub small_views: Vec<u16>"));
         assert!(sea_orm.contains("pub views: Vec<u32>"));
+        assert!(sea_orm.contains("pub daily_views: Vec<u32>"));
         assert!(sea_orm.contains("pub ratios: Vec<f32>"));
         assert!(sea_orm.contains("pub weights: Vec<f64>"));
         assert!(sea_orm.contains("pub flags: Vec<bool>"));
         assert!(sea_orm.contains("tags: self.tags.map(Set).unwrap_or_else(|| Set(Some(vec![\"new\".to_string(), \"hot\".to_string()])))"));
+        assert!(sea_orm
+            .contains("tiny_scores: self.tiny_scores.map(Set).unwrap_or_else(|| Set(vec![1, 2]))"));
+        assert!(sea_orm.contains(
+            "small_scores: self.small_scores.map(Set).unwrap_or_else(|| Set(vec![3, 4]))"
+        ));
         assert!(sea_orm.contains("scores: self.scores.map(Set).unwrap_or_else(|| Set(vec![1, 2]))"));
+        assert!(
+            sea_orm.contains("rankings: self.rankings.map(Set).unwrap_or_else(|| Set(vec![5, 6]))")
+        );
+        assert!(sea_orm
+            .contains("tiny_views: self.tiny_views.map(Set).unwrap_or_else(|| Set(vec![7, 8]))"));
+        assert!(sea_orm.contains(
+            "small_views: self.small_views.map(Set).unwrap_or_else(|| Set(vec![9, 10]))"
+        ));
+        assert!(sea_orm.contains(
+            "daily_views: self.daily_views.map(Set).unwrap_or_else(|| Set(vec![11, 12]))"
+        ));
         assert!(
             sea_orm.contains("ratios: self.ratios.map(Set).unwrap_or_else(|| Set(vec![0.5, 1.5]))")
         );
@@ -13588,14 +13796,16 @@ mod tests {
         let source = r#"
         entity User {
             table "users"
-            field String("email").StructTag(`json:"email,omitempty"`).ValueScanner(field.TextValueScanner[*big.Int]{}).Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email") {
+            field String("email").StructTag(`json:"email,omitempty"`).ValueScanner(field.TextValueScanner[*big.Int]{}).DefaultExpr("lower(email)").Collation("utf8mb4_bin").Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email") {
                 Unique()
                 SchemaType(map[string]string{dialect.Postgres: "citext"})
                 GoType(sql.NullString{})
+                Charset("utf8mb4")
             }
             field JSON("metadata", map[string]any{}) {
                 Optional()
                 ValueScanner(field.JSONValueScanner[map[string]any]{})
+                DefaultExprs(map[string]string{dialect.Postgres: "'{}'::jsonb"})
                 Annotations(entgql.Skip())
                 Deprecated("metadata_v2")
             }
@@ -13629,6 +13839,9 @@ mod tests {
         assert!(!ent.contains("GoType"));
         assert!(!ent.contains("StructTag"));
         assert!(!ent.contains("ValueScanner"));
+        assert!(!ent.contains("DefaultExpr"));
+        assert!(!ent.contains("Collation"));
+        assert!(!ent.contains("Charset"));
         assert!(!ent.contains("Annotations"));
         assert!(!ent.contains("Deprecated"));
     }
@@ -13681,12 +13894,19 @@ mod tests {
             }
             field String("tenant_id") {
             }
-            edge To("user", User.Type).Field("user_id").Ref("id").Unique().Annotations(entgql.Bind()) {
+            edge To("user", User.Type).Field("user_id").Ref("id").Unique().Immutable().Annotations(entgql.Bind()) {
                 StorageKey("profile_user_fk")
                 Comment("owner relation")
+                Immutable()
                 Deprecated("use account")
             }
-            index Fields("tenant_id", "user_id").Unique().Annotations(entgql.OrderField("TENANT_USER")).Where(sql.FieldNEQ("deleted_at", nil)).Deprecated("old lookup") {
+            index Fields("tenant_id", "user_id").Unique().Prefix(64).Desc().IndexType("HASH").Annotations(entgql.OrderField("TENANT_USER")).Where(sql.FieldNEQ("deleted_at", nil)).Deprecated("old lookup") {
+                PrefixColumn("tenant_id", 32)
+                DescColumns("tenant_id")
+                IndexTypes(map[string]string{dialect.MySQL: "FULLTEXT"})
+                IncludeColumns("updated_at")
+                IndexWhere("active")
+                OpClass("bpchar_pattern_ops")
             }
         }
         "#;
@@ -13720,8 +13940,15 @@ mod tests {
         assert!(!ent.contains("Annotations"));
         assert!(!ent.contains("StorageKey(\"profile_user_fk\")"));
         assert!(!ent.contains("Comment(\"owner relation\")"));
+        assert!(!ent.contains("Immutable"));
         assert!(!ent.contains("Deprecated"));
         assert!(!ent.contains("Where"));
+        assert!(!ent.contains("Prefix"));
+        assert!(!ent.contains("Desc"));
+        assert!(!ent.contains("IndexType"));
+        assert!(!ent.contains("IncludeColumns"));
+        assert!(!ent.contains("IndexWhere"));
+        assert!(!ent.contains("OpClass"));
     }
 
     #[test]

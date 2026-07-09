@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{header, Request, Response, StatusCode};
+use http::{header, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
@@ -332,7 +332,32 @@ pub fn json_response<T: Serialize>(status: StatusCode, value: &T) -> HttpRespons
 }
 
 pub fn error_response(error: &roze_error::RozeError) -> HttpResponse {
+    if let Some(body) = error.fallback_body() {
+        let mut response = json_response(error.status_code(), body);
+        apply_fallback_headers(&mut response, error);
+        return response;
+    }
+    if error.fallback_headers().is_some() {
+        let mut response = json_response(error.status_code(), &error.response_body());
+        apply_fallback_headers(&mut response, error);
+        return response;
+    }
     json_response(error.status_code(), &error.response_body())
+}
+
+fn apply_fallback_headers(response: &mut HttpResponse, error: &roze_error::RozeError) {
+    let Some(headers) = error.fallback_headers() else {
+        return;
+    };
+    for (key, value) in headers {
+        let Ok(key) = HeaderName::try_from(key.as_str()) else {
+            continue;
+        };
+        let Ok(value) = HeaderValue::try_from(value.as_str()) else {
+            continue;
+        };
+        response.headers_mut().insert(key, value);
+    }
 }
 
 pub fn api_response<T: Serialize>(value: &roze_result::ApiResponse<T>) -> HttpResponse {
@@ -356,9 +381,12 @@ mod tests {
     use std::{convert::Infallible, net::SocketAddr, time::Duration};
 
     use http::{Request, StatusCode};
+    use http_body_util::BodyExt;
     use tower::{service_fn, Layer};
 
-    use super::{text_response, RestConfig, RestLayerStack, RestServer, SharedService};
+    use super::{
+        error_response, text_response, RestConfig, RestLayerStack, RestServer, SharedService,
+    };
 
     #[test]
     fn rest_layer_stack_can_be_used_as_tower_layer() {
@@ -388,5 +416,26 @@ mod tests {
             RestServer::with_make_service_config(config.clone(), SharedService::new(service));
 
         assert_eq!(server.config().addr, config.addr);
+    }
+
+    #[tokio::test]
+    async fn fallback_error_response_uses_configured_body_and_headers() {
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("x-roze-fallback".to_string(), "route".to_string());
+        let error = roze_error::RozeError::fallback_response(
+            598,
+            Some(serde_json::json!({"code": 503, "message": "degraded"})),
+            headers,
+        );
+
+        let response = error_response(&error);
+
+        assert_eq!(response.status(), StatusCode::from_u16(598).unwrap());
+        assert_eq!(
+            response.headers().get("x-roze-fallback"),
+            Some(&http::HeaderValue::from_static("route"))
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], br#"{"code":503,"message":"degraded"}"#);
     }
 }

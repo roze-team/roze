@@ -154,6 +154,7 @@ pub struct RoutePolicy {
     pub rate_limit: Option<RouteRateLimitConfig>,
     pub breaker: Option<RouteBreakerConfig>,
     pub shedding: Option<RouteSheddingConfig>,
+    pub fallback: Option<roze_config::GovernanceFallbackConfig>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,6 +189,7 @@ pub fn route_policy(
             rate_limit: None,
             breaker: None,
             shedding: None,
+            fallback: None,
         };
     };
     let route_config = governance.routes.get(route);
@@ -221,7 +223,32 @@ pub fn route_policy(
                 max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
                 cool_down: Duration::from_millis(config.cool_down_ms),
             }),
+        fallback: route_config
+            .and_then(|route| route.fallback.clone())
+            .or_else(|| governance.fallback.clone())
+            .filter(|fallback| fallback.enabled),
     }
+}
+
+pub fn route_fallback(
+    governance: Option<&roze_config::GovernanceConfig>,
+    route: &str,
+) -> Option<roze_config::GovernanceFallbackConfig> {
+    route_policy(governance, route).fallback
+}
+
+pub fn apply_fallback(
+    error: RozeError,
+    fallback: Option<roze_config::GovernanceFallbackConfig>,
+) -> RozeError {
+    if error.is_client_error() {
+        return error;
+    }
+    let Some(fallback) = fallback else {
+        return error;
+    };
+    roze_metrics::record_resilience_decision("http", "fallback", "served");
+    RozeError::fallback_response(fallback.status, fallback.body, fallback.headers)
 }
 
 pub fn begin_route(
@@ -419,6 +446,12 @@ mod tests {
                 failure_threshold: 10,
                 reset_timeout_ms: 1_000,
             }),
+            fallback: Some(roze_config::GovernanceFallbackConfig {
+                enabled: true,
+                status: 503,
+                body: Some(serde_json::json!({"message": "global"})),
+                headers: Default::default(),
+            }),
             ..Default::default()
         };
         governance.routes.insert(
@@ -433,6 +466,12 @@ mod tests {
                     failure_threshold: 1,
                     reset_timeout_ms: 30_000,
                 }),
+                fallback: Some(roze_config::GovernanceFallbackConfig {
+                    enabled: true,
+                    status: 598,
+                    body: Some(serde_json::json!({"message": "route"})),
+                    headers: Default::default(),
+                }),
                 ..Default::default()
             },
         );
@@ -441,6 +480,46 @@ mod tests {
         assert_eq!(policy.timeout, Some(Duration::from_millis(50)));
         assert_eq!(policy.rate_limit.expect("rate limit").burst, 1);
         assert_eq!(policy.breaker.expect("breaker").failure_threshold, 1);
+        let fallback = policy.fallback.expect("fallback");
+        assert_eq!(fallback.status, 598);
+        assert_eq!(
+            fallback.body.expect("fallback body")["message"],
+            serde_json::json!("route")
+        );
+    }
+
+    #[test]
+    fn route_fallback_ignores_disabled_policy() {
+        let governance = roze_config::GovernanceConfig {
+            fallback: Some(roze_config::GovernanceFallbackConfig {
+                enabled: false,
+                status: 503,
+                body: Some(serde_json::json!({"message": "off"})),
+                headers: Default::default(),
+            }),
+            ..Default::default()
+        };
+
+        assert!(route_fallback(Some(&governance), "get_user").is_none());
+    }
+
+    #[test]
+    fn apply_fallback_only_for_server_errors() {
+        let fallback = roze_config::GovernanceFallbackConfig {
+            enabled: true,
+            status: 598,
+            body: Some(serde_json::json!({"message": "degraded"})),
+            headers: Default::default(),
+        };
+
+        assert_eq!(
+            apply_fallback(RozeError::BadRequest("bad".into()), Some(fallback.clone())),
+            RozeError::BadRequest("bad".into())
+        );
+        assert!(matches!(
+            apply_fallback(RozeError::Internal("boom".into()), Some(fallback)),
+            RozeError::Fallback { status: 598, .. }
+        ));
     }
 
     #[test]

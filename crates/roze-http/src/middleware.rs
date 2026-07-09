@@ -36,8 +36,13 @@ pub fn map_request<F>(f: F) -> MapRequestLayer<F> {
     MapRequestLayer { f }
 }
 
-pub fn from_extractor<E>() -> FromExtractorLayer<E> {
+pub fn from_extractor<E>() -> FromExtractorLayer<E, ()> {
+    from_extractor_with_state(())
+}
+
+pub fn from_extractor_with_state<E, S>(state: S) -> FromExtractorLayer<E, S> {
     FromExtractorLayer {
+        state,
         _marker: PhantomData,
     }
 }
@@ -155,70 +160,92 @@ where
     }
 }
 
-pub struct FromExtractorLayer<E> {
+pub struct FromExtractorLayer<E, S = ()> {
+    state: S,
     _marker: PhantomData<fn() -> E>,
 }
 
-impl<E> Clone for FromExtractorLayer<E> {
+impl<E, S> Clone for FromExtractorLayer<E, S>
+where
+    S: Clone,
+{
     fn clone(&self) -> Self {
         Self {
+            state: self.state.clone(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<E> std::fmt::Debug for FromExtractorLayer<E> {
+impl<E, S> std::fmt::Debug for FromExtractorLayer<E, S>
+where
+    S: std::fmt::Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FromExtractorLayer")
+            .field("state", &self.state)
             .field("extractor", &std::any::type_name::<E>())
             .finish()
     }
 }
 
-impl<E> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for FromExtractorLayer<E>
+impl<E, S> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
+    for FromExtractorLayer<E, S>
 where
     E: FromRequestParts + Send + 'static,
     E::Rejection: Send + 'static,
+    S: Clone + Send + Sync + 'static,
 {
-    type Service = FromExtractor<E>;
+    type Service = FromExtractor<E, S>;
 
     fn layer(
         &self,
         inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         FromExtractor {
+            state: self.state.clone(),
             inner,
             _marker: PhantomData,
         }
     }
 }
 
-pub struct FromExtractor<E> {
+pub struct FromExtractor<E, S = ()> {
+    state: S,
     inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
     _marker: PhantomData<fn() -> E>,
 }
 
-impl<E> Clone for FromExtractor<E> {
+impl<E, S> Clone for FromExtractor<E, S>
+where
+    S: Clone,
+{
     fn clone(&self) -> Self {
         Self {
+            state: self.state.clone(),
             inner: self.inner.clone(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<E> std::fmt::Debug for FromExtractor<E> {
+impl<E, S> std::fmt::Debug for FromExtractor<E, S>
+where
+    S: std::fmt::Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FromExtractor")
+            .field("state", &self.state)
             .field("extractor", &std::any::type_name::<E>())
             .finish_non_exhaustive()
     }
 }
 
-impl<E> Service<IncomingRequest> for FromExtractor<E>
+impl<E, S> Service<IncomingRequest> for FromExtractor<E, S>
 where
     E: FromRequestParts + Send + 'static,
     E::Rejection: Send + 'static,
+    S: Clone + Send + Sync + 'static,
 {
     type Response = HttpResponse;
     type Error = Infallible;
@@ -228,7 +255,8 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, request: IncomingRequest) -> Self::Future {
+    fn call(&mut self, mut request: IncomingRequest) -> Self::Future {
+        request.extensions_mut().insert(self.state.clone());
         let mut inner = self.inner.clone();
         Box::pin(async move {
             let (mut parts, body) = request.into_parts();
@@ -689,6 +717,26 @@ mod tests {
         }
     }
 
+    struct RequireAppState;
+
+    impl FromRequestParts for RequireAppState {
+        type Rejection = StatusCode;
+
+        fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
+            Box::pin(async move {
+                let State(app) = State::<AppName>::from_request_parts(parts)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                if app.0 == "roze" {
+                    Ok(Self)
+                } else {
+                    Err(StatusCode::FORBIDDEN)
+                }
+            })
+        }
+    }
+
     #[tokio::test]
     async fn from_extractor_allows_request_when_extractor_succeeds() {
         let mut service = Router::new()
@@ -736,6 +784,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn from_extractor_with_state_makes_state_available_to_extractor() {
+        let mut service = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .route_layer(from_extractor_with_state::<RequireAppState, _>(AppName(
+                "roze",
+            )))
+            .into_service();
+
+        let response = service
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::builder()
+                    .uri("/")
+                    .body(rest::empty_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
     }
 
     #[tokio::test]

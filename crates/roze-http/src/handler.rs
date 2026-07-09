@@ -1,11 +1,18 @@
-use std::{convert::Infallible, future::Future, marker::PhantomData, pin::Pin};
+use std::{
+    convert::Infallible,
+    fmt,
+    future::{ready, Future, Ready},
+    marker::PhantomData,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use tower::{service_fn, util::BoxCloneService, Layer, Service, ServiceExt};
 
 use crate::{
-    extract::{FromRef, FromRequest, FromRequestParts},
+    extract::{ConnectInfo, FromRef, FromRequest, FromRequestParts},
     response::IntoResponse,
-    rest::{HttpResponse, IncomingRequest},
+    rest::{HttpResponse, IncomingRequest, SharedService},
 };
 
 pub trait Handler<Args>: Clone + Send + 'static {
@@ -52,6 +59,62 @@ pub trait Handler<Args>: Clone + Send + 'static {
             async move { Ok::<_, Infallible>(handler.call(request).await) }
         })
         .boxed_clone()
+    }
+
+    fn into_make_service(
+        self,
+    ) -> SharedService<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> {
+        SharedService::new(self.into_service())
+    }
+
+    fn into_make_service_with_connect_info<T>(
+        self,
+    ) -> HandlerMakeServiceWithConnectInfo<Self, Args, T>
+    where
+        Args: 'static,
+        T: Clone + Send + Sync + 'static,
+    {
+        HandlerMakeServiceWithConnectInfo {
+            handler: self,
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct HandlerMakeServiceWithConnectInfo<H, Args, T> {
+    handler: H,
+    _marker: PhantomData<fn() -> (Args, T)>,
+}
+
+impl<H, Args, T> fmt::Debug for HandlerMakeServiceWithConnectInfo<H, Args, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HandlerMakeServiceWithConnectInfo")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<H, Args, T, Target> Service<Target> for HandlerMakeServiceWithConnectInfo<H, Args, T>
+where
+    H: Handler<Args>,
+    Args: 'static,
+    T: Clone + Send + Sync + 'static,
+    Target: Into<T>,
+{
+    type Response = BoxCloneService<IncomingRequest, HttpResponse, Infallible>;
+    type Error = Infallible;
+    type Future = Ready<Result<Self::Response, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, target: Target) -> Self::Future {
+        ready(Ok(self
+            .handler
+            .clone()
+            .with_state(ConnectInfo(target.into()))
+            .into_service()))
     }
 }
 
@@ -310,7 +373,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        extract::{Host, OriginalUri, Parts, Path, Query, State},
+        extract::{ConnectInfo, Host, OriginalUri, Parts, Path, Query, State},
         response::Json,
         rest,
         router::RouteParams,
@@ -658,6 +721,41 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"app:tenant-a");
+    }
+
+    #[tokio::test]
+    async fn handler_into_make_service_builds_request_services() {
+        let mut make_service = (|| async { "ok" }).into_make_service();
+        let mut service = Service::<()>::call(&mut make_service, ()).await.unwrap();
+        let response = service
+            .ready()
+            .await
+            .unwrap()
+            .call(Request::builder().body(rest::empty_body()).unwrap())
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn handler_make_service_with_connect_info_injects_target() {
+        let mut make_service = (|ConnectInfo(peer): ConnectInfo<&'static str>| async move { peer })
+            .into_make_service_with_connect_info::<&'static str>();
+        let mut service = Service::<&'static str>::call(&mut make_service, "client-a")
+            .await
+            .unwrap();
+        let response = service
+            .ready()
+            .await
+            .unwrap()
+            .call(Request::builder().body(rest::empty_body()).unwrap())
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"client-a");
     }
 
     #[derive(Clone)]

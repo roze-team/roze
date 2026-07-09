@@ -167,13 +167,28 @@ governance:
     max_avg_latency_ms: 500
   fallback:
     enabled: true
+    status: 503
+    body:
+      code: 503
+      message: degraded
+    headers:
+      x-roze-fallback: governance
   routes: {}
 ```
 
 `begin_route` applies route/global rate limit and breaker policy and attaches
-the effective timeout to `roze_context::Context`. `retry`, `shedding`, and
-`fallback` are part of the shared governance schema so Gateway/RPC/MQ can use
-the same configuration model where applicable.
+the effective timeout to `roze_context::Context`. `shedding` is enforced before
+logic execution, and `fallback` is resolved with route policy taking precedence
+over global policy. Disabled fallback entries are ignored, so generated services
+default to explicit fail-closed behavior until an operator enables a degradation
+path with evidence. Generated REST adapters apply fallback only to non-client
+errors and render the configured status, JSON body, and headers through
+`RozeError::Fallback`; RPC adapters expose fallback status/body as gRPC
+metadata while preserving an unavailable status for typed clients, and
+`roze_rpc::rpc::error_from_status` restores that metadata into
+`RozeError::Fallback` for application code that wants structured degradation
+handling. `retry`, `shedding`, and `fallback` are part of the shared governance
+schema so Gateway/RPC/MQ can use the same configuration model where applicable.
 
 Timeout is intentionally a framework concern:
 

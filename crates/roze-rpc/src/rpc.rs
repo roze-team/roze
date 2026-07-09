@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -10,7 +11,7 @@ use std::{
 use dashmap::DashMap;
 
 use crate::{
-    balance::{Balancer, PowerOfTwoChoicesBalancer},
+    balance::{build_balancer, Balancer, BalancerKind},
     registry::{
         registry_config_from_rpc_client_etcd, CachedRegistryResolver, EtcdRegistry, Registry,
         ServiceInstance,
@@ -36,6 +37,9 @@ static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 pub const ERROR_CODE_METADATA: &str = "x-roze-error-code";
 pub const ERROR_KIND_METADATA: &str = "x-roze-error-kind";
+pub const FALLBACK_STATUS_METADATA: &str = "x-roze-fallback-status";
+pub const FALLBACK_BODY_METADATA: &str = "x-roze-fallback-body";
+pub const FALLBACK_HEADERS_METADATA: &str = "x-roze-fallback-headers";
 
 #[derive(Debug, Clone)]
 pub struct RpcConfig {
@@ -246,9 +250,10 @@ pub async fn connect_channel_from_config(
     }
 
     if rpc_client_has_static_endpoints(config) {
-        let target = rpc_client_round_robin_endpoint(config, &RPC_ENDPOINT_CURSOR)?;
+        let target = rpc_client_pick_static_endpoint(config, &RPC_ENDPOINT_CURSOR)?;
         info!(
             mode = "endpoints",
+            balancer = ?config.balancer,
             "rpc client config selected static endpoint mode"
         );
         return connect_channel_with_options(target, options).await;
@@ -262,17 +267,23 @@ pub async fn connect_channel_from_config(
             service = %etcd.key,
             "rpc client config selected etcd discovery mode"
         );
-        return connect_via_registry_with_options(
-            &etcd.key,
-            &registry,
-            &PowerOfTwoChoicesBalancer::default(),
-            options,
-        )
-        .await;
+        let balancer = build_balancer(rpc_client_balancer_kind(config));
+        return connect_via_registry_with_options(&etcd.key, &registry, balancer.as_ref(), options)
+            .await;
     }
 
     let target = rpc_client_target(config)?;
     connect_channel_with_options(target, options).await
+}
+
+pub fn rpc_client_balancer_kind(config: &roze_config::RpcClientConfig) -> BalancerKind {
+    match config.balancer {
+        roze_config::RpcClientBalancerKind::FirstAvailable => BalancerKind::FirstAvailable,
+        roze_config::RpcClientBalancerKind::RoundRobin => BalancerKind::RoundRobin,
+        roze_config::RpcClientBalancerKind::WeightedRoundRobin => BalancerKind::WeightedRoundRobin,
+        roze_config::RpcClientBalancerKind::PowerOfTwoChoices => BalancerKind::PowerOfTwoChoices,
+        roze_config::RpcClientBalancerKind::HealthAware => BalancerKind::HealthAware,
+    }
 }
 
 pub fn validate_rpc_client_config_mode(
@@ -322,6 +333,36 @@ pub fn rpc_client_round_robin_endpoint<'a>(
     Ok(endpoints[idx])
 }
 
+pub fn rpc_client_pick_static_endpoint(
+    config: &roze_config::RpcClientConfig,
+    cursor: &AtomicUsize,
+) -> anyhow::Result<String> {
+    if config.balancer == roze_config::RpcClientBalancerKind::RoundRobin {
+        return rpc_client_round_robin_endpoint(config, cursor).map(str::to_string);
+    }
+    let instances = rpc_client_static_instances(config)?;
+    let picked = build_balancer(rpc_client_balancer_kind(config))
+        .pick(&instances)
+        .ok_or_else(|| anyhow::anyhow!("rpc client config must set at least one endpoint"))?;
+    Ok(picked.addr)
+}
+
+pub fn rpc_client_static_instances(
+    config: &roze_config::RpcClientConfig,
+) -> anyhow::Result<Vec<ServiceInstance>> {
+    let instances = config
+        .endpoints
+        .iter()
+        .map(String::as_str)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(|endpoint| ServiceInstance::new("static", endpoint))
+        .collect::<Vec<_>>();
+    if instances.is_empty() {
+        anyhow::bail!("rpc client config must set at least one endpoint")
+    }
+    Ok(instances)
+}
+
 pub fn rpc_client_target(config: &roze_config::RpcClientConfig) -> anyhow::Result<&str> {
     if let Some(target) = config.target.as_deref().filter(|target| !target.is_empty()) {
         return Ok(target);
@@ -349,7 +390,7 @@ pub async fn connect_via_registry<R, B>(
 ) -> anyhow::Result<Channel>
 where
     R: Registry,
-    B: Balancer,
+    B: Balancer + ?Sized,
 {
     connect_via_registry_with_options(service, registry, balancer, RpcClientOptions::default())
         .await
@@ -363,7 +404,7 @@ pub async fn connect_via_registry_with_options<R, B>(
 ) -> anyhow::Result<Channel>
 where
     R: Registry,
-    B: Balancer,
+    B: Balancer + ?Sized,
 {
     let instances = registry.discover(service).await?;
     let instance = balancer
@@ -515,6 +556,22 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
     if let Some(locale) = locale.as_deref() {
         insert_metadata(&mut metadata, roze_context::LOCALE_HEADER, locale);
     }
+    if let RozeError::Fallback {
+        status,
+        body,
+        headers,
+    } = &error
+    {
+        insert_metadata(&mut metadata, FALLBACK_STATUS_METADATA, &status.to_string());
+        if let Some(body) = body {
+            insert_metadata(&mut metadata, FALLBACK_BODY_METADATA, &body.to_string());
+        }
+        if !headers.is_empty() {
+            if let Ok(headers) = serde_json::to_string(headers) {
+                insert_metadata(&mut metadata, FALLBACK_HEADERS_METADATA, &headers);
+            }
+        }
+    }
     Status::with_metadata(
         code,
         error.message_i18n(locale.as_deref().unwrap_or("en-US")),
@@ -531,6 +588,7 @@ fn grpc_code_from_error(error: &RozeError) -> Code {
         RozeError::NotFound(_) => Code::NotFound,
         RozeError::Unavailable(_) => Code::Unavailable,
         RozeError::Internal(_) => Code::Internal,
+        RozeError::Fallback { .. } => Code::Unavailable,
     }
 }
 
@@ -540,6 +598,17 @@ pub fn invalid_argument_status(message: impl Into<String>, context: &Context) ->
 }
 
 pub fn error_from_status(status: &Status) -> RozeError {
+    if metadata_value(status.metadata(), ERROR_KIND_METADATA) == Some("fallback") {
+        let fallback_status = metadata_value(status.metadata(), FALLBACK_STATUS_METADATA)
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(503);
+        let body = metadata_value(status.metadata(), FALLBACK_BODY_METADATA)
+            .and_then(|value| serde_json::from_str(value).ok());
+        let headers = metadata_value(status.metadata(), FALLBACK_HEADERS_METADATA)
+            .and_then(|value| serde_json::from_str::<BTreeMap<String, String>>(value).ok())
+            .unwrap_or_default();
+        return RozeError::fallback_response(fallback_status, body, headers);
+    }
     match status.code() {
         Code::InvalidArgument => RozeError::BadRequest(status.message().to_string()),
         Code::Unauthenticated => RozeError::Unauthorized,
@@ -551,6 +620,20 @@ pub fn error_from_status(status: &Status) -> RozeError {
     }
 }
 
+pub fn apply_fallback(
+    error: RozeError,
+    fallback: Option<roze_config::GovernanceFallbackConfig>,
+) -> RozeError {
+    if error.is_client_error() {
+        return error;
+    }
+    let Some(fallback) = fallback else {
+        return error;
+    };
+    record_resilience_decision("rpc", "fallback", "served");
+    RozeError::fallback_response(fallback.status, fallback.body, fallback.headers)
+}
+
 fn insert_metadata(metadata: &mut MetadataMap, key: &str, value: &str) {
     let Ok(key) = key.parse::<roze_grpc::transport::MetadataKey<roze_grpc::transport::Ascii>>()
     else {
@@ -560,6 +643,10 @@ fn insert_metadata(metadata: &mut MetadataMap, key: &str, value: &str) {
         return;
     };
     metadata.insert(key, value);
+}
+
+fn metadata_value<'a>(metadata: &'a MetadataMap, key: &str) -> Option<&'a str> {
+    metadata.get(key).and_then(|value| value.to_str().ok())
 }
 
 fn context_auth_from_tonic(metadata: &MetadataMap) -> Option<AuthContext> {
@@ -657,6 +744,7 @@ pub struct MethodPolicy {
     pub rate_limit: Option<MethodRateLimitConfig>,
     pub breaker: Option<MethodBreakerConfig>,
     pub shedding: Option<MethodSheddingConfig>,
+    pub fallback: Option<roze_config::GovernanceFallbackConfig>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -709,6 +797,7 @@ pub fn method_policy(
             rate_limit: None,
             breaker: None,
             shedding: None,
+            fallback: None,
         };
     };
     let method_config = governance.routes.get(method);
@@ -742,7 +831,18 @@ pub fn method_policy(
                 max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
                 cool_down: Duration::from_millis(config.cool_down_ms),
             }),
+        fallback: method_config
+            .and_then(|method| method.fallback.clone())
+            .or_else(|| governance.fallback.clone())
+            .filter(|fallback| fallback.enabled),
     }
+}
+
+pub fn method_fallback(
+    governance: Option<&roze_config::GovernanceConfig>,
+    method: &str,
+) -> Option<roze_config::GovernanceFallbackConfig> {
+    method_policy(governance, method).fallback
 }
 
 pub fn retry_policy_for_method(
@@ -1140,6 +1240,16 @@ mod tests {
                 500,
                 "internal",
             ),
+            (
+                RozeError::fallback_response(
+                    598,
+                    Some(serde_json::json!({"message": "degraded"})),
+                    Default::default(),
+                ),
+                Code::Unavailable,
+                598,
+                "fallback",
+            ),
         ];
 
         for (error, expected_code, expected_error_code, expected_kind) in cases {
@@ -1165,6 +1275,44 @@ mod tests {
     }
 
     #[test]
+    fn status_from_fallback_error_exports_metadata() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1");
+        let mut headers = BTreeMap::new();
+        headers.insert("x-roze-fallback".to_string(), "method".to_string());
+        let status = status_from_error(
+            RozeError::fallback_response(
+                598,
+                Some(serde_json::json!({"message": "degraded"})),
+                headers,
+            ),
+            &context,
+        );
+
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(
+            status
+                .metadata()
+                .get(FALLBACK_STATUS_METADATA)
+                .and_then(|value| value.to_str().ok()),
+            Some("598")
+        );
+        assert_eq!(
+            status
+                .metadata()
+                .get(FALLBACK_BODY_METADATA)
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"{"message":"degraded"}"#)
+        );
+        assert_eq!(
+            status
+                .metadata()
+                .get(FALLBACK_HEADERS_METADATA)
+                .and_then(|value| value.to_str().ok()),
+            Some(r#"{"x-roze-fallback":"method"}"#)
+        );
+    }
+
+    #[test]
     fn error_from_status_restores_roze_error_variants_with_grpc_codes() {
         assert_eq!(
             error_from_status(&Status::resource_exhausted("slow down")),
@@ -1173,6 +1321,36 @@ mod tests {
         assert_eq!(
             error_from_status(&Status::unavailable("down")),
             RozeError::Unavailable("down".into())
+        );
+    }
+
+    #[test]
+    fn error_from_status_restores_fallback_metadata() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1");
+        let mut headers = BTreeMap::new();
+        headers.insert("x-roze-fallback".to_string(), "method".to_string());
+        let status = status_from_error(
+            RozeError::fallback_response(
+                598,
+                Some(serde_json::json!({"message": "degraded"})),
+                headers,
+            ),
+            &context,
+        );
+
+        let error = error_from_status(&status);
+
+        assert!(matches!(error, RozeError::Fallback { status: 598, .. }));
+        assert_eq!(
+            error.fallback_body(),
+            Some(&serde_json::json!({"message": "degraded"}))
+        );
+        assert_eq!(
+            error
+                .fallback_headers()
+                .and_then(|headers| headers.get("x-roze-fallback"))
+                .map(String::as_str),
+            Some("method")
         );
     }
 
@@ -1369,6 +1547,7 @@ mod tests {
             non_block: true,
             timeout_ms: 2_500,
             keepalive_time_secs: 30,
+            balancer: Default::default(),
             middlewares: roze_config::RpcClientMiddlewaresConfig {
                 trace: false,
                 ..Default::default()
@@ -1381,9 +1560,31 @@ mod tests {
         assert!(options.non_block);
         assert!(!options.trace);
         assert_eq!(
+            rpc_client_balancer_kind(&config),
+            BalancerKind::PowerOfTwoChoices
+        );
+        assert_eq!(
             rpc_client_target(&config).expect("target"),
             "127.0.0.1:4000"
         );
+    }
+
+    #[test]
+    fn rpc_client_balancer_kind_follows_config() {
+        let config = roze_config::RpcClientConfig {
+            etcd: None,
+            endpoints: vec!["127.0.0.1:4000".to_string()],
+            target: None,
+            app: None,
+            token: None,
+            non_block: false,
+            timeout_ms: 2_000,
+            keepalive_time_secs: 20,
+            balancer: roze_config::RpcClientBalancerKind::HealthAware,
+            middlewares: Default::default(),
+        };
+
+        assert_eq!(rpc_client_balancer_kind(&config), BalancerKind::HealthAware);
     }
 
     #[test]
@@ -1397,22 +1598,50 @@ mod tests {
             non_block: false,
             timeout_ms: 2_000,
             keepalive_time_secs: 20,
+            balancer: roze_config::RpcClientBalancerKind::RoundRobin,
             middlewares: Default::default(),
         };
         let cursor = AtomicUsize::new(0);
 
         assert!(rpc_client_has_static_endpoints(&config));
         assert_eq!(
-            rpc_client_round_robin_endpoint(&config, &cursor).expect("endpoint"),
+            rpc_client_pick_static_endpoint(&config, &cursor).expect("endpoint"),
             "127.0.0.1:4000"
         );
         assert_eq!(
-            rpc_client_round_robin_endpoint(&config, &cursor).expect("endpoint"),
+            rpc_client_pick_static_endpoint(&config, &cursor).expect("endpoint"),
             "127.0.0.1:4001"
         );
         assert_eq!(
-            rpc_client_round_robin_endpoint(&config, &cursor).expect("endpoint"),
+            rpc_client_pick_static_endpoint(&config, &cursor).expect("endpoint"),
             "127.0.0.1:4000"
+        );
+    }
+
+    #[test]
+    fn rpc_client_static_endpoints_use_configured_balancer() {
+        let config = roze_config::RpcClientConfig {
+            etcd: None,
+            endpoints: vec!["127.0.0.1:4000".to_string(), "127.0.0.1:4001".to_string()],
+            target: None,
+            app: None,
+            token: None,
+            non_block: false,
+            timeout_ms: 2_000,
+            keepalive_time_secs: 20,
+            balancer: roze_config::RpcClientBalancerKind::FirstAvailable,
+            middlewares: Default::default(),
+        };
+
+        assert_eq!(
+            rpc_client_pick_static_endpoint(&config, &AtomicUsize::new(0)).expect("endpoint"),
+            "127.0.0.1:4000"
+        );
+        assert_eq!(
+            rpc_client_static_instances(&config)
+                .expect("instances")
+                .len(),
+            2
         );
     }
 
@@ -1431,6 +1660,7 @@ mod tests {
             non_block: false,
             timeout_ms: 2_000,
             keepalive_time_secs: 20,
+            balancer: Default::default(),
             middlewares: Default::default(),
         };
 
@@ -1453,6 +1683,7 @@ mod tests {
             non_block: false,
             timeout_ms: 2_000,
             keepalive_time_secs: 20,
+            balancer: Default::default(),
             middlewares: Default::default(),
         };
 
@@ -1471,6 +1702,7 @@ mod tests {
             non_block: false,
             timeout_ms: 2_000,
             keepalive_time_secs: 20,
+            balancer: Default::default(),
             middlewares: Default::default(),
         };
         let options = RpcClientOptions::from_config(&config);
@@ -1498,6 +1730,12 @@ mod tests {
     fn method_policy_prefers_method_override() {
         let mut governance = roze_config::GovernanceConfig {
             timeout_ms: Some(1000),
+            fallback: Some(roze_config::GovernanceFallbackConfig {
+                enabled: true,
+                status: 503,
+                body: Some(serde_json::json!({"message": "global"})),
+                headers: Default::default(),
+            }),
             ..Default::default()
         };
         governance.routes.insert(
@@ -1514,6 +1752,12 @@ mod tests {
                     max_failure_ratio_per_mille: 500,
                     cool_down_ms: 1_000,
                 }),
+                fallback: Some(roze_config::GovernanceFallbackConfig {
+                    enabled: true,
+                    status: 598,
+                    body: Some(serde_json::json!({"message": "method"})),
+                    headers: Default::default(),
+                }),
                 ..Default::default()
             },
         );
@@ -1522,6 +1766,46 @@ mod tests {
 
         assert_eq!(policy.timeout, Some(Duration::from_millis(50)));
         assert_eq!(policy.shedding.expect("shedding").concurrency, 3);
+        let fallback = policy.fallback.expect("fallback");
+        assert_eq!(fallback.status, 598);
+        assert_eq!(
+            fallback.body.expect("fallback body")["message"],
+            serde_json::json!("method")
+        );
+    }
+
+    #[test]
+    fn method_fallback_ignores_disabled_policy() {
+        let governance = roze_config::GovernanceConfig {
+            fallback: Some(roze_config::GovernanceFallbackConfig {
+                enabled: false,
+                status: 503,
+                body: Some(serde_json::json!({"message": "off"})),
+                headers: Default::default(),
+            }),
+            ..Default::default()
+        };
+
+        assert!(method_fallback(Some(&governance), "GetUser").is_none());
+    }
+
+    #[test]
+    fn apply_fallback_only_for_server_errors() {
+        let fallback = roze_config::GovernanceFallbackConfig {
+            enabled: true,
+            status: 598,
+            body: Some(serde_json::json!({"message": "degraded"})),
+            headers: Default::default(),
+        };
+
+        assert_eq!(
+            apply_fallback(RozeError::BadRequest("bad".into()), Some(fallback.clone())),
+            RozeError::BadRequest("bad".into())
+        );
+        assert!(matches!(
+            apply_fallback(RozeError::Internal("boom".into()), Some(fallback)),
+            RozeError::Fallback { status: 598, .. }
+        ));
     }
 
     #[test]

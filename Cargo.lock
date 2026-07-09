@@ -3636,6 +3636,7 @@ dependencies = [
  "http",
  "roze-grpc",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

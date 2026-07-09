@@ -304,7 +304,10 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
         app_to_proto(spec, resp_ty, "resp")
     ));
-    out.push_str("            Err(err) => {\n                roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }\n        }\n");
+    out.push_str(&format!(
+        "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+        handler = handler
+    ));
     out.push_str("    }\n");
     out
 }
@@ -347,7 +350,10 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
         app_to_proto(spec, resp_ty, "resp")
     ));
-    out.push_str("            Err(err) => {\n                roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }\n        }\n");
+    out.push_str(&format!(
+        "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+        method = method.name
+    ));
     out.push_str("    }\n");
     out
 }
@@ -1290,6 +1296,11 @@ mod tests {
         assert!(rendered.contains("roze_validation::validate_or_message_i18n(&req"));
         assert!(rendered.contains("roze_rpc::rpc::invalid_argument_status(message, &request_ctx)"));
         assert!(rendered.contains("finish_method(method_guard, \"invalid_argument\")"));
+        assert!(rendered.contains("roze_rpc::rpc::apply_fallback("));
+        assert!(rendered.contains(
+            "roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), \"GetUser\")"
+        ));
+        assert!(rendered.contains("finish_method(method_guard, err.kind())"));
         assert!(rendered.contains("if ![\"active\", \"disabled\"].contains(&value.as_str())"));
         assert!(
             rendered.contains("if (!req.account.to_string().is_empty()) && req.backup.is_empty()")

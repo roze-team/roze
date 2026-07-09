@@ -350,7 +350,20 @@ pub struct RpcClientConfig {
     #[serde(default = "default_rpc_client_keepalive_time_secs")]
     pub keepalive_time_secs: u64,
     #[serde(default)]
+    pub balancer: RpcClientBalancerKind,
+    #[serde(default)]
     pub middlewares: RpcClientMiddlewaresConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcClientBalancerKind {
+    FirstAvailable,
+    RoundRobin,
+    WeightedRoundRobin,
+    #[default]
+    PowerOfTwoChoices,
+    HealthAware,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1297,6 +1310,7 @@ name = "demo"
 
 [rpc_client]
 endpoints = ["127.0.0.1:4000"]
+balancer = "health_aware"
 
 [governance]
 "#;
@@ -1309,6 +1323,7 @@ endpoints = ["127.0.0.1:4000"]
 
         let client = config.rpc_client.expect("rpc client");
         assert_eq!(client.endpoints, vec!["127.0.0.1:4000"]);
+        assert_eq!(client.balancer, RpcClientBalancerKind::HealthAware);
         assert_eq!(client.timeout_ms, default_rpc_client_timeout_ms());
         assert_eq!(
             client.keepalive_time_secs,
@@ -1354,6 +1369,7 @@ rpc_clients:
       hosts: ["http://127.0.0.1:2379"]
       key: shop-order-rpc
     timeout_ms: 1500
+    balancer: weighted_round_robin
   payment:
     endpoints: ["127.0.0.1:4005"]
 governance: {}
@@ -1367,6 +1383,7 @@ governance: {}
 
         let order = config.rpc_client_config("order").expect("order client");
         assert_eq!(order.timeout_ms, 1500);
+        assert_eq!(order.balancer, RpcClientBalancerKind::WeightedRoundRobin);
         let order_etcd = order.etcd.expect("order etcd");
         assert_eq!(order_etcd.key, "shop-order-rpc");
         assert_eq!(order_etcd.hosts, vec!["http://127.0.0.1:2379"]);
