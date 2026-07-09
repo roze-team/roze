@@ -3770,6 +3770,8 @@ dependencies = [
  "matchit",
  "roze-error",
  "roze-result",
+ "roze-service",
+ "roze-shutdown",
  "serde",
  "serde_json",
  "serde_urlencoded",

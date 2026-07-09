@@ -14,6 +14,8 @@ hyper-util.workspace = true
 matchit.workspace = true
 roze-error = { path = "../roze-error" }
 roze-result = { path = "../roze-result" }
+roze-service = { path = "../roze-service" }
+roze-shutdown = { path = "../roze-shutdown" }
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true

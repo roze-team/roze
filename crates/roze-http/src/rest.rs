@@ -3,6 +3,7 @@ use std::{
     error::Error,
     future::{ready, Future, Ready},
     net::SocketAddr,
+    pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
@@ -12,8 +13,9 @@ use http::{header, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
+use roze_service::{RuntimeService, ServiceFuture};
 use serde::Serialize;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tower::{Service, ServiceExt};
 use tracing::info;
 
@@ -83,6 +85,69 @@ impl<S> RestService<S> {
             name: name.into(),
             server: std::sync::Mutex::new(Some(server)),
         }
+    }
+}
+
+impl RuntimeService for RestService<SharedService<crate::Router>> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn start(&self, shutdown: roze_shutdown::ShutdownListener) -> ServiceFuture<'_> {
+        let server = match self.server.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => {
+                return Box::pin(async {
+                    Err(anyhow::anyhow!("REST service state lock is poisoned"))
+                })
+            }
+        };
+        Box::pin(async move {
+            let server = server.ok_or_else(|| anyhow::anyhow!("REST service already started"))?;
+            serve_router_service(server, shutdown).await?;
+            Ok(())
+        })
+    }
+}
+
+async fn serve_router_service(
+    server: RestServer<SharedService<crate::Router>>,
+    shutdown: roze_shutdown::ShutdownListener,
+) -> std::io::Result<()> {
+    let addr = server.config.addr;
+    info!(addr = %addr, "REST server listening");
+
+    let mut listener = TcpListener::bind(addr).await?;
+    let router = server.make_service.service;
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown_flag(shutdown.clone()) => break,
+            accepted = accept_owned(listener) => {
+                let (next_listener, (stream, _peer_addr)) = accepted?;
+                listener = next_listener;
+                let io = TokioIo::new(stream);
+                let service = router.clone();
+                let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                    let mut service = service.clone();
+                    async move {
+                        let request: IncomingRequest = request.map(|body| {
+                            body.map_err(|error| -> BoxError { Box::new(error) }).boxed()
+                        });
+                        service.call(request).await
+                    }
+                });
+                if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+                    tracing::debug!(error = %error, "HTTP connection closed with error");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_shutdown_flag(shutdown: roze_shutdown::ShutdownListener) {
+    while !shutdown.is_triggered() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -168,14 +233,15 @@ where
         let addr = self.config.addr;
         info!(addr = %addr, "REST server listening");
 
-        let listener = TcpListener::bind(addr).await?;
+        let mut listener = TcpListener::bind(addr).await?;
         let mut make_service = self.make_service.clone();
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
-                accepted = listener.accept() => {
-                    let (stream, peer_addr) = accepted?;
+                accepted = accept_owned(listener) => {
+                    let (next_listener, (stream, peer_addr)) = accepted?;
+                    listener = next_listener;
                     let io = TokioIo::new(stream);
                     let service = make_service
                         .ready()
@@ -201,6 +267,38 @@ where
             }
         }
         Ok(())
+    }
+}
+
+fn accept_owned(listener: TcpListener) -> AcceptOwned {
+    AcceptOwned {
+        listener: Some(listener),
+    }
+}
+
+struct AcceptOwned {
+    listener: Option<TcpListener>,
+}
+
+impl Future for AcceptOwned {
+    type Output = std::io::Result<(TcpListener, (TcpStream, SocketAddr))>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let listener = this
+            .listener
+            .as_ref()
+            .expect("listener is available while polling accept");
+        match listener.poll_accept(cx) {
+            Poll::Ready(result) => {
+                let listener = this
+                    .listener
+                    .take()
+                    .expect("listener is available after polling accept");
+                Poll::Ready(result.map(|accepted| (listener, accepted)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

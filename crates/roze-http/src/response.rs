@@ -480,6 +480,7 @@ impl_flat_status_parts_into_response!(A, B);
 impl_flat_status_parts_into_response!(A, B, C);
 impl_flat_status_parts_into_response!(A, B, C, D);
 
+#[derive(Clone, Debug)]
 pub struct Json<T>(pub T);
 
 impl<T> Deref for Json<T> {
@@ -594,6 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn response_result_alias_maps_default_error_response() {
+        #[allow(clippy::result_large_err)]
         fn handler() -> super::Result<&'static str> {
             Err(roze_error::RozeError::NotFound("missing".to_string()))?
         }

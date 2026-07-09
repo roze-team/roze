@@ -1337,6 +1337,17 @@ impl OptionalFromRequestParts for OriginalUri {
     }
 }
 
+impl<T> Json<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, roze_error::RozeError> {
+        let value = serde_json::from_slice(bytes)
+            .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
+        Ok(Self(value))
+    }
+}
+
 impl<T> FromRequest for Json<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -1346,9 +1357,7 @@ where
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
         Box::pin(async move {
             let body = Bytes::from_request(request).await?;
-            let value = serde_json::from_slice(&body)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Self(value))
+            Self::from_bytes(&body)
         })
     }
 }
@@ -1367,9 +1376,7 @@ where
             if body.is_empty() {
                 return Ok(None);
             }
-            let value = serde_json::from_slice(&body)
-                .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
-            Ok(Some(Self(value)))
+            Self::from_bytes(&body).map(Some)
         })
     }
 }
@@ -1405,6 +1412,26 @@ mod tests {
                 name: "roze".to_string()
             }
         );
+    }
+
+    #[test]
+    fn json_from_bytes_deserializes_payload() {
+        let Json(payload) =
+            Json::<Payload>::from_bytes(br#"{"name":"roze"}"#).expect("json from bytes");
+
+        assert_eq!(
+            payload,
+            Payload {
+                name: "roze".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn json_from_bytes_preserves_parse_errors() {
+        let error = Json::<Payload>::from_bytes(br#"{"other":"roze"}"#).unwrap_err();
+
+        assert_eq!(error.code(), 400);
     }
 
     #[tokio::test]

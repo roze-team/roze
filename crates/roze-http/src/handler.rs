@@ -540,7 +540,7 @@ mod tests {
                 optional_extension
                     .map(|crate::extract::Extension(value)| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
-                original_uri.to_string(),
+                *original_uri,
                 body.name
             )
         };

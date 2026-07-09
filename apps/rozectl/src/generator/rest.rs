@@ -212,10 +212,10 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use std::{collections::BTreeMap, time::Duration};\n\nuse roze_http::{extract::{Query, State}, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\nuse serde::{Deserialize, Serialize};\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+        "use std::collections::BTreeMap;\n\nuse roze_http::{extract::{Query, State}, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\nuse serde::{Deserialize, Serialize};\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
-    out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and(ctx.config.governance.timeout_ms)\n        .map(Duration::from_millis);\n    let router = Router::new()\n");
+    out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and(ctx.config.governance.timeout_ms);\n    let router = Router::new()\n");
     out.push_str(&format!(
         "        .route(\"{}\", get(health))\n",
         roze_http_route_path(&full_route_path(spec, "/healthz"))
@@ -253,7 +253,7 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
     }
 
     out.push_str(";\n");
-    out.push_str("    let router = match timeout {\n        Some(timeout) => roze_middleware::apply_timeout(router, timeout),\n        None => router,\n    };\n    router.with_state(ctx)\n");
+    out.push_str("    let router = match timeout {\n        Some(timeout_ms) => roze_middleware::apply_timeout(router, timeout_ms),\n        None => router,\n    };\n    router.with_state(ctx)\n");
     out.push_str("}\n\n");
 
     out.push_str(
@@ -390,7 +390,7 @@ pub fn render_route_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
     route_groups(spec)
         .into_iter()
         .map(|(group, routes)| {
-            let mut out = String::from("use roze_http::{routing::{delete, get, head, patch, post, put}, Router};\n\nuse crate::handler;\nuse crate::svc::ServiceContext;\n\npub fn routes() -> Router<ServiceContext> {\n    Router::new()\n");
+            let mut out = String::from("use roze_http::{routing::{delete, get, head, patch, post, put}, Router};\n\nuse crate::handler;\n\npub fn routes() -> Router {\n    Router::new()\n");
             for route in routes {
                 let handler = resolved_handler_name(route);
                 let routing_fn = match route.method {
@@ -2469,7 +2469,9 @@ mod tests {
         assert!(handlers.contains("crate::middleware::audit(&ctx, &request_ctx).await"));
 
         let routes = render_route_mod(&spec);
-        assert!(routes.contains("roze_middleware::apply_timeout(router, timeout)"));
+        assert!(routes.contains("roze_middleware::apply_timeout(router, timeout_ms)"));
+        assert!(!routes.contains("Duration::from_millis"));
+        assert!(!routes.contains("Router<ServiceContext>"));
         assert!(routes.contains(".and(ctx.config.governance.timeout_ms)"));
 
         let openapi = render_openapi(&spec);

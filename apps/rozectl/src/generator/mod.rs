@@ -8785,7 +8785,6 @@ impl ServiceContext {
 
     out.push_str(
         r#"}
-}
 "#,
     );
     out
@@ -9293,6 +9292,7 @@ mod tests {
         assert!(svc.contains("shop_order_rpc::client::RpcClient::connect_from_config(config)"));
         assert!(svc.contains("pub async fn payment(&self)"));
         assert!(svc.contains("rpc_client_config(\"payment\")"));
+        assert!(!svc.trim_end().ends_with("}\n}\n}"));
 
         let cargo = std::fs::read_to_string(admin.join("Cargo.toml")).expect("read cargo");
         assert!(cargo.contains(r#"shop-order-rpc = { path = "../shop-order-rpc" }"#));

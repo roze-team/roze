@@ -179,6 +179,9 @@ let app = Router::new()
   `String`, `Json`, `Form`, and `RawForm` honor the default 2MiB limit, route
   layers can override it with `DefaultBodyLimit::max(bytes)`, and trusted
   endpoints can call `DefaultBodyLimit::disable()`
+- `Json<T>::from_bytes(&[u8])` exposes the same JSON decoding path used by the
+  request extractor for middleware, pre-buffered request flows, and focused
+  tests
 - direct extraction of common HTTP request parts such as `Method`, `Uri`,
   `Version`, and `HeaderMap` without consuming the body
 - `Host` extraction from the `Host` header or URI authority for

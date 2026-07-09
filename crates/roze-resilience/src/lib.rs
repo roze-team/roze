@@ -111,7 +111,7 @@ struct BreakerState {
     open_until: Option<Instant>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SheddingState {
     in_flight: usize,
     samples: VecDeque<SheddingSample>,
@@ -191,10 +191,7 @@ impl SheddingRegistry {
 
     pub fn allow(&self, key: impl Into<String>, config: SheddingConfig) -> bool {
         let now = Instant::now();
-        let mut state = self
-            .states
-            .entry(key.into())
-            .or_insert_with(SheddingState::default);
+        let mut state = self.states.entry(key.into()).or_default();
         prune_shedding_samples(&mut state, now, config.window);
         if shedding_is_open(&mut state, now) {
             return false;
@@ -215,10 +212,7 @@ impl SheddingRegistry {
         config: SheddingConfig,
     ) {
         let now = Instant::now();
-        let mut state = self
-            .states
-            .entry(key.into())
-            .or_insert_with(SheddingState::default);
+        let mut state = self.states.entry(key.into()).or_default();
         state.in_flight = state.in_flight.saturating_sub(1);
         state.samples.push_back(SheddingSample {
             at: now,
@@ -245,16 +239,6 @@ impl SheddingRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.states.is_empty()
-    }
-}
-
-impl Default for SheddingState {
-    fn default() -> Self {
-        Self {
-            in_flight: 0,
-            samples: VecDeque::new(),
-            open_until: None,
-        }
     }
 }
 

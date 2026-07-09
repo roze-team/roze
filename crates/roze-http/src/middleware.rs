@@ -244,6 +244,7 @@ where
 }
 
 pub trait IntoMapRequestResult {
+    #[allow(clippy::result_large_err)]
     fn into_map_request_result(self) -> Result<IncomingRequest, HttpResponse>;
 }
 
