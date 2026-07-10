@@ -1,4 +1,5 @@
 use std::{
+    any::TypeId,
     collections::BTreeMap,
     convert::Infallible,
     fmt,
@@ -374,6 +375,7 @@ impl Router {
     {
         let prefix = normalize_nest_prefix(prefix.into());
         self.route(prefix.clone(), any_service(service.clone()))
+            .route(format!("{prefix}/"), any_service(service.clone()))
             .route(format!("{prefix}/{{*tail}}"), any_service(service))
     }
 
@@ -385,6 +387,7 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert_route_service_not_router::<S>();
         self.route(path, any_service(service))
     }
 
@@ -1778,6 +1781,12 @@ fn allow_header_from_methods(methods: impl IntoIterator<Item = Method>) -> Strin
     methods.join(", ")
 }
 
+fn assert_route_service_not_router<S: 'static>() {
+    if TypeId::of::<S>() == TypeId::of::<Router>() {
+        panic!("Router::route_service cannot be used with Router; use Router::nest instead");
+    }
+}
+
 fn normalize_path(path: String) -> String {
     if path.is_empty() {
         panic!("route path must not be empty");
@@ -1785,7 +1794,19 @@ fn normalize_path(path: String) -> String {
     if !path.starts_with('/') {
         panic!("route path must start with `/`");
     }
+    validate_path_segments(&path);
     path
+}
+
+fn validate_path_segments(path: &str) {
+    for segment in path.split('/') {
+        if segment.starts_with(':') {
+            panic!("route path segments must not start with `:`; use `{{param}}` captures");
+        }
+        if segment.starts_with('*') {
+            panic!("route path segments must not start with `*`; use `{{*wildcard}}` captures");
+        }
+    }
 }
 
 fn normalize_nest_prefix(prefix: String) -> String {
@@ -1793,6 +1814,12 @@ fn normalize_nest_prefix(prefix: String) -> String {
     let prefix = prefix.trim_end_matches('/').to_string();
     if prefix.is_empty() || prefix == "/" {
         panic!("nest prefix must not be root");
+    }
+    if prefix
+        .split('/')
+        .any(|segment| segment.starts_with("{*") && segment.ends_with('}'))
+    {
+        panic!("nest prefix must not contain wildcard captures");
     }
     prefix
 }
@@ -1892,6 +1919,29 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"fallback");
+    }
+
+    #[tokio::test]
+    async fn fallback_preserves_original_uri_without_matched_path() {
+        let mut router = Router::new()
+            .route("/known", get(|| async { "known" }))
+            .fallback(
+                |matched_path: Option<MatchedPath>, original_uri: OriginalUri| async move {
+                    format!("{} {}", matched_path.is_none(), original_uri.0)
+                },
+            );
+        let response = router
+            .call(
+                Request::builder()
+                    .uri("/missing?trace=1")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"true /missing?trace=1");
     }
 
     #[tokio::test]
@@ -3025,12 +3075,42 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "route path segments must not start with `:`")]
+    fn route_panics_on_legacy_colon_capture() {
+        let _router = Router::new().route("/users/:id", get(|| async { "users" }));
+    }
+
+    #[test]
+    #[should_panic(expected = "route path segments must not start with `*`")]
+    fn route_panics_on_legacy_wildcard_capture() {
+        let _router = Router::new().route("/assets/*tail", get(|| async { "assets" }));
+    }
+
+    #[test]
     #[should_panic(expected = "route path must start with `/`")]
     fn nest_panics_on_prefix_without_leading_slash() {
         let _router = Router::new().nest(
             "api",
             Router::new().route("/users", get(|| async { "users" })),
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "nest prefix must not contain wildcard captures")]
+    fn nest_panics_on_wildcard_prefix() {
+        let _router = Router::new().nest(
+            "/api/{*tail}",
+            Router::new().route("/users", get(|| async { "users" })),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "nest prefix must not contain wildcard captures")]
+    fn nest_service_panics_on_wildcard_prefix() {
+        let service = tower::service_fn(|_request: IncomingRequest| async {
+            Ok::<_, Infallible>(rest::text_response(StatusCode::OK, "service"))
+        });
+        let _router = Router::new().nest_service("/api/{*tail}", service);
     }
 
     #[tokio::test]
@@ -3049,6 +3129,52 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"accepted");
+    }
+
+    #[tokio::test]
+    async fn any_routes_skip_allow_header() {
+        let mut router = Router::new().route("/events", any(|| async { "accepted" }));
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/events")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::ALLOW).is_none());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"accepted");
+    }
+
+    #[tokio::test]
+    async fn any_service_routes_skip_allow_header() {
+        let service = tower::service_fn(|request: IncomingRequest| async move {
+            Ok::<_, Infallible>(rest::text_response(
+                StatusCode::OK,
+                format!("{} {}", request.method(), request.uri().path()),
+            ))
+        });
+        let mut router = Router::new().route("/events", any_service(service));
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::TRACE)
+                    .uri("/events")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::ALLOW).is_none());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"TRACE /events");
     }
 
     #[tokio::test]
@@ -3154,6 +3280,13 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"service PATCH");
+    }
+
+    #[test]
+    #[should_panic(expected = "Router::route_service cannot be used with Router")]
+    fn route_service_panics_when_service_is_router() {
+        let child = Router::new().route("/users", get(|| async { "users" }));
+        let _router = Router::new().route_service("/api", child);
     }
 
     #[tokio::test]
@@ -3411,6 +3544,43 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"/proxy/users/42");
+    }
+
+    #[tokio::test]
+    async fn nest_service_matches_prefix_and_trailing_slash() {
+        let service = tower::service_fn(|request: IncomingRequest| async move {
+            Ok::<_, Infallible>(rest::text_response(
+                StatusCode::OK,
+                request.uri().path().to_string(),
+            ))
+        });
+        let mut router = Router::new().nest_service("/proxy", service);
+
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/proxy")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"/proxy");
+
+        let response = router
+            .call(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/proxy/")
+                    .body(empty_incoming())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"/proxy/");
     }
 
     fn empty_incoming() -> crate::rest::Body {

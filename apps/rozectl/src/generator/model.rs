@@ -85,6 +85,8 @@ pub struct ModelEdge {
     pub ref_field: String,
     pub unique: bool,
     pub required: bool,
+    pub storage_column: Option<String>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,6 +324,9 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             }
             if edge.required {
                 writeln!(out, "    required").unwrap();
+            }
+            if let Some(comment) = &edge.comment {
+                writeln!(out, "    comment {}", quote_ent_string(comment)).unwrap();
             }
             writeln!(out, "  }}").unwrap();
             writeln!(out).unwrap();
@@ -8997,6 +9002,16 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 tenant = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
                 continue;
             }
+            if let Some(fields) = parse_ent_field_id_annotation(inner, inner_line_no + 1)? {
+                if fields.len() > 1 {
+                    bail!(
+                        "line {}: field.ID(...) composite primary keys are not supported",
+                        inner_line_no + 1
+                    );
+                }
+                primary = fields.into_iter().next();
+                continue;
+            }
             if is_ent_ignored_entity_directive(inner) {
                 continue;
             }
@@ -9081,6 +9096,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             field_indexes.extend(indexes);
             indexes = field_indexes;
         }
+        apply_ent_edge_storage_columns(&name, &mut fields, &edges)?;
         normalize_ent_edge_indexes(&mut indexes, &edges);
         normalize_edge_unique_indexes(&mut indexes, &edges);
         normalize_edge_unique_cache_keys(&mut cache_keys, &edges, &fields);
@@ -9435,6 +9451,43 @@ fn is_ent_ignored_entity_directive(value: &str) -> bool {
         .is_some()
 }
 
+fn parse_ent_field_id_annotation(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<Option<Vec<String>>> {
+    if let Some(args) = ent_field_arg(value, &["annotation", "annotations"]) {
+        return parse_ent_field_id_annotation_args(args, line_no);
+    }
+    parse_ent_field_id_annotation_args(value, line_no)
+}
+
+fn parse_ent_field_id_annotation_args(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<Option<Vec<String>>> {
+    let lower = value.to_ascii_lowercase();
+    let Some(start) = lower.find("field.id(").or_else(|| {
+        let trimmed = value.trim_start();
+        trimmed
+            .to_ascii_lowercase()
+            .starts_with("id(")
+            .then_some(value.len() - trimmed.len())
+    }) else {
+        return Ok(None);
+    };
+
+    let (builder, args, _) = parse_ent_call_prefix(&value[start..], line_no)?;
+    let builder = builder
+        .rsplit('.')
+        .next()
+        .unwrap_or(builder.as_str())
+        .trim();
+    if !builder.eq_ignore_ascii_case("id") {
+        return Ok(None);
+    }
+    Ok(Some(parse_ent_value_list(&args, line_no)?))
+}
+
 fn parse_ent_field_header(
     value: &str,
     line_no: usize,
@@ -9717,6 +9770,33 @@ fn normalize_ent_edge_indexes(indexes: &mut Vec<ModelIndex>, edges: &[ModelEdge]
     *indexes = normalized;
 }
 
+fn apply_ent_edge_storage_columns(
+    model_name: &str,
+    fields: &mut [ModelField],
+    edges: &[ModelEdge],
+) -> anyhow::Result<()> {
+    for edge in edges {
+        let Some(storage_column) = edge.storage_column.as_deref() else {
+            continue;
+        };
+        let Some(field) = fields.iter_mut().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        if let Some(source_name) = field.source_name.as_deref() {
+            if source_name != storage_column {
+                bail!(
+                    "entity `{model_name}` edge `{}` storage column `{storage_column}` conflicts with field `{}` source `{source_name}`",
+                    edge.name,
+                    field.name
+                );
+            }
+        } else if storage_column != field.name {
+            field.source_name = Some(storage_column.to_string());
+        }
+    }
+    Ok(())
+}
+
 fn parse_ent_edge(
     header: &str,
     lines: &[(usize, &str)],
@@ -9737,6 +9817,9 @@ fn parse_ent_edge(
     let mut ref_field = None;
     let mut unique = false;
     let mut required = false;
+    let mut storage_column = None;
+    let mut storage_columns = false;
+    let mut comment = None;
 
     while header_directive_index < header_directives.len() || *i < lines.len() {
         let (inner_line_no, inner) = if header_directive_index < header_directives.len() {
@@ -9761,6 +9844,11 @@ fn parse_ent_edge(
             let Some(field) = field else {
                 bail!("line {line_no}: edge `{name}` must declare `field`");
             };
+            if storage_columns {
+                bail!(
+                    "line {line_no}: edge StorageKey Columns(...) composite storage columns are not supported for local-FK edges"
+                );
+            }
             let ref_field = ref_field.unwrap_or_else(|| "id".to_string());
             return Ok(Some(ModelEdge {
                 name,
@@ -9769,7 +9857,13 @@ fn parse_ent_edge(
                 ref_field,
                 unique,
                 required,
+                storage_column,
+                comment,
             }));
+        }
+        if let Some(value) = ent_field_arg(&inner, &["comment"]) {
+            comment = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
         }
         if inverse {
             if ent_field_arg(&inner, &["to"]).is_some()
@@ -9814,7 +9908,9 @@ fn parse_ent_edge(
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["storage_key", "storagekey"]) {
-            parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
+            let storage_key = parse_ent_edge_storage_key(value.trim(), inner_line_no + 1)?;
+            storage_column = storage_key.0;
+            storage_columns |= storage_key.1;
             continue;
         }
         if is_ent_ignored_metadata_directive(&inner) {
@@ -9859,6 +9955,45 @@ fn parse_ent_edge_header(
         parse_ent_call_chain(rest, line_no)?,
         inverse,
     ))
+}
+
+fn parse_ent_edge_storage_key(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<(Option<String>, bool)> {
+    let value = value.trim();
+    let mut column = None;
+    let mut columns = false;
+    for item in split_ent_comma_items(value)? {
+        let item = item.trim();
+        if !item.contains('(') {
+            continue;
+        }
+        let (builder, args, _) = parse_ent_call_prefix(item, line_no)?;
+        let builder = builder
+            .rsplit('.')
+            .next()
+            .unwrap_or(builder.as_str())
+            .trim();
+        if builder.eq_ignore_ascii_case("column") {
+            let values = parse_ent_value_list(&args, line_no)?;
+            if values.len() != 1 {
+                bail!(
+                    "line {line_no}: edge StorageKey Column(...) must include exactly one column"
+                );
+            }
+            column = values.into_iter().next();
+        } else if builder.eq_ignore_ascii_case("columns") {
+            let values = parse_ent_value_list(&args, line_no)?;
+            if values.len() < 2 {
+                bail!(
+                    "line {line_no}: edge StorageKey Columns(...) must include at least two columns"
+                );
+            }
+            columns = true;
+        }
+    }
+    Ok((column, columns))
 }
 
 fn clean_ent_type_ref(value: &str) -> String {
@@ -11100,6 +11235,8 @@ fn normalize_sql_edges(
             ref_field: foreign_key.target_field,
             unique,
             required,
+            storage_column: None,
+            comment: None,
         });
     }
 
@@ -13612,6 +13749,46 @@ mod tests {
     }
 
     #[test]
+    fn ent_field_id_annotation_selects_single_primary_field() {
+        let source = r#"
+        entity Invite {
+            Table("invites")
+            Annotations(field.ID("token"))
+            field String("token") {
+                NotEmpty()
+            }
+            field Time("created_at").Default(time.Now) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        assert_eq!(models[0].primary, "token");
+    }
+
+    #[test]
+    fn ent_field_id_annotation_rejects_composite_primary_keys() {
+        let source = r#"
+        entity Like {
+            Table("likes")
+            Annotations(field.ID("user_id", "tweet_id"))
+            field Time("liked_at").Default(time.Now) {
+            }
+            field Int64("user_id") {
+            }
+            field Int64("tweet_id") {
+            }
+        }
+        "#;
+
+        let err = parse_models_with_format(source, ModelFormat::Ent)
+            .expect_err("composite field.ID annotation should be rejected");
+        assert!(err
+            .to_string()
+            .contains("field.ID(...) composite primary keys are not supported"));
+    }
+
+    #[test]
     fn ent_duration_field_builder_maps_to_i64_nanoseconds() {
         let source = r#"
         entity Job {
@@ -14054,6 +14231,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: true,
             required: false,
+            storage_column: None,
+            comment: Some("owner relation".to_string()),
         }));
         assert!(profile.indexes.iter().any(|index| {
             index.unique
@@ -14070,6 +14249,7 @@ mod tests {
         assert!(ent.contains("    fields tenant_id, user_id"));
         assert!(!ent.contains("Annotations"));
         assert!(!ent.contains("StorageKey(\"profile_user_fk\")"));
+        assert!(ent.contains("    comment \"owner relation\""));
         assert!(!ent.contains("Comment(\"owner relation\")"));
         assert!(!ent.contains("Immutable"));
         assert!(!ent.contains("Deprecated"));
@@ -14430,6 +14610,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: true,
             required: true,
+            storage_column: None,
+            comment: None,
         }));
         assert!(profile
             .indexes
@@ -14492,6 +14674,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: true,
             required: true,
+            storage_column: None,
+            comment: None,
         }));
 
         let ent = render_ent_schema(&models);
@@ -14549,6 +14733,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: true,
             required: false,
+            storage_column: None,
+            comment: None,
         }));
 
         let ent = render_ent_schema(&models);
@@ -14571,7 +14757,7 @@ mod tests {
             table "posts"
             field Int64("id").Primary() {
             }
-            field Int64("author_id").Optional().StorageKey("post_author") {
+            field Int64("author_id").Optional() {
             }
             edge From("author", User.Type).Field("author_id").Unique().Required().StorageKey(edge.Column("post_author")) {
             }
@@ -14590,7 +14776,15 @@ mod tests {
             ref_field: "id".to_string(),
             unique: true,
             required: true,
+            storage_column: Some("post_author".to_string()),
+            comment: None,
         }));
+        let author_id = post
+            .fields
+            .iter()
+            .find(|field| field.name == "author_id")
+            .expect("author_id field");
+        assert_eq!(author_id.source_name.as_deref(), Some("post_author"));
         assert!(post.indexes.iter().any(|index| {
             index.name == "uniq_author_id" && index.unique && index.fields == ["author_id"]
         }));
@@ -14606,13 +14800,67 @@ mod tests {
     }
 
     #[test]
+    fn ent_edge_storage_key_conflicts_with_field_source_name() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+        }
+
+        entity Post {
+            table "posts"
+            field Int64("id").Primary() {
+            }
+            field Int64("author_id").StorageKey("author_fk") {
+            }
+            edge To("author", User.Type).Field("author_id").StorageKey(edge.Column("post_author")) {
+            }
+        }
+        "#;
+
+        let err = parse_models_with_format(source, ModelFormat::Ent)
+            .expect_err("conflicting field and edge storage columns should fail");
+        assert!(err.to_string().contains(
+            "storage column `post_author` conflicts with field `author_id` source `author_fk`"
+        ));
+    }
+
+    #[test]
+    fn ent_edge_storage_key_columns_rejects_local_fk_edges() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+        }
+
+        entity Profile {
+            table "profiles"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            edge To("user", User.Type).Field("user_id").StorageKey(edge.Columns("user_id", "profile_id")) {
+            }
+        }
+        "#;
+
+        let err = parse_models_with_format(source, ModelFormat::Ent)
+            .expect_err("composite edge storage columns should fail for local FK edges");
+        assert!(err.to_string().contains(
+            "edge StorageKey Columns(...) composite storage columns are not supported for local-FK edges"
+        ));
+    }
+
+    #[test]
     fn ent_through_edges_without_local_fk_are_parse_compatible_noops() {
         let source = r#"
         entity User {
             table "users"
             field Int64("id").Primary() {
             }
-            edge To("groups", Group.Type).Through("memberships", Membership.Type) {
+            edge To("groups", Group.Type).Through("memberships", Membership.Type).StorageKey(edge.Table("memberships"), edge.Columns("user_id", "group_id")) {
                 Annotations(entgql.RelayConnection())
             }
         }
@@ -14651,6 +14899,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: true,
             required: false,
+            storage_column: None,
+            comment: None,
         }));
 
         let ent = render_ent_schema(&models);
@@ -14725,6 +14975,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: false,
             required: false,
+            storage_column: None,
+            comment: None,
         }));
 
         let ent = render_ent_schema(&models);
@@ -14975,6 +15227,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: false,
             required: true,
+            storage_column: None,
+            comment: None,
         }));
         assert!(order.edges.contains(&ModelEdge {
             name: "profile".to_string(),
@@ -14983,6 +15237,8 @@ mod tests {
             ref_field: "id".to_string(),
             unique: false,
             required: false,
+            storage_column: None,
+            comment: None,
         }));
 
         let ent = render_ent_schema(&models);

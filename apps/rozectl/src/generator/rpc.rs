@@ -48,8 +48,8 @@ async fn main() -> anyhow::Result<()> {{
     group.add_fn(service_name, move |shutdown| {{
         let ctx = ctx.clone();
         async move {{
-            RpcServer::new(rpc_addr)
-                .builder()
+            let mut builder = RpcServer::new(rpc_addr).builder();
+            builder
                 .add_service({service}Server::new(server::RpcService::new(ctx)))
                 .serve_with_shutdown(rpc_addr, async move {{
                     shutdown.wait().await;
@@ -1225,6 +1225,8 @@ mod tests {
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
         assert!(rendered.contains("let health = ctx.health.clone();"));
         assert!(rendered.contains("group.add_fn(service_name"));
+        assert!(rendered.contains("let mut builder = RpcServer::new(rpc_addr).builder();"));
+        assert!(rendered.contains("builder\n                .add_service"));
         assert!(rendered.contains(".serve_with_shutdown(rpc_addr"));
         assert!(rendered.contains("health.mark_draining();"));
         assert!(rendered.contains("let result = group.start().await;"));

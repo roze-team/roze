@@ -2751,6 +2751,7 @@ fn generate_rest_project_with_rpc_clients(
     fs::create_dir_all(out.join("src/types"))?;
     fs::create_dir_all(out.join("ops"))?;
     fs::create_dir_all(out.join(".cargo"))?;
+    fs::create_dir_all(out.join(".github/workflows"))?;
     write_cargo_toml_with_rpc_clients(spec, out, options, ProjectKind::Rest, rpc_clients)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rest))?;
@@ -2855,6 +2856,18 @@ fn generate_rest_project_with_rpc_clients(
         out.join("ops/production-verify.ps1"),
         production_verify_ps1(spec, ProjectKind::Rest),
     )?;
+    fs::write(
+        out.join("ops/production-verify.sh"),
+        production_verify_sh(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join("ops/ci-evidence-policy.yaml"),
+        ci_evidence_policy_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
+        out.join(".github/workflows/roze-production-verify.yml"),
+        production_verify_workflow_yml(spec, ProjectKind::Rest),
+    )?;
     write_preserved(
         &out.join("config.yaml"),
         config_yaml(spec, ProjectKind::Rest),
@@ -2943,6 +2956,7 @@ pub(super) fn generate_rpc_project(
     fs::create_dir_all(out.join("ops"))?;
     fs::create_dir_all(out.join("proto"))?;
     fs::create_dir_all(out.join(".cargo"))?;
+    fs::create_dir_all(out.join(".github/workflows"))?;
     remove_path_if_exists(&out.join("src/client.rs"))?;
     remove_path_if_exists(&out.join("src/config.rs"))?;
     remove_path_if_exists(&out.join("src/pb.rs"))?;
@@ -3051,6 +3065,18 @@ pub(super) fn generate_rpc_project(
     fs::write(
         out.join("ops/production-verify.ps1"),
         production_verify_ps1(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/production-verify.sh"),
+        production_verify_sh(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/ci-evidence-policy.yaml"),
+        ci_evidence_policy_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join(".github/workflows/roze-production-verify.yml"),
+        production_verify_workflow_yml(spec, ProjectKind::Rpc),
     )?;
     fs::write(out.join("build.rs"), build_rs())?;
     write_preserved(
@@ -3903,7 +3929,7 @@ cargo run
 ## Production Evidence
 
 Use `ops/production-evidence.md` before promoting this service beyond a controlled production path.
-Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures.
+Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or `bash ops/production-verify.sh` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures. GitHub Actions wiring is generated at `.github/workflows/roze-production-verify.yml`; CI evidence policy is generated at `ops/ci-evidence-policy.yaml`.
 "#,
             name = spec.service,
             rest_routes = spec
@@ -3935,7 +3961,7 @@ cargo run
 ## Production Evidence
 
 Use `ops/production-evidence.md` before promoting this service beyond a controlled production path.
-Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures.
+Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or `bash ops/production-verify.sh` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures. GitHub Actions wiring is generated at `.github/workflows/roze-production-verify.yml`; CI evidence policy is generated at `ops/ci-evidence-policy.yaml`.
 "#,
             name = spec.service,
             rpc_methods = spec
@@ -4089,9 +4115,18 @@ Interface governance contracts are generated at
 `ops/interface-governance.yaml`; use them to validate generated framework
 interfaces, business IDL interfaces, OpenAPI/proto projection, framework smoke
 coverage, typed errors, auth boundaries, and bounded observability labels.
-Executable production verification is generated at `ops/production-verify.ps1`;
-run it in CI to fail fast on missing generated ops assets, format drift,
-compile errors, and test failures before collecting long-run evidence.
+Executable production verification is generated at `ops/production-verify.ps1`
+and `ops/production-verify.sh`; run one in CI to fail fast on missing generated
+ops assets, format drift, compile errors, and test failures before collecting
+long-run evidence.
+Generated GitHub Actions wiring is available at
+`.github/workflows/roze-production-verify.yml`; it runs the verification scripts
+on Linux and Windows so generated services prove the same production gates on
+both runner families.
+CI evidence policy is generated at `ops/ci-evidence-policy.yaml`; use it to
+validate artifact naming, retention, uploaded evidence paths, blocking gates,
+and the promotion rule that CI success is only a precondition for long-run
+production evidence.
 
 ## Evidence Scaffold
 
@@ -4224,6 +4259,9 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "ops/data-access-governance.yaml",
         "ops/interface-governance.yaml",
         "ops/production-verify.ps1",
+        "ops/production-verify.sh",
+        "ops/ci-evidence-policy.yaml",
+        ".github/workflows/roze-production-verify.yml",
     ] {
         writeln!(&mut out, "    '{path}'").unwrap();
     }
@@ -4336,8 +4374,333 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
     out
 }
 
+fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
+    use std::fmt::Write as _;
+
+    let boundary = match kind {
+        ProjectKind::Rest => "REST",
+        ProjectKind::Rpc => "RPC",
+    };
+    let service = sh_single_quoted(&spec.service);
+    let mut out = String::new();
+
+    writeln!(&mut out, "#!/usr/bin/env bash").unwrap();
+    writeln!(&mut out, "# Generated by rozectl.").unwrap();
+    writeln!(&mut out, "# service: {service}").unwrap();
+    writeln!(&mut out, "# boundary: {boundary}").unwrap();
+    match kind {
+        ProjectKind::Rest => {
+            writeln!(&mut out, "# rest_routes: {}", spec.rest_routes.len()).unwrap();
+        }
+        ProjectKind::Rpc => {
+            writeln!(&mut out, "# rpc_methods: {}", spec.rpc_methods.len()).unwrap();
+        }
+    }
+    writeln!(&mut out, "set -euo pipefail").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "SCRIPT_DIR=\"$(cd \"$(dirname \"${{BASH_SOURCE[0]}}\")\" && pwd)\""
+    )
+    .unwrap();
+    writeln!(&mut out, "PROJECT_ROOT=\"$(cd \"$SCRIPT_DIR/..\" && pwd)\"").unwrap();
+    writeln!(
+        &mut out,
+        "MANIFEST_PATH=\"${{MANIFEST_PATH:-$PROJECT_ROOT/Cargo.toml}}\""
+    )
+    .unwrap();
+    writeln!(&mut out, "SKIP_TESTS=\"${{SKIP_TESTS:-0}}\"").unwrap();
+    writeln!(
+        &mut out,
+        "SKIP_EVIDENCE_INVENTORY=\"${{SKIP_EVIDENCE_INVENTORY:-0}}\""
+    )
+    .unwrap();
+    writeln!(&mut out, "SERVICE_NAME={service}").unwrap();
+    writeln!(&mut out, "BOUNDARY={}", sh_single_quoted(boundary)).unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "run_step() {{").unwrap();
+    writeln!(&mut out, "  local name=\"$1\"").unwrap();
+    writeln!(&mut out, "  shift").unwrap();
+    writeln!(&mut out, "  echo \"==> $name\"").unwrap();
+    writeln!(&mut out, "  \"$@\"").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "required_ops_files=(").unwrap();
+    for path in [
+        "ops/production-evidence.md",
+        "ops/governance-baseline.yaml",
+        "ops/prometheus-rules.yaml",
+        "ops/grafana-dashboard.json",
+        "ops/slo.yaml",
+        "ops/failure-injection-plan.yaml",
+        "ops/release-rollout.yaml",
+        "ops/incident-response.yaml",
+        "ops/capacity-plan.yaml",
+        "ops/security-readiness.yaml",
+        "ops/production-gate.yaml",
+        "ops/regeneration-policy.yaml",
+        "ops/client-contract.yaml",
+        "ops/config-governance.yaml",
+        "ops/reliable-events.yaml",
+        "ops/dependency-governance.yaml",
+        "ops/data-consistency.yaml",
+        "ops/observability-contract.yaml",
+        "ops/runtime-hardening.yaml",
+        "ops/error-contract.yaml",
+        "ops/deployment-topology.yaml",
+        "ops/service-communication.yaml",
+        "ops/cache-governance.yaml",
+        "ops/data-access-governance.yaml",
+        "ops/interface-governance.yaml",
+        "ops/production-verify.ps1",
+        "ops/production-verify.sh",
+        "ops/ci-evidence-policy.yaml",
+        ".github/workflows/roze-production-verify.yml",
+    ] {
+        writeln!(&mut out, "  {}", sh_single_quoted(path)).unwrap();
+    }
+    writeln!(&mut out, ")").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "check_ops_inventory() {{").unwrap();
+    writeln!(&mut out, "  local relative_path").unwrap();
+    writeln!(&mut out, "  local candidate").unwrap();
+    writeln!(
+        &mut out,
+        "  for relative_path in \"${{required_ops_files[@]}}\"; do"
+    )
+    .unwrap();
+    writeln!(&mut out, "    candidate=\"$PROJECT_ROOT/$relative_path\"").unwrap();
+    writeln!(&mut out, "    if [[ ! -e \"$candidate\" ]]; then").unwrap();
+    writeln!(
+        &mut out,
+        "      echo \"Missing generated ops asset: $relative_path\" >&2"
+    )
+    .unwrap();
+    writeln!(&mut out, "      return 1").unwrap();
+    writeln!(&mut out, "    fi").unwrap();
+    writeln!(&mut out, "  done").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "if [[ \"$SKIP_EVIDENCE_INVENTORY\" != \"1\" ]]; then"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  run_step \"generated ops asset inventory\" check_ops_inventory"
+    )
+    .unwrap();
+    writeln!(&mut out, "fi").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "run_step \"cargo fmt generated service\" cargo fmt --manifest-path \"$MANIFEST_PATH\" -- --check"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "run_step \"cargo check generated service\" cargo check --manifest-path \"$MANIFEST_PATH\""
+    )
+    .unwrap();
+    writeln!(&mut out, "if [[ \"$SKIP_TESTS\" != \"1\" ]]; then").unwrap();
+    writeln!(
+        &mut out,
+        "  run_step \"cargo test generated service\" cargo test --manifest-path \"$MANIFEST_PATH\""
+    )
+    .unwrap();
+    writeln!(&mut out, "fi").unwrap();
+    writeln!(&mut out).unwrap();
+    match kind {
+        ProjectKind::Rest => {
+            writeln!(&mut out, "framework_smoke=(").unwrap();
+            for endpoint in [
+                "GET /healthz",
+                "GET /readyz",
+                "GET /startupz",
+                "GET /metrics",
+                "GET /openapi.json",
+                "GET /reports/export",
+                "POST /charts/query",
+            ] {
+                writeln!(&mut out, "  {}", sh_single_quoted(endpoint)).unwrap();
+            }
+            for route in &spec.rest_routes {
+                let smoke = format!("{} {}", method_name(&route.method), route.path);
+                writeln!(&mut out, "  {}", sh_single_quoted(&smoke)).unwrap();
+            }
+            writeln!(&mut out, ")").unwrap();
+            writeln!(
+                &mut out,
+                "printf 'REST smoke endpoints required: %s\\n' \"${{framework_smoke[*]}}\""
+            )
+            .unwrap();
+        }
+        ProjectKind::Rpc => {
+            writeln!(&mut out, "rpc_smoke=(").unwrap();
+            for method in &spec.rpc_methods {
+                let smoke = format!("{} -> {}", method.name, method.request);
+                writeln!(&mut out, "  {}", sh_single_quoted(&smoke)).unwrap();
+            }
+            writeln!(&mut out, ")").unwrap();
+            writeln!(
+                &mut out,
+                "printf 'RPC smoke methods required: %s\\n' \"${{rpc_smoke[*]}}\""
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        &mut out,
+        "printf 'Production verification passed for %s (%s). Attach long-run soak, failure-injection, dashboard, alert, and rollback evidence before broad rollout.\\n' \"$SERVICE_NAME\" \"$BOUNDARY\""
+    )
+    .unwrap();
+
+    out
+}
+
+fn production_verify_workflow_yml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Keep this workflow aligned with ops/production-verify.*.
+name: Roze Production Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip cargo test and run compile/asset gates only"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ROZE_SERVICE_NAME: {service}
+  ROZE_BOUNDARY: {boundary}
+
+jobs:
+  verify:
+    name: ${{{{ matrix.os }}}} production gates
+    runs-on: ${{{{ matrix.os }}}}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify generated service on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          SKIP_TESTS: ${{{{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == 'true' && '1' || '0' }}}}
+        run: bash ops/production-verify.sh
+
+      - name: Verify generated service on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $skipTests = "${{{{ github.event_name == 'workflow_dispatch' && inputs.skip_tests == 'true' && 'true' || 'false' }}}}" -eq "true"
+          powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1 -SkipTests:$skipTests
+
+      - name: Upload production evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roze-production-evidence-${{{{ matrix.os }}}}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ops/**
+            .github/workflows/roze-production-verify.yml
+"#,
+        service = spec.service,
+        boundary = boundary,
+    )
+}
+
+fn ci_evidence_policy_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let smoke_surface = match kind {
+        ProjectKind::Rest => "framework_probes_report_export_chart_query_and_business_routes",
+        ProjectKind::Rpc => "startup_readiness_metrics_and_representative_rpc_methods",
+    };
+
+    format!(
+        r#"# Generated by rozectl. Keep this policy machine-readable for CI and release tooling.
+service: {service}
+boundary: {boundary}
+policy: ci_evidence
+workflow: .github/workflows/roze-production-verify.yml
+artifact:
+  name_pattern: roze-production-evidence-${{{{ matrix.os }}}}
+  retention_days: 30
+  upload_on: always
+  if_no_files_found: error
+  required_paths:
+    - ops/**
+    - .github/workflows/roze-production-verify.yml
+required_runner_matrix:
+  - ubuntu-latest
+  - windows-latest
+required_gates:
+  - generated_ops_asset_inventory
+  - cargo_fmt_check
+  - cargo_check
+  - cargo_test_unless_explicitly_skipped
+  - {smoke_surface}
+blocking_conditions:
+  - missing_generated_ops_asset
+  - missing_ci_evidence_policy
+  - missing_github_actions_workflow
+  - fmt_drift
+  - compile_failure
+  - test_failure_without_approved_skip
+  - artifact_upload_missing
+promotion:
+  ci_success_is: precondition
+  broad_production_requires:
+    - 24h_or_72h_soak_report
+    - failure_injection_report
+    - dashboard_and_alert_evidence
+    - rollback_or_rollforward_evidence
+    - security_readiness_signoff
+    - capacity_and_resource_trend
+"#,
+        service = spec.service,
+        boundary = boundary,
+        smoke_surface = smoke_surface,
+    )
+}
+
 fn ps_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn sh_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn governance_baseline_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
@@ -10535,6 +10898,15 @@ mod tests {
                 .expect("read rest interface governance");
         let rest_production_verify = fs::read_to_string(rest_out.join("ops/production-verify.ps1"))
             .expect("read rest production verify script");
+        let rest_production_verify_sh =
+            fs::read_to_string(rest_out.join("ops/production-verify.sh"))
+                .expect("read rest production verify shell script");
+        let rest_ci_evidence_policy =
+            fs::read_to_string(rest_out.join("ops/ci-evidence-policy.yaml"))
+                .expect("read rest ci evidence policy");
+        let rest_production_workflow =
+            fs::read_to_string(rest_out.join(".github/workflows/roze-production-verify.yml"))
+                .expect("read rest production verify workflow");
         let rpc_readme = fs::read_to_string(rpc_out.join("README.md")).expect("read rpc readme");
         let rpc_config = fs::read_to_string(rpc_out.join("config.yaml")).expect("read rpc config");
         let rpc_runbook = fs::read_to_string(rpc_out.join("ops/production-evidence.md"))
@@ -10595,11 +10967,25 @@ mod tests {
                 .expect("read rpc interface governance");
         let rpc_production_verify = fs::read_to_string(rpc_out.join("ops/production-verify.ps1"))
             .expect("read rpc production verify script");
+        let rpc_production_verify_sh = fs::read_to_string(rpc_out.join("ops/production-verify.sh"))
+            .expect("read rpc production verify shell script");
+        let rpc_ci_evidence_policy =
+            fs::read_to_string(rpc_out.join("ops/ci-evidence-policy.yaml"))
+                .expect("read rpc ci evidence policy");
+        let rpc_production_workflow =
+            fs::read_to_string(rpc_out.join(".github/workflows/roze-production-verify.yml"))
+                .expect("read rpc production verify workflow");
 
         assert!(rest_readme.contains("ops/production-evidence.md"));
         assert!(rpc_readme.contains("ops/production-evidence.md"));
         assert!(rest_readme.contains("ops\\production-verify.ps1"));
         assert!(rpc_readme.contains("ops\\production-verify.ps1"));
+        assert!(rest_readme.contains("ops/production-verify.sh"));
+        assert!(rpc_readme.contains("ops/production-verify.sh"));
+        assert!(rest_readme.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rpc_readme.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_readme.contains(".github/workflows/roze-production-verify.yml"));
+        assert!(rpc_readme.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_config.contains("routes:\n    get_user:"));
         assert!(rest_config.contains("max_attempts: 2"));
         assert!(rest_config.contains("rate_limit:\n        burst: 100"));
@@ -10648,15 +11034,55 @@ mod tests {
         assert!(rest_runbook.contains("ops/data-access-governance.yaml"));
         assert!(rest_runbook.contains("ops/interface-governance.yaml"));
         assert!(rest_runbook.contains("ops/production-verify.ps1"));
+        assert!(rest_runbook.contains("ops/production-verify.sh"));
+        assert!(rest_runbook.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_runbook.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_production_verify.contains("function Invoke-Step"));
         assert!(rest_production_verify.contains("$requiredOpsFiles"));
         assert!(rest_production_verify.contains("ops/production-gate.yaml"));
+        assert!(rest_production_verify.contains("ops/production-verify.sh"));
+        assert!(rest_production_verify.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_production_verify.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_production_verify.contains("cargo fmt --manifest-path"));
         assert!(rest_production_verify.contains("cargo check --manifest-path"));
         assert!(rest_production_verify.contains("cargo test --manifest-path"));
         assert!(rest_production_verify.contains("GET /reports/export"));
         assert!(rest_production_verify.contains("POST /charts/query"));
         assert!(rest_production_verify.contains("GET /users/:id"));
+        assert!(rest_production_verify_sh.starts_with("#!/usr/bin/env bash"));
+        assert!(rest_production_verify_sh.contains("set -euo pipefail"));
+        assert!(rest_production_verify_sh.contains("run_step()"));
+        assert!(rest_production_verify_sh.contains("required_ops_files=("));
+        assert!(rest_production_verify_sh.contains("ops/production-verify.ps1"));
+        assert!(rest_production_verify_sh.contains("ops/production-verify.sh"));
+        assert!(rest_production_verify_sh.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_production_verify_sh.contains(".github/workflows/roze-production-verify.yml"));
+        assert!(rest_production_verify_sh.contains("cargo fmt --manifest-path"));
+        assert!(rest_production_verify_sh.contains("cargo check --manifest-path"));
+        assert!(rest_production_verify_sh.contains("cargo test --manifest-path"));
+        assert!(rest_production_verify_sh.contains("GET /reports/export"));
+        assert!(rest_production_verify_sh.contains("POST /charts/query"));
+        assert!(rest_production_verify_sh.contains("GET /users/:id"));
+        assert!(rest_production_workflow.contains("name: Roze Production Verify"));
+        assert!(rest_production_workflow.contains("ROZE_SERVICE_NAME: user-api"));
+        assert!(rest_production_workflow.contains("ROZE_BOUNDARY: rest"));
+        assert!(rest_production_workflow.contains("ubuntu-latest"));
+        assert!(rest_production_workflow.contains("windows-latest"));
+        assert!(rest_production_workflow.contains("bash ops/production-verify.sh"));
+        assert!(rest_production_workflow.contains("ops\\production-verify.ps1"));
+        assert!(rest_production_workflow.contains("actions/upload-artifact@v4"));
+        assert!(rest_production_workflow.contains("roze-production-evidence-${{ matrix.os }}"));
+        assert!(rest_production_workflow.contains("retention-days: 30"));
+        assert!(rest_production_workflow.contains("ops/**"));
+        assert!(rest_ci_evidence_policy.contains("service: user-api"));
+        assert!(rest_ci_evidence_policy.contains("boundary: rest"));
+        assert!(rest_ci_evidence_policy.contains("policy: ci_evidence"));
+        assert!(rest_ci_evidence_policy.contains("retention_days: 30"));
+        assert!(rest_ci_evidence_policy.contains("artifact_upload_missing"));
+        assert!(rest_ci_evidence_policy.contains("missing_ci_evidence_policy"));
+        assert!(rest_ci_evidence_policy
+            .contains("framework_probes_report_export_chart_query_and_business_routes"));
+        assert!(rest_ci_evidence_policy.contains("ci_success_is: precondition"));
         assert!(rest_governance.contains("boundary: rest"));
         assert!(rest_governance.contains("endpoint_count: 1"));
         assert!(rest_governance.contains("failure_oriented_resilience"));
@@ -10916,9 +11342,37 @@ mod tests {
         assert!(rpc_production_verify.contains("function Invoke-Step"));
         assert!(rpc_production_verify.contains("$requiredOpsFiles"));
         assert!(rpc_production_verify.contains("ops/production-verify.ps1"));
+        assert!(rpc_production_verify.contains("ops/production-verify.sh"));
+        assert!(rpc_production_verify.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rpc_production_verify.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rpc_production_verify.contains("cargo check --manifest-path"));
         assert!(rpc_production_verify.contains("RPC smoke methods required"));
         assert!(rpc_production_verify.contains("GetUser -> GetUserReq"));
+        assert!(rpc_production_verify_sh.starts_with("#!/usr/bin/env bash"));
+        assert!(rpc_production_verify_sh.contains("set -euo pipefail"));
+        assert!(rpc_production_verify_sh.contains("run_step()"));
+        assert!(rpc_production_verify_sh.contains("ops/production-verify.ps1"));
+        assert!(rpc_production_verify_sh.contains("ops/production-verify.sh"));
+        assert!(rpc_production_verify_sh.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rpc_production_verify_sh.contains(".github/workflows/roze-production-verify.yml"));
+        assert!(rpc_production_verify_sh.contains("cargo check --manifest-path"));
+        assert!(rpc_production_verify_sh.contains("RPC smoke methods required"));
+        assert!(rpc_production_verify_sh.contains("GetUser -> GetUserReq"));
+        assert!(rpc_production_workflow.contains("ROZE_SERVICE_NAME: user"));
+        assert!(rpc_production_workflow.contains("ROZE_BOUNDARY: rpc"));
+        assert!(rpc_production_workflow.contains("ubuntu-latest"));
+        assert!(rpc_production_workflow.contains("windows-latest"));
+        assert!(rpc_production_workflow.contains("bash ops/production-verify.sh"));
+        assert!(rpc_production_workflow.contains("ops\\production-verify.ps1"));
+        assert!(rpc_production_workflow.contains("actions/upload-artifact@v4"));
+        assert!(rpc_production_workflow.contains("roze-production-evidence-${{ matrix.os }}"));
+        assert!(rpc_production_workflow.contains("ops/**"));
+        assert!(rpc_ci_evidence_policy.contains("service: user"));
+        assert!(rpc_ci_evidence_policy.contains("boundary: rpc"));
+        assert!(rpc_ci_evidence_policy
+            .contains("startup_readiness_metrics_and_representative_rpc_methods"));
+        assert!(rpc_ci_evidence_policy.contains("test_failure_without_approved_skip"));
+        assert!(rpc_ci_evidence_policy.contains("failure_injection_report"));
         assert!(
             rpc_production_gate.contains("startup_readiness_metrics_and_representative_rpc_call")
         );

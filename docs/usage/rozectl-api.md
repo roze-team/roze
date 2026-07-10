@@ -391,14 +391,21 @@ Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/observability-contract.yaml`, `ops/runtime-hardening.yaml`, and
 `ops/error-contract.yaml`, `ops/deployment-topology.yaml`, and
 `ops/service-communication.yaml`, `ops/cache-governance.yaml`, and
-`ops/data-access-governance.yaml`, `ops/interface-governance.yaml`, and
-`ops/production-verify.ps1`. The runbook records the generated service
-boundary, required production gates,
+`ops/data-access-governance.yaml`, `ops/interface-governance.yaml`,
+`ops/production-verify.ps1`, `ops/production-verify.sh`,
+`ops/ci-evidence-policy.yaml`, and
+`.github/workflows/roze-production-verify.yml`. The runbook records the
+generated service boundary, required production gates,
 `scripts/production-evidence.sh --area generated-services`, and lifecycle
 summary collection with `--lifecycle-summary`. Run
-`powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` in CI to
-fail fast on missing generated ops assets, format drift, compile errors, and
-test failures before collecting long-run evidence. The YAML baseline is
+`powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or
+`bash ops/production-verify.sh` in CI to fail fast on missing generated ops
+assets, format drift, compile errors, and test failures before collecting
+long-run evidence. The generated GitHub Actions workflow runs the same gates on
+Linux and Windows runners and uploads an `ops/**` evidence bundle. The CI
+evidence policy records artifact naming, retention, required paths, blocking
+conditions, and the rule that CI success is a precondition, not a replacement,
+for soak and failure-injection evidence. The YAML baseline is
 machine-readable for CI/platform checks and captures the go-zero inspired
 architecture baseline Roze expects before broad rollout: simple IDL-first
 ownership, timeout, rate limit, circuit breaker, load shedding, retry budget,
@@ -1190,9 +1197,11 @@ matching entgo's builtin-id/override convention for declarations such as
 `field String("id").MaxLen(25).NotEmpty().Unique().Immutable()`. Because the
 primary key is already unique, a `Unique()` directive on the primary `id` field
 does not generate a redundant `uniq_id` index.
-Composite entgo IDs such as `ID("user_id", "group_id")` are not generated
-implicitly; model them as explicit fields and indexes until Roze adds
-first-class composite primary-key generation.
+Composite entgo IDs such as `ID("user_id", "group_id")` or edge-schema
+annotations such as `Annotations(field.ID("user_id", "tweet_id"))` are not
+generated implicitly; Roze rejects them with a clear error. Model them as
+explicit fields and indexes until Roze adds first-class composite primary-key
+generation.
 `.ent` schemas can declare entity relationships with edge blocks:
 
 ```text
@@ -1233,11 +1242,19 @@ unique index on the local edge field and generates unique lookup helpers.
 Edge blocks also accept ent-style builder calls such as `To("User")`,
 `Field("user_id")`, `Ref("id")`, `Unique()`, `Required()`, and edge-level
 `Immutable()`; round-trip rendering normalizes generated relationship
-directives to lowercase `.ent` directives and omits edge metadata-only
-directives such as `Immutable()`.
+directives to lowercase `.ent` directives, preserves edge `Comment("...")` as
+`comment "..."`, and omits edge metadata-only directives such as `Immutable()`.
 Edge headers can also use chained ent-style syntax such as
 `edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required()`;
 round-trip rendering normalizes that form to `edge user { ... }`.
+When a local-FK edge declares `StorageKey(edge.Column("post_author"))`, Roze
+maps that column name onto the local field's `source`/SeaORM `column_name`
+metadata. If a field-level `StorageKey(...)` declares a different column, model
+generation fails fast with a conflict error. Ent many-to-many storage metadata
+such as `StorageKey(edge.Table("memberships"), edge.Columns("user_id",
+"group_id"))` remains parse-compatible for no-local-FK/`Through(...)` edges;
+using `edge.Columns(...)` on a concrete local-FK edge fails fast because Roze
+does not yet generate composite edge storage columns.
 Inverse ent-style edges such as `edge From("profile", Profile.Type).Ref("user")`
 are accepted as parse-compatible no-ops when they do not declare a local
 foreign-key field for Roze to generate. If an inverse edge declares a local

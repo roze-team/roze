@@ -58,14 +58,20 @@ let app = Router::new()
 `Router` is intentionally small at this stage:
 
 - `matchit` route-template matching
+- route templates use modern `{param}` and `{*wildcard}` captures; legacy
+  `:param` and `*wildcard` segments are rejected
 - path parameter capture through request extensions
 - matched route-template extraction with `MatchedPath` for metrics, tracing,
   route-aware middleware, and handlers; `MatchedPath` supports `as_str`,
   `Deref<Target = str>`, and display formatting for concise observability code
+- fallback handlers and services preserve `OriginalUri` but do not expose
+  `MatchedPath`, keeping route-aware observability scoped to matched routes
 - original request URI extraction with `OriginalUri`, preserving a stable
   request URI view in extensions before route dispatch
 - method dispatch with `MethodRouter`
-- `any` and `any_service` endpoints for method-independent handlers/services
+- `any` and `any_service` endpoints for method-independent handlers/services;
+  these endpoints serve otherwise-unmatched methods directly and skip default
+  `Allow` header generation
 - `MethodFilter` plus `on` and `on_service` for registering one
   handler/service against multiple standard HTTP methods
 - `MethodFilter::ALL`, `from_method`, `matches`, `methods`, `intersects`,
@@ -93,7 +99,10 @@ let app = Router::new()
   `method_not_allowed_fallback_service` hooks for generated services that need
   custom 405 payloads from handlers or Tower services
 - route nesting with `Router::nest(prefix, router)`
-- service nesting with `Router::nest_service(prefix, service)`
+- service nesting with `Router::nest_service(prefix, service)`; mounting at
+  `/prefix` serves `/prefix`, `/prefix/`, and `/prefix/...`
+- nesting prefixes must be concrete path prefixes and cannot contain
+  catch-all wildcard captures
 - router composition with `Router::merge(router)`
 - `Router::merge` follows explicit fallback composition rules: a default
   fallback can be replaced by the merged router's custom fallback, while merging
@@ -105,6 +114,8 @@ let app = Router::new()
 - Axum-style `Router::route_service(path, service)` for attaching a Tower
   service to all methods for one path; method-specific services use
   `route(path, get_service(service))` and the other method service helpers
+- `Router::route_service` rejects `Router` values as services; use
+  `Router::nest` when composing routers so child route matching remains explicit
 - handler-backed route registration
 - Roze `Handler` conversion into Tower services
 - handler-level `Handler::layer` for applying Tower layers to one handler
