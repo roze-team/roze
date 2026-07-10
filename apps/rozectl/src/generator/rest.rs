@@ -918,7 +918,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         http_method_name(&route.method)
     ));
     if uses_auth {
-        out.push_str("    let request_ctx = match authorize(headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
+        out.push_str("    let request_ctx = match authorize(&headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
     }
     if !route.permissions.is_empty() {
         out.push_str(&format!(
@@ -1576,7 +1576,7 @@ fn field_value_expr(
         FieldSource::Form => format!("form.{}", rust_field_name(field)),
         FieldSource::Json => format!("body.{}", rust_field_name(field)),
         FieldSource::Header => format!(
-            "header_value::<{}>(headers, \"{}\")?",
+            "header_value::<{}>(&headers, \"{}\")?",
             map_type(&field.ty),
             field_wire_name(field)
         ),
@@ -2303,7 +2303,7 @@ mod tests {
         assert!(handlers.contains("HeaderMap"));
         assert!(handlers.contains("#[serde(default)]\n    q: String"));
         assert!(!handlers.contains("#[serde(default)]\n    id: u64"));
-        assert!(handlers.contains("header_value::<String>(headers, \"X-Token\")?"));
+        assert!(handlers.contains("header_value::<String>(&headers, \"X-Token\")?"));
         assert!(handlers.contains("#[validate(length(min = 2, max = 16))]"));
         assert!(handlers.contains("#[validate(range(min = 1, max = 120))]"));
         assert!(handlers.contains("#[validate(range(exclusive_min = 0, exclusive_max = 100))]"));
@@ -2444,7 +2444,7 @@ mod tests {
         assert!(handlers.contains(
             "roze_middleware::enforce_permissions(&request_ctx, &[\"users:read\", \"users:list\"])"
         ));
-        assert!(handlers.contains("let request_ctx = match authorize(headers, &ctx)"));
+        assert!(handlers.contains("let request_ctx = match authorize(&headers, &ctx)"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains(".extension(\"x-roze-permissions\", serde_json::json!([\"users:read\", \"users:list\"]))"));
@@ -2644,7 +2644,7 @@ mod tests {
         assert!(handlers.contains(".route(\"/api/v1/users/{id}\", get(get_user))"));
         assert!(handlers.contains(".route(\"/internal/stats\", get(get_stats))"));
         assert!(handlers.contains(".route(\"/internal/users/{id}\", patch(update_user))"));
-        assert!(handlers.contains("authorize(headers, &ctx)"));
+        assert!(handlers.contains("authorize(&headers, &ctx)"));
         assert!(handlers
             .contains("ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout)"));
         assert!(handlers.contains("crate::middleware::audit(&ctx, &request_ctx).await"));
