@@ -431,10 +431,12 @@ pub fn render_logic_mod(spec: &ApiSpec) -> String {
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
     out.push_str(render_auth_context_helpers());
+    out.push_str("// <roze:generated-rpc-logic>\n");
     for method in rpc_logic_methods(spec) {
         out.push_str(&format!("mod {method};\n"));
         out.push_str(&format!("pub use {method}::{method};\n"));
     }
+    out.push_str("// </roze:generated-rpc-logic>\n");
     out
 }
 

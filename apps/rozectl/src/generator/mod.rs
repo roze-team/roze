@@ -3253,7 +3253,7 @@ pub(super) fn generate_rpc_project(
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
-    write_logic_group_mod(
+    write_rpc_logic_mod(
         &out.join("src/logic/mod.rs"),
         rpc::render_logic_mod(spec),
         options.mode,
@@ -3311,6 +3311,61 @@ fn write_logic_group_mod(path: &Path, content: String, mode: GenerateMode) -> an
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let merged = merge_app_owned_mod_declarations(&content, &existing);
     fs::write(path, merged).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_rpc_logic_mod(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
+    if mode != GenerateMode::Update || !path.exists() {
+        return fs::write(path, content)
+            .with_context(|| format!("failed to write {}", path.display()));
+    }
+
+    let existing =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let existing = rpc_app_owned_logic_declarations(&content, &existing, path.parent().unwrap());
+    let merged = merge_app_owned_mod_declarations(&content, &existing);
+    fs::write(path, merged).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn rpc_app_owned_logic_declarations(generated: &str, existing: &str, logic_dir: &Path) -> String {
+    const START: &str = "// <roze:generated-rpc-logic>";
+    const END: &str = "// </roze:generated-rpc-logic>";
+
+    if existing.lines().any(|line| line.trim() == START) {
+        let mut inside_generated = false;
+        return existing
+            .lines()
+            .filter(|line| {
+                let line = line.trim();
+                if line == START {
+                    inside_generated = true;
+                    return false;
+                }
+                if line == END {
+                    inside_generated = false;
+                    return false;
+                }
+                !inside_generated
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+    }
+
+    let generated_modules = generated
+        .lines()
+        .filter_map(mod_declaration_name)
+        .collect::<HashSet<_>>();
+    existing
+        .lines()
+        .filter(|line| {
+            let module = mod_declaration_name(line)
+                .or_else(|| pub_use_declaration(line).map(|declaration| declaration.module));
+            module.is_none_or(|module| {
+                generated_modules.contains(&module)
+                    || logic_dir.join(format!("{module}.rs")).is_file()
+            })
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
 }
 
 fn merge_app_owned_mod_declarations(generated: &str, existing: &str) -> String {
@@ -12810,8 +12865,31 @@ mod tests {
     }
 
     #[test]
-    fn rpc_update_preserves_custom_logic_module_declarations() {
-        let spec = parse_api(
+    fn rpc_update_removes_stale_generated_logic_and_preserves_custom_declarations() {
+        let initial = parse_api(
+            r#"
+            service promotion-rpc {
+                rpc ListCoupons (ListCouponsReq) returns (ListCouponsResp)
+                rpc GetDashboard (GetDashboardReq) returns (GetDashboardResp)
+            }
+
+            type ListCouponsReq {
+                page: u64
+            }
+
+            type ListCouponsResp {
+                total: u64
+            }
+
+            type GetDashboardReq {
+            }
+
+            type GetDashboardResp {
+            }
+            "#,
+        )
+        .expect("valid initial api");
+        let updated = parse_api(
             r#"
             service promotion-rpc {
                 rpc ListCoupons (ListCouponsReq) returns (ListCouponsResp)
@@ -12826,7 +12904,7 @@ mod tests {
             }
             "#,
         )
-        .expect("valid api");
+        .expect("valid updated api");
         let root = temp_test_root("rozectl-rpc-update-logic-mod-test");
         let out = root.join("promotion");
         fs::create_dir_all(&root).expect("create test workspace");
@@ -12834,7 +12912,7 @@ mod tests {
             .expect("write workspace manifest");
 
         generate_rpc_project(
-            &spec,
+            &initial,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
         )
@@ -12843,12 +12921,14 @@ mod tests {
             .expect("write custom helper");
         fs::write(
             out.join("src/logic/mod.rs"),
-            "mod list_coupons;\npub use list_coupons::list_coupons;\nmod coupon_map;\n",
+            "mod list_coupons;\npub use list_coupons::list_coupons;\nmod get_dashboard;\npub use get_dashboard::get_dashboard;\nmod coupon_map;\n",
         )
         .expect("write custom logic mod");
+        fs::remove_file(out.join("src/logic/get_dashboard.rs"))
+            .expect("remove obsolete generated logic");
 
         generate_rpc_project(
-            &spec,
+            &updated,
             &out,
             GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
         )
@@ -12858,6 +12938,8 @@ mod tests {
         assert!(logic_mod.contains("mod list_coupons;"));
         assert!(logic_mod.contains("pub use list_coupons::list_coupons;"));
         assert!(logic_mod.contains("mod coupon_map;"));
+        assert!(!logic_mod.contains("get_dashboard"));
+        assert!(logic_mod.contains("// <roze:generated-rpc-logic>"));
         assert_eq!(
             fs::read_to_string(out.join("src/logic/coupon_map.rs")).expect("read helper"),
             "// custom helper\n"
