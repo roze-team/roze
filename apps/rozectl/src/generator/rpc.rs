@@ -773,6 +773,16 @@ fn custom_validation_checks(field: &Field, fields: &[Field], expr: &str) -> Stri
             "        if !{expr}.is_ascii() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain ASCII characters only\", &request_ctx));\n        }}\n"
         ));
     }
+    if has_rule(rules, "code") {
+        out.push_str(&format!(
+            "        if {expr}.is_empty() || !{expr}.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')) {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be a valid code\", &request_ctx));\n        }}\n"
+        ));
+    }
+    if has_rule(rules, "json") {
+        out.push_str(&format!(
+            "        if serde_json::from_str::<serde_json::Value>(&{expr}).is_err() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain valid JSON\", &request_ctx));\n        }}\n"
+        ));
+    }
     if has_rule(rules, "numeric") {
         out.push_str(&format!(
             "        if {expr}.parse::<f64>().is_err() {{\n            roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n            return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be numeric\", &request_ctx));\n        }}\n"
@@ -908,6 +918,16 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
                     "{indent}if !{var}.is_ascii() {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain ASCII characters only\", &request_ctx));\n{indent}}}\n"
                 ));
             }
+            if has_rule(rules, "code") {
+                body.push_str(&format!(
+                    "{indent}if {var}.is_empty() || !{var}.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')) {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be a valid code\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "json") {
+                body.push_str(&format!(
+                    "{indent}if serde_json::from_str::<serde_json::Value>({var}).is_err() {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must contain valid JSON\", &request_ctx));\n{indent}}}\n"
+                ));
+            }
             if has_rule(rules, "numeric") {
                 body.push_str(&format!(
                     "{indent}if {var}.parse::<f64>().is_err() {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be numeric\", &request_ctx));\n{indent}}}\n"
@@ -925,7 +945,7 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
             }
         }
         "i64" | "u64" | "i32" | "u32" => {
-            body.push_str(&numeric_range_checks(rules, var, field_label, indent));
+            body.push_str(&numeric_range_checks(rules, var, ty, field_label, indent));
         }
         _ => {}
     }
@@ -933,8 +953,29 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
     body
 }
 
-fn numeric_range_checks(rules: &str, expr: &str, field_label: &str, indent: &str) -> String {
+fn numeric_range_checks(
+    rules: &str,
+    expr: &str,
+    ty: &str,
+    field_label: &str,
+    indent: &str,
+) -> String {
     let mut out = String::new();
+    if has_rule(rules, "nonnegative") && matches!(map_type(ty).as_str(), "i64" | "i32") {
+        out.push_str(&format!(
+            "{indent}if {expr} < &0 {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be non-negative\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
+    if has_rule(rules, "page") || has_rule(rules, "limit") {
+        out.push_str(&format!(
+            "{indent}if {expr} < &1 {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must be at least 1\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
+    if has_rule(rules, "limit") {
+        out.push_str(&format!(
+            "{indent}if {expr} > &1000 {{\n{indent}    roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n{indent}    return Err(roze_rpc::rpc::invalid_argument_status(\"{field_label} must not exceed 1000\", &request_ctx));\n{indent}}}\n"
+        ));
+    }
     if let Some(min) = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
         .filter(|value| is_number_literal(value))
@@ -1219,9 +1260,11 @@ fn split_map_dive_rules(rules: &str) -> (Option<String>, Option<String>) {
 fn min_max_rules(rules: &str) -> (Option<usize>, Option<usize>) {
     let min = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
+        .or_else(|| rule_value(rules, "min_items"))
         .and_then(parse_usize);
     let max = rule_value(rules, "max")
         .or_else(|| rule_value(rules, "lte"))
+        .or_else(|| rule_value(rules, "max_items"))
         .and_then(parse_usize);
     (min, max)
 }
@@ -1393,7 +1436,13 @@ mod tests {
                 backup: string `validate:"required_with=account"`
                 lower_code: string `validate:"lowercase"`
                 upper_code: string `validate:"uppercase"`
+                resource_code: string `validate:"code"`
+                json_config: string `validate:"json"`
+                offset: int `validate:"nonnegative"`
+                page: int `validate:"page"`
+                limit: int `validate:"limit"`
                 tags: []string `validate:"min=1,dive,required,min=2,alphanum"`
+                codes: []string `validate:"min_items=1,max_items=3,dive,code"`
             }
 
             type GetUserResp {
@@ -1404,6 +1453,7 @@ mod tests {
         .expect("api");
 
         let rendered = render_rpc(&spec);
+        let rendered_types = crate::generator::types::render_types(&spec.types);
 
         assert!(rendered.contains("roze_validation::validate_or_message_i18n(&req"));
         assert!(rendered.contains("roze_rpc::rpc::invalid_argument_status(message, &request_ctx)"));
@@ -1419,6 +1469,14 @@ mod tests {
         );
         assert!(rendered.contains("if req.lower_code.chars().any(|ch| ch.is_uppercase())"));
         assert!(rendered.contains("if req.upper_code.chars().any(|ch| ch.is_lowercase())"));
+        assert!(rendered.contains("if req.resource_code.is_empty()"));
+        assert!(rendered
+            .contains("serde_json::from_str::<serde_json::Value>(&req.json_config).is_err()"));
+        assert!(rendered_types.contains("#[validate(range(min = 0))]"));
+        assert!(rendered_types.contains("#[validate(range(min = 1))]"));
+        assert!(rendered_types.contains("#[validate(range(min = 1, max = 1000))]"));
+        assert!(rendered_types.contains("#[validate(length(min = 1, max = 3))]"));
+        assert!(rendered.contains("for item in &req.codes"));
         assert!(rendered.contains("for item in &req.tags"));
         assert!(rendered.contains("if item.chars().count() < 2"));
         assert!(rendered.contains("if !item.chars().all(|ch| ch.is_alphanumeric())"));

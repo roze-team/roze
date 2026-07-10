@@ -979,6 +979,10 @@ Validation has two layers:
 | `min=N`, `max=N` on number | `range(min = N, max = N)` |
 | `gte=N`, `lte=N` on number | `range(min = N, max = N)` |
 | `gt=N`, `lt=N` on number | `range(exclusive_min = N, exclusive_max = N)` |
+| `nonnegative` on signed number | `range(min = 0)` |
+| `page` on number | `range(min = 1)` |
+| `limit` on number | `range(min = 1, max = 1000)` |
+| `min_items=N`, `max_items=N` on container | `length(min = N, max = N)` |
 | `email` | `email` |
 | `url`, `uri` | `url` |
 | `ip` | `ip` |
@@ -998,6 +1002,8 @@ Validation has two layers:
 | `alpha` | string must contain alphabetic characters only |
 | `alphanum` | string must contain alphabetic or numeric characters only |
 | `ascii` | string must be ASCII |
+| `code` | non-empty ASCII code containing only letters, digits, `_`, `-`, or `.` |
+| `json` | string must parse as a JSON value |
 | `numeric` | string must parse as `f64` |
 | `lowercase` | string must not contain uppercase characters |
 | `uppercase` | string must not contain lowercase characters |
@@ -1038,8 +1044,9 @@ type LabelsReq {
 
 Supported item/key/value rules are the same basic string and numeric rules used
 for scalar request-level checks: `required`, `min`, `max`, `len`, `oneof`,
-`alpha`, `alphanum`, `ascii`, `numeric`, `lowercase`, `uppercase`, `gte`,
-`lte`, `gt`, and `lt`.
+`alpha`, `alphanum`, `ascii`, `code`, `json`, `numeric`, `lowercase`,
+`uppercase`, `nonnegative`, `page`, `limit`, `gte`, `lte`, `gt`, and `lt`.
+Container rules before `dive` also accept `min_items` and `max_items`.
 
 ## Convention-first project layout
 

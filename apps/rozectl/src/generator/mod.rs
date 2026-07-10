@@ -11199,6 +11199,12 @@ mod tests {
                 CreateUserReq {
                     name string `json:"name"`
                     email string `json:"email"`
+                    code string `json:"code" validate:"code"`
+                    config string `json:"config" validate:"json"`
+                    offset int `json:"offset" validate:"nonnegative"`
+                    page int `json:"page" validate:"page"`
+                    limit int `json:"limit" validate:"limit"`
+                    codes []string `json:"codes" validate:"min_items=1,max_items=3,dive,code"`
                 }
 
                 UserResp {
@@ -11295,6 +11301,12 @@ mod tests {
                 CreateUserReq {
                     name: string
                     email: string
+                    code: string `validate:"code"`
+                    config: string `validate:"json"`
+                    offset: int `validate:"nonnegative"`
+                    page: int `validate:"page"`
+                    limit: int `validate:"limit"`
+                    codes: []string `validate:"min_items=1,max_items=3,dive,code"`
                 }
 
                 CreateUserResp {

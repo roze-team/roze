@@ -175,12 +175,22 @@ fn string_validation_attr(rules: &str) -> Option<String> {
 }
 
 fn number_validation_attr(rules: &str) -> Option<String> {
-    let min = rule_value(rules, "min")
+    let mut min = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
         .filter(|value| is_number_literal(value));
-    let max = rule_value(rules, "max")
+    let mut max = rule_value(rules, "max")
         .or_else(|| rule_value(rules, "lte"))
         .filter(|value| is_number_literal(value));
+    if min.is_none() && has_rule(rules, "nonnegative") {
+        min = Some("0");
+    }
+    if has_rule(rules, "page") {
+        min.get_or_insert("1");
+    }
+    if has_rule(rules, "limit") {
+        min.get_or_insert("1");
+        max.get_or_insert("1000");
+    }
     let exclusive_min = rule_value(rules, "gt").filter(|value| is_number_literal(value));
     let exclusive_max = rule_value(rules, "lt").filter(|value| is_number_literal(value));
 
@@ -223,9 +233,11 @@ fn collection_validation_attr(rules: &str) -> Option<String> {
 fn min_max_rules(rules: &str) -> (Option<usize>, Option<usize>) {
     let min = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
+        .or_else(|| rule_value(rules, "min_items"))
         .and_then(parse_usize);
     let max = rule_value(rules, "max")
         .or_else(|| rule_value(rules, "lte"))
+        .or_else(|| rule_value(rules, "max_items"))
         .and_then(parse_usize);
     (min, max)
 }
@@ -341,6 +353,10 @@ mod tests {
                 nickname String `json:"nickname" validate:"required,min=2,max=16"`
                 age int `json:"age" validate:"gte=1,lte=120"`
                 tags []string `json:"tags" validate:"min=1,dive,required"`
+                offset int `json:"offset" validate:"nonnegative"`
+                page int `json:"page" validate:"page"`
+                limit int `json:"limit" validate:"limit"`
+                codes []string `json:"codes" validate:"min_items=1,max_items=3,dive,code"`
             }
             "#,
         )
@@ -352,6 +368,10 @@ mod tests {
         assert!(rendered.contains("#[validate(length(min = 2, max = 16))]"));
         assert!(rendered.contains("#[validate(range(min = 1, max = 120))]"));
         assert!(rendered.contains("#[validate(length(min = 1))]"));
+        assert!(rendered.contains("#[validate(range(min = 0))]"));
+        assert!(rendered.contains("#[validate(range(min = 1))]"));
+        assert!(rendered.contains("#[validate(range(min = 1, max = 1000))]"));
+        assert!(rendered.contains("#[validate(length(min = 1, max = 3))]"));
     }
 
     #[test]

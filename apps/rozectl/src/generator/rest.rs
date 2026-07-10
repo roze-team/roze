@@ -1199,6 +1199,16 @@ fn custom_validation_checks(field: &Field, fields: &[Field], expr: &str) -> Stri
             "    if !{expr}.is_ascii() {{\n        let err = RozeError::BadRequest(\"{field_label} must contain ASCII characters only\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
         ));
     }
+    if has_rule(rules, "code") {
+        out.push_str(&format!(
+            "    if {expr}.is_empty() || !{expr}.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')) {{\n        let err = RozeError::BadRequest(\"{field_label} must be a valid code\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    if has_rule(rules, "json") {
+        out.push_str(&format!(
+            "    if serde_json::from_str::<serde_json::Value>(&{expr}).is_err() {{\n        let err = RozeError::BadRequest(\"{field_label} must contain valid JSON\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
     if has_rule(rules, "numeric") {
         out.push_str(&format!(
             "    if {expr}.parse::<f64>().is_err() {{\n        let err = RozeError::BadRequest(\"{field_label} must be numeric\".to_string());\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
@@ -1329,6 +1339,16 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
                     "{indent}if !{var}.is_ascii() {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must contain ASCII characters only\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
                 ));
             }
+            if has_rule(rules, "code") {
+                body.push_str(&format!(
+                    "{indent}if {var}.is_empty() || !{var}.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')) {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be a valid code\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
+            if has_rule(rules, "json") {
+                body.push_str(&format!(
+                    "{indent}if serde_json::from_str::<serde_json::Value>({var}).is_err() {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must contain valid JSON\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+                ));
+            }
             if has_rule(rules, "numeric") {
                 body.push_str(&format!(
                     "{indent}if {var}.parse::<f64>().is_err() {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be numeric\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
@@ -1346,7 +1366,7 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
             }
         }
         "i64" | "u64" | "i32" | "u32" => {
-            body.push_str(&numeric_range_checks(rules, var, field_label, indent));
+            body.push_str(&numeric_range_checks(rules, var, ty, field_label, indent));
         }
         _ => {}
     }
@@ -1354,8 +1374,29 @@ fn dive_element_body(rules: &str, var: &str, ty: &str, field_label: &str, indent
     body
 }
 
-fn numeric_range_checks(rules: &str, expr: &str, field_label: &str, indent: &str) -> String {
+fn numeric_range_checks(
+    rules: &str,
+    expr: &str,
+    ty: &str,
+    field_label: &str,
+    indent: &str,
+) -> String {
     let mut out = String::new();
+    if has_rule(rules, "nonnegative") && matches!(map_type(ty).as_str(), "i64" | "i32") {
+        out.push_str(&format!(
+            "{indent}if {expr} < &0 {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be non-negative\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
+    if has_rule(rules, "page") || has_rule(rules, "limit") {
+        out.push_str(&format!(
+            "{indent}if {expr} < &1 {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must be at least 1\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
+    if has_rule(rules, "limit") {
+        out.push_str(&format!(
+            "{indent}if {expr} > &1000 {{\n{indent}    let err = RozeError::BadRequest(\"{field_label} must not exceed 1000\".to_string());\n{indent}    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n{indent}    return Err(err);\n{indent}}}\n"
+        ));
+    }
     if let Some(min) = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
         .filter(|value| is_number_literal(value))
@@ -1966,12 +2007,22 @@ fn string_validation_attr(rules: &str) -> Option<String> {
 }
 
 fn number_validation_attr(rules: &str) -> Option<String> {
-    let min = rule_value(rules, "min")
+    let mut min = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
         .filter(|value| is_number_literal(value));
-    let max = rule_value(rules, "max")
+    let mut max = rule_value(rules, "max")
         .or_else(|| rule_value(rules, "lte"))
         .filter(|value| is_number_literal(value));
+    if min.is_none() && has_rule(rules, "nonnegative") {
+        min = Some("0");
+    }
+    if has_rule(rules, "page") {
+        min.get_or_insert("1");
+    }
+    if has_rule(rules, "limit") {
+        min.get_or_insert("1");
+        max.get_or_insert("1000");
+    }
     let exclusive_min = rule_value(rules, "gt").filter(|value| is_number_literal(value));
     let exclusive_max = rule_value(rules, "lt").filter(|value| is_number_literal(value));
 
@@ -2018,9 +2069,11 @@ fn collection_validation_attr(rules: &str) -> Option<String> {
 fn min_max_rules(rules: &str) -> (Option<usize>, Option<usize>) {
     let min = rule_value(rules, "min")
         .or_else(|| rule_value(rules, "gte"))
+        .or_else(|| rule_value(rules, "min_items"))
         .and_then(parse_usize);
     let max = rule_value(rules, "max")
         .or_else(|| rule_value(rules, "lte"))
+        .or_else(|| rule_value(rules, "max_items"))
         .and_then(parse_usize);
     (min, max)
 }
@@ -2200,6 +2253,9 @@ mod tests {
                 max_age int `query:"maxAge" validate:"gtefield=min_age"`
                 score int `query:"score" validate:"gt=0,lt=100"`
                 page uint `query:"page" validate:"gte=1,lte=500"`
+                page_number int `query:"pageNumber" validate:"page"`
+                page_limit int `query:"pageLimit" validate:"limit"`
+                offset int `query:"offset" validate:"nonnegative"`
                 email string `query:"email" validate:"required,email"`
                 website string `query:"website" validate:"url"`
                 code string `query:"code" validate:"len=6"`
@@ -2221,6 +2277,9 @@ mod tests {
                 resource string `query:"resource" validate:"endswith=_id"`
                 alpha_name string `query:"alphaName" validate:"alpha"`
                 code_name string `query:"codeName" validate:"alphanum"`
+                resource_code string `query:"resourceCode" validate:"code"`
+                json_config string `query:"jsonConfig" validate:"json"`
+                codes []string `query:"codes" validate:"min_items=1,max_items=3,dive,code"`
                 trace string `query:"trace" validate:"ascii"`
                 amount string `query:"amount" validate:"numeric"`
                 lower_code string `query:"lowerCode" validate:"lowercase"`
@@ -2249,6 +2308,9 @@ mod tests {
         assert!(handlers.contains("#[validate(range(min = 1, max = 120))]"));
         assert!(handlers.contains("#[validate(range(exclusive_min = 0, exclusive_max = 100))]"));
         assert!(handlers.contains("#[validate(range(min = 1, max = 500))]"));
+        assert!(handlers.contains("#[validate(range(min = 1))]"));
+        assert!(handlers.contains("#[validate(range(min = 1, max = 1000))]"));
+        assert!(handlers.contains("#[validate(range(min = 0))]"));
         assert!(handlers.contains("#[validate(email, length(min = 1))]"));
         assert!(handlers.contains("#[validate(url)]"));
         assert!(handlers.contains("#[validate(length(equal = 6))]"));
@@ -2302,6 +2364,11 @@ mod tests {
         assert!(handlers.contains("if !req.resource.ends_with(\"_id\")"));
         assert!(handlers.contains("if !req.alpha_name.chars().all(|ch| ch.is_alphabetic())"));
         assert!(handlers.contains("if !req.code_name.chars().all(|ch| ch.is_alphanumeric())"));
+        assert!(handlers.contains("if req.resource_code.is_empty()"));
+        assert!(handlers
+            .contains("serde_json::from_str::<serde_json::Value>(&req.json_config).is_err()"));
+        assert!(handlers.contains("#[validate(length(min = 1, max = 3))]"));
+        assert!(handlers.contains("for item in &req.codes"));
         assert!(handlers.contains("if !req.trace.is_ascii()"));
         assert!(handlers.contains("if req.amount.parse::<f64>().is_err()"));
         assert!(handlers.contains("if req.lower_code.chars().any(|ch| ch.is_uppercase())"));
