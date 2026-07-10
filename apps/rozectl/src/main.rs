@@ -774,6 +774,16 @@ enum ContractCommands {
         #[arg(long)]
         new: PathBuf,
     },
+    Diff {
+        #[arg(long)]
+        old: PathBuf,
+        #[arg(long)]
+        new: PathBuf,
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        allow_breaking: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1855,6 +1865,203 @@ fn run_contract(command: ContractCommands) -> anyhow::Result<()> {
             }
             anyhow::bail!("contract check failed")
         }
+        ContractCommands::Diff {
+            old,
+            new,
+            out,
+            allow_breaking,
+        } => {
+            let old_spec = read_api_spec(&old)?;
+            let new_spec = read_api_spec(&new)?;
+            let issues = check_contract_breaking_changes(&old_spec, &new_spec);
+            let report = render_contract_surface_diff(&old_spec, &new_spec, &issues);
+            if let Some(out) = out {
+                if let Some(parent) = out.parent().filter(|path| !path.as_os_str().is_empty()) {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&out, &report)
+                    .with_context(|| format!("failed to write {}", out.display()))?;
+            } else {
+                print!("{report}");
+            }
+            if !issues.is_empty() && !allow_breaking {
+                anyhow::bail!("contract diff detected {} breaking change(s)", issues.len());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn render_contract_surface_diff(
+    old: &parser::ApiSpec,
+    new: &parser::ApiSpec,
+    issues: &[ContractIssue],
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut report = String::from("# Roze Contract Surface Diff\n\n");
+    writeln!(report, "Breaking changes: {}\n", issues.len()).unwrap();
+    if !issues.is_empty() {
+        writeln!(report, "## Breaking Changes\n").unwrap();
+        for issue in issues {
+            writeln!(report, "- {}", issue.detail).unwrap();
+        }
+        writeln!(report).unwrap();
+    }
+
+    render_named_surface_diff(
+        &mut report,
+        "REST API",
+        contract_rest_surfaces(old),
+        contract_rest_surfaces(new),
+    );
+    render_named_surface_diff(
+        &mut report,
+        "RPC API",
+        contract_rpc_surfaces(old),
+        contract_rpc_surfaces(new),
+    );
+    render_named_surface_diff(
+        &mut report,
+        "OpenAPI",
+        contract_openapi_surfaces(old),
+        contract_openapi_surfaces(new),
+    );
+    render_named_surface_diff(
+        &mut report,
+        "TypeScript SDK",
+        contract_typescript_surfaces(old),
+        contract_typescript_surfaces(new),
+    );
+    report
+}
+
+fn render_named_surface_diff(
+    report: &mut String,
+    title: &str,
+    old: BTreeMap<String, String>,
+    new: BTreeMap<String, String>,
+) {
+    use std::fmt::Write as _;
+
+    writeln!(report, "## {title}\n").unwrap();
+    let mut changes = 0;
+    for (name, old_value) in &old {
+        match new.get(name) {
+            None => {
+                writeln!(report, "- Removed `{name}`").unwrap();
+                changes += 1;
+            }
+            Some(new_value) if new_value != old_value => {
+                writeln!(report, "- Changed `{name}`").unwrap();
+                writeln!(report, "  - Before: `{}`", markdown_inline(old_value)).unwrap();
+                writeln!(report, "  - After: `{}`", markdown_inline(new_value)).unwrap();
+                changes += 1;
+            }
+            Some(_) => {}
+        }
+    }
+    for name in new.keys().filter(|name| !old.contains_key(*name)) {
+        writeln!(report, "- Added `{name}`").unwrap();
+        changes += 1;
+    }
+    if changes == 0 {
+        writeln!(report, "- No surface changes").unwrap();
+    }
+    writeln!(report).unwrap();
+}
+
+fn markdown_inline(value: &str) -> String {
+    value.replace('`', "'").replace(['\r', '\n'], " ")
+}
+
+fn contract_rest_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
+    spec.rest_routes
+        .iter()
+        .map(|route| {
+            let key = format!("{} {}", contract_http_method(&route.method), route.path);
+            let value = format!("{} -> {}", route.request, route.response);
+            (key, value)
+        })
+        .collect()
+}
+
+fn contract_rpc_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
+    spec.rpc_methods
+        .iter()
+        .map(|method| {
+            (
+                method.name.clone(),
+                format!("{} -> {}", method.request, method.response),
+            )
+        })
+        .collect()
+}
+
+fn contract_openapi_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
+    let document = generator::openapi_document(spec);
+    let mut surfaces = BTreeMap::new();
+    if let Some(paths) = document.get("paths").and_then(serde_json::Value::as_object) {
+        for (path, operations) in paths {
+            if let Some(operations) = operations.as_object() {
+                for (method, operation) in operations {
+                    surfaces.insert(
+                        format!("operation {} {}", method.to_ascii_uppercase(), path),
+                        operation.to_string(),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(schemas) = document
+        .pointer("/components/schemas")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, schema) in schemas {
+            surfaces.insert(format!("schema {name}"), schema.to_string());
+        }
+    }
+    surfaces
+}
+
+fn contract_typescript_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
+    let rendered = generator::client::render_ts_client(spec);
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let mut surfaces = BTreeMap::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if let Some(name) = line
+            .strip_prefix("export interface ")
+            .and_then(|line| line.split_whitespace().next())
+        {
+            let mut block = vec![line];
+            index += 1;
+            while index < lines.len() {
+                block.push(lines[index].trim());
+                if lines[index].trim() == "}" {
+                    break;
+                }
+                index += 1;
+            }
+            surfaces.insert(format!("interface {name}"), block.join(" "));
+        } else if let Some(signature) = line.strip_prefix("export async function ") {
+            let name = signature.split('(').next().unwrap_or(signature);
+            surfaces.insert(format!("function {name}"), line.to_string());
+        }
+        index += 1;
+    }
+    surfaces
+}
+
+fn contract_http_method(method: &parser::HttpMethod) -> &'static str {
+    match method {
+        parser::HttpMethod::Get => "GET",
+        parser::HttpMethod::Head => "HEAD",
+        parser::HttpMethod::Post => "POST",
+        parser::HttpMethod::Put => "PUT",
+        parser::HttpMethod::Patch => "PATCH",
+        parser::HttpMethod::Delete => "DELETE",
     }
 }
 
@@ -4857,6 +5064,29 @@ spec:
             }
         ));
 
+        let contract_diff = Cli::try_parse_from([
+            "rozectl",
+            "contract",
+            "diff",
+            "--old",
+            "old.api",
+            "--new",
+            "new.api",
+            "--out",
+            "contract-diff.md",
+            "--allow-breaking",
+        ])
+        .expect("parse contract diff");
+        assert!(matches!(
+            contract_diff.command,
+            Commands::Contract {
+                command: ContractCommands::Diff {
+                    allow_breaking: true,
+                    ..
+                }
+            }
+        ));
+
         let mock = Cli::try_parse_from([
             "rozectl",
             "mock",
@@ -6548,5 +6778,68 @@ type (
         assert!(report.contains("field type changed: GetUserReq.id string -> uint64"));
         assert!(report.contains("field removed: GetUserResp.name"));
         assert!(report.contains("required field added: GetUserReq.tenantId"));
+    }
+
+    #[test]
+    fn contract_diff_reports_rest_rpc_openapi_and_sdk_surfaces() {
+        let old_spec = parser::parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (UserResp)
+                rpc Ping (PingReq) returns (PingResp)
+            }
+            type GetUserReq {
+                id u64 `path:"id"`
+            }
+            type UserResp {
+                id u64 `json:"id"`
+            }
+            type PingReq {
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("old spec");
+        let new_spec = parser::parse_api(
+            r#"
+            service user {
+                get /users/:id (GetUserReq) returns (UserResp)
+                post /users (CreateUserReq) returns (UserResp)
+                rpc Ping (PingReqV2) returns (PingResp)
+            }
+            type GetUserReq {
+                id u64 `path:"id"`
+            }
+            type CreateUserReq {
+                name string `json:"name"`
+            }
+            type UserResp {
+                id u64 `json:"id"`
+                name string `json:"name,optional" validate:"optional"`
+            }
+            type PingReqV2 {
+                traceId string `json:"traceId"`
+            }
+            type PingResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("new spec");
+        let issues = check_contract_breaking_changes(&old_spec, &new_spec);
+        let report = render_contract_surface_diff(&old_spec, &new_spec, &issues);
+
+        assert!(report.contains("## REST API"));
+        assert!(report.contains("Added `POST /users`"));
+        assert!(report.contains("## RPC API"));
+        assert!(report.contains("Changed `Ping`"));
+        assert!(report.contains("## OpenAPI"));
+        assert!(report.contains("Added `operation POST /users`"));
+        assert!(report.contains("Changed `schema UserResp`"));
+        assert!(report.contains("## TypeScript SDK"));
+        assert!(report.contains("Added `function postUsers`"));
+        assert!(report.contains("Changed `interface UserResp`"));
     }
 }

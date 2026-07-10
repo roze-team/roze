@@ -304,6 +304,21 @@ methods, request/response type changes, removed fields, field type/source
 changes, and newly added required fields. Additive optional fields with
 `validate:"optional"` or `validate:"omitempty"` are allowed.
 
+Generate one semantic regeneration report across REST, RPC, OpenAPI, and the
+TypeScript SDK surface:
+
+```bash
+rozectl contract diff \
+  --old example/user.v1.api \
+  --new example/user.v2.api \
+  --out contract-diff.md
+```
+
+The report lists added, removed, and changed route/method signatures, OpenAPI
+operations and schemas, and exported SDK interfaces/functions. It is written
+before command failure so CI can retain the artifact. Breaking changes return a
+non-zero status; pass `--allow-breaking` for an explicitly review-only run.
+
 Generate a mock server from the API contract:
 
 ```bash
