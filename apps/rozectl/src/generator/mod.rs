@@ -10004,6 +10004,7 @@ pub struct ServiceContext {
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub outbox: roze_transaction::InMemoryOutbox,
+    pub idempotency: roze_middleware::InMemoryIdempotencyStore,
 }
 
 impl ServiceContext {
@@ -10037,6 +10038,7 @@ impl ServiceContext {
             cache,
             mq,
             outbox: roze_transaction::InMemoryOutbox::new(),
+            idempotency: roze_middleware::InMemoryIdempotencyStore::default(),
         })
     }
 
@@ -10092,6 +10094,7 @@ pub struct ServiceContext {
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub outbox: roze_transaction::InMemoryOutbox,
+    pub idempotency: roze_middleware::InMemoryIdempotencyStore,
 }
 
 impl ServiceContext {
@@ -10135,6 +10138,7 @@ impl ServiceContext {
             cache,
             mq,
             outbox: roze_transaction::InMemoryOutbox::new(),
+            idempotency: roze_middleware::InMemoryIdempotencyStore::default(),
         })
     }
 
