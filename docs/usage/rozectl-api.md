@@ -1258,6 +1258,12 @@ src/svc/mod.rs
 `proto/service.proto` is the normalized build input used by the generated Rust
 project.
 
+When `src/model` already exists, `rpc generate --update` and
+`rpc protoc --update` restore the generated `mod model;` declaration after
+refreshing `src/main.rs`. RPC and model generation are therefore composable:
+either command can be updated independently without requiring a compensating
+model regeneration pass.
+
 The proto parser supports line and block comments, multi-line `rpc`
 signatures, qualified type names, `stream` request/response markers,
 `optional`/`required` labels, `repeated` fields, and `map<K,V>` fields. The

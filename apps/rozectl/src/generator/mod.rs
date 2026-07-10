@@ -3284,6 +3284,7 @@ fn generate_rpc_project_with_rpc_clients(
     fs::write(out.join("src/lib.rs"), rpc::render_lib())?;
     fs::write(out.join("src/main.rs"), rpc::render_main(spec))?;
     fs::write(out.join("proto/service.proto"), render_proto(spec)?)?;
+    ensure_model_module(out)?;
     Ok(())
 }
 
@@ -13140,6 +13141,71 @@ mod tests {
         assert!(svc.contains("pub fn catalog(&self) -> shop_catalog_rpc::client::RpcClient"));
         assert!(svc.contains("pub fn custom_dependency(&self)"));
         assert_eq!(svc.matches("<roze:generated-rpc-client-fields>").count(), 1);
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_update_preserves_existing_generated_model_module() {
+        let spec = parse_api(
+            r#"
+            service system-rpc {
+                rpc GetAdmin (GetAdminReq) returns (GetAdminResp)
+            }
+
+            type GetAdminReq {
+                id: u64
+            }
+
+            type GetAdminResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rpc-update-model-composition-test");
+        let out = root.join("system");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial rpc generation");
+        model::generate_model_project(
+            r#"
+            CREATE TABLE admin_tokens (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                token VARCHAR(255) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("model generation");
+        assert!(fs::read_to_string(out.join("src/main.rs"))
+            .expect("read composed main")
+            .contains("mod model;"));
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("rpc update");
+
+        let main = fs::read_to_string(out.join("src/main.rs")).expect("read updated main");
+        assert!(main.contains("mod model;"));
+        assert_eq!(main.matches("mod model;").count(), 1);
+        assert!(out.join("src/model/admin_token.rs").is_file());
+        let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
+        assert!(svc.contains("pub fn model(&self) -> crate::model::ModelClient<'_>"));
+        assert!(svc.contains("toasty::models!(crate::model::AdminToken)"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
