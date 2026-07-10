@@ -3849,8 +3849,7 @@ version = "0.1.0""#
 config.workspace = true"#
             } else {
                 r#"anyhow = "1"
-config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
-roze_http = { version = "0.8", default-features = false, features = ["form", "http1", "http2", "json", "query", "tokio", "tracing"] }"#
+config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }"#
             },
             if in_workspace {
                 r#"serde.workspace = true
@@ -11060,6 +11059,28 @@ mod tests {
         );
         assert!(!cargo.contains("rev ="));
         assert!(!cargo.contains(".workspace = true"));
+    }
+
+    #[test]
+    fn generated_standalone_rest_cargo_uses_only_valid_roze_http_dependency() {
+        let cargo = cargo_toml(
+            "user-api",
+            DependencySource::Git,
+            None,
+            false,
+            ProjectKind::Rest,
+            Path::new("user-api"),
+            &[],
+        );
+        let document = cargo
+            .parse::<toml_edit::DocumentMut>()
+            .expect("valid generated cargo manifest");
+        let dependencies = document["dependencies"]
+            .as_table()
+            .expect("dependencies table");
+
+        assert!(dependencies.contains_key("roze-http"));
+        assert!(!dependencies.contains_key("roze_http"));
     }
 
     #[test]
