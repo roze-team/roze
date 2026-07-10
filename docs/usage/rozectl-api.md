@@ -402,6 +402,17 @@ Generated API crates do not depend on `roze-db`, `roze-mongo`, or Toasty by
 default. API services can still call RPC clients, cache, MQ, NATS, outbox, auth,
 metrics, OpenAPI, validation, and middleware crates.
 
+Generated REST and RPC `ServiceContext` values expose
+`Arc<dyn roze_transaction::OutboxStore>`. The default
+`InMemoryOutbox` is intended for local development and tests. Production
+services should inject a persistent adapter with `with_outbox_store`. A
+persistent adapter implements asynchronous claim, publish/failure state, and
+lease recovery through `OutboxStore`. Database adapters additionally implement
+`TransactionalOutbox<Tx>` so business writes and outbox messages are inserted
+in the same database transaction before it commits. `relay_outbox_batch` then
+publishes claimed messages after commit and records retry state without
+duplicating application sequencing code.
+
 Generated REST services expose standard operational endpoints:
 
 - `GET /healthz` for process liveness

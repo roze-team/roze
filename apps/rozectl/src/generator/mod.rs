@@ -10004,7 +10004,7 @@ pub struct ServiceContext {
     pub health: roze_health::HealthRegistry,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
-    pub outbox: roze_transaction::InMemoryOutbox,
+    pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub idempotency: roze_middleware::InMemoryIdempotencyStore,
 }
 
@@ -10038,9 +10038,17 @@ impl ServiceContext {
             health,
             cache,
             mq,
-            outbox: roze_transaction::InMemoryOutbox::new(),
+            outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
             idempotency: roze_middleware::InMemoryIdempotencyStore::default(),
         })
+    }
+
+    pub fn with_outbox_store(
+        mut self,
+        outbox: Arc<dyn roze_transaction::OutboxStore>,
+    ) -> Self {
+        self.outbox = outbox;
+        self
     }
 
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
@@ -10094,7 +10102,7 @@ pub struct ServiceContext {
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
-    pub outbox: roze_transaction::InMemoryOutbox,
+    pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub idempotency: roze_middleware::InMemoryIdempotencyStore,
 }
 
@@ -10138,9 +10146,17 @@ impl ServiceContext {
             mongo,
             cache,
             mq,
-            outbox: roze_transaction::InMemoryOutbox::new(),
+            outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
             idempotency: roze_middleware::InMemoryIdempotencyStore::default(),
         })
+    }
+
+    pub fn with_outbox_store(
+        mut self,
+        outbox: Arc<dyn roze_transaction::OutboxStore>,
+    ) -> Self {
+        self.outbox = outbox;
+        self
     }
 
     pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
@@ -10372,6 +10388,15 @@ mod tests {
     use crate::parser::{parse_api, HttpMethod};
 
     use super::*;
+
+    #[test]
+    fn generated_service_context_accepts_persistent_outbox_store() {
+        for rendered in [rest_service_context_rs(&[]), rpc_service_context_rs()] {
+            assert!(rendered.contains("Arc<dyn roze_transaction::OutboxStore>"));
+            assert!(rendered.contains("pub fn with_outbox_store"));
+            assert!(rendered.contains("Arc::new(roze_transaction::InMemoryOutbox::new())"));
+        }
+    }
 
     fn temp_test_root(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

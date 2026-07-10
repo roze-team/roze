@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
@@ -121,6 +122,7 @@ impl TransactionPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboxStatus {
     Pending,
+    Publishing,
     Published,
     Failed,
 }
@@ -137,6 +139,8 @@ pub struct OutboxMessage {
     pub status: OutboxStatus,
     pub attempts: u32,
     pub next_attempt_millis: Option<u64>,
+    pub lease_until_millis: Option<u64>,
+    pub last_error: Option<String>,
 }
 
 impl OutboxMessage {
@@ -156,6 +160,8 @@ impl OutboxMessage {
             status: OutboxStatus::Pending,
             attempts: 0,
             next_attempt_millis: None,
+            lease_until_millis: None,
+            last_error: None,
         }
     }
 
@@ -190,15 +196,56 @@ impl OutboxMessage {
         message
     }
 
-    pub fn mark_published(&mut self) {
-        self.status = OutboxStatus::Published;
+    pub fn mark_publishing(&mut self, lease_until_millis: u64) {
+        self.status = OutboxStatus::Publishing;
+        self.lease_until_millis = Some(lease_until_millis);
     }
 
-    pub fn mark_failed(&mut self, next_attempt_millis: Option<u64>) {
+    pub fn mark_published(&mut self) {
+        self.status = OutboxStatus::Published;
+        self.next_attempt_millis = None;
+        self.lease_until_millis = None;
+        self.last_error = None;
+    }
+
+    pub fn mark_failed(&mut self, error: impl Into<String>, next_attempt_millis: Option<u64>) {
         self.status = OutboxStatus::Failed;
         self.attempts = self.attempts.saturating_add(1);
         self.next_attempt_millis = next_attempt_millis;
+        self.lease_until_millis = None;
+        self.last_error = Some(error.into());
     }
+}
+
+#[async_trait]
+pub trait OutboxStore: std::fmt::Debug + Send + Sync + 'static {
+    async fn enqueue(&self, message: OutboxMessage) -> Result<bool>;
+    async fn get(&self, id: &str) -> Result<Option<OutboxMessage>>;
+    async fn claim_pending(
+        &self,
+        now_millis: u64,
+        limit: usize,
+        lease_until_millis: u64,
+    ) -> Result<Vec<OutboxMessage>>;
+    async fn mark_published(&self, id: &str) -> Result<()>;
+    async fn mark_failed(
+        &self,
+        id: &str,
+        error: &str,
+        next_attempt_millis: Option<u64>,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+pub trait TransactionalOutbox<Tx>: Send + Sync
+where
+    Tx: Send,
+{
+    async fn enqueue_in_transaction(
+        &self,
+        transaction: &mut Tx,
+        messages: &[OutboxMessage],
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -210,41 +257,62 @@ impl InMemoryOutbox {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn enqueue(&self, message: OutboxMessage) -> bool {
-        self.messages
+#[async_trait]
+impl OutboxStore for InMemoryOutbox {
+    async fn enqueue(&self, message: OutboxMessage) -> Result<bool> {
+        Ok(self
+            .messages
             .lock()
             .expect("outbox lock poisoned")
             .insert(message.id.clone(), message)
-            .is_none()
+            .is_none())
     }
 
-    pub fn get(&self, id: &str) -> Option<OutboxMessage> {
-        self.messages
+    async fn get(&self, id: &str) -> Result<Option<OutboxMessage>> {
+        Ok(self
+            .messages
             .lock()
             .expect("outbox lock poisoned")
             .get(id)
-            .cloned()
+            .cloned())
     }
 
-    pub fn pending(&self, now_millis: u64, limit: usize) -> Vec<OutboxMessage> {
-        self.messages
-            .lock()
-            .expect("outbox lock poisoned")
-            .values()
-            .filter(|message| {
-                matches!(message.status, OutboxStatus::Pending | OutboxStatus::Failed)
-                    && message
-                        .next_attempt_millis
-                        .map(|next| next <= now_millis)
-                        .unwrap_or(true)
-            })
-            .take(limit.max(1))
-            .cloned()
-            .collect()
+    async fn claim_pending(
+        &self,
+        now_millis: u64,
+        limit: usize,
+        lease_until_millis: u64,
+    ) -> Result<Vec<OutboxMessage>> {
+        let mut messages = self.messages.lock().expect("outbox lock poisoned");
+        let mut claimed = Vec::new();
+        for message in messages.values_mut() {
+            let retry_ready = message
+                .next_attempt_millis
+                .map(|next| next <= now_millis)
+                .unwrap_or(true);
+            let lease_expired = message
+                .lease_until_millis
+                .map(|lease| lease <= now_millis)
+                .unwrap_or(true);
+            let claimable = match message.status {
+                OutboxStatus::Pending | OutboxStatus::Failed => retry_ready,
+                OutboxStatus::Publishing => lease_expired,
+                OutboxStatus::Published => false,
+            };
+            if claimable {
+                message.mark_publishing(lease_until_millis);
+                claimed.push(message.clone());
+                if claimed.len() >= limit.max(1) {
+                    break;
+                }
+            }
+        }
+        Ok(claimed)
     }
 
-    pub fn mark_published(&self, id: &str) {
+    async fn mark_published(&self, id: &str) -> Result<()> {
         if let Some(message) = self
             .messages
             .lock()
@@ -253,17 +321,24 @@ impl InMemoryOutbox {
         {
             message.mark_published();
         }
+        Ok(())
     }
 
-    pub fn mark_failed(&self, id: &str, next_attempt_millis: Option<u64>) {
+    async fn mark_failed(
+        &self,
+        id: &str,
+        error: &str,
+        next_attempt_millis: Option<u64>,
+    ) -> Result<()> {
         if let Some(message) = self
             .messages
             .lock()
             .expect("outbox lock poisoned")
             .get_mut(id)
         {
-            message.mark_failed(next_attempt_millis);
+            message.mark_failed(error, next_attempt_millis);
         }
+        Ok(())
     }
 }
 
@@ -273,36 +348,63 @@ pub struct OutboxRelayReport {
     pub failed: usize,
 }
 
-pub async fn relay_outbox_batch<P>(
-    outbox: &InMemoryOutbox,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxRelayConfig {
+    pub limit: usize,
+    pub lease_millis: u64,
+    pub initial_backoff_millis: u64,
+    pub max_backoff_millis: u64,
+}
+
+impl Default for OutboxRelayConfig {
+    fn default() -> Self {
+        Self {
+            limit: 100,
+            lease_millis: 30_000,
+            initial_backoff_millis: 1_000,
+            max_backoff_millis: 60_000,
+        }
+    }
+}
+
+pub async fn relay_outbox_batch<S, P>(
+    outbox: &S,
     publisher: &P,
     now_millis: u64,
-    limit: usize,
-) -> OutboxRelayReport
+    config: OutboxRelayConfig,
+) -> Result<OutboxRelayReport>
 where
+    S: OutboxStore + ?Sized,
     P: roze_mq::Publisher,
 {
     let mut report = OutboxRelayReport::default();
-    for message in outbox.pending(now_millis, limit) {
+    let lease_until = now_millis.saturating_add(config.lease_millis);
+    for message in outbox
+        .claim_pending(now_millis, config.limit, lease_until)
+        .await?
+    {
         match publisher.publish(message.to_mq_message()).await {
             Ok(()) => {
-                outbox.mark_published(&message.id);
+                outbox.mark_published(&message.id).await?;
                 report.published += 1;
             }
-            Err(_) => {
-                outbox.mark_failed(
-                    &message.id,
-                    Some(next_attempt_millis(now_millis, message.attempts)),
-                );
+            Err(error) => {
+                let next_attempt = next_attempt_millis(now_millis, message.attempts, config);
+                outbox
+                    .mark_failed(&message.id, &error.to_string(), Some(next_attempt))
+                    .await?;
                 report.failed += 1;
             }
         }
     }
-    report
+    Ok(report)
 }
 
-fn next_attempt_millis(now_millis: u64, attempts: u32) -> u64 {
-    let delay = 1_000u64.saturating_mul(2u64.saturating_pow(attempts.min(6)));
+fn next_attempt_millis(now_millis: u64, attempts: u32, config: OutboxRelayConfig) -> u64 {
+    let delay = config
+        .initial_backoff_millis
+        .saturating_mul(2u64.saturating_pow(attempts.min(6)))
+        .min(config.max_backoff_millis);
     now_millis.saturating_add(delay)
 }
 
@@ -585,18 +687,20 @@ mod tests {
     }
 
     #[test]
-    fn outbox_tracks_status_and_attempts() {
+    fn outbox_tracks_status_attempts_and_errors() {
         let mut message = OutboxMessage::new(
             "1",
             "orders",
             "order-created-1",
             serde_json::json!({"id": 1}),
         );
-        message.mark_failed(Some(42));
+        message.mark_failed("broker timeout", Some(42));
         assert_eq!(message.status, OutboxStatus::Failed);
         assert_eq!(message.attempts, 1);
+        assert_eq!(message.last_error.as_deref(), Some("broker timeout"));
         message.mark_published();
         assert_eq!(message.status, OutboxStatus::Published);
+        assert!(message.last_error.is_none());
     }
 
     #[tokio::test]
@@ -608,20 +712,38 @@ mod tests {
             roze_context::Context::background_with_request_id_and_trace_id("request-1", "trace-1")
                 .with_locale("zh-CN");
 
-        outbox.enqueue(OutboxMessage::with_context(
-            &ctx,
-            "msg-1",
-            "orders",
-            "order-1",
-            serde_json::json!({"id": 1}),
-        ));
+        outbox
+            .enqueue(OutboxMessage::with_context(
+                &ctx,
+                "msg-1",
+                "orders",
+                "order-1",
+                serde_json::json!({"id": 1}),
+            ))
+            .await
+            .expect("enqueue");
 
-        let report = relay_outbox_batch(&outbox, &broker, 1, 10).await;
+        let report = relay_outbox_batch(
+            &outbox,
+            &broker,
+            1,
+            OutboxRelayConfig {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("relay");
         let delivered = rx.recv().await.expect("delivery");
 
         assert_eq!(report.published, 1);
         assert_eq!(
-            outbox.get("msg-1").expect("message").status,
+            outbox
+                .get("msg-1")
+                .await
+                .expect("get")
+                .expect("message")
+                .status,
             OutboxStatus::Published
         );
         assert_eq!(
@@ -633,6 +755,38 @@ mod tests {
             delivered.message().context().locale().as_deref(),
             Some("zh-CN")
         );
+    }
+
+    #[tokio::test]
+    async fn outbox_claim_lease_prevents_parallel_delivery_and_recovers() {
+        let outbox = InMemoryOutbox::new();
+        outbox
+            .enqueue(OutboxMessage::new(
+                "msg-1",
+                "orders",
+                "order-1",
+                serde_json::json!({"id": 1}),
+            ))
+            .await
+            .expect("enqueue");
+
+        let first = outbox
+            .claim_pending(100, 10, 200)
+            .await
+            .expect("first claim");
+        let concurrent = outbox
+            .claim_pending(150, 10, 250)
+            .await
+            .expect("concurrent claim");
+        let recovered = outbox
+            .claim_pending(200, 10, 300)
+            .await
+            .expect("recovered claim");
+
+        assert_eq!(first.len(), 1);
+        assert!(concurrent.is_empty());
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].lease_until_millis, Some(300));
     }
 
     #[test]

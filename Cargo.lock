@@ -4212,6 +4212,7 @@ name = "roze-transaction"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "roze-context",
  "roze-mq",
  "serde",
