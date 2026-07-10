@@ -1,5 +1,7 @@
 use std::{
+    collections::BTreeMap,
     sync::OnceLock,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -422,6 +424,61 @@ pub fn idempotency_key_from_headers<'a>(
         .map(|(_, value)| value.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum IdempotencyDecision {
+    Execute,
+    Replay(serde_json::Value),
+    InFlight,
+}
+
+#[derive(Debug, Clone)]
+enum IdempotencyState {
+    InFlight,
+    Completed(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryIdempotencyStore {
+    states: Arc<Mutex<BTreeMap<String, IdempotencyState>>>,
+}
+
+impl InMemoryIdempotencyStore {
+    pub fn begin(&self, scope: impl AsRef<str>, key: impl AsRef<str>) -> IdempotencyDecision {
+        let key = format!("{}:{}", scope.as_ref(), key.as_ref());
+        let mut states = self.states.lock().expect("idempotency lock poisoned");
+        match states.get(&key) {
+            Some(IdempotencyState::Completed(value)) => IdempotencyDecision::Replay(value.clone()),
+            Some(IdempotencyState::InFlight) => IdempotencyDecision::InFlight,
+            None => {
+                states.insert(key, IdempotencyState::InFlight);
+                IdempotencyDecision::Execute
+            }
+        }
+    }
+
+    pub fn complete(
+        &self,
+        scope: impl AsRef<str>,
+        key: impl AsRef<str>,
+        response: serde_json::Value,
+    ) {
+        self.states
+            .lock()
+            .expect("idempotency lock poisoned")
+            .insert(
+                format!("{}:{}", scope.as_ref(), key.as_ref()),
+                IdempotencyState::Completed(response),
+            );
+    }
+
+    pub fn fail(&self, scope: impl AsRef<str>, key: impl AsRef<str>) {
+        self.states
+            .lock()
+            .expect("idempotency lock poisoned")
+            .remove(&format!("{}:{}", scope.as_ref(), key.as_ref()));
+    }
+}
+
 pub type RateLimitConfig = roze_resilience::RateLimitConfig;
 
 #[cfg(test)]
@@ -446,6 +503,34 @@ mod tests {
         let plan = resolve_middleware_plan(&["auth".into(), "audit".into()]);
         assert_eq!(plan.builtins, vec![BuiltInMiddleware::Auth]);
         assert_eq!(plan.custom, vec!["audit"]);
+    }
+
+    #[test]
+    fn idempotency_store_replays_completed_requests_and_releases_failures() {
+        let store = InMemoryIdempotencyStore::default();
+        assert_eq!(
+            store.begin("create-order", "key-1"),
+            IdempotencyDecision::Execute
+        );
+        assert_eq!(
+            store.begin("create-order", "key-1"),
+            IdempotencyDecision::InFlight
+        );
+        store.complete("create-order", "key-1", serde_json::json!({"id": 1}));
+        assert_eq!(
+            store.begin("create-order", "key-1"),
+            IdempotencyDecision::Replay(serde_json::json!({"id": 1}))
+        );
+
+        assert_eq!(
+            store.begin("create-order", "key-2"),
+            IdempotencyDecision::Execute
+        );
+        store.fail("create-order", "key-2");
+        assert_eq!(
+            store.begin("create-order", "key-2"),
+            IdempotencyDecision::Execute
+        );
     }
 
     #[test]

@@ -14,9 +14,8 @@ roze-resilience = { path = "../roze-resilience" }
 roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
 tokio.workspace = true
+serde_json.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-serde_json.workspace = true
