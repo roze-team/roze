@@ -142,14 +142,95 @@ pub struct PresignedUrl {
     pub headers: BTreeMap<String, String>,
 }
 
+pub type FileMetadata = ObjectInfo;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadPolicy {
+    pub max_size_bytes: usize,
+    #[serde(default)]
+    pub allowed_mime_types: Vec<String>,
+}
+
+impl Default for UploadPolicy {
+    fn default() -> Self {
+        Self {
+            max_size_bytes: default_max_size_bytes(),
+            allowed_mime_types: default_allowed_image_mimes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadToken {
+    pub key: String,
+    pub expires_at_millis: u64,
+    pub max_size_bytes: usize,
+    pub allowed_mime_types: Vec<String>,
+    pub upload: PresignedUrl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaUrl {
+    pub key: String,
+    pub url: String,
+    pub expires_at_millis: Option<u64>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
 #[async_trait]
-pub trait ObjectStorage: Send + Sync + 'static {
+pub trait ObjectStorage: std::fmt::Debug + Send + Sync + 'static {
     async fn put_object(&self, request: PutObjectRequest) -> anyhow::Result<ObjectInfo>;
     async fn get_object(&self, key: &str) -> anyhow::Result<Vec<u8>>;
     async fn delete_object(&self, key: &str) -> anyhow::Result<()>;
     async fn stat_object(&self, key: &str) -> anyhow::Result<Option<ObjectInfo>>;
     async fn presign_put(&self, key: &str, expires: Duration) -> anyhow::Result<PresignedUrl>;
     async fn presign_get(&self, key: &str, expires: Duration) -> anyhow::Result<PresignedUrl>;
+}
+
+pub async fn issue_upload_token(
+    storage: &dyn ObjectStorage,
+    key: &str,
+    expires: Duration,
+    policy: UploadPolicy,
+) -> anyhow::Result<UploadToken> {
+    if policy.max_size_bytes == 0 {
+        anyhow::bail!("upload max_size_bytes must be greater than zero");
+    }
+    let key = normalize_object_key(key)?;
+    let upload = storage.presign_put(&key, expires).await?;
+    Ok(UploadToken {
+        key,
+        expires_at_millis: upload.expires_at_millis,
+        max_size_bytes: policy.max_size_bytes,
+        allowed_mime_types: policy.allowed_mime_types,
+        upload,
+    })
+}
+
+pub async fn resolve_media_url(
+    storage: &dyn ObjectStorage,
+    key: &str,
+    expires: Duration,
+) -> anyhow::Result<MediaUrl> {
+    let key = normalize_object_key(key)?;
+    if let Some(info) = storage.stat_object(&key).await? {
+        if let Some(url) = info.url {
+            return Ok(MediaUrl {
+                key,
+                url,
+                expires_at_millis: None,
+                headers: BTreeMap::new(),
+            });
+        }
+    }
+    let signed = storage.presign_get(&key, expires).await?;
+    Ok(MediaUrl {
+        key,
+        url: signed.url,
+        expires_at_millis: Some(signed.expires_at_millis),
+        headers: signed.headers,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -564,5 +645,44 @@ mod tests {
                 .map(String::as_str),
             Some("AliyunOss")
         );
+    }
+
+    #[tokio::test]
+    async fn upload_tokens_and_media_urls_use_storage_contract() {
+        let root =
+            std::env::temp_dir().join(format!("roze-storage-token-{}", uuid::Uuid::now_v7()));
+        let storage = LocalObjectStorage::new(StorageConfig {
+            provider: StorageProvider::Local,
+            bucket: "test".to_string(),
+            root: root.clone(),
+            public_base_url: Some("http://localhost/files".to_string()),
+            ..Default::default()
+        });
+
+        let token = issue_upload_token(
+            &storage,
+            "avatars/a.png",
+            Duration::from_secs(60),
+            UploadPolicy::default(),
+        )
+        .await
+        .expect("upload token");
+        assert_eq!(token.key, "avatars/a.png");
+        assert_eq!(token.upload.method, "PUT");
+
+        storage
+            .put_object(PutObjectRequest::image(
+                "avatars/a.png",
+                vec![1, 2, 3],
+                "image/png",
+            ))
+            .await
+            .expect("put");
+        let media = resolve_media_url(&storage, "avatars/a.png", Duration::from_secs(60))
+            .await
+            .expect("media url");
+        assert_eq!(media.url, "http://localhost/files/avatars/a.png");
+        assert!(media.expires_at_millis.is_none());
+        let _ = fs::remove_dir_all(root);
     }
 }

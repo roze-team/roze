@@ -467,6 +467,20 @@ let batch = roze_query::QueryComposer::new(roze_query::QueryCompositionConfig {
 .await?;
 ```
 
+## Object storage integration
+
+Generated REST and RPC `ServiceContext` values expose an optional
+`Arc<dyn roze_storage::ObjectStorage>`. Local storage is constructed from
+`config.storage`; cloud/provider implementations can be injected with
+`with_storage` without changing generated handlers or RPC adapters.
+
+`issue_upload_token` returns a normalized key, expiration, upload policy, and
+provider presigned request. `FileMetadata` is the stable metadata contract for
+stored objects. `resolve_media_url`, also exposed as `ServiceContext::media_url`,
+uses a public object URL when available and otherwise returns a time-bounded
+provider URL plus required headers. Application logic therefore stores object
+keys and metadata rather than constructing provider URLs itself.
+
 New generated REST, RPC, and stream worker entrypoints run under
 `roze_service::ServiceGroup`. When shutdown starts, generated REST/RPC lifecycle
 tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops

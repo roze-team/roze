@@ -18,7 +18,7 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 19] = [
+const REST_ROZE_CRATES: [&str; 20] = [
     "roze-config",
     "roze-error",
     "roze-health",
@@ -35,12 +35,13 @@ const REST_ROZE_CRATES: [&str; 19] = [
     "roze-query",
     "roze-result",
     "roze-service",
+    "roze-storage",
     "roze-transaction",
     "roze-validation",
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 20] = [
+const RPC_ROZE_CRATES: [&str; 21] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -58,6 +59,7 @@ const RPC_ROZE_CRATES: [&str; 20] = [
     "roze-query",
     "roze-rpc",
     "roze-service",
+    "roze-storage",
     "roze-trace",
     "roze-transaction",
     "roze-validation",
@@ -10006,6 +10008,7 @@ pub struct ServiceContext {
     pub health: roze_health::HealthRegistry,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
+    pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
@@ -10028,6 +10031,10 @@ impl ServiceContext {
             Some(nats) => Some(Arc::new(roze_nats::NatsJetStream::connect(nats.clone()).await?)),
             None => None,
         };
+        let storage = match config.storage.clone() {
+            Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
+            None => None,
+        };
         if cache.is_some() {
             health.register_static(roze_health::HealthCheck::healthy("redis"));
         }
@@ -10040,6 +10047,7 @@ impl ServiceContext {
             health,
             cache,
             mq,
+            storage,
             outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
             idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
         })
@@ -10059,6 +10067,28 @@ impl ServiceContext {
     ) -> Self {
         self.idempotency = idempotency;
         self
+    }
+
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn roze_storage::ObjectStorage>,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    pub fn storage(&self) -> anyhow::Result<Arc<dyn roze_storage::ObjectStorage>> {
+        self.storage
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("object storage is not configured"))
+    }
+
+    pub async fn media_url(
+        &self,
+        key: &str,
+        expires: std::time::Duration,
+    ) -> anyhow::Result<roze_storage::MediaUrl> {
+        roze_storage::resolve_media_url(self.storage()?.as_ref(), key, expires).await
     }
 
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
@@ -10112,6 +10142,7 @@ pub struct ServiceContext {
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
+    pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
@@ -10136,6 +10167,10 @@ impl ServiceContext {
             Some(nats) => Some(Arc::new(roze_nats::NatsJetStream::connect(nats.clone()).await?)),
             None => None,
         };
+        let storage = match config.storage.clone() {
+            Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
+            None => None,
+        };
         if db_connections.is_some() {
             health.register_static(roze_health::HealthCheck::healthy("database"));
         }
@@ -10156,6 +10191,7 @@ impl ServiceContext {
             mongo,
             cache,
             mq,
+            storage,
             outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
             idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
         })
@@ -10175,6 +10211,28 @@ impl ServiceContext {
     ) -> Self {
         self.idempotency = idempotency;
         self
+    }
+
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn roze_storage::ObjectStorage>,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    pub fn storage(&self) -> anyhow::Result<Arc<dyn roze_storage::ObjectStorage>> {
+        self.storage
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("object storage is not configured"))
+    }
+
+    pub async fn media_url(
+        &self,
+        key: &str,
+        expires: std::time::Duration,
+    ) -> anyhow::Result<roze_storage::MediaUrl> {
+        roze_storage::resolve_media_url(self.storage()?.as_ref(), key, expires).await
     }
 
     pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
@@ -10415,6 +10473,9 @@ mod tests {
             assert!(rendered.contains("Arc::new(roze_transaction::InMemoryOutbox::new())"));
             assert!(rendered.contains("Arc<dyn roze_middleware::IdempotencyStore>"));
             assert!(rendered.contains("pub fn with_idempotency_store"));
+            assert!(rendered.contains("Arc<dyn roze_storage::ObjectStorage>"));
+            assert!(rendered.contains("pub fn with_storage"));
+            assert!(rendered.contains("pub async fn media_url"));
         }
     }
 
