@@ -3,7 +3,6 @@ use std::{
     error::Error,
     future::{ready, Future, Ready},
     net::SocketAddr,
-    pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
@@ -11,15 +10,47 @@ use std::{
 use bytes::Bytes;
 use http::{header, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
-use hyper::{server::conn::http1, service::service_fn};
+use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use roze_service::{RuntimeService, ServiceFuture};
 use serde::Serialize;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{net::TcpListener, task::JoinSet};
 use tower::{Service, ServiceExt};
 use tracing::info;
 
-pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
+#[derive(Debug)]
+pub struct BoxError(Box<dyn Error + Send + Sync + 'static>);
+
+impl BoxError {
+    pub fn new(error: impl Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(error))
+    }
+}
+
+impl AsRef<dyn Error + Send + Sync + 'static> for BoxError {
+    fn as_ref(&self) -> &(dyn Error + Send + Sync + 'static) {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Display for BoxError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Error for BoxError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl From<Infallible> for BoxError {
+    fn from(never: Infallible) -> Self {
+        match never {}
+    }
+}
+
 pub type Body = BoxBody<Bytes, BoxError>;
 pub type IncomingRequest = Request<Body>;
 pub type HttpResponse = Response<Body>;
@@ -117,31 +148,30 @@ async fn serve_router_service(
     let addr = server.config.addr;
     info!(addr = %addr, "REST server listening");
 
-    let mut listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await?;
     let router = server.make_service.service;
+    let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             _ = wait_for_shutdown_flag(shutdown.clone()) => break,
-            accepted = accept_owned(listener) => {
-                let (next_listener, (stream, _peer_addr)) = accepted?;
-                listener = next_listener;
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    tracing::debug!(error = %error, "HTTP connection task failed");
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _peer_addr) = accepted?;
                 let io = TokioIo::new(stream);
-                let service = router.clone();
-                let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                    let mut service = service.clone();
-                    async move {
-                        let request: IncomingRequest = request.map(|body| {
-                            body.map_err(|error| -> BoxError { Box::new(error) }).boxed()
-                        });
-                        service.call(request).await
+                let service = TowerToHyperService::new(router.clone());
+                connections.spawn(async move {
+                    if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+                        tracing::debug!(error = %error, "HTTP connection closed with error");
                     }
                 });
-                if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
-                    tracing::debug!(error = %error, "HTTP connection closed with error");
-                }
             }
         }
     }
+    drain_connections(&mut connections, server.config.graceful_shutdown_timeout).await;
     Ok(())
 }
 
@@ -219,6 +249,7 @@ where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
         + Clone
         + Send
+        + Sync
         + 'static,
     S::Future: Send + 'static,
 {
@@ -233,15 +264,20 @@ where
         let addr = self.config.addr;
         info!(addr = %addr, "REST server listening");
 
-        let mut listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr).await?;
         let mut make_service = self.make_service.clone();
+        let mut connections = JoinSet::new();
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
-                accepted = accept_owned(listener) => {
-                    let (next_listener, (stream, peer_addr)) = accepted?;
-                    listener = next_listener;
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = joined {
+                        tracing::debug!(error = %error, "HTTP connection task failed");
+                    }
+                }
+                accepted = listener.accept() => {
+                    let (stream, peer_addr) = accepted?;
                     let io = TokioIo::new(stream);
                     let service = make_service
                         .ready()
@@ -249,56 +285,60 @@ where
                         .expect("infallible make service")
                         .call(peer_addr)
                         .await
-                        .expect("infallible make service")
-                        .boxed_clone();
-                    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                        let service = service.clone();
-                        async move {
-                            let request: IncomingRequest = request.map(|body| {
-                                body.map_err(|error| -> BoxError { Box::new(error) }).boxed()
-                            });
-                            service.oneshot(request).await
+                        .expect("infallible make service");
+                    let service = TowerToHyperService::new(service);
+                    connections.spawn(async move {
+                        if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+                            tracing::debug!(error = %error, "HTTP connection closed with error");
                         }
                     });
-                    if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
-                        tracing::debug!(error = %error, "HTTP connection closed with error");
-                    }
                 }
             }
         }
+        drain_connections(&mut connections, self.config.graceful_shutdown_timeout).await;
         Ok(())
     }
 }
 
-fn accept_owned(listener: TcpListener) -> AcceptOwned {
-    AcceptOwned {
-        listener: Some(listener),
+#[derive(Clone)]
+struct TowerToHyperService<S> {
+    inner: S,
+}
+
+impl<S> TowerToHyperService<S> {
+    fn new(inner: S) -> Self {
+        Self { inner }
     }
 }
 
-struct AcceptOwned {
-    listener: Option<TcpListener>,
+impl<S> hyper::service::Service<Request<hyper::body::Incoming>> for TowerToHyperService<S>
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = HttpResponse;
+    type Error = Infallible;
+    type Future = S::Future;
+
+    fn call(&self, request: Request<hyper::body::Incoming>) -> Self::Future {
+        let mut service = self.inner.clone();
+        let request: IncomingRequest = request.map(|body| body.map_err(BoxError::new).boxed());
+        service.call(request)
+    }
 }
 
-impl Future for AcceptOwned {
-    type Output = std::io::Result<(TcpListener, (TcpStream, SocketAddr))>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let listener = this
-            .listener
-            .as_ref()
-            .expect("listener is available while polling accept");
-        match listener.poll_accept(cx) {
-            Poll::Ready(result) => {
-                let listener = this
-                    .listener
-                    .take()
-                    .expect("listener is available after polling accept");
-                Poll::Ready(result.map(|accepted| (listener, accepted)))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+async fn drain_connections(connections: &mut JoinSet<()>, timeout: Duration) {
+    if tokio::time::timeout(timeout, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
     }
 }
 

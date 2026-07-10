@@ -17,3 +17,4 @@ reqwest.workspace = true
 roze-sqlx = { path = "../../crates/roze-sqlx" }
 roze-middleware = { path = "../../crates/roze-middleware" }
 serde_json.workspace = true
+regex.workspace = true

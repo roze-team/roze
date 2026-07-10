@@ -54,6 +54,21 @@ startup, stores the cloneable client in a framework-owned field, registers an
 `<name>()` accessor. Client channels are owned by the service context and are
 dropped through the normal service shutdown lifecycle.
 
+## Retry Backoff And Deadlines
+
+Generated RPC clients pass the inbound `roze_context::Context` into the shared
+retry executor. Retryable failures use exponential full-jitter backoff: attempt
+`n` samples a delay from zero through
+`min(backoff_ms * 2^(n-1), max_backoff_ms)`. The retry budget is isolated by
+service and method.
+
+Before sleeping, the executor rejects a retry when its sampled delay would
+consume the remaining deadline. It checks cancellation before and after the
+sleep, and `roze_resilience_decisions_total` records `attempt` only immediately
+before a real retry call. Budget exhaustion, deadline exhaustion, and
+cancellation use the bounded decisions `budget_exhausted`,
+`deadline_exhausted`, and `cancelled`.
+
 For an existing service, declare both surfaces before running `--update`:
 
 ```toml

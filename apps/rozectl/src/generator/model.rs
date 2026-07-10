@@ -83,20 +83,40 @@ pub struct ModelEdge {
     pub target: String,
     pub field: String,
     pub ref_field: String,
+    pub inverse_ref: Option<String>,
+    pub inverse_field_optional: bool,
+    pub through: Option<ModelThroughEdge>,
     pub unique: bool,
     pub required: bool,
+    pub immutable: bool,
     pub storage_column: Option<String>,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelThroughEdge {
+    pub name: String,
+    pub model: String,
+    pub source_field: String,
+    pub source_ref_field: String,
+    pub source_field_optional: bool,
+    pub target_field: String,
+    pub target_ref_field: String,
+    pub target_field_optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelField {
     pub name: String,
     pub source_name: Option<String>,
+    pub json_name: Option<String>,
+    pub json_omit_empty: bool,
     pub ty: String,
     pub auto_increment: bool,
     pub immutable: bool,
     pub sensitive: bool,
+    pub deprecated: Option<String>,
+    pub required_on_create: bool,
     pub validation: ModelFieldValidation,
     pub update_default: Option<String>,
     pub client_default_value: Option<String>,
@@ -109,6 +129,8 @@ pub struct ModelFieldValidation {
     pub not_empty: bool,
     pub min_len: Option<usize>,
     pub max_len: Option<usize>,
+    pub min_byte_len: Option<usize>,
+    pub max_byte_len: Option<usize>,
     pub enum_values: Vec<String>,
     pub contains: Option<String>,
     pub starts_with: Option<String>,
@@ -116,6 +138,7 @@ pub struct ModelFieldValidation {
     pub not_contains: Option<String>,
     pub not_starts_with: Option<String>,
     pub not_ends_with: Option<String>,
+    pub match_pattern: Option<String>,
     pub positive: bool,
     pub non_negative: bool,
     pub negative: bool,
@@ -202,6 +225,12 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             if let Some(source_name) = &field.source_name {
                 writeln!(out, "    source {}", quote_ent_string(source_name)).unwrap();
             }
+            if let Some(json_name) = &field.json_name {
+                writeln!(out, "    json_name {}", quote_ent_string(json_name)).unwrap();
+            }
+            if field.json_omit_empty {
+                writeln!(out, "    json_omit_empty").unwrap();
+            }
             if field.auto_increment {
                 writeln!(out, "    auto_increment").unwrap();
             }
@@ -211,6 +240,16 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             if field.sensitive {
                 writeln!(out, "    sensitive").unwrap();
             }
+            if let Some(reason) = &field.deprecated {
+                if reason.is_empty() {
+                    writeln!(out, "    deprecated").unwrap();
+                } else {
+                    writeln!(out, "    deprecated {}", quote_ent_string(reason)).unwrap();
+                }
+            }
+            if field.required_on_create {
+                writeln!(out, "    required_on_create").unwrap();
+            }
             if field.validation.not_empty {
                 writeln!(out, "    not_empty").unwrap();
             }
@@ -219,6 +258,12 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             }
             if let Some(max_len) = field.validation.max_len {
                 writeln!(out, "    max_len {max_len}").unwrap();
+            }
+            if let Some(min_byte_len) = field.validation.min_byte_len {
+                writeln!(out, "    min_byte_len {min_byte_len}").unwrap();
+            }
+            if let Some(max_byte_len) = field.validation.max_byte_len {
+                writeln!(out, "    max_byte_len {max_byte_len}").unwrap();
             }
             if let Some(min) = &field.validation.min {
                 writeln!(out, "    min {min}").unwrap();
@@ -253,6 +298,9 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
             }
             if let Some(value) = &field.validation.not_ends_with {
                 writeln!(out, "    not_ends_with {}", quote_ent_string(value)).unwrap();
+            }
+            if let Some(value) = &field.validation.match_pattern {
+                writeln!(out, "    match {}", quote_ent_string(value)).unwrap();
             }
             if field.validation.positive {
                 writeln!(out, "    positive").unwrap();
@@ -315,15 +363,39 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
         }
 
         for edge in &model.edges {
-            writeln!(out, "  edge {} {{", edge.name).unwrap();
-            writeln!(out, "    to {}", to_pascal_case(&edge.target)).unwrap();
-            writeln!(out, "    field {}", edge.field).unwrap();
-            writeln!(out, "    ref {}", edge.ref_field).unwrap();
+            if let Some(through) = &edge.through {
+                writeln!(
+                    out,
+                    "  edge To({}, {}.Type).Through({}, {}.Type) {{",
+                    quote_ent_string(&edge.name),
+                    to_pascal_case(&edge.target),
+                    quote_ent_string(&through.name),
+                    to_pascal_case(&through.model)
+                )
+                .unwrap();
+            } else if let Some(inverse_ref) = &edge.inverse_ref {
+                writeln!(
+                    out,
+                    "  edge From({}, {}.Type).Ref({}) {{",
+                    quote_ent_string(&edge.name),
+                    to_pascal_case(&edge.target),
+                    quote_ent_string(inverse_ref)
+                )
+                .unwrap();
+            } else {
+                writeln!(out, "  edge {} {{", edge.name).unwrap();
+                writeln!(out, "    to {}", to_pascal_case(&edge.target)).unwrap();
+                writeln!(out, "    field {}", edge.field).unwrap();
+                writeln!(out, "    ref {}", edge.ref_field).unwrap();
+            }
             if edge.unique {
                 writeln!(out, "    unique").unwrap();
             }
             if edge.required {
                 writeln!(out, "    required").unwrap();
+            }
+            if edge.immutable {
+                writeln!(out, "    immutable").unwrap();
             }
             if let Some(comment) = &edge.comment {
                 writeln!(out, "    comment {}", quote_ent_string(comment)).unwrap();
@@ -607,10 +679,14 @@ fn mongo_field_from_samples(key: &str, documents: &[Document]) -> ModelField {
     ModelField {
         name: mongo_rust_field_name(key),
         source_name: Some(key.to_string()).filter(|source| source != "_id"),
+        json_name: None,
+        json_omit_empty: false,
         ty,
         auto_increment: false,
         immutable: false,
         sensitive: false,
+        deprecated: None,
+        required_on_create: false,
         validation: ModelFieldValidation::default(),
         update_default: None,
         client_default_value: None,
@@ -731,6 +807,7 @@ fn write_model_project(
         orm,
         models_need_rust_decimal(models),
         models_need_uuid(models),
+        models_need_regex(models),
     )?;
     update_model_service_context(out)?;
     if orm == ModelOrm::Toasty {
@@ -797,6 +874,7 @@ fn update_model_dependencies(
     orm: ModelOrm,
     needs_rust_decimal: bool,
     needs_uuid: bool,
+    needs_regex: bool,
 ) -> anyhow::Result<()> {
     let manifest_path = out.join("Cargo.toml");
     if !manifest_path.is_file() {
@@ -888,6 +966,14 @@ fn update_model_dependencies(
         };
         dependencies.insert("uuid", item);
     }
+    if needs_regex && !dependencies.contains_key("regex") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            r#""1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
+        };
+        dependencies.insert("regex", item);
+    }
     fs::write(&manifest_path, document.to_string())
         .with_context(|| format!("failed to write {}", manifest_path.display()))
 }
@@ -910,6 +996,15 @@ fn models_need_uuid(models: &[ModelSpec]) -> bool {
                     Some("uuid_new_string")
                 )
         })
+    })
+}
+
+fn models_need_regex(models: &[ModelSpec]) -> bool {
+    models.iter().any(|model| {
+        model
+            .fields
+            .iter()
+            .any(|field| field.validation.match_pattern.is_some())
     })
 }
 
@@ -1420,6 +1515,36 @@ fn has_sensitive_fields(model: &ModelSpec) -> bool {
     model.fields.iter().any(|field| field.sensitive)
 }
 
+fn has_json_omit_empty_fields(model: &ModelSpec) -> bool {
+    model.fields.iter().any(|field| field.json_omit_empty)
+}
+
+fn render_serde_default_helper(out: &mut String, model: &ModelSpec) {
+    use std::fmt::Write as _;
+
+    if has_json_omit_empty_fields(model) {
+        writeln!(
+            out,
+            "fn is_default<T: Default + PartialEq>(value: &T) -> bool {{ value == &T::default() }}"
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+fn render_deprecated_field_attr(out: &mut String, field: &ModelField) {
+    use std::fmt::Write as _;
+
+    let Some(reason) = &field.deprecated else {
+        return;
+    };
+    if reason.is_empty() {
+        writeln!(out, "    #[deprecated]").unwrap();
+    } else {
+        writeln!(out, "    #[deprecated(note = {reason:?})]").unwrap();
+    }
+}
+
 fn render_debug_impl(out: &mut String, type_name: &str, fields: &[ModelField]) {
     use std::fmt::Write as _;
 
@@ -1485,19 +1610,82 @@ fn render_field_validation_checks(out: &mut String, fields: &[&ModelField], resu
     }
 }
 
-fn render_field_validation_body(out: &mut String, field: &ModelField, result_kind: &str) {
-    let message_prefix = format!("{} validation failed", field.name);
-    let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
-    if field.validation.not_empty {
-        let condition = if validation_ty == "Vec<u8>" {
-            "value.is_empty()"
+fn render_required_edge_checks(
+    out: &mut String,
+    model: &ModelSpec,
+    result_kind: &str,
+    is_create: bool,
+) {
+    for edge in model
+        .edges
+        .iter()
+        .filter(|edge| edge.required && edge.inverse_ref.is_none() && edge.through.is_none())
+    {
+        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+            continue;
+        };
+        if optional_inner_type(&field.ty).is_none()
+            || (!is_create
+                && !updatable_model_fields(model, &model.primary)
+                    .iter()
+                    .any(|candidate| candidate.name == field.name))
+        {
+            continue;
+        }
+        let field_ident = model_field_ident(field);
+        let condition = if is_create {
+            format!("!matches!(self.{field_ident}.as_ref(), Some(Some(_)))")
         } else {
-            "value.trim().is_empty()"
+            format!("matches!(self.{field_ident}.as_ref(), Some(None))")
         };
         render_validation_return(
             out,
             result_kind,
-            condition,
+            &condition,
+            &format!("missing required edge `{}`", edge.name),
+        );
+    }
+}
+
+fn render_required_field_checks(
+    out: &mut String,
+    model: &ModelSpec,
+    result_kind: &str,
+    is_create: bool,
+) {
+    for field in model.fields.iter().filter(|field| field.required_on_create) {
+        if optional_inner_type(&field.ty).is_none()
+            || (!is_create
+                && !updatable_model_fields(model, &model.primary)
+                    .iter()
+                    .any(|candidate| candidate.name == field.name))
+        {
+            continue;
+        }
+        let field_ident = model_field_ident(field);
+        let has_default = create_default_value_expr(field).is_some();
+        let condition = if is_create && !has_default {
+            format!("!matches!(self.{field_ident}.as_ref(), Some(Some(_)))")
+        } else {
+            format!("matches!(self.{field_ident}.as_ref(), Some(None))")
+        };
+        render_validation_return(
+            out,
+            result_kind,
+            &condition,
+            &format!("required field `{}` cannot be null", field.name),
+        );
+    }
+}
+
+fn render_field_validation_body(out: &mut String, field: &ModelField, result_kind: &str) {
+    let message_prefix = format!("{} validation failed", field.name);
+    let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
+    if field.validation.not_empty {
+        render_validation_return(
+            out,
+            result_kind,
+            "value.is_empty()",
             &format!("{message_prefix}: must not be empty"),
         );
     }
@@ -1525,6 +1713,22 @@ fn render_field_validation_body(out: &mut String, field: &ModelField, result_kin
             result_kind,
             &format!("{len_expr} > {max_len}"),
             &format!("{message_prefix}: length must be at most {max_len}"),
+        );
+    }
+    if let Some(min_byte_len) = field.validation.min_byte_len {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.len() < {min_byte_len}"),
+            &format!("{message_prefix}: byte length must be at least {min_byte_len}"),
+        );
+    }
+    if let Some(max_byte_len) = field.validation.max_byte_len {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!("value.len() > {max_byte_len}"),
+            &format!("{message_prefix}: byte length must be at most {max_byte_len}"),
         );
     }
     if !field.validation.enum_values.is_empty() {
@@ -1588,6 +1792,16 @@ fn render_field_validation_body(out: &mut String, field: &ModelField, result_kin
             result_kind,
             &format!("value.ends_with({not_ends_with:?})"),
             &format!("{message_prefix}: must not end with forbidden suffix"),
+        );
+    }
+    if let Some(pattern) = &field.validation.match_pattern {
+        render_validation_return(
+            out,
+            result_kind,
+            &format!(
+                "!regex::Regex::new({pattern:?}).expect(\"validated model regex\").is_match(value)"
+            ),
+            &format!("{message_prefix}: value does not match required pattern"),
         );
     }
     if field.validation.positive {
@@ -1931,7 +2145,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     use std::fmt::Write as _;
 
     writeln!(&mut out, "{MODEL_GENERATED_MARKER}").unwrap();
-    writeln!(&mut out, "#![allow(dead_code, unused_imports)]").unwrap();
+    writeln!(&mut out, "#![allow(dead_code, unused_imports, deprecated)]").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use std::time::Duration;").unwrap();
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
@@ -1944,6 +2158,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use crate::svc::ServiceContext;").unwrap();
     writeln!(&mut out).unwrap();
+    render_serde_default_helper(&mut out, model);
     let derive_eq = model_supports_eq(model);
     match (has_sensitive_fields(model), derive_eq) {
         (true, true) => writeln!(
@@ -2005,6 +2220,23 @@ fn render_model_module(model: &ModelSpec) -> String {
                 default_value.replace('\n', " ")
             )
             .unwrap();
+        }
+        render_deprecated_field_attr(&mut out, field);
+        if field.sensitive || field.json_name.as_deref() == Some("-") {
+            writeln!(&mut out, "    #[serde(skip)]").unwrap();
+        } else {
+            if let Some(json_name) = &field.json_name {
+                if json_name != &field.name {
+                    writeln!(&mut out, "    #[serde(rename = {json_name:?})]").unwrap();
+                }
+            }
+            if field.json_omit_empty {
+                writeln!(
+                    &mut out,
+                    "    #[serde(skip_serializing_if = \"is_default\")]"
+                )
+                .unwrap();
+            }
         }
         writeln!(
             &mut out,
@@ -2847,22 +3079,83 @@ fn render_sea_orm_edge_methods(out: &mut String, model: &ModelSpec) {
 
     writeln!(out, "impl Model {{").unwrap();
     for edge in &model.edges {
-        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+        if let Some(through) = &edge.through {
+            let Some(source_ref) = model
+                .fields
+                .iter()
+                .find(|field| field.name == through.source_ref_field)
+            else {
+                continue;
+            };
+            let method = edge_query_method_name(edge);
+            let target_pascal = to_pascal_case(&edge.target);
+            let target_module = to_snake_case(&edge.target);
+            let through_pascal = to_pascal_case(&through.model);
+            let through_module = to_snake_case(&through.model);
+            let source_eq = predicate_helper_name_by_name(&through.source_field, "eq");
+            let projection = projection_method_name(&through.target_field);
+            let target_in = predicate_helper_name_by_name(&through.target_ref_field, "in");
+            let result_ty = if edge.unique {
+                format!("Option<crate::model::{target_pascal}Model>")
+            } else {
+                format!("Vec<crate::model::{target_pascal}Model>")
+            };
+            writeln!(out, "    pub async fn {method}(&self, through_repo: &crate::model::{through_pascal}Repository<'_>, repo: &crate::model::{target_pascal}Repository<'_>) -> anyhow::Result<{result_ty}> {{").unwrap();
+            render_edge_value_binding(out, source_ref);
+            writeln!(out, "        let values = through_repo.query().where_(crate::model::{through_module}::{source_eq}(value)).{projection}().await?;").unwrap();
+            if through.target_field_optional {
+                writeln!(
+                    out,
+                    "        let values = values.into_iter().flatten().collect::<Vec<_>>();"
+                )
+                .unwrap();
+            }
+            let execute = if edge.unique { "first" } else { "all" };
+            writeln!(out, "        repo.query().where_(crate::model::{target_module}::{target_in}(values)).{execute}().await").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
+        let source_field_name = if edge.inverse_ref.is_some() {
+            &edge.ref_field
+        } else {
+            &edge.field
+        };
+        let Some(field) = model
+            .fields
+            .iter()
+            .find(|field| field.name == *source_field_name)
+        else {
             continue;
         };
         let method = edge_query_method_name(edge);
         let target_pascal = to_pascal_case(&edge.target);
         let target_module = to_snake_case(&edge.target);
-        let ref_helper = predicate_helper_name_by_name(&edge.ref_field, "eq");
+        let target_field_name = if edge.inverse_ref.is_some() {
+            &edge.field
+        } else {
+            &edge.ref_field
+        };
+        let ref_helper = predicate_helper_name_by_name(target_field_name, "eq");
+        let result_ty = if edge.inverse_ref.is_some() && !edge.unique {
+            format!("Vec<crate::model::{target_pascal}Model>")
+        } else {
+            format!("Option<crate::model::{target_pascal}Model>")
+        };
         writeln!(
             out,
-            "    pub async fn {method}(&self, repo: &crate::model::{target_pascal}Repository<'_>) -> anyhow::Result<Option<crate::model::{target_pascal}Model>> {{"
+            "    pub async fn {method}(&self, repo: &crate::model::{target_pascal}Repository<'_>) -> anyhow::Result<{result_ty}> {{"
         )
         .unwrap();
         render_edge_value_binding(out, field);
+        let execute = if edge.inverse_ref.is_some() && !edge.unique {
+            "all"
+        } else {
+            "first"
+        };
         writeln!(
             out,
-            "        repo.query().where_(crate::model::{target_module}::{ref_helper}(value)).first().await"
+            "        repo.query().where_(crate::model::{target_module}::{ref_helper}(value)).{execute}().await"
         )
         .unwrap();
         writeln!(out, "    }}").unwrap();
@@ -2941,6 +3234,8 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
         .iter()
         .filter(|field| !field.auto_increment)
         .collect::<Vec<_>>();
+    render_required_field_checks(out, model, "anyhow", true);
+    render_required_edge_checks(out, model, "anyhow", true);
     render_field_validation_checks(out, &validation_fields, "anyhow");
     writeln!(out, "        let db = self.repo.write_db()?;").unwrap();
     writeln!(out, "        let active = ActiveModel {{").unwrap();
@@ -3007,11 +3302,16 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
 fn render_sea_orm_edge_builder_setters(out: &mut String, model: &ModelSpec, is_create: bool) {
     use std::fmt::Write as _;
 
-    for edge in &model.edges {
+    for edge in model
+        .edges
+        .iter()
+        .filter(|edge| edge.inverse_ref.is_none() && edge.through.is_none())
+    {
         let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
             continue;
         };
-        if field.auto_increment || (!is_create && (field.name == model.primary || field.immutable))
+        if field.auto_increment
+            || (!is_create && (field.name == model.primary || field.immutable || edge.immutable))
         {
             continue;
         }
@@ -3120,15 +3420,24 @@ fn render_sea_orm_update_builder(
     )
     .unwrap();
     let validation_fields = updatable_model_fields(model, primary);
+    render_required_field_checks(out, model, "anyhow", false);
+    render_required_edge_checks(out, model, "anyhow", false);
     render_field_validation_checks(out, &validation_fields, "anyhow");
     writeln!(out, "        let db = self.repo.write_db()?;").unwrap();
-    writeln!(out, "        let mut active = ActiveModel {{").unwrap();
+    let active_binding = if validation_fields.is_empty() {
+        "active"
+    } else {
+        "mut active"
+    };
+    writeln!(out, "        let {active_binding} = ActiveModel {{").unwrap();
     writeln!(
         out,
         "            {primary_ident}: Set(self.{primary_ident}),"
     )
     .unwrap();
-    writeln!(out, "            ..std::default::Default::default()").unwrap();
+    if !validation_fields.is_empty() {
+        writeln!(out, "            ..std::default::Default::default()").unwrap();
+    }
     writeln!(out, "        }};").unwrap();
     for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
@@ -3266,6 +3575,8 @@ fn render_sea_orm_update_many_builder(
     )
     .unwrap();
     let validation_fields = updatable_model_fields(model, primary);
+    render_required_field_checks(out, model, "anyhow", false);
+    render_required_edge_checks(out, model, "anyhow", false);
     render_field_validation_checks(out, &validation_fields, "anyhow");
     writeln!(out, "        let mut query = self.repo.query();").unwrap();
     writeln!(
@@ -3281,9 +3592,14 @@ fn render_sea_orm_update_many_builder(
     .unwrap();
     writeln!(out, "        for item in items {{").unwrap();
     let primary_value = sea_orm_reusable_value_expr(primary_ty, &format!("item.{primary_ident}"));
+    let update_binding = if validation_fields.is_empty() {
+        "update"
+    } else {
+        "mut update"
+    };
     writeln!(
         out,
-        "            let mut update = self.repo.update_one({primary_value});"
+        "            let {update_binding} = self.repo.update_one({primary_value});"
     )
     .unwrap();
     for field in updatable_model_fields(model, primary) {
@@ -3522,6 +3838,7 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_sea_orm_edge_query_filters(out, model);
     writeln!(
         out,
         "    pub fn order(mut self, order: {pascal}Order) -> Self {{"
@@ -4478,7 +4795,16 @@ fn updatable_model_fields<'a>(model: &'a ModelSpec, primary: &str) -> Vec<&'a Mo
     model
         .fields
         .iter()
-        .filter(|field| field.name != primary && !field.immutable)
+        .filter(|field| {
+            field.name != primary
+                && !field.immutable
+                && !model.edges.iter().any(|edge| {
+                    edge.inverse_ref.is_none()
+                        && edge.through.is_none()
+                        && edge.immutable
+                        && edge.field == field.name
+                })
+        })
         .collect()
 }
 
@@ -4529,6 +4855,206 @@ fn edge_query_method_name(edge: &ModelEdge) -> String {
     rust_identifier(&format!("query_{}", edge.name))
 }
 
+fn edge_where_with_method_name(edge: &ModelEdge) -> String {
+    rust_identifier(&format!("where_{}_with", edge.name))
+}
+
+fn projection_method_name(field_name: &str) -> String {
+    rust_identifier(&format!("pluck_{field_name}"))
+}
+
+fn render_sea_orm_edge_query_filters(out: &mut String, model: &ModelSpec) {
+    use std::fmt::Write as _;
+
+    for edge in &model.edges {
+        if let Some(through) = &edge.through {
+            let Some(source_ref) = model
+                .fields
+                .iter()
+                .find(|field| field.name == through.source_ref_field)
+            else {
+                continue;
+            };
+            let method = edge_where_with_method_name(edge);
+            let target_pascal = to_pascal_case(&edge.target);
+            let through_pascal = to_pascal_case(&through.model);
+            let through_module = to_snake_case(&through.model);
+            let target_projection = projection_method_name(&through.target_ref_field);
+            let through_target_in = predicate_helper_name_by_name(&through.target_field, "in");
+            let source_projection = projection_method_name(&through.source_field);
+            let source_in = predicate_helper_name(source_ref, "in");
+            writeln!(out, "    pub async fn {method}<I>(self, repo: &crate::model::{target_pascal}Repository<'_>, through_repo: &crate::model::{through_pascal}Repository<'_>, predicates: I) -> anyhow::Result<Self>").unwrap();
+            writeln!(out, "    where").unwrap();
+            writeln!(
+                out,
+                "        I: IntoIterator<Item = crate::model::{target_pascal}Predicate>,"
+            )
+            .unwrap();
+            writeln!(out, "    {{").unwrap();
+            writeln!(out, "        let target_values = repo.query().where_all(predicates).{target_projection}().await?;").unwrap();
+            writeln!(out, "        let values = through_repo.query().where_(crate::model::{through_module}::{through_target_in}(target_values)).{source_projection}().await?;").unwrap();
+            if through.source_field_optional {
+                writeln!(
+                    out,
+                    "        let values = values.into_iter().flatten().collect::<Vec<_>>();"
+                )
+                .unwrap();
+            }
+            writeln!(out, "        Ok(self.where_({source_in}(values)))").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
+        let source_field_name = if edge.inverse_ref.is_some() {
+            &edge.ref_field
+        } else {
+            &edge.field
+        };
+        let Some(field) = model
+            .fields
+            .iter()
+            .find(|field| field.name == *source_field_name)
+        else {
+            continue;
+        };
+        let method = edge_where_with_method_name(edge);
+        let target_pascal = to_pascal_case(&edge.target);
+        let projection_field = if edge.inverse_ref.is_some() {
+            &edge.field
+        } else {
+            &edge.ref_field
+        };
+        let projection = projection_method_name(projection_field);
+        let local_in = predicate_helper_name(field, "in");
+        writeln!(
+            out,
+            "    pub async fn {method}<I>(self, repo: &crate::model::{target_pascal}Repository<'_>, predicates: I) -> anyhow::Result<Self>"
+        )
+        .unwrap();
+        writeln!(out, "    where").unwrap();
+        writeln!(
+            out,
+            "        I: IntoIterator<Item = crate::model::{target_pascal}Predicate>,"
+        )
+        .unwrap();
+        writeln!(out, "    {{").unwrap();
+        writeln!(
+            out,
+            "        let values = repo.query().where_all(predicates).{projection}().await?;"
+        )
+        .unwrap();
+        if edge.inverse_ref.is_some() && edge.inverse_field_optional {
+            writeln!(
+                out,
+                "        let values = values.into_iter().flatten().collect::<Vec<_>>();"
+            )
+            .unwrap();
+        }
+        writeln!(out, "        Ok(self.where_({local_in}(values)))").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+fn render_toasty_edge_query_filters(out: &mut String, model: &ModelSpec) {
+    use std::fmt::Write as _;
+
+    for edge in &model.edges {
+        if let Some(through) = &edge.through {
+            let Some(source_ref) = model
+                .fields
+                .iter()
+                .find(|field| field.name == through.source_ref_field)
+            else {
+                continue;
+            };
+            let method = edge_where_with_method_name(edge);
+            let target_pascal = to_pascal_case(&edge.target);
+            let through_pascal = to_pascal_case(&through.model);
+            let through_module = to_snake_case(&through.model);
+            let target_projection = projection_method_name(&through.target_ref_field);
+            let through_target_in = predicate_helper_name_by_name(&through.target_field, "in");
+            let source_projection = projection_method_name(&through.source_field);
+            let source_in = predicate_helper_name(source_ref, "in");
+            writeln!(
+                out,
+                "    pub async fn {method}<I>(mut self, predicates: I) -> toasty::Result<Self>"
+            )
+            .unwrap();
+            writeln!(out, "    where").unwrap();
+            writeln!(
+                out,
+                "        I: IntoIterator<Item = crate::model::{target_pascal}Predicate>,"
+            )
+            .unwrap();
+            writeln!(out, "    {{").unwrap();
+            writeln!(out, "        let target_values = crate::model::{target_pascal}Repository::query(&mut *self.db).where_all(predicates).{target_projection}().await?;").unwrap();
+            writeln!(out, "        let values = crate::model::{through_pascal}Repository::query(&mut *self.db).where_(crate::model::{through_module}::{through_target_in}(target_values)).{source_projection}().await?;").unwrap();
+            if through.source_field_optional {
+                writeln!(
+                    out,
+                    "        let values = values.into_iter().flatten().collect::<Vec<_>>();"
+                )
+                .unwrap();
+            }
+            writeln!(out, "        self.predicates.push({source_in}(values));").unwrap();
+            writeln!(out, "        Ok(self)").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
+        let source_field_name = if edge.inverse_ref.is_some() {
+            &edge.ref_field
+        } else {
+            &edge.field
+        };
+        let Some(field) = model
+            .fields
+            .iter()
+            .find(|field| field.name == *source_field_name)
+        else {
+            continue;
+        };
+        let method = edge_where_with_method_name(edge);
+        let target_pascal = to_pascal_case(&edge.target);
+        let projection_field = if edge.inverse_ref.is_some() {
+            &edge.field
+        } else {
+            &edge.ref_field
+        };
+        let projection = projection_method_name(projection_field);
+        let local_in = predicate_helper_name(field, "in");
+        writeln!(
+            out,
+            "    pub async fn {method}<I>(mut self, predicates: I) -> toasty::Result<Self>"
+        )
+        .unwrap();
+        writeln!(out, "    where").unwrap();
+        writeln!(
+            out,
+            "        I: IntoIterator<Item = crate::model::{target_pascal}Predicate>,"
+        )
+        .unwrap();
+        writeln!(out, "    {{").unwrap();
+        writeln!(
+            out,
+            "        let values = crate::model::{target_pascal}Repository::query(&mut *self.db).where_all(predicates).{projection}().await?;"
+        )
+        .unwrap();
+        if edge.inverse_ref.is_some() && edge.inverse_field_optional {
+            writeln!(
+                out,
+                "        let values = values.into_iter().flatten().collect::<Vec<_>>();"
+            )
+            .unwrap();
+        }
+        writeln!(out, "        self.predicates.push({local_in}(values));").unwrap();
+        writeln!(out, "        Ok(self)").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
 fn render_edge_value_binding(out: &mut String, field: &ModelField) {
     use std::fmt::Write as _;
 
@@ -4571,7 +5097,7 @@ where
     use std::fmt::Write as _;
 
     for field in fields {
-        if optional_inner_type(&field.ty).is_none() {
+        if optional_inner_type(&field.ty).is_none() || field.required_on_create {
             continue;
         }
         let field_ident = model_field_ident(field);
@@ -4976,22 +5502,83 @@ fn render_toasty_edge_methods(out: &mut String, model: &ModelSpec, pascal: &str)
 
     writeln!(out, "impl {pascal} {{").unwrap();
     for edge in &model.edges {
-        let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
+        if let Some(through) = &edge.through {
+            let Some(source_ref) = model
+                .fields
+                .iter()
+                .find(|field| field.name == through.source_ref_field)
+            else {
+                continue;
+            };
+            let method = edge_query_method_name(edge);
+            let target_pascal = to_pascal_case(&edge.target);
+            let target_module = to_snake_case(&edge.target);
+            let through_pascal = to_pascal_case(&through.model);
+            let through_module = to_snake_case(&through.model);
+            let source_eq = predicate_helper_name_by_name(&through.source_field, "eq");
+            let projection = projection_method_name(&through.target_field);
+            let target_in = predicate_helper_name_by_name(&through.target_ref_field, "in");
+            let result_ty = if edge.unique {
+                format!("Option<crate::model::{target_pascal}>")
+            } else {
+                format!("Vec<crate::model::{target_pascal}>")
+            };
+            writeln!(out, "    pub async fn {method}(&self, db: &mut dyn toasty::Executor) -> toasty::Result<{result_ty}> {{").unwrap();
+            render_edge_value_binding(out, source_ref);
+            writeln!(out, "        let values = crate::model::{through_pascal}Repository::query(&mut *db).where_(crate::model::{through_module}::{source_eq}(value)).{projection}().await?;").unwrap();
+            if through.target_field_optional {
+                writeln!(
+                    out,
+                    "        let values = values.into_iter().flatten().collect::<Vec<_>>();"
+                )
+                .unwrap();
+            }
+            let execute = if edge.unique { "first" } else { "all" };
+            writeln!(out, "        crate::model::{target_pascal}Repository::query(&mut *db).where_(crate::model::{target_module}::{target_in}(values)).{execute}().await").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+            continue;
+        }
+        let source_field_name = if edge.inverse_ref.is_some() {
+            &edge.ref_field
+        } else {
+            &edge.field
+        };
+        let Some(field) = model
+            .fields
+            .iter()
+            .find(|field| field.name == *source_field_name)
+        else {
             continue;
         };
         let method = edge_query_method_name(edge);
         let target_pascal = to_pascal_case(&edge.target);
         let target_module = to_snake_case(&edge.target);
-        let ref_helper = predicate_helper_name_by_name(&edge.ref_field, "eq");
+        let target_field_name = if edge.inverse_ref.is_some() {
+            &edge.field
+        } else {
+            &edge.ref_field
+        };
+        let ref_helper = predicate_helper_name_by_name(target_field_name, "eq");
+        let result_ty = if edge.inverse_ref.is_some() && !edge.unique {
+            format!("Vec<crate::model::{target_pascal}>")
+        } else {
+            format!("Option<crate::model::{target_pascal}>")
+        };
         writeln!(
             out,
-            "    pub async fn {method}(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Option<crate::model::{target_pascal}>> {{"
+            "    pub async fn {method}(&self, db: &mut dyn toasty::Executor) -> toasty::Result<{result_ty}> {{"
         )
         .unwrap();
         render_edge_value_binding(out, field);
+        let execute = if edge.inverse_ref.is_some() && !edge.unique {
+            "all"
+        } else {
+            "first"
+        };
         writeln!(
             out,
-            "        crate::model::{target_pascal}Repository::query(db).where_(crate::model::{target_module}::{ref_helper}(value)).first().await"
+            "        crate::model::{target_pascal}Repository::query(db).where_(crate::model::{target_module}::{ref_helper}(value)).{execute}().await"
         )
         .unwrap();
         writeln!(out, "    }}").unwrap();
@@ -5164,7 +5751,11 @@ fn render_toasty_predicate_helpers(out: &mut String, model: &ModelSpec, pascal: 
         "pub fn not(predicate: {pascal}Predicate) -> {pascal}Predicate {{ {pascal}Predicate::Not(Box::new(predicate)) }}"
     )
     .unwrap();
-    for edge in &model.edges {
+    for edge in model
+        .edges
+        .iter()
+        .filter(|edge| edge.inverse_ref.is_none() && edge.through.is_none())
+    {
         let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
             continue;
         };
@@ -5286,6 +5877,8 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
         .iter()
         .filter(|field| !field.auto_increment)
         .collect::<Vec<_>>();
+    render_required_field_checks(out, model, "toasty", true);
+    render_required_edge_checks(out, model, "toasty", true);
     render_field_validation_checks(out, &validation_fields, "toasty");
     writeln!(out, "        let mut create = {pascal}::create();").unwrap();
     for field in model.fields.iter().filter(|field| !field.auto_increment) {
@@ -5340,11 +5933,16 @@ fn render_toasty_create_builder(out: &mut String, model: &ModelSpec, pascal: &st
 fn render_toasty_edge_builder_setters(out: &mut String, model: &ModelSpec, is_create: bool) {
     use std::fmt::Write as _;
 
-    for edge in &model.edges {
+    for edge in model
+        .edges
+        .iter()
+        .filter(|edge| edge.inverse_ref.is_none() && edge.through.is_none())
+    {
         let Some(field) = model.fields.iter().find(|field| field.name == edge.field) else {
             continue;
         };
-        if field.auto_increment || (!is_create && (field.name == model.primary || field.immutable))
+        if field.auto_increment
+            || (!is_create && (field.name == model.primary || field.immutable || edge.immutable))
         {
             continue;
         }
@@ -5453,10 +6051,17 @@ fn render_toasty_update_builder(
     )
     .unwrap();
     let validation_fields = updatable_model_fields(model, primary);
+    render_required_field_checks(out, model, "toasty", false);
+    render_required_edge_checks(out, model, "toasty", false);
     render_field_validation_checks(out, &validation_fields, "toasty");
+    let model_binding = if validation_fields.is_empty() {
+        "model"
+    } else {
+        "mut model"
+    };
     writeln!(
         out,
-        "        let mut model = {pascal}::get_by_{primary}(self.db, &self.{primary_ident}).await?;"
+        "        let {model_binding} = {pascal}::get_by_{primary}(self.db, &self.{primary_ident}).await?;"
     )
     .unwrap();
     for field in updatable_model_fields(model, primary) {
@@ -5587,6 +6192,8 @@ fn render_toasty_update_many_builder(
     )
     .unwrap();
     let validation_fields = updatable_model_fields(model, primary);
+    render_required_field_checks(out, model, "toasty", false);
+    render_required_edge_checks(out, model, "toasty", false);
     render_field_validation_checks(out, &validation_fields, "toasty");
     writeln!(out, "        let items = {{").unwrap();
     writeln!(
@@ -5606,7 +6213,12 @@ fn render_toasty_update_many_builder(
         "        let mut updated = Vec::with_capacity(items.len());"
     )
     .unwrap();
-    writeln!(out, "        for mut model in items {{").unwrap();
+    let model_binding = if validation_fields.is_empty() {
+        "model"
+    } else {
+        "mut model"
+    };
+    writeln!(out, "        for {model_binding} in items {{").unwrap();
     for field in updatable_model_fields(model, primary) {
         let field_ident = model_field_ident(field);
         let value_expr = update_slot_value_from_ref(field, "value");
@@ -5801,6 +6413,7 @@ fn render_toasty_query_builder_impl(out: &mut String, model: &ModelSpec, pascal:
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    render_toasty_edge_query_filters(out, model);
     writeln!(
         out,
         "    pub fn order(mut self, order: {pascal}Order) -> Self {{"
@@ -6602,10 +7215,11 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     use std::fmt::Write as _;
 
     writeln!(&mut out, "{MODEL_GENERATED_MARKER}").unwrap();
-    writeln!(&mut out, "#![allow(dead_code, unused_imports)]").unwrap();
+    writeln!(&mut out, "#![allow(dead_code, unused_imports, deprecated)]").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
     writeln!(&mut out).unwrap();
+    render_serde_default_helper(&mut out, model);
     if has_sensitive_fields(model) {
         writeln!(
             &mut out,
@@ -6650,6 +7264,23 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
                 default_value.replace('\n', " ")
             )
             .unwrap();
+        }
+        render_deprecated_field_attr(&mut out, field);
+        if field.sensitive || field.json_name.as_deref() == Some("-") {
+            writeln!(&mut out, "    #[serde(skip)]").unwrap();
+        } else {
+            if let Some(json_name) = &field.json_name {
+                if json_name != &field.name {
+                    writeln!(&mut out, "    #[serde(rename = {json_name:?})]").unwrap();
+                }
+            }
+            if field.json_omit_empty {
+                writeln!(
+                    &mut out,
+                    "    #[serde(skip_serializing_if = \"is_default\")]"
+                )
+                .unwrap();
+            }
         }
         writeln!(
             &mut out,
@@ -8107,10 +8738,14 @@ fn build_inspected_model(
         fields.push(ModelField {
             name: column.name,
             source_name: None,
+            json_name: None,
+            json_omit_empty: false,
             ty,
             auto_increment: column.auto_increment,
             immutable: false,
             sensitive: false,
+            deprecated: None,
+            required_on_create: false,
             validation: ModelFieldValidation::default(),
             update_default: None,
             client_default_value: None,
@@ -8177,7 +8812,10 @@ fn normalize_edge_unique_cache_keys(
     edges: &[ModelEdge],
     fields: &[ModelField],
 ) {
-    for edge in edges.iter().filter(|edge| edge.unique) {
+    for edge in edges
+        .iter()
+        .filter(|edge| edge.unique && edge.inverse_ref.is_none() && edge.through.is_none())
+    {
         if cache_keys.iter().any(|key| key == &edge.field) {
             continue;
         }
@@ -8257,7 +8895,10 @@ fn validate_and_normalize_indexes(
 
 fn normalize_edge_unique_indexes(indexes: &mut Vec<ModelIndex>, edges: &[ModelEdge]) {
     let mut edge_indexes = Vec::new();
-    for edge in edges.iter().filter(|edge| edge.unique) {
+    for edge in edges
+        .iter()
+        .filter(|edge| edge.unique && edge.inverse_ref.is_none() && edge.through.is_none())
+    {
         if indexes
             .iter()
             .chain(edge_indexes.iter())
@@ -8365,6 +9006,14 @@ fn validate_model_spec(model: ModelSpec) -> anyhow::Result<ModelSpec> {
 
 fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
     for field in &model.fields {
+        if field.required_on_create && optional_inner_type(&field.ty).is_none() {
+            bail!(
+                "model `{}` field `{}` required_on_create requires an optional/nillable type, got `{}`",
+                model.name,
+                field.name,
+                field.ty
+            );
+        }
         validate_model_field_default(model, field)?;
         validate_model_field_update_default(model, field)?;
         validate_model_field_client_default(model, field)?;
@@ -8373,14 +9022,17 @@ fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
         }
         let has_length_validation = field.validation.not_empty
             || field.validation.min_len.is_some()
-            || field.validation.max_len.is_some();
+            || field.validation.max_len.is_some()
+            || field.validation.min_byte_len.is_some()
+            || field.validation.max_byte_len.is_some();
         let has_string_validation = !field.validation.enum_values.is_empty()
             || field.validation.contains.is_some()
             || field.validation.starts_with.is_some()
             || field.validation.ends_with.is_some()
             || field.validation.not_contains.is_some()
             || field.validation.not_starts_with.is_some()
-            || field.validation.not_ends_with.is_some();
+            || field.validation.not_ends_with.is_some()
+            || field.validation.match_pattern.is_some();
         let validation_ty = optional_inner_type(&field.ty).unwrap_or(field.ty.as_str());
         if has_length_validation && !matches!(validation_ty, "String" | "Vec<u8>") {
             bail!(
@@ -8448,6 +9100,17 @@ fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
             if min_len > max_len {
                 bail!(
                     "model `{}` field `{}` min_len {min_len} exceeds max_len {max_len}",
+                    model.name,
+                    model_field_source_label(field)
+                );
+            }
+        }
+        if let (Some(min_len), Some(max_len)) =
+            (field.validation.min_byte_len, field.validation.max_byte_len)
+        {
+            if min_len > max_len {
+                bail!(
+                    "model `{}` field `{}` min_byte_len {min_len} exceeds max_byte_len {max_len}",
                     model.name,
                     model_field_source_label(field)
                 );
@@ -8740,13 +9403,15 @@ fn validate_model_generated_names(model: &ModelSpec) -> anyhow::Result<()> {
                 edge.name
             );
         }
-        let setter = create_setter_name_by_name(&edge.name);
-        if field_setters.contains(&setter) {
-            bail!(
-                "model `{}` edge `{}` generates field setter conflict `{setter}`",
-                model.name,
-                edge.name
-            );
+        if edge.inverse_ref.is_none() && edge.through.is_none() {
+            let setter = create_setter_name_by_name(&edge.name);
+            if field_setters.contains(&setter) {
+                bail!(
+                    "model `{}` edge `{}` generates field setter conflict `{setter}`",
+                    model.name,
+                    edge.name
+                );
+            }
         }
     }
 
@@ -8758,12 +9423,6 @@ fn validate_edges(
     model_indexes: &HashMap<String, &ModelSpec>,
 ) -> anyhow::Result<()> {
     for edge in &model.edges {
-        validate_model_field(&model.name, "edge", &edge.field, &model.fields)?;
-        let field = model
-            .fields
-            .iter()
-            .find(|field| field.name == edge.field)
-            .expect("edge field validated");
         let target_name = to_pascal_case(&edge.target);
         let target = model_indexes.get(&target_name).ok_or_else(|| {
             anyhow::anyhow!(
@@ -8773,6 +9432,85 @@ fn validate_edges(
                 edge.target
             )
         })?;
+        if let Some(through) = &edge.through {
+            validate_model_field(
+                &model.name,
+                "through source ref",
+                &through.source_ref_field,
+                &model.fields,
+            )?;
+            validate_model_field(
+                &target.name,
+                "through target ref",
+                &through.target_ref_field,
+                &target.fields,
+            )?;
+            let join_name = to_pascal_case(&through.model);
+            let join = model_indexes.get(&join_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{}` through edge `{}` join model `{}` not found",
+                    model.name,
+                    edge.name,
+                    through.model
+                )
+            })?;
+            validate_model_field(
+                &join.name,
+                "through source field",
+                &through.source_field,
+                &join.fields,
+            )?;
+            validate_model_field(
+                &join.name,
+                "through target field",
+                &through.target_field,
+                &join.fields,
+            )?;
+            continue;
+        }
+        if edge.inverse_ref.is_some() {
+            validate_model_field(
+                &model.name,
+                "inverse edge ref",
+                &edge.ref_field,
+                &model.fields,
+            )?;
+            validate_model_field(
+                &target.name,
+                "inverse edge field",
+                &edge.field,
+                &target.fields,
+            )?;
+            let source_ref = model
+                .fields
+                .iter()
+                .find(|field| field.name == edge.ref_field)
+                .expect("inverse source ref validated");
+            let target_field = target
+                .fields
+                .iter()
+                .find(|field| field.name == edge.field)
+                .expect("inverse target field validated");
+            let target_ty = edge_storage_type(target_field);
+            if target_ty != source_ref.ty {
+                bail!(
+                    "model `{}` inverse edge `{}` target field `{}` type `{}` does not match source ref `{}` type `{}`",
+                    model.name,
+                    edge.name,
+                    edge.field,
+                    target_ty,
+                    edge.ref_field,
+                    source_ref.ty
+                );
+            }
+            continue;
+        }
+        validate_model_field(&model.name, "edge", &edge.field, &model.fields)?;
+        let field = model
+            .fields
+            .iter()
+            .find(|field| field.name == edge.field)
+            .expect("edge field validated");
         validate_model_field(&target.name, "edge ref", &edge.ref_field, &target.fields)?;
         let ref_field = target
             .fields
@@ -9271,7 +10009,137 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         bail!("no entity declarations found");
     }
 
+    resolve_through_edges(&mut models)?;
+    resolve_inverse_edges(&mut models)?;
     validate_model_specs(models)
+}
+
+fn resolve_through_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
+    let snapshot = models.to_vec();
+    for model in models {
+        for edge in &mut model.edges {
+            let Some(through) = edge.through.as_mut() else {
+                continue;
+            };
+            if edge.inverse_ref.is_some() || !through.source_field.is_empty() {
+                continue;
+            }
+            let target_name = to_pascal_case(&edge.target);
+            if target_name == model.name {
+                bail!(
+                    "model `{}` through edge `{}` self-reference is ambiguous; model the two join directions as explicit edges",
+                    model.name,
+                    edge.name
+                );
+            }
+            let through_name = to_pascal_case(&through.model);
+            let join = snapshot
+                .iter()
+                .find(|candidate| candidate.name == through_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model `{}` through edge `{}` join model `{}` not found",
+                        model.name,
+                        edge.name,
+                        through.model
+                    )
+                })?;
+            let find_join_edge = |target: &str| {
+                let matches = join
+                    .edges
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.inverse_ref.is_none()
+                            && candidate.through.is_none()
+                            && to_pascal_case(&candidate.target) == target
+                    })
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [candidate] => Ok(*candidate),
+                    [] => bail!(
+                        "join model `{}` has no owning edge to `{target}` for through edge `{}.{}`",
+                        join.name,
+                        model.name,
+                        edge.name
+                    ),
+                    _ => bail!(
+                        "join model `{}` has multiple owning edges to `{target}` for through edge `{}.{}`",
+                        join.name,
+                        model.name,
+                        edge.name
+                    ),
+                }
+            };
+            let source_edge = find_join_edge(&model.name)?;
+            let target_edge = find_join_edge(&target_name)?;
+            let source_field = join
+                .fields
+                .iter()
+                .find(|field| field.name == source_edge.field)
+                .expect("join source field validated later");
+            let target_field = join
+                .fields
+                .iter()
+                .find(|field| field.name == target_edge.field)
+                .expect("join target field validated later");
+            through.source_field = source_edge.field.clone();
+            through.source_ref_field = source_edge.ref_field.clone();
+            through.source_field_optional = is_optional_type(&source_field.ty);
+            through.target_field = target_edge.field.clone();
+            through.target_ref_field = target_edge.ref_field.clone();
+            through.target_field_optional = is_optional_type(&target_field.ty);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_inverse_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
+    let snapshot = models.to_vec();
+    for model in models {
+        for edge in &mut model.edges {
+            let Some(inverse_ref) = edge.inverse_ref.as_deref() else {
+                continue;
+            };
+            let target_name = to_pascal_case(&edge.target);
+            let target = snapshot
+                .iter()
+                .find(|candidate| candidate.name == target_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model `{}` inverse edge `{}` target `{}` not found",
+                        model.name,
+                        edge.name,
+                        edge.target
+                    )
+                })?;
+            let owning = target
+                .edges
+                .iter()
+                .find(|candidate| {
+                    candidate.inverse_ref.is_none()
+                        && candidate.name == inverse_ref
+                        && to_pascal_case(&candidate.target) == model.name
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model `{}` inverse edge `{}` ref `{}` does not match an owning edge on `{}`",
+                        model.name,
+                        edge.name,
+                        inverse_ref,
+                        target.name
+                    )
+                })?;
+            let target_field = target
+                .fields
+                .iter()
+                .find(|field| field.name == owning.field)
+                .expect("owning edge field validated later");
+            edge.field = owning.field.clone();
+            edge.ref_field = owning.ref_field.clone();
+            edge.inverse_field_optional = is_optional_type(&target_field.ty);
+        }
+    }
+    Ok(())
 }
 
 fn parse_ent_field(
@@ -9287,6 +10155,8 @@ fn parse_ent_field(
     let (name, mut ty, header_directives) = parse_ent_field_header(value, line_no)?;
     let mut header_directive_index = 0usize;
     let mut source_name = None;
+    let mut json_name = None;
+    let mut json_omit_empty = false;
     let mut auto_increment = false;
     let mut default_value = None;
     let mut comment = None;
@@ -9295,6 +10165,10 @@ fn parse_ent_field(
     let mut indexed = false;
     let mut immutable = false;
     let mut sensitive = false;
+    let mut deprecated = None;
+    let mut saw_optional = false;
+    let mut saw_nillable = false;
+    let mut required_on_create = false;
     let mut validation = ModelFieldValidation::default();
     let mut update_default = None;
     let mut client_default_value = None;
@@ -9317,10 +10191,14 @@ fn parse_ent_field(
                 ModelField {
                     name,
                     source_name,
+                    json_name,
+                    json_omit_empty,
                     ty,
                     auto_increment,
                     immutable,
                     sensitive,
+                    deprecated,
+                    required_on_create: required_on_create || (saw_nillable && !saw_optional),
                     validation,
                     update_default,
                     client_default_value,
@@ -9356,10 +10234,35 @@ fn parse_ent_field(
             sensitive = true;
             continue;
         }
-        if ent_field_flag(&inner, &["optional", "nillable", "nullable"]) {
+        if ent_field_flag(&inner, &["deprecated"]) {
+            deprecated = Some(String::new());
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["deprecated"]) {
+            let reasons = split_ent_comma_items(value)?
+                .into_iter()
+                .filter(|reason| !reason.trim().is_empty())
+                .map(|reason| parse_ent_string_or_ident(reason.trim(), inner_line_no + 1))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            deprecated = Some(reasons.join(" "));
+            continue;
+        }
+        if ent_field_flag(&inner, &["optional", "nullable"]) {
+            saw_optional = true;
             if optional_inner_type(&ty).is_none() {
                 ty = format!("Option<{ty}>");
             }
+            continue;
+        }
+        if ent_field_flag(&inner, &["nillable"]) {
+            saw_nillable = true;
+            if optional_inner_type(&ty).is_none() {
+                ty = format!("Option<{ty}>");
+            }
+            continue;
+        }
+        if ent_field_flag(&inner, &["required_on_create", "requiredoncreate"]) {
+            required_on_create = true;
             continue;
         }
         if ent_field_flag(&inner, &["not_empty", "notempty"]) {
@@ -9382,11 +10285,35 @@ fn parse_ent_field(
             validation.non_positive = true;
             continue;
         }
-        if let Some(value) = ent_field_arg(&inner, &["min_len", "minlen"]) {
+        if let Some(value) = ent_call_arg(&inner, &["minlen"]) {
+            validation.min_byte_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_call_arg(&inner, &["minrunelen"]) {
             validation.min_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if let Some(value) = ent_field_arg(&inner, &["max_len", "maxlen", "size"]) {
+        if let Some(value) = ent_field_arg(&inner, &["min_byte_len", "minbytelen"]) {
+            validation.min_byte_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["min_len"]) {
+            validation.min_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_call_arg(&inner, &["maxlen", "size"]) {
+            validation.max_byte_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_call_arg(&inner, &["maxrunelen"]) {
+            validation.max_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["max_byte_len", "maxbytelen"]) {
+            validation.max_byte_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["max_len"]) {
             validation.max_len = Some(parse_usize(value.trim(), inner_line_no + 1)?);
             continue;
         }
@@ -9447,6 +10374,10 @@ fn parse_ent_field(
                 Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
+        if let Some(value) = ent_field_arg(&inner, &["match"]) {
+            validation.match_pattern = parse_ent_match_pattern(value, inner_line_no + 1)?;
+            continue;
+        }
         if let Some(value) = ent_field_arg(&inner, &["update_default", "updatedefault"]) {
             let value = parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?;
             update_default = Some(normalize_ent_default_value_for_type(&value, &ty));
@@ -9463,6 +10394,22 @@ fn parse_ent_field(
         }
         if let Some(value) = ent_field_arg(&inner, &["storage_key", "storagekey"]) {
             source_name = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["struct_tag", "structtag"]) {
+            let (parsed_name, omit_empty) = parse_ent_struct_tag_json(value, inner_line_no + 1)?;
+            if parsed_name.is_some() {
+                json_name = parsed_name;
+            }
+            json_omit_empty |= omit_empty;
+            continue;
+        }
+        if let Some(value) = ent_field_arg(&inner, &["json_name", "jsonname"]) {
+            json_name = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            continue;
+        }
+        if ent_field_flag(&inner, &["json_omit_empty", "jsonomitempty"]) {
+            json_omit_empty = true;
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["default"]) {
@@ -9485,7 +10432,7 @@ fn parse_ent_field(
             continue;
         }
         bail!(
-            "line {}: expected `primary`, `unique`, `index`, `immutable`, `sensitive`, `optional`, `not_empty`, `positive`, `non_negative`, `negative`, `non_positive`, `min_len`, `max_len`, `min`, `max`, `range`, `enum`, `contains`, `starts_with`, `ends_with`, `not_contains`, `not_starts_with`, `not_ends_with`, `update_default`, `client_default`, `source`, `storage_key`, `auto_increment`, `default`, `default_func`, `comment`, recognized ent metadata directives such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`, `Annotations(...)`, or `}}`",
+            "line {}: expected `primary`, `unique`, `index`, `immutable`, `sensitive`, `deprecated`, `optional`, `nillable`, `required_on_create`, `not_empty`, `positive`, `non_negative`, `negative`, `non_positive`, `min_len`, `max_len`, `min_byte_len`, `max_byte_len`, `min`, `max`, `range`, `enum`, `contains`, `starts_with`, `ends_with`, `not_contains`, `not_starts_with`, `not_ends_with`, `update_default`, `client_default`, `source`, `storage_key`, `auto_increment`, `default`, `default_func`, `comment`, recognized ent metadata directives such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`, `Annotations(...)`, or `}}`",
             inner_line_no + 1
         );
     }
@@ -9506,6 +10453,55 @@ fn parse_ent_max_rune_count_validator(
         bail!("line {line_no}: MaxRuneCount validator must include a length");
     };
     Ok(Some(parse_usize(value.trim(), line_no)?))
+}
+
+fn parse_ent_match_pattern(value: &str, line_no: usize) -> anyhow::Result<Option<String>> {
+    let trimmed = value.trim();
+    let pattern = if trimmed.starts_with('"') {
+        Some(parse_ent_string_or_ident(trimmed, line_no)?)
+    } else if trimmed.contains('(') {
+        let (builder, args, rest) = parse_ent_call_prefix(trimmed, line_no)?;
+        let builder = builder.rsplit('.').next().unwrap_or(builder.as_str());
+        if builder.eq_ignore_ascii_case("mustcompile") && rest.trim().is_empty() {
+            Some(parse_ent_string_or_ident(args.trim(), line_no)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(pattern) = &pattern {
+        regex::Regex::new(pattern)
+            .with_context(|| format!("line {line_no}: invalid Match regex"))?;
+    }
+    Ok(pattern)
+}
+
+fn parse_ent_struct_tag_json(
+    value: &str,
+    line_no: usize,
+) -> anyhow::Result<(Option<String>, bool)> {
+    let trimmed = value.trim();
+    let tag = if let Some(tag) = trimmed
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+    {
+        tag.to_string()
+    } else {
+        parse_ent_string_or_ident(trimmed, line_no)?
+    };
+    let Some(start) = tag.find("json:\"") else {
+        return Ok((None, false));
+    };
+    let rest = &tag[start + "json:\"".len()..];
+    let Some(end) = rest.find('"') else {
+        bail!("line {line_no}: malformed JSON StructTag");
+    };
+    let mut parts = rest[..end].split(',');
+    let name = parts.next().unwrap_or_default();
+    let omit_empty = parts.any(|option| option == "omitempty");
+    let name = (!name.is_empty()).then(|| name.to_string());
+    Ok((name, omit_empty))
 }
 
 fn is_ent_ignored_metadata_directive(value: &str) -> bool {
@@ -9874,7 +10870,9 @@ fn normalize_ent_edge_indexes(indexes: &mut Vec<ModelIndex>, edges: &[ModelEdge]
         let mut fields = Vec::new();
         for field in original_fields {
             if let Some(edge_name) = ent_edge_index_marker_name(&field) {
-                if let Some(edge) = edges.iter().find(|edge| edge.name == edge_name) {
+                if let Some(edge) = edges.iter().find(|edge| {
+                    edge.name == edge_name && edge.inverse_ref.is_none() && edge.through.is_none()
+                }) {
                     fields.push(edge.field.clone());
                 }
             } else {
@@ -9898,7 +10896,10 @@ fn apply_ent_edge_storage_columns(
     fields: &mut [ModelField],
     edges: &[ModelEdge],
 ) -> anyhow::Result<()> {
-    for edge in edges {
+    for edge in edges
+        .iter()
+        .filter(|edge| edge.inverse_ref.is_none() && edge.through.is_none())
+    {
         let Some(storage_column) = edge.storage_column.as_deref() else {
             continue;
         };
@@ -9940,8 +10941,10 @@ fn parse_ent_edge(
     let mut ref_field = None;
     let mut unique = false;
     let mut required = false;
+    let mut immutable = false;
     let mut storage_column = None;
     let mut storage_columns = false;
+    let mut through = None;
     let mut comment = None;
 
     while header_directive_index < header_directives.len() || *i < lines.len() {
@@ -9958,7 +10961,50 @@ fn parse_ent_edge(
             continue;
         }
         if inner == "}" {
-            if inverse && field.is_none() || field.is_none() && ref_field.is_none() {
+            if field.is_none() {
+                if let Some(through) = through {
+                    let Some(target) = target else {
+                        bail!("line {line_no}: through edge `{name}` must declare a target");
+                    };
+                    return Ok(Some(ModelEdge {
+                        name,
+                        target,
+                        field: String::new(),
+                        ref_field: String::new(),
+                        inverse_ref: inverse.then_some(ref_field).flatten(),
+                        inverse_field_optional: false,
+                        through: Some(through),
+                        unique,
+                        required,
+                        immutable,
+                        storage_column: None,
+                        comment,
+                    }));
+                }
+            }
+            if inverse && field.is_none() {
+                let Some(target) = target else {
+                    bail!("line {line_no}: inverse edge `{name}` must declare a target");
+                };
+                let Some(inverse_ref) = ref_field else {
+                    bail!("line {line_no}: inverse edge `{name}` must declare `ref`");
+                };
+                return Ok(Some(ModelEdge {
+                    name,
+                    target,
+                    field: String::new(),
+                    ref_field: String::new(),
+                    inverse_ref: Some(inverse_ref),
+                    inverse_field_optional: false,
+                    through: None,
+                    unique,
+                    required,
+                    immutable: false,
+                    storage_column: None,
+                    comment,
+                }));
+            }
+            if field.is_none() && ref_field.is_none() {
                 return Ok(None);
             }
             let Some(target) = target else {
@@ -9978,8 +11024,12 @@ fn parse_ent_edge(
                 target,
                 field,
                 ref_field,
+                inverse_ref: None,
+                inverse_field_optional: false,
+                through: None,
                 unique,
                 required,
+                immutable,
                 storage_column,
                 comment,
             }));
@@ -10024,9 +11074,27 @@ fn parse_ent_edge(
             continue;
         }
         if ent_field_flag(&inner, &["immutable"]) {
+            immutable = true;
             continue;
         }
-        if ent_field_arg(&inner, &["through"]).is_some() {
+        if let Some(value) = ent_field_arg(&inner, &["through"]) {
+            let args = parse_ent_value_list(value, inner_line_no + 1)?;
+            if args.len() != 2 {
+                bail!(
+                    "line {}: Through(...) must include edge name and join model",
+                    inner_line_no + 1
+                );
+            }
+            through = Some(ModelThroughEdge {
+                name: args[0].clone(),
+                model: clean_ent_type_ref(&args[1]),
+                source_field: String::new(),
+                source_ref_field: String::new(),
+                source_field_optional: false,
+                target_field: String::new(),
+                target_ref_field: String::new(),
+                target_field_optional: false,
+            });
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["storage_key", "storagekey"]) {
@@ -10039,7 +11107,7 @@ fn parse_ent_edge(
             continue;
         }
         bail!(
-            "line {}: expected `to`, `field`, `ref`, `unique`, `required`, `through`, recognized ent metadata directives such as `Annotations(...)`, `StorageKey(...)`, or ent-style edge builder calls such as `To(...)`, `Field(...)`, `Ref(...)`, `Unique()`, `Required()`, `Through(...)` or `}}`",
+            "line {}: expected `to`, `field`, `ref`, `unique`, `required`, `immutable`, `through`, recognized ent metadata directives such as `Annotations(...)`, `StorageKey(...)`, or ent-style edge builder calls such as `To(...)`, `Field(...)`, `Ref(...)`, `Unique()`, `Required()`, `Immutable()`, `Through(...)` or `}}`",
             inner_line_no + 1
         );
     }
@@ -10163,6 +11231,19 @@ fn ent_field_arg<'a>(value: &'a str, names: &[&str]) -> Option<&'a str> {
         }
     }
     None
+}
+
+fn ent_call_arg<'a>(value: &'a str, names: &[&str]) -> Option<&'a str> {
+    let trimmed = value.trim();
+    let open = trimmed.find('(')?;
+    let call = trimmed[..open]
+        .rsplit('.')
+        .next()
+        .unwrap_or(&trimmed[..open]);
+    if !names.iter().any(|name| call.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    ent_parenthesized_arg(&trimmed[open..])
 }
 
 fn ent_directive_arg_rest(value: &str) -> Option<&str> {
@@ -10506,13 +11587,18 @@ fn normalize_ent_timestamp_default_func(value: &str) -> Option<String> {
     if !compact.contains("time.Now()") {
         return None;
     }
-    if compact.contains("time.Now().UnixNano()") {
+    if compact.contains("time.Now().UnixNano()") || compact.contains("time.Now().UTC().UnixNano()")
+    {
         Some("now_nanos".to_string())
-    } else if compact.contains("time.Now().UnixMicro()") {
+    } else if compact.contains("time.Now().UnixMicro()")
+        || compact.contains("time.Now().UTC().UnixMicro()")
+    {
         Some("now_micros".to_string())
-    } else if compact.contains("time.Now().UnixMilli()") {
+    } else if compact.contains("time.Now().UnixMilli()")
+        || compact.contains("time.Now().UTC().UnixMilli()")
+    {
         Some("now_millis".to_string())
-    } else if compact.contains("time.Now().Unix()") {
+    } else if compact.contains("time.Now().Unix()") || compact.contains("time.Now().UTC().Unix()") {
         Some("now_secs".to_string())
     } else if compact.contains("returntime.Now()")
         || compact.contains("=>time.Now()")
@@ -10684,10 +11770,14 @@ fn parse_dsl_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 fields.push(ModelField {
                     name: field_name.to_string(),
                     source_name: None,
+                    json_name: None,
+                    json_omit_empty: false,
                     ty: normalize_dsl_model_type(field_ty),
                     auto_increment: false,
                     immutable: false,
                     sensitive: false,
+                    deprecated: None,
+                    required_on_create: false,
                     validation: ModelFieldValidation::default(),
                     update_default: None,
                     client_default_value: None,
@@ -10793,7 +11883,7 @@ fn normalize_dsl_model_type(ty: &str) -> String {
         "ulong" => "u64".to_string(),
         "float" => "f32".to_string(),
         "double" | "decimal" | "numeric" => "f64".to_string(),
-        "json" | "jsonb" | "value" => "String".to_string(),
+        "any" | "json" | "jsonb" | "value" => "String".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -11078,10 +12168,14 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
             ModelField {
                 name: field.name,
                 source_name: None,
+                json_name: None,
+                json_omit_empty: false,
                 ty,
                 auto_increment: field.auto_increment,
                 immutable: false,
                 sensitive: false,
+                deprecated: None,
+                required_on_create: false,
                 validation: ModelFieldValidation::default(),
                 update_default: None,
                 client_default_value: None,
@@ -11404,8 +12498,12 @@ fn normalize_sql_edges(
             target,
             field: foreign_key.field,
             ref_field: foreign_key.target_field,
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique,
             required,
+            immutable: false,
             storage_column: None,
             comment: None,
         });
@@ -12682,6 +13780,10 @@ mod tests {
             field bio: string {
                 Nillable()
             }
+            field String("alias").Optional().Nillable() {
+            }
+            field String("locale").Nillable().Default("en") {
+            }
         }
         "#;
 
@@ -12696,7 +13798,7 @@ mod tests {
             .expect("display_name field");
         assert_eq!(display_name.source_name.as_deref(), Some("display-name"));
         assert!(display_name.sensitive);
-        assert_eq!(display_name.validation.min_len, Some(3));
+        assert_eq!(display_name.validation.min_byte_len, Some(3));
         assert_eq!(display_name.client_default_value.as_deref(), Some("guest"));
 
         let nickname = model
@@ -12705,21 +13807,40 @@ mod tests {
             .find(|field| field.name == "nickname")
             .expect("nickname field");
         assert_eq!(nickname.ty, "Option<String>");
+        assert!(!nickname.required_on_create);
         let bio = model
             .fields
             .iter()
             .find(|field| field.name == "bio")
             .expect("bio field");
         assert_eq!(bio.ty, "Option<String>");
+        assert!(bio.required_on_create);
+        let alias = model
+            .fields
+            .iter()
+            .find(|field| field.name == "alias")
+            .expect("alias field");
+        assert_eq!(alias.ty, "Option<String>");
+        assert!(!alias.required_on_create);
+        let locale = model
+            .fields
+            .iter()
+            .find(|field| field.name == "locale")
+            .expect("locale field");
+        assert_eq!(locale.ty, "Option<String>");
+        assert!(locale.required_on_create);
+        assert_eq!(locale.default_value.as_deref(), Some("en"));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("source \"display-name\""));
         assert!(ent.contains("unique"));
         assert!(ent.contains("sensitive"));
-        assert!(ent.contains("min_len 3"));
+        assert!(ent.contains("min_byte_len 3"));
         assert!(ent.contains("client_default \"guest\""));
         assert!(ent.contains("field nickname: string? {"));
-        assert!(ent.contains("field bio: string? {"));
+        assert!(ent.contains("field bio: string? {\n    required_on_create"));
+        assert!(ent.contains("field alias: string? {"));
+        assert!(ent.contains("field locale: string? {\n    required_on_create"));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("#[sea_orm(column_name = \"display-name\")]"));
@@ -12728,7 +13849,47 @@ mod tests {
                 "display_name: self.display_name.map(Set).unwrap_or_else(|| Set(\"guest\".to_string()))"
             )
         );
-        assert!(sea_orm.contains("display_name validation failed: length must be at least 3"));
+        assert!(sea_orm.contains("display_name validation failed: byte length must be at least 3"));
+        assert!(sea_orm.contains(
+            "if !matches!(self.bio.as_ref(), Some(Some(_))) { anyhow::bail!(\"required field `bio` cannot be null\"); }"
+        ));
+        assert_eq!(
+            sea_orm
+                .matches("if matches!(self.bio.as_ref(), Some(None))")
+                .count(),
+            2
+        );
+        assert_eq!(
+            sea_orm
+                .matches("if matches!(self.locale.as_ref(), Some(None))")
+                .count(),
+            3
+        );
+        assert!(!sea_orm.contains("fn clear_bio"));
+        assert!(!sea_orm.contains("fn clear_locale"));
+        assert!(sea_orm.contains("fn clear_nickname"));
+        assert!(sea_orm.contains("fn clear_alias"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "if !matches!(self.bio.as_ref(), Some(Some(_))) { return Err(toasty::Error::invalid_record_count(\"required field `bio` cannot be null\")); }"
+        ));
+        assert_eq!(
+            toasty
+                .matches("if matches!(self.bio.as_ref(), Some(None))")
+                .count(),
+            2
+        );
+        assert_eq!(
+            toasty
+                .matches("if matches!(self.locale.as_ref(), Some(None))")
+                .count(),
+            3
+        );
+        assert!(!toasty.contains("fn clear_bio"));
+        assert!(!toasty.contains("fn clear_locale"));
+        assert!(toasty.contains("fn clear_nickname"));
+        assert!(toasty.contains("fn clear_alias"));
     }
 
     #[test]
@@ -12766,6 +13927,7 @@ mod tests {
         assert!(sea_orm.contains("impl std::fmt::Debug for Model"));
         assert!(sea_orm.contains("debug.field(\"username\", &self.username);"));
         assert!(sea_orm.contains("debug.field(\"password\", &\"<sensitive>\");"));
+        assert!(sea_orm.contains("#[serde(skip)]\n    pub password: String"));
         assert!(!sea_orm.contains(
             "#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveEntityModel)]"
         ));
@@ -12777,6 +13939,7 @@ mod tests {
         assert!(toasty.contains("impl std::fmt::Debug for User"));
         assert!(toasty.contains("debug.field(\"username\", &self.username);"));
         assert!(toasty.contains("debug.field(\"password\", &\"<sensitive>\");"));
+        assert!(toasty.contains("#[serde(skip)]\n    pub password: String"));
         assert!(!toasty
             .contains("#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"));
     }
@@ -12837,8 +14000,9 @@ mod tests {
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("if let Some(value) = self.name.as_ref() {"));
         assert!(sea_orm.contains(
-            "if value.trim().is_empty() { anyhow::bail!(\"name validation failed: must not be empty\"); }"
+            "if value.is_empty() { anyhow::bail!(\"name validation failed: must not be empty\"); }"
         ));
+        assert!(!sea_orm.contains("value.trim().is_empty()"));
         assert!(sea_orm.contains(
             "if value.chars().count() < 3 { anyhow::bail!(\"name validation failed: length must be at least 3\"); }"
         ));
@@ -12900,6 +14064,58 @@ mod tests {
     }
 
     #[test]
+    fn ent_string_byte_and_rune_length_validators_generate_distinct_checks() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            field String("handle").MinLen(3).MaxLen(12) {
+            }
+            field String("display_name").MinRuneLen(2).MaxRuneLen(8) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let handle = model
+            .fields
+            .iter()
+            .find(|field| field.name == "handle")
+            .expect("handle field");
+        assert_eq!(handle.validation.min_byte_len, Some(3));
+        assert_eq!(handle.validation.max_byte_len, Some(12));
+        let display_name = model
+            .fields
+            .iter()
+            .find(|field| field.name == "display_name")
+            .expect("display_name field");
+        assert_eq!(display_name.validation.min_len, Some(2));
+        assert_eq!(display_name.validation.max_len, Some(8));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("min_byte_len 3"));
+        assert!(ent.contains("max_byte_len 12"));
+        assert!(ent.contains("min_len 2"));
+        assert!(ent.contains("max_len 8"));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains(
+            "if value.len() < 3 { anyhow::bail!(\"handle validation failed: byte length must be at least 3\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.len() > 12 { anyhow::bail!(\"handle validation failed: byte length must be at most 12\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.chars().count() < 2 { anyhow::bail!(\"display_name validation failed: length must be at least 2\"); }"
+        ));
+        assert!(sea_orm.contains(
+            "if value.chars().count() > 8 { anyhow::bail!(\"display_name validation failed: length must be at most 8\"); }"
+        ));
+    }
+
+    #[test]
     fn ent_bytes_field_length_validators_generate_mutation_checks() {
         let source = r#"
         entity User {
@@ -12921,14 +14137,14 @@ mod tests {
             .expect("payload field");
         assert_eq!(payload.ty, "Option<Vec<u8>>");
         assert!(payload.validation.not_empty);
-        assert_eq!(payload.validation.min_len, Some(2));
-        assert_eq!(payload.validation.max_len, Some(8));
+        assert_eq!(payload.validation.min_byte_len, Some(2));
+        assert_eq!(payload.validation.max_byte_len, Some(8));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field payload: bytes? {"));
         assert!(ent.contains("not_empty"));
-        assert!(ent.contains("min_len 2"));
-        assert!(ent.contains("max_len 8"));
+        assert!(ent.contains("min_byte_len 2"));
+        assert!(ent.contains("max_byte_len 8"));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("if let Some(Some(value)) = self.payload.as_ref() {"));
@@ -12936,10 +14152,10 @@ mod tests {
             "if value.is_empty() { anyhow::bail!(\"payload validation failed: must not be empty\"); }"
         ));
         assert!(sea_orm.contains(
-            "if value.len() < 2 { anyhow::bail!(\"payload validation failed: length must be at least 2\"); }"
+            "if value.len() < 2 { anyhow::bail!(\"payload validation failed: byte length must be at least 2\"); }"
         ));
         assert!(sea_orm.contains(
-            "if value.len() > 8 { anyhow::bail!(\"payload validation failed: length must be at most 8\"); }"
+            "if value.len() > 8 { anyhow::bail!(\"payload validation failed: byte length must be at most 8\"); }"
         ));
 
         let toasty = render_toasty_model_module(model);
@@ -12948,7 +14164,7 @@ mod tests {
             "return Err(toasty::Error::invalid_record_count(\"payload validation failed: must not be empty\"));"
         ));
         assert!(toasty.contains(
-            "return Err(toasty::Error::invalid_record_count(\"payload validation failed: length must be at least 2\"));"
+            "return Err(toasty::Error::invalid_record_count(\"payload validation failed: byte length must be at least 2\"));"
         ));
     }
 
@@ -13394,9 +14610,15 @@ mod tests {
             }
             field Int64("created_secs").Default(func() int64 { return time.Now().Unix() }) {
             }
+            field Int64("created_utc_secs").Default(func() int64 { return time.Now().UTC().Unix() }) {
+            }
             field Int64("updated_micros").UpdateDefault(func() int64 { return time.Now().UnixMicro() }) {
             }
+            field Int64("updated_utc_millis").UpdateDefault(func() int64 { return time.Now().UTC().UnixMilli() }) {
+            }
             field Int64("seen_nanos").ClientDefault(func() int64 { return time.Now().UnixNano() }) {
+            }
+            field Int64("seen_utc_nanos").ClientDefault(func() int64 { return time.Now().UTC().UnixNano() }) {
             }
         }
         "#;
@@ -13415,6 +14637,21 @@ mod tests {
             .find(|field| field.name == "updated_micros")
             .expect("updated_micros field");
         assert_eq!(updated_micros.update_default.as_deref(), Some("now_micros"));
+        let created_utc_secs = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_utc_secs")
+            .expect("created_utc_secs field");
+        assert_eq!(created_utc_secs.default_value.as_deref(), Some("now_secs"));
+        let updated_utc_millis = model
+            .fields
+            .iter()
+            .find(|field| field.name == "updated_utc_millis")
+            .expect("updated_utc_millis field");
+        assert_eq!(
+            updated_utc_millis.update_default.as_deref(),
+            Some("now_millis")
+        );
         let seen_nanos = model
             .fields
             .iter()
@@ -13424,10 +14661,20 @@ mod tests {
             seen_nanos.client_default_value.as_deref(),
             Some("now_nanos")
         );
+        let seen_utc_nanos = model
+            .fields
+            .iter()
+            .find(|field| field.name == "seen_utc_nanos")
+            .expect("seen_utc_nanos field");
+        assert_eq!(
+            seen_utc_nanos.client_default_value.as_deref(),
+            Some("now_nanos")
+        );
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("default \"now_secs\""));
         assert!(ent.contains("update_default now_micros"));
+        assert!(ent.contains("update_default now_millis"));
         assert!(ent.contains("client_default \"now_nanos\""));
     }
 
@@ -13658,6 +14905,10 @@ mod tests {
             }
             field JSON("dirs", []http.Dir{}).Default([]http.Dir{"/tmp"}) {
             }
+            field Any("preferences").Optional().Default(map[string]any{"theme": "dark", "density": 2}) {
+            }
+            field Any("history").Default([]any{"created", 3, true}) {
+            }
             field Other("profile", &Profile{}).Optional().StorageKey("profile_json").Default("{}") {
             }
         }
@@ -13710,6 +14961,26 @@ mod tests {
             .expect("dirs field");
         assert_eq!(dirs.ty, "String");
         assert_eq!(dirs.default_value.as_deref(), Some(r#"["/tmp"]"#));
+        let preferences = model
+            .fields
+            .iter()
+            .find(|field| field.name == "preferences")
+            .expect("preferences field");
+        assert_eq!(preferences.ty, "Option<String>");
+        assert_eq!(
+            preferences.default_value.as_deref(),
+            Some(r#"{"theme":"dark","density":2}"#)
+        );
+        let history = model
+            .fields
+            .iter()
+            .find(|field| field.name == "history")
+            .expect("history field");
+        assert_eq!(history.ty, "String");
+        assert_eq!(
+            history.default_value.as_deref(),
+            Some(r#"["created",3,true]"#)
+        );
         let profile = model
             .fields
             .iter()
@@ -13732,6 +15003,10 @@ mod tests {
         assert!(ent.contains("default \"[true,3,\\\"ok\\\",null]\""));
         assert!(ent.contains("field dirs: string {"));
         assert!(ent.contains("default \"[\\\"/tmp\\\"]\""));
+        assert!(ent.contains("field preferences: string? {"));
+        assert!(ent.contains("default \"{\\\"theme\\\":\\\"dark\\\",\\\"density\\\":2}\""));
+        assert!(ent.contains("field history: string {"));
+        assert!(ent.contains("default \"[\\\"created\\\",3,true]\""));
         assert!(ent.contains("field profile: string? {"));
         assert!(ent.contains("source \"profile_json\""));
         assert!(ent.contains("default \"{}\""));
@@ -13742,6 +15017,8 @@ mod tests {
         assert!(sea_orm.contains("pub labels: Option<String>"));
         assert!(sea_orm.contains("pub flags: String"));
         assert!(sea_orm.contains("pub dirs: String"));
+        assert!(sea_orm.contains("pub preferences: Option<String>"));
+        assert!(sea_orm.contains("pub history: String"));
         assert!(sea_orm.contains("pub profile: Option<String>"));
         assert!(sea_orm.contains("#[sea_orm(column_name = \"metadata_json\")]"));
         assert!(sea_orm.contains("metadata: self.metadata.map(Set).unwrap_or_else(|| Set(Some(\"{\\\"theme\\\":\\\"dark\\\",\\\"beta\\\":true,\\\"retry\\\":3}\".to_string())))"));
@@ -13750,6 +15027,8 @@ mod tests {
         assert!(sea_orm.contains(
             "dirs: self.dirs.map(Set).unwrap_or_else(|| Set(\"[\\\"/tmp\\\"]\".to_string()))"
         ));
+        assert!(sea_orm.contains("preferences: self.preferences.map(Set).unwrap_or_else(|| Set(Some(\"{\\\"theme\\\":\\\"dark\\\",\\\"density\\\":2}\".to_string())))"));
+        assert!(sea_orm.contains("history: self.history.map(Set).unwrap_or_else(|| Set(\"[\\\"created\\\",3,true]\".to_string()))"));
         assert!(sea_orm.contains("#[sea_orm(column_name = \"profile_json\")]"));
         assert!(sea_orm.contains(
             "profile: self.profile.map(Set).unwrap_or_else(|| Set(Some(\"{}\".to_string())))"
@@ -14061,23 +15340,23 @@ mod tests {
         assert_eq!(id.ty, "String");
         assert!(id.immutable);
         assert!(id.validation.not_empty);
-        assert_eq!(id.validation.max_len, Some(25));
+        assert_eq!(id.validation.max_byte_len, Some(25));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field id: string {"));
         assert!(ent.contains("    primary"));
         assert!(ent.contains("    immutable"));
         assert!(ent.contains("    not_empty"));
-        assert!(ent.contains("    max_len 25"));
+        assert!(ent.contains("    max_byte_len 25"));
         assert!(!ent.contains("index uniq_id"));
 
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("#[sea_orm(primary_key)]"));
         assert!(sea_orm.contains(
-            "if value.trim().is_empty() { anyhow::bail!(\"id validation failed: must not be empty\"); }"
+            "if value.is_empty() { anyhow::bail!(\"id validation failed: must not be empty\"); }"
         ));
         assert!(sea_orm.contains(
-            "if value.chars().count() > 25 { anyhow::bail!(\"id validation failed: length must be at most 25\"); }"
+            "if value.len() > 25 { anyhow::bail!(\"id validation failed: byte length must be at most 25\"); }"
         ));
         assert!(!sea_orm.contains("IdUnique"));
     }
@@ -14435,11 +15714,11 @@ mod tests {
     }
 
     #[test]
-    fn ent_field_metadata_directives_are_accepted_as_noops() {
+    fn ent_struct_tags_and_field_metadata_generate_expected_behavior() {
         let source = r#"
         entity User {
             table "users"
-            field String("email").StructTag(`json:"email,omitempty"`).ValueScanner(field.TextValueScanner[*big.Int]{}).DefaultExpr("lower(email)").Collation("utf8mb4_bin").Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email") {
+            field String("email").StructTag(`json:"contactEmail,omitempty"`).ValueScanner(field.TextValueScanner[*big.Int]{}).DefaultExpr("lower(email)").Collation("utf8mb4_bin").Annotations(entgql.OrderField("EMAIL")).Deprecated("use contact_email", "before v2") {
                 Unique()
                 SchemaType(map[string]string{dialect.Postgres: "citext"})
                 GoType(sql.NullString{})
@@ -14452,6 +15731,8 @@ mod tests {
                 Annotations(entgql.Skip())
                 Deprecated("metadata_v2")
             }
+            field String("internal_token").StructTag(`json:"-"`).Deprecated() {
+            }
         }
         "#;
 
@@ -14463,6 +15744,12 @@ mod tests {
             .find(|field| field.name == "email")
             .expect("email field");
         assert_eq!(email.ty, "String");
+        assert_eq!(email.json_name.as_deref(), Some("contactEmail"));
+        assert!(email.json_omit_empty);
+        assert_eq!(
+            email.deprecated.as_deref(),
+            Some("use contact_email before v2")
+        );
         assert!(model
             .indexes
             .iter()
@@ -14473,11 +15760,26 @@ mod tests {
             .find(|field| field.name == "metadata")
             .expect("metadata field");
         assert_eq!(metadata.ty, "Option<String>");
+        assert_eq!(metadata.deprecated.as_deref(), Some("metadata_v2"));
+        let internal_token = model
+            .fields
+            .iter()
+            .find(|field| field.name == "internal_token")
+            .expect("internal_token field");
+        assert_eq!(internal_token.json_name.as_deref(), Some("-"));
+        assert_eq!(internal_token.deprecated.as_deref(), Some(""));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field email: string {"));
+        assert!(ent.contains("json_name \"contactEmail\""));
+        assert!(ent.contains("json_omit_empty"));
+        assert!(ent.contains("deprecated \"use contact_email before v2\""));
         assert!(ent.contains("unique"));
         assert!(ent.contains("field metadata: string? {"));
+        assert!(ent.contains("deprecated \"metadata_v2\""));
+        assert!(ent.contains("field internal_token: string {"));
+        assert!(ent.contains("json_name \"-\""));
+        assert!(ent.contains("    deprecated\n"));
         assert!(!ent.contains("SchemaType"));
         assert!(!ent.contains("GoType"));
         assert!(!ent.contains("StructTag"));
@@ -14486,11 +15788,47 @@ mod tests {
         assert!(!ent.contains("Collation"));
         assert!(!ent.contains("Charset"));
         assert!(!ent.contains("Annotations"));
-        assert!(!ent.contains("Deprecated"));
+        assert!(!ent.contains("Deprecated("));
+
+        let round_trip = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
+        let round_trip_email = round_trip[0]
+            .fields
+            .iter()
+            .find(|field| field.name == "email")
+            .expect("round trip email");
+        assert_eq!(
+            round_trip_email.deprecated.as_deref(),
+            Some("use contact_email before v2")
+        );
+        let round_trip_internal_token = round_trip[0]
+            .fields
+            .iter()
+            .find(|field| field.name == "internal_token")
+            .expect("round trip internal_token");
+        assert_eq!(round_trip_internal_token.deprecated.as_deref(), Some(""));
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("fn is_default<T: Default + PartialEq>"));
+        assert!(sea_orm.contains("#[serde(rename = \"contactEmail\")]"));
+        assert!(sea_orm.contains("#[serde(skip_serializing_if = \"is_default\")]"));
+        assert!(sea_orm.contains("#[deprecated(note = \"use contact_email before v2\")]"));
+        assert!(sea_orm.contains("#[deprecated]\n    #[serde(skip)]"));
+        assert!(sea_orm.contains("pub internal_token: String"));
+
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains("#[deprecated(note = \"use contact_email before v2\")]"));
+        assert!(toasty.contains("#[deprecated]\n    #[serde(skip)]"));
+        assert!(toasty.contains("pub internal_token: String"));
+        assert!(sea_orm.contains("#[serde(skip)]\n    pub internal_token: String"));
+
+        assert!(toasty.contains("fn is_default<T: Default + PartialEq>"));
+        assert!(toasty.contains("#[serde(rename = \"contactEmail\")]"));
+        assert!(toasty.contains("#[serde(skip_serializing_if = \"is_default\")]"));
+        assert!(toasty.contains("#[serde(skip)]\n    pub internal_token: String"));
     }
 
     #[test]
-    fn ent_go_side_field_validators_are_accepted_as_noops() {
+    fn ent_static_match_and_go_side_validators_generate_expected_behavior() {
         let source = r#"
         entity User {
             table "users"
@@ -14511,6 +15849,10 @@ mod tests {
             .expect("email field");
         assert_eq!(email.ty, "String");
         assert!(email.validation.not_empty);
+        assert_eq!(
+            email.validation.match_pattern.as_deref(),
+            Some("^[^@]+@[^@]+$")
+        );
         let nickname = model
             .fields
             .iter()
@@ -14522,6 +15864,7 @@ mod tests {
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field email: string {"));
         assert!(ent.contains("not_empty"));
+        assert!(ent.contains("match \"^[^@]+@[^@]+$\""));
         assert!(ent.contains("field nickname: string {"));
         assert!(ent.contains("max_len 20"));
         assert!(!ent.contains("Match"));
@@ -14530,12 +15873,34 @@ mod tests {
         let sea_orm = render_model_module(model);
         assert!(sea_orm.contains("email validation failed: must not be empty"));
         assert!(sea_orm.contains(
+            "regex::Regex::new(\"^[^@]+@[^@]+$\").expect(\"validated model regex\").is_match(value)"
+        ));
+        let toasty = render_toasty_model_module(model);
+        assert!(toasty.contains(
+            "regex::Regex::new(\"^[^@]+@[^@]+$\").expect(\"validated model regex\").is_match(value)"
+        ));
+        assert!(sea_orm.contains(
             "if value.chars().count() > 20 { anyhow::bail!(\"nickname validation failed: length must be at most 20\"); }"
         ));
     }
 
     #[test]
-    fn ent_edge_and_index_metadata_directives_are_accepted_as_noops() {
+    fn ent_static_match_rejects_invalid_regex() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                field String("email").Match(regexp.MustCompile("[")) {
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("invalid regex should fail");
+        assert!(err.to_string().contains("invalid Match regex"));
+    }
+
+    #[test]
+    fn ent_edge_immutable_and_metadata_directives_generate_expected_behavior() {
         let source = r#"
         entity User {
             table "users"
@@ -14578,8 +15943,12 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: true,
             required: false,
+            immutable: true,
             storage_column: None,
             comment: Some("owner relation".to_string()),
         }));
@@ -14599,6 +15968,7 @@ mod tests {
         assert!(!ent.contains("Annotations"));
         assert!(!ent.contains("StorageKey(\"profile_user_fk\")"));
         assert!(ent.contains("    comment \"owner relation\""));
+        assert!(ent.contains("    immutable"));
         assert!(!ent.contains("Comment(\"owner relation\")"));
         assert!(!ent.contains("Immutable"));
         assert!(!ent.contains("Deprecated"));
@@ -14609,6 +15979,34 @@ mod tests {
         assert!(!ent.contains("IncludeColumns"));
         assert!(!ent.contains("IndexWhere"));
         assert!(!ent.contains("OpClass"));
+
+        let sea_orm = render_model_module(profile);
+        assert_eq!(
+            sea_orm
+                .matches("pub fn set_user(mut self, target: &crate::model::UserModel)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            sea_orm
+                .matches("pub fn set_user_id(mut self, value: i64)")
+                .count(),
+            1
+        );
+
+        let toasty = render_toasty_model_module(profile);
+        assert_eq!(
+            toasty
+                .matches("pub fn set_user(mut self, target: &crate::model::User)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            toasty
+                .matches("pub fn set_user_id(mut self, value: i64)")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -14957,8 +16355,12 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: true,
             required: true,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
@@ -15021,8 +16423,12 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: true,
             required: true,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
@@ -15043,7 +16449,7 @@ mod tests {
     }
 
     #[test]
-    fn ent_inverse_from_edges_are_parse_compatible_noops() {
+    fn ent_inverse_from_edges_generate_queries_and_relation_filters() {
         let source = r#"
         entity User {
             table "users"
@@ -15051,6 +16457,8 @@ mod tests {
             }
             edge From("profile", Profile.Type).Ref("user").Unique() {
                 Annotations(entgql.Bind())
+            }
+            edge From("posts", Post.Type).Ref("author") {
             }
         }
 
@@ -15063,6 +16471,16 @@ mod tests {
             edge To("user", User.Type).Field("user_id").Ref("id").Unique() {
             }
         }
+
+        entity Post {
+            table "posts"
+            field Int64("id").Primary() {
+            }
+            field Int64("author_id").Optional() {
+            }
+            edge To("author", User.Type).Field("author_id").Ref("id") {
+            }
+        }
         "#;
 
         let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
@@ -15070,7 +16488,34 @@ mod tests {
             .iter()
             .find(|model| model.name == "User")
             .expect("user");
-        assert!(user.edges.is_empty());
+        assert!(user.edges.contains(&ModelEdge {
+            name: "profile".to_string(),
+            target: "Profile".to_string(),
+            field: "user_id".to_string(),
+            ref_field: "id".to_string(),
+            inverse_ref: Some("user".to_string()),
+            inverse_field_optional: false,
+            through: None,
+            unique: true,
+            required: false,
+            immutable: false,
+            storage_column: None,
+            comment: None,
+        }));
+        assert!(user.edges.contains(&ModelEdge {
+            name: "posts".to_string(),
+            target: "Post".to_string(),
+            field: "author_id".to_string(),
+            ref_field: "id".to_string(),
+            inverse_ref: Some("author".to_string()),
+            inverse_field_optional: true,
+            through: None,
+            unique: false,
+            required: false,
+            immutable: false,
+            storage_column: None,
+            comment: None,
+        }));
         let profile = models
             .iter()
             .find(|model| model.name == "Profile")
@@ -15080,17 +16525,54 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: true,
             required: false,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
 
         let ent = render_ent_schema(&models);
-        assert!(!ent.contains("edge profile"));
+        assert!(ent.contains("edge From(\"profile\", Profile.Type).Ref(\"user\") {"));
+        assert!(ent.contains("edge From(\"posts\", Post.Type).Ref(\"author\") {"));
         assert!(ent.contains("edge user {"));
         assert!(ent.contains("    field user_id"));
         assert!(ent.contains("    unique"));
+
+        let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
+        let reparsed_user = reparsed
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("reparsed user");
+        assert_eq!(reparsed_user.edges, user.edges);
+
+        let sea_orm = render_model_module(user);
+        assert!(sea_orm.contains("pub async fn query_profile(&self, repo: &crate::model::ProfileRepository<'_>) -> anyhow::Result<Option<crate::model::ProfileModel>>"));
+        assert!(sea_orm.contains("pub async fn query_posts(&self, repo: &crate::model::PostRepository<'_>) -> anyhow::Result<Vec<crate::model::PostModel>>"));
+        assert!(sea_orm.contains("crate::model::post::author_id_eq(value)).all().await"));
+        assert!(sea_orm.contains("pub async fn where_posts_with<I>(self, repo: &crate::model::PostRepository<'_>, predicates: I) -> anyhow::Result<Self>"));
+        assert!(sea_orm.contains("where_all(predicates).pluck_author_id().await?;"));
+        assert!(sea_orm.contains("let values = values.into_iter().flatten().collect::<Vec<_>>();"));
+        assert!(sea_orm.contains("Ok(self.where_(id_in(values)))"));
+        assert!(!sea_orm.contains("pub fn set_profile"));
+        assert!(!sea_orm.contains("pub fn set_posts"));
+
+        let toasty = render_toasty_model_module(user);
+        assert!(toasty.contains("pub async fn query_profile(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Option<crate::model::Profile>>"));
+        assert!(toasty.contains("pub async fn query_posts(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Vec<crate::model::Post>>"));
+        assert!(toasty.contains("crate::model::post::author_id_eq(value)).all().await"));
+        assert!(toasty.contains(
+            "pub async fn where_posts_with<I>(mut self, predicates: I) -> toasty::Result<Self>"
+        ));
+        assert!(toasty.contains(
+            "PostRepository::query(&mut *self.db).where_all(predicates).pluck_author_id().await?;"
+        ));
+        assert!(toasty.contains("self.predicates.push(id_in(values));"));
+        assert!(!toasty.contains("pub fn set_profile"));
+        assert!(!toasty.contains("pub fn set_posts"));
     }
 
     #[test]
@@ -15123,8 +16605,12 @@ mod tests {
             target: "User".to_string(),
             field: "author_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: true,
             required: true,
+            immutable: false,
             storage_column: Some("post_author".to_string()),
             comment: None,
         }));
@@ -15146,6 +16632,28 @@ mod tests {
         assert!(ent.contains("    unique"));
         assert!(ent.contains("    required"));
         assert!(!ent.contains("StorageKey(edge.Column"));
+
+        let sea_orm = render_model_module(post);
+        assert!(sea_orm.contains(
+            "if !matches!(self.author_id.as_ref(), Some(Some(_))) { anyhow::bail!(\"missing required edge `author`\"); }"
+        ));
+        assert_eq!(
+            sea_orm
+                .matches("if matches!(self.author_id.as_ref(), Some(None)) { anyhow::bail!(\"missing required edge `author`\"); }")
+                .count(),
+            2
+        );
+
+        let toasty = render_toasty_model_module(post);
+        assert!(toasty.contains(
+            "if !matches!(self.author_id.as_ref(), Some(Some(_))) { return Err(toasty::Error::invalid_record_count(\"missing required edge `author`\")); }"
+        ));
+        assert_eq!(
+            toasty
+                .matches("if matches!(self.author_id.as_ref(), Some(None)) { return Err(toasty::Error::invalid_record_count(\"missing required edge `author`\")); }")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -15203,7 +16711,7 @@ mod tests {
     }
 
     #[test]
-    fn ent_through_edges_without_local_fk_are_parse_compatible_noops() {
+    fn ent_through_edges_generate_join_entity_queries_and_filters() {
         let source = r#"
         entity User {
             table "users"
@@ -15217,6 +16725,20 @@ mod tests {
         entity Group {
             table "groups"
             field Int64("id").Primary() {
+            }
+        }
+
+        entity Membership {
+            table "memberships"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            field Int64("group_id") {
+            }
+            edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required() {
+            }
+            edge To("group", Group.Type).Field("group_id").Ref("id").Unique().Required() {
             }
         }
 
@@ -15236,7 +16758,24 @@ mod tests {
             .iter()
             .find(|model| model.name == "User")
             .expect("user");
-        assert!(user.edges.is_empty());
+        let groups = user
+            .edges
+            .iter()
+            .find(|edge| edge.name == "groups")
+            .expect("groups edge");
+        assert_eq!(
+            groups.through.as_ref(),
+            Some(&ModelThroughEdge {
+                name: "memberships".to_string(),
+                model: "Membership".to_string(),
+                source_field: "user_id".to_string(),
+                source_ref_field: "id".to_string(),
+                source_field_optional: false,
+                target_field: "group_id".to_string(),
+                target_ref_field: "id".to_string(),
+                target_field_optional: false,
+            })
+        );
         let profile = models
             .iter()
             .find(|model| model.name == "Profile")
@@ -15246,16 +16785,52 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: true,
             required: false,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
 
         let ent = render_ent_schema(&models);
-        assert!(!ent.contains("edge groups"));
+        assert!(ent.contains(
+            "edge To(\"groups\", Group.Type).Through(\"memberships\", Membership.Type) {"
+        ));
         assert!(ent.contains("edge user {"));
         assert!(ent.contains("    field user_id"));
+
+        let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
+        let reparsed_user = reparsed
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("reparsed user");
+        assert_eq!(reparsed_user.edges, user.edges);
+
+        let sea_orm = render_model_module(user);
+        assert!(sea_orm.contains("pub async fn query_groups(&self, through_repo: &crate::model::MembershipRepository<'_>, repo: &crate::model::GroupRepository<'_>) -> anyhow::Result<Vec<crate::model::GroupModel>>"));
+        assert!(sea_orm.contains("through_repo.query().where_(crate::model::membership::user_id_eq(value)).pluck_group_id().await?;"));
+        assert!(
+            sea_orm.contains("repo.query().where_(crate::model::group::id_in(values)).all().await")
+        );
+        assert!(sea_orm.contains("pub async fn where_groups_with<I>(self, repo: &crate::model::GroupRepository<'_>, through_repo: &crate::model::MembershipRepository<'_>, predicates: I) -> anyhow::Result<Self>"));
+        assert!(sea_orm.contains("where_all(predicates).pluck_id().await?;"));
+        assert!(sea_orm.contains("membership::group_id_in(target_values)"));
+        assert!(sea_orm.contains("Ok(self.where_(id_in(values)))"));
+        assert!(!sea_orm.contains("pub fn set_groups"));
+
+        let toasty = render_toasty_model_module(user);
+        assert!(toasty.contains("pub async fn query_groups(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Vec<crate::model::Group>>"));
+        assert!(toasty.contains("MembershipRepository::query(&mut *db).where_(crate::model::membership::user_id_eq(value)).pluck_group_id().await?;"));
+        assert!(toasty.contains("GroupRepository::query(&mut *db).where_(crate::model::group::id_in(values)).all().await"));
+        assert!(toasty.contains(
+            "pub async fn where_groups_with<I>(mut self, predicates: I) -> toasty::Result<Self>"
+        ));
+        assert!(toasty.contains("MembershipRepository::query(&mut *self.db).where_(crate::model::membership::group_id_in(target_values)).pluck_user_id().await?;"));
+        assert!(toasty.contains("self.predicates.push(id_in(values));"));
+        assert!(!toasty.contains("pub fn set_groups"));
     }
 
     #[test]
@@ -15322,8 +16897,12 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: false,
             required: false,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
@@ -15574,8 +17153,12 @@ mod tests {
             target: "User".to_string(),
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: false,
             required: true,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
@@ -15584,8 +17167,12 @@ mod tests {
             target: "Profile".to_string(),
             field: "profile_id".to_string(),
             ref_field: "id".to_string(),
+            inverse_ref: None,
+            inverse_field_optional: false,
+            through: None,
             unique: false,
             required: false,
+            immutable: false,
             storage_column: None,
             comment: None,
         }));
@@ -15607,6 +17194,9 @@ mod tests {
         let sea_orm_order = render_model_module(order);
         assert!(sea_orm_order.contains("pub async fn query_user"));
         assert!(sea_orm_order.contains("pub async fn query_profile"));
+        assert!(sea_orm_order.contains("pub async fn where_user_with<I>(self, repo: &crate::model::UserRepository<'_>, predicates: I) -> anyhow::Result<Self>"));
+        assert!(sea_orm_order.contains("repo.query().where_all(predicates).pluck_id().await?;"));
+        assert!(sea_orm_order.contains("Ok(self.where_(user_id_in(values)))"));
         assert!(sea_orm_order
             .contains("pub fn set_user(mut self, target: &crate::model::UserModel) -> Self"));
         assert!(sea_orm_order.contains("self.user_id = Some(target.id);"));
@@ -15618,6 +17208,13 @@ mod tests {
         let toasty_order = render_toasty_model_module(order);
         assert!(toasty_order.contains("pub async fn query_user"));
         assert!(toasty_order.contains("pub async fn query_profile"));
+        assert!(toasty_order.contains(
+            "pub async fn where_user_with<I>(mut self, predicates: I) -> toasty::Result<Self>"
+        ));
+        assert!(toasty_order.contains(
+            "UserRepository::query(&mut *self.db).where_all(predicates).pluck_id().await?;"
+        ));
+        assert!(toasty_order.contains("self.predicates.push(user_id_in(values));"));
         assert!(
             toasty_order.contains("pub fn set_user(mut self, target: &crate::model::User) -> Self")
         );
@@ -15651,10 +17248,14 @@ mod tests {
                 ModelField {
                     name: "id".to_string(),
                     source_name: None,
+                    json_name: None,
+                    json_omit_empty: false,
                     ty: "i64".to_string(),
                     auto_increment: true,
                     immutable: false,
                     sensitive: false,
+                    deprecated: None,
+                    required_on_create: false,
                     validation: ModelFieldValidation::default(),
                     update_default: None,
                     client_default_value: None,
@@ -15664,10 +17265,14 @@ mod tests {
                 ModelField {
                     name: "name".to_string(),
                     source_name: None,
+                    json_name: None,
+                    json_omit_empty: false,
                     ty: "String".to_string(),
                     auto_increment: false,
                     immutable: false,
                     sensitive: false,
+                    deprecated: None,
+                    required_on_create: false,
                     validation: ModelFieldValidation::default(),
                     update_default: None,
                     client_default_value: None,
@@ -15677,10 +17282,14 @@ mod tests {
                 ModelField {
                     name: "tenant_id".to_string(),
                     source_name: None,
+                    json_name: None,
+                    json_omit_empty: false,
                     ty: "String".to_string(),
                     auto_increment: false,
                     immutable: false,
                     sensitive: false,
+                    deprecated: None,
+                    required_on_create: false,
                     validation: ModelFieldValidation::default(),
                     update_default: None,
                     client_default_value: None,
@@ -15690,10 +17299,14 @@ mod tests {
                 ModelField {
                     name: "nickname".to_string(),
                     source_name: None,
+                    json_name: None,
+                    json_omit_empty: false,
                     ty: "Option<String>".to_string(),
                     auto_increment: false,
                     immutable: false,
                     sensitive: false,
+                    deprecated: None,
+                    required_on_create: false,
                     validation: ModelFieldValidation::default(),
                     update_default: None,
                     client_default_value: None,
@@ -15703,10 +17316,14 @@ mod tests {
                 ModelField {
                     name: "deleted".to_string(),
                     source_name: None,
+                    json_name: None,
+                    json_omit_empty: false,
                     ty: "bool".to_string(),
                     auto_increment: false,
                     immutable: false,
                     sensitive: false,
+                    deprecated: None,
+                    required_on_create: false,
                     validation: ModelFieldValidation::default(),
                     update_default: None,
                     client_default_value: None,
@@ -16551,6 +18168,50 @@ serde.workspace = true
         assert!(manifest.contains("uuid = { workspace = true }"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("uuid::Uuid::now_v7().to_string()"));
+    }
+
+    #[test]
+    fn ent_match_updates_manifest_dependency() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-regex-model-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "user-service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            entity User {
+                field Int64("id").Primary() {
+                }
+                field String("email").Match(regexp.MustCompile("^[^@]+@[^@]+$")) {
+                }
+            }
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            ModelFormat::Ent,
+            ModelOrm::SeaOrm,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains("regex = { workspace = true }"));
+        let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
+        assert!(module.contains("regex::Regex::new"));
     }
 
     #[test]
@@ -17460,8 +19121,19 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
                 field type: string {
                 }
                 field name: string {
+                    match "^[a-z]+$"
+                    json_name "displayName"
+                    json_omit_empty
+                    deprecated "use display_name"
                 }
                 field nickname: string? {
+                }
+                field required_label: string {
+                    nillable
+                }
+                edge From("orders", Order.Type).Ref("user") {
+                }
+                edge To("groups", Group.Type).Through("memberships", Membership.Type) {
                 }
             }
 
@@ -17480,6 +19152,39 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
                     required
                 }
             }
+
+            entity Group {
+                table "groups"
+                cache false
+                field id: i64 {
+                    primary
+                }
+            }
+
+            entity Membership {
+                table "memberships"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field user_id: i64 {
+                }
+                field group_id: i64 {
+                }
+                edge user {
+                    to User
+                    field user_id
+                    ref id
+                    required
+                }
+                edge group {
+                    to Group
+                    field group_id
+                    ref id
+                    required
+                }
+            }
+
             "#,
             &out,
             GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
@@ -17544,8 +19249,19 @@ impl ServiceContext {
                 field type: string {
                 }
                 field name: string {
+                    match "^[a-z]+$"
+                    json_name "displayName"
+                    json_omit_empty
+                    deprecated "use display_name"
                 }
                 field nickname: string? {
+                }
+                field required_label: string {
+                    nillable
+                }
+                edge From("orders", Order.Type).Ref("user") {
+                }
+                edge To("groups", Group.Type).Through("memberships", Membership.Type) {
                 }
             }
 
@@ -17560,6 +19276,37 @@ impl ServiceContext {
                 edge user {
                     to User
                     field user_id
+                    ref id
+                    required
+                }
+            }
+            entity Group {
+                table "groups"
+                cache false
+                field id: i64 {
+                    primary
+                }
+            }
+
+            entity Membership {
+                table "memberships"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field user_id: i64 {
+                }
+                field group_id: i64 {
+                }
+                edge user {
+                    to User
+                    field user_id
+                    ref id
+                    required
+                }
+                edge group {
+                    to Group
+                    field group_id
                     ref id
                     required
                 }

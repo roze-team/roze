@@ -63,7 +63,10 @@ let app = Router::new()
 - path parameter capture through request extensions
 - matched route-template extraction with `MatchedPath` for metrics, tracing,
   route-aware middleware, and handlers; `MatchedPath` supports `as_str`,
-  `Deref<Target = str>`, and display formatting for concise observability code
+  `Deref<Target = str>`, display formatting, and synchronous extension reads;
+  construction remains internal so middleware cannot forge route metadata;
+  immutable route templates use shared `Arc<str>` storage so request dispatch
+  and extractor clones do not copy the template string
 - fallback handlers and services preserve `OriginalUri` but do not expose
   `MatchedPath`, keeping route-aware observability scoped to matched routes
 - original request URI extraction with `OriginalUri`, preserving a stable
@@ -82,13 +85,47 @@ let app = Router::new()
 - `MethodRouter` implements Tower `Service` directly and exposes
   `into_make_service` / `into_make_service_with_connect_info::<T>` for
   standalone method-only services that do not need path routing
+- `Router` stores its immutable runtime graph in `Arc<RouterInner>`; clones and
+  ordinary `IntoMakeService` connection services share the graph, while
+  consuming builder methods use copy-on-write when a clone is still alive
+- request dispatch splits the request into HTTP parts and body, matches by
+  borrowing `parts.uri.path()`, writes route context into `parts.extensions`,
+  and then recombines the original body; routing does not allocate a path copy
+- the Hyper/Tower server boundary uses a concrete `BoxError` newtype and a
+  dedicated `TowerToHyperService` adapter, keeping body-error lifetimes and
+  spawned connection futures explicit instead of relying on closure inference
+- connect-info make services wrap Router, MethodRouter, or Handler services in
+  `ConnectInfoService` and inject connection metadata at request entry; they do
+  not apply a state layer to every route or copy the route graph per connection
+- handler, routed service, and layer values are `Clone + Send + Sync + 'static`
+  and are erased through Tower `BoxCloneSyncService`, keeping the shared router
+  graph safely usable across runtime worker threads
 - `MethodRouter::merge` composes distinct method endpoints and rejects
   overlapping method handlers or overlapping method-not-allowed fallbacks
 - standard method helpers for GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS,
   TRACE, and CONNECT
+- typed and raw path extractors percent-decode captures exactly once; form
+  delimiters such as `&`, `=`, and `+` remain part of the captured path value
+  instead of being reinterpreted as fields
+- route matching stores decoded path captures or an invalid-UTF-8 marker in a
+  request-scoped shared `RouteParams`; repeated typed/raw extraction borrows or
+  clones that shared storage instead of decoding and allocating again
+- `Path<T>` uses a path-specific Serde deserializer and supports one-capture
+  scalar values, positional tuples/sequences, and named structs/maps
+- `Option<Path<T>>` has identical request and request-parts semantics, allowing
+  one handler to serve routes both with and without path captures
+- `RawPathParams::from_request_extensions` and its optional counterpart expose
+  the same decoded parameter view synchronously to Tower middleware; async
+  request extractors delegate to this shared core
 - GET routes implicitly satisfy HEAD requests when no explicit HEAD route is
   registered, and all HEAD responses preserve status/headers while omitting the
   response body
+- a shared `RouteFuture` applies protocol-level response finalization for both
+  `Router` and standalone `MethodRouter`: HEAD records a known content length
+  before removing the body, while successful CONNECT responses remove ordinary
+  body framing headers and body content; this protocol boundary lives in the
+  dedicated `router/future.rs` module so route matching and method selection do
+  not own response-finalization policy
 - service helper variants for each standard method, such as `get_service` and
   `MethodRouter::post_service`, so generated routes can attach Tower services
   without wrapping them as handlers
@@ -98,11 +135,23 @@ let app = Router::new()
 - route-level and router-level `method_not_allowed_fallback` /
   `method_not_allowed_fallback_service` hooks for generated services that need
   custom 405 payloads from handlers or Tower services
-- route nesting with `Router::nest(prefix, router)`
+- `layer` wraps route endpoints and fallbacks, while `route_layer` wraps only
+  registered route endpoints and leaves both 404 and method-not-allowed
+  fallbacks untouched
+- route nesting with `Router::nest(prefix, router)`; nested handlers receive a
+  prefix-stripped current URI while `MatchedPath` keeps the complete external
+  route template and both `OriginalUri` and `Option<OriginalUri>` keep the
+  complete external request URI
 - service nesting with `Router::nest_service(prefix, service)`; mounting at
   `/prefix` serves `/prefix`, `/prefix/`, and `/prefix/...`; nested services
-  receive the prefix-stripped URI path while `OriginalUri` preserves the
-  external request URI
+  receive the same prefix-stripped current URI semantics while `OriginalUri`
+  preserves the external request URI
+- nested routers and services expose a composable `NestedPath` extractor with
+  the complete mount prefix; this keeps redirect and mount-aware URL building
+  independent from both the stripped current URI and the external
+  `OriginalUri`
+- router fallbacks clear stale `MatchedPath` and route parameters inherited
+  from an outer router while preserving `OriginalUri` and `NestedPath`
 - nesting prefixes must be concrete path prefixes and cannot contain
   catch-all wildcard captures
 - root nesting is rejected: compose routers with `Router::merge`, and use
@@ -124,6 +173,9 @@ let app = Router::new()
 - route-builder APIs, including handler helpers, service helpers, fallback
   hooks, and method-not-allowed hooks that can reject invalid composition, use
   caller-tracked panics so diagnostics point at the route registration site
+- `Router`, `MethodRouter`, and their owned service/make-service adapters are
+  `must_use`; accidentally discarding a consuming builder result is reported by
+  the compiler instead of silently dropping route configuration
 - handler-backed route registration
 - Roze `Handler` conversion into Tower services
 - handler-level `Handler::layer` for applying Tower layers to one handler
@@ -216,10 +268,9 @@ let app = Router::new()
   `roze_http::extract::Request` / `roze_http::Request` aliases, `RawRequest`,
   `Parts`, `Path<T>`, `RawPathParams`, `RawQuery`, `RawForm`, `Query<T>`,
   `Form<T>`, `Json<T>`, and `OriginalUri`
-- `Path<T>::from_params(&RouteParams)` and
-  `Path<T>::optional_from_params(Option<&RouteParams>)` expose typed path
-  parsing outside request extraction, so middleware and tests reuse the same
-  parser as the extractor
+- `Path<T>::from_request_extensions` and its optional counterpart expose typed
+  path parsing synchronously to Tower middleware and tests; the internal route
+  parameter representation stays private to `roze-http`
 - `RawPathParams` exposes named route captures without deserializing them,
   useful for route-aware middleware, audit logs, and generic gateway policy;
   it supports `iter()` and `for (key, value) in &params`
@@ -280,6 +331,19 @@ let app = Router::new()
   constructors for common `Location` responses
 
 The next growth step is generated handler integration.
+
+## Connection Concurrency And Drain
+
+`RestServer` accepts TCP connections continuously and runs each Hyper HTTP/1
+connection in an independent Tokio task. Connection handling must never be
+awaited inline in the accept loop; doing so serializes clients and prevents
+rate limits, bulkheads, and adaptive shedding from observing real concurrency.
+
+Both direct-service and make-service entry points track connection tasks. On
+shutdown they stop accepting new connections, wait up to
+`graceful_shutdown_timeout` for active connections, then abort and reap any
+remaining tasks. Concrete Router and boxed-service adapters erase generic
+service futures before spawning, keeping the connection tasks `Send + 'static`.
 
 ## Non-Goals
 

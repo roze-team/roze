@@ -84,9 +84,20 @@ Use `["*"]` for wildcard origins, methods, or headers. Do not combine wildcard
 origins with credentialed browser requests in production; browsers reject that
 combination by specification.
 
+## Circuit Breaker State Machine
+
+REST and RPC use the same explicit `closed`, `open`, and `half-open` state
+machine. After `reset_timeout_ms`, exactly one request receives a half-open
+probe permit; concurrent requests remain rejected until that probe completes.
+A successful probe closes the breaker, while a failed probe reopens it. A
+cancelled probe also reopens the breaker for another reset interval without
+incrementing the failure count. Completion carries its original permit, so a
+stale request that started while closed cannot close a newer open state.
+
 ## Adaptive Shedding
 
-`shedding` combines a hard concurrency limit with a rolling health window:
+`shedding` combines a hard concurrency limit with a 50-bucket rolling health
+window. Memory use is bounded by the bucket count instead of request volume:
 
 - `concurrency`: maximum concurrent requests allowed through the shedding guard.
 - `window_ms`: statistics window duration.
@@ -98,10 +109,34 @@ combination by specification.
 - `cool_down_ms`: how long to reject requests after an unhealthy window is
   detected.
 
+Reaching the hard concurrency limit rejects only the excess request. It does
+not start a route-wide cool-down; cool-down is reserved for a statistically
+unhealthy latency or failure window.
+
 The guard records completed request status and elapsed time. If a window has at
 least `min_samples` requests and either average latency or failure ratio exceeds
 the configured threshold, the service enters cool-down and returns `503 service
 overloaded` until the cool-down expires.
+
+REST `RouteGuard` and RPC `MethodGuard` are non-cloneable and use
+completion-safe RAII semantics. A normal finish records latency and
+success/failure exactly once. If request work
+is cancelled, panics, or returns before the explicit finish call, dropping the
+guard releases the in-flight shedding slot, records a bounded `cancelled`
+observation, and does not count the cancellation as a circuit-breaker failure.
+This prevents cancelled work from leaking concurrency capacity and causing a
+healthy operation to remain permanently shed.
+
+## Resilience Metrics
+
+REST and RPC governance decisions use one Prometheus label contract:
+`roze_resilience_decisions_total{service,boundary,kind,decision}`. `boundary`
+is `rest` or `rpc`; `kind` identifies `rate_limit`, `breaker`,
+`load_shedding`, `retry`, or `fallback`; and `decision` records the bounded
+outcome. Generated alerts, dashboards, SLO queries, failure-injection plans,
+and runtime-hardening contracts use this exact schema. Service and operation
+identity are passed explicitly, so metrics do not rely on process-global
+state and RPC retry budgets are isolated by service and method.
 
 ## Route-scoped Middleware
 

@@ -1040,6 +1040,15 @@ enum StreamCommands {
 }
 
 fn main() -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("rozectl-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run)?
+        .join()
+        .map_err(|_| anyhow::anyhow!("rozectl main thread panicked"))?
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = parse_cli_from(std::env::args_os());
     let registry = generator::registry();
 

@@ -8,8 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dashmap::DashMap;
-
 use crate::{
     balance::{build_balancer, Balancer, BalancerKind},
     registry::{
@@ -24,7 +22,10 @@ use roze_grpc::transport::{
 };
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_metrics::{record_resilience_decision, record_rpc_method};
-use roze_resilience::{BreakerRegistry, RateLimitRegistry, SheddingRegistry};
+use roze_resilience::{
+    full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, RateLimitRegistry,
+    RetryBudgetRegistry, SheddingRegistry,
+};
 use roze_trace::generate_trace_id;
 use tokio::time::sleep;
 use tracing::info;
@@ -644,6 +645,7 @@ pub fn error_from_status(status: &Status) -> RozeError {
 }
 
 pub fn apply_fallback(
+    service: impl Into<String>,
     error: RozeError,
     fallback: Option<roze_config::GovernanceFallbackConfig>,
 ) -> RozeError {
@@ -653,7 +655,7 @@ pub fn apply_fallback(
     let Some(fallback) = fallback else {
         return error;
     };
-    record_resilience_decision("rpc", "fallback", "served");
+    record_resilience_decision(service, "rpc", "fallback", "served");
     RozeError::fallback_response(fallback.status, fallback.body, fallback.headers)
 }
 
@@ -800,14 +802,47 @@ pub struct MethodRetryPolicy {
     pub budget_percent: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MethodGuard {
     key: String,
     service: String,
     method: String,
     started_at: Instant,
     breaker: Option<MethodBreakerConfig>,
+    breaker_permit: Option<BreakerPermit>,
     shedding: Option<MethodSheddingConfig>,
+    finished: bool,
+}
+
+impl Drop for MethodGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        let elapsed = self.started_at.elapsed();
+        if let (Some(config), Some(permit)) = (self.breaker, self.breaker_permit) {
+            method_breaker_cancel(&self.key, permit, &config);
+            if permit == BreakerPermit::Probe {
+                record_resilience_decision(
+                    self.service.as_str(),
+                    "rpc",
+                    "breaker",
+                    "probe_cancelled",
+                );
+            }
+        }
+        if self.shedding.is_some() {
+            method_shedding_release(&self.key);
+            record_resilience_decision(self.service.as_str(), "rpc", "load_shedding", "cancelled");
+        }
+        record_rpc_method(
+            self.service.as_str(),
+            self.method.as_str(),
+            "cancelled",
+            elapsed,
+        );
+    }
 }
 
 pub fn method_policy(
@@ -916,29 +951,42 @@ pub fn begin_method(
     let key = format!("{service}:{method}");
     if let Some(config) = &policy.rate_limit {
         match enforce_method_rate_limit(&key, config) {
-            Ok(()) => record_resilience_decision("rpc", "rate_limit", "allowed"),
+            Ok(()) => record_resilience_decision(service.as_str(), "rpc", "rate_limit", "allowed"),
             Err(status) => {
-                record_resilience_decision("rpc", "rate_limit", "rejected");
+                record_resilience_decision(service.as_str(), "rpc", "rate_limit", "rejected");
                 return Err(status);
             }
         }
     }
-    if policy
-        .breaker
-        .as_ref()
-        .is_some_and(|_| method_breaker_is_open(&key))
-    {
-        record_resilience_decision("rpc", "breaker", "open");
-        return Err(Status::unavailable("circuit open"));
-    }
-    if policy.breaker.is_some() {
-        record_resilience_decision("rpc", "breaker", "allowed");
-    }
+    let breaker_permit = match policy.breaker {
+        Some(_) => match method_breaker_allow(&key) {
+            BreakerDecision::Allow(permit) => {
+                record_resilience_decision(
+                    service.as_str(),
+                    "rpc",
+                    "breaker",
+                    if permit == BreakerPermit::Probe {
+                        "half_open_probe"
+                    } else {
+                        "allowed"
+                    },
+                );
+                Some(permit)
+            }
+            BreakerDecision::Reject => {
+                record_resilience_decision(service.as_str(), "rpc", "breaker", "open");
+                return Err(Status::unavailable("circuit open"));
+            }
+        },
+        None => None,
+    };
     if let Some(config) = &policy.shedding {
         match enforce_method_shedding(&key, config) {
-            Ok(()) => record_resilience_decision("rpc", "load_shedding", "allowed"),
+            Ok(()) => {
+                record_resilience_decision(service.as_str(), "rpc", "load_shedding", "allowed")
+            }
             Err(status) => {
-                record_resilience_decision("rpc", "load_shedding", "shed");
+                record_resilience_decision(service.as_str(), "rpc", "load_shedding", "shed");
                 return Err(status);
             }
         }
@@ -955,40 +1003,47 @@ pub fn begin_method(
             method,
             started_at: Instant::now(),
             breaker: policy.breaker,
+            breaker_permit,
             shedding: policy.shedding,
+            finished: false,
         },
     ))
 }
 
-pub fn finish_method(guard: MethodGuard, code: impl Into<String>) {
+pub fn finish_method(mut guard: MethodGuard, code: impl Into<String>) {
     let code = code.into();
     let success = code == "ok";
-    record_rpc_method(
-        guard.service,
-        guard.method,
-        code,
-        guard.started_at.elapsed(),
-    );
-    if let Some(config) = guard.breaker {
+    let elapsed = guard.started_at.elapsed();
+    if let (Some(config), Some(permit)) = (guard.breaker, guard.breaker_permit) {
         record_resilience_decision(
+            guard.service.as_str(),
             "rpc",
             "breaker",
             if success { "success" } else { "failure" },
         );
-        method_breaker_record(&guard.key, success, &config);
+        method_breaker_record(&guard.key, permit, success, &config);
     }
     if let Some(config) = guard.shedding {
-        method_shedding_record(&guard.key, success, guard.started_at.elapsed(), &config);
+        method_shedding_record(&guard.key, success, elapsed, &config);
     }
+    guard.finished = true;
+    record_rpc_method(guard.service.as_str(), guard.method.as_str(), code, elapsed);
 }
 
-pub async fn retry_status<F, Fut, T>(mut call: F, options: RpcClientOptions) -> Result<T, Status>
+pub async fn retry_status<F, Fut, T>(
+    service: &str,
+    context: &Context,
+    mut call: F,
+    options: RpcClientOptions,
+) -> Result<T, Status>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
     retry_status_with_policy(
+        service,
         "default",
+        context,
         &mut call,
         MethodRetryPolicy::from_options(options),
     )
@@ -996,6 +1051,8 @@ where
 }
 
 pub async fn retry_status_for_method<F, Fut, T>(
+    service: &str,
+    context: &Context,
     mut call: F,
     options: RpcClientOptions,
     governance: Option<&roze_config::GovernanceConfig>,
@@ -1006,7 +1063,9 @@ where
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
     retry_status_with_policy(
+        service,
         method,
+        context,
         &mut call,
         retry_policy_for_method(options, governance, method),
     )
@@ -1014,7 +1073,9 @@ where
 }
 
 async fn retry_status_with_policy<F, Fut, T>(
-    budget_key: &str,
+    service: &str,
+    method: &str,
+    context: &Context,
     call: &mut F,
     policy: MethodRetryPolicy,
 ) -> Result<T, Status>
@@ -1022,9 +1083,10 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
+    let budget_key = format!("{service}:{method}");
     CLIENT_RETRY_BUDGETS
-        .get_or_init(RetryBudgetRegistry::new)
-        .record_call(budget_key);
+        .get_or_init(RetryBudgetRegistry::default)
+        .record_call(&budget_key);
     let mut attempt = 0usize;
     loop {
         let response = call().await;
@@ -1032,24 +1094,65 @@ where
             Ok(value) => return Ok(value),
             Err(status) if attempt < policy.max_retries && should_retry_status(&status) => {
                 if !CLIENT_RETRY_BUDGETS
-                    .get_or_init(RetryBudgetRegistry::new)
-                    .allow_retry(budget_key, policy.budget_percent)
+                    .get_or_init(RetryBudgetRegistry::default)
+                    .allow_retry(&budget_key, policy.budget_percent)
                 {
-                    record_resilience_decision("rpc", "retry", "budget_exhausted");
+                    record_resilience_decision(service, "rpc", "retry", "budget_exhausted");
                     return Err(status);
                 }
-                attempt += 1;
-                record_resilience_decision("rpc", "retry", "attempt");
-                sleep(retry_delay(policy.backoff, policy.max_backoff, attempt)).await;
+                let next_attempt = attempt + 1;
+                let delay = full_jitter_delay(policy.backoff, policy.max_backoff, next_attempt);
+                if let Some(status) = retry_context_status(context, delay) {
+                    record_resilience_decision(
+                        service,
+                        "rpc",
+                        "retry",
+                        if status.code() == Code::Cancelled {
+                            "cancelled"
+                        } else {
+                            "deadline_exhausted"
+                        },
+                    );
+                    return Err(status);
+                }
+                if !delay.is_zero() {
+                    sleep(delay).await;
+                }
+                if let Some(status) = retry_context_status(context, Duration::ZERO) {
+                    record_resilience_decision(
+                        service,
+                        "rpc",
+                        "retry",
+                        if status.code() == Code::Cancelled {
+                            "cancelled"
+                        } else {
+                            "deadline_exhausted"
+                        },
+                    );
+                    return Err(status);
+                }
+                attempt = next_attempt;
+                record_resilience_decision(service, "rpc", "retry", "attempt");
             }
             Err(status) => return Err(status),
         }
     }
 }
 
-fn retry_delay(base: Duration, max: Duration, attempt: usize) -> Duration {
-    let factor = attempt.max(1) as u32;
-    base.saturating_mul(factor).min(max)
+fn retry_context_status(context: &Context, delay: Duration) -> Option<Status> {
+    if context.cancelled() {
+        return Some(Status::cancelled("RPC retry cancelled"));
+    }
+    if context.deadline().is_some()
+        && context
+            .remaining_timeout()
+            .is_none_or(|remaining| remaining <= delay)
+    {
+        return Some(Status::deadline_exceeded(
+            "RPC retry backoff exceeds remaining deadline",
+        ));
+    }
+    None
 }
 
 #[allow(clippy::result_large_err)]
@@ -1071,20 +1174,35 @@ fn rate_limit_config(config: MethodRateLimitConfig) -> roze_resilience::RateLimi
     }
 }
 
-fn method_breaker_is_open(key: &str) -> bool {
-    METHOD_BREAKERS
-        .get_or_init(BreakerRegistry::new)
-        .is_open(key)
+fn method_breaker_allow(key: &str) -> BreakerDecision {
+    METHOD_BREAKERS.get_or_init(BreakerRegistry::new).allow(key)
 }
 
-fn method_breaker_record(key: &str, success: bool, config: &MethodBreakerConfig) {
+fn method_breaker_record(
+    key: &str,
+    permit: BreakerPermit,
+    success: bool,
+    config: &MethodBreakerConfig,
+) {
     let registry = METHOD_BREAKERS.get_or_init(BreakerRegistry::new);
     if success {
-        registry.record_success(key);
+        registry.record_success(key, permit);
         return;
     }
     registry.record_failure(
         key,
+        permit,
+        roze_resilience::BreakerConfig {
+            failure_threshold: config.failure_threshold,
+            reset_timeout: config.reset_timeout,
+        },
+    );
+}
+
+fn method_breaker_cancel(key: &str, permit: BreakerPermit, config: &MethodBreakerConfig) {
+    METHOD_BREAKERS.get_or_init(BreakerRegistry::new).cancel(
+        key,
+        permit,
         roze_resilience::BreakerConfig {
             failure_threshold: config.failure_threshold,
             reset_timeout: config.reset_timeout,
@@ -1118,6 +1236,12 @@ fn method_shedding_record(
     );
 }
 
+fn method_shedding_release(key: &str) {
+    METHOD_SHEDDERS
+        .get_or_init(SheddingRegistry::new)
+        .release(key);
+}
+
 fn method_shedding_config(config: MethodSheddingConfig) -> roze_resilience::SheddingConfig {
     roze_resilience::SheddingConfig {
         concurrency: config.concurrency,
@@ -1126,75 +1250,6 @@ fn method_shedding_config(config: MethodSheddingConfig) -> roze_resilience::Shed
         max_avg_latency: config.max_avg_latency,
         max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
         cool_down: config.cool_down,
-    }
-}
-
-#[derive(Debug)]
-struct RetryBudgetRegistry {
-    states: DashMap<String, RetryBudgetState>,
-    window: Duration,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RetryBudgetState {
-    window_start: Instant,
-    calls: u64,
-    retries: u64,
-}
-
-impl RetryBudgetRegistry {
-    fn new() -> Self {
-        Self {
-            states: DashMap::new(),
-            window: Duration::from_secs(60),
-        }
-    }
-
-    fn record_call(&self, key: &str) {
-        let now = Instant::now();
-        let mut state = self
-            .states
-            .entry(key.to_string())
-            .or_insert_with(|| RetryBudgetState {
-                window_start: now,
-                calls: 0,
-                retries: 0,
-            });
-        reset_retry_budget_window(&mut state, now, self.window);
-        state.calls = state.calls.saturating_add(1);
-    }
-
-    fn allow_retry(&self, key: &str, budget_percent: Option<u32>) -> bool {
-        let Some(budget_percent) = budget_percent else {
-            return true;
-        };
-        let now = Instant::now();
-        let mut state = self
-            .states
-            .entry(key.to_string())
-            .or_insert_with(|| RetryBudgetState {
-                window_start: now,
-                calls: 1,
-                retries: 0,
-            });
-        reset_retry_budget_window(&mut state, now, self.window);
-        let retry_budget = state
-            .calls
-            .saturating_mul(u64::from(budget_percent.min(100)))
-            / 100;
-        let allowed = state.retries < retry_budget.max(1);
-        if allowed {
-            state.retries = state.retries.saturating_add(1);
-        }
-        allowed
-    }
-}
-
-fn reset_retry_budget_window(state: &mut RetryBudgetState, now: Instant, window: Duration) {
-    if now.duration_since(state.window_start) > window {
-        state.window_start = now;
-        state.calls = 0;
-        state.retries = 0;
     }
 }
 
@@ -1411,7 +1466,10 @@ mod tests {
     async fn retry_status_retries_once() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_clone = attempts.clone();
+        let context = Context::background();
         let result = retry_status(
+            "catalog",
+            &context,
             move || {
                 let attempts = attempts_clone.clone();
                 async move {
@@ -1489,8 +1547,11 @@ mod tests {
         );
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_clone = attempts.clone();
+        let context = Context::background();
 
         let err = retry_status_for_method(
+            "catalog",
+            &context,
             move || {
                 let attempts = attempts_clone.clone();
                 async move {
@@ -1507,6 +1568,66 @@ mod tests {
 
         assert_eq!(err.code(), Code::Unavailable);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_status_stops_when_backoff_exceeds_deadline() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let context = Context::background().with_timeout(Duration::from_nanos(1));
+
+        let err = retry_status(
+            "catalog",
+            &context,
+            move || {
+                let attempts = attempts_clone.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(Status::unavailable("temporary"))
+                }
+            },
+            RpcClientOptions {
+                max_retries: 2,
+                retry_backoff: Duration::from_secs(1),
+                retry_max_backoff: Duration::from_secs(1),
+                ..RpcClientOptions::default()
+            },
+        )
+        .await
+        .expect_err("expired deadline must stop retries");
+
+        assert_eq!(err.code(), Code::DeadlineExceeded);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_status_stops_when_context_is_cancelled() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let context = Context::background();
+        context.cancel();
+
+        let err = retry_status(
+            "catalog",
+            &context,
+            move || {
+                let attempts = attempts_clone.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(Status::unavailable("temporary"))
+                }
+            },
+            RpcClientOptions {
+                max_retries: 2,
+                retry_backoff: Duration::ZERO,
+                ..RpcClientOptions::default()
+            },
+        )
+        .await
+        .expect_err("cancelled context must stop retries");
+
+        assert_eq!(err.code(), Code::Cancelled);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1862,11 +1983,19 @@ mod tests {
         };
 
         assert_eq!(
-            apply_fallback(RozeError::BadRequest("bad".into()), Some(fallback.clone())),
+            apply_fallback(
+                "catalog",
+                RozeError::BadRequest("bad".into()),
+                Some(fallback.clone())
+            ),
             RozeError::BadRequest("bad".into())
         );
         assert!(matches!(
-            apply_fallback(RozeError::Internal("boom".into()), Some(fallback)),
+            apply_fallback(
+                "catalog",
+                RozeError::Internal("boom".into()),
+                Some(fallback)
+            ),
             RozeError::Fallback { status: 598, .. }
         ));
     }
@@ -1902,6 +2031,108 @@ mod tests {
             second,
             Err(status) if status.code() == Code::Unavailable && status.message() == "load shed"
         ));
+    }
+
+    #[test]
+    fn method_breaker_serializes_half_open_probe_and_recovers_after_cancel() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let method = format!("HalfOpen{}", std::process::id());
+        governance.routes.insert(
+            method.clone(),
+            roze_config::RouteGovernanceConfig {
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 1,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let (_ctx, failing) = begin_method(
+            "svc",
+            method.clone(),
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("closed breaker should allow request");
+        finish_method(failing, "internal");
+        std::thread::sleep(Duration::from_millis(2));
+
+        let (_ctx, cancelled_probe) = begin_method(
+            "svc",
+            method.clone(),
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("expired breaker should allow one probe");
+        drop(cancelled_probe);
+        let protected = begin_method(
+            "svc",
+            method.clone(),
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(
+            matches!(protected, Err(status) if status.code() == Code::Unavailable && status.message() == "circuit open")
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        let (_ctx, successful_probe) = begin_method(
+            "svc",
+            method.clone(),
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("cancelled probe should become retryable after reset timeout");
+        let concurrent = begin_method(
+            "svc",
+            method.clone(),
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(
+            matches!(concurrent, Err(status) if status.code() == Code::Unavailable && status.message() == "circuit open")
+        );
+        finish_method(successful_probe, "ok");
+
+        let recovered = begin_method("svc", method, Context::background(), Some(&governance));
+        assert!(recovered.is_ok());
+    }
+
+    #[test]
+    fn dropping_method_guard_releases_shedding_without_opening_breaker() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let method = format!("Cancelled{}", std::process::id());
+        governance.routes.insert(
+            method.clone(),
+            roze_config::RouteGovernanceConfig {
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 60_000,
+                }),
+                shedding: Some(roze_config::SheddingConfig {
+                    concurrency: 1,
+                    window_ms: 1_000,
+                    min_samples: 1,
+                    max_avg_latency_ms: 1_000,
+                    max_failure_ratio_per_mille: 0,
+                    cool_down_ms: 60_000,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let (_ctx, guard) = begin_method(
+            "svc",
+            method.clone(),
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("first call should acquire shedding capacity");
+        drop(guard);
+
+        let next = begin_method("svc", method, Context::background(), Some(&governance));
+        assert!(next.is_ok());
     }
 
     #[tokio::test]

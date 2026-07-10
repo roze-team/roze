@@ -135,6 +135,7 @@ pub fn render_rpc(spec: &ApiSpec) -> String {
 pub fn render_client(spec: &ApiSpec) -> String {
     let package = to_snake_case(&spec.service);
     let service = to_pascal_case(&spec.service);
+    let service_name = &spec.service;
     let client_mod = format!("{}_client", to_snake_case(&service));
 
     let mut out = String::from("#![allow(dead_code, unused_imports)]\n\n");
@@ -240,12 +241,13 @@ pub fn render_client(spec: &ApiSpec) -> String {
         let handler = resolved_handler_name(route);
         let retry_request_expr = retry_request_template_expr(spec, &route.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            {service_name:?},\n            &context,\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
             request = proto_type_name(&route.request),
             response = proto_type_name(&route.response),
             retry_request_expr = retry_request_expr,
-            governance_key = handler.clone()
+            governance_key = handler.clone(),
+            service_name = service_name,
         ));
     }
 
@@ -253,12 +255,13 @@ pub fn render_client(spec: &ApiSpec) -> String {
         let method_name = to_snake_case(&method.name);
         let retry_request_expr = retry_request_template_expr(spec, &method.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            {service_name:?},\n            &context,\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
             request = proto_type_name(&method.request),
             response = proto_type_name(&method.response),
             retry_request_expr = retry_request_expr,
-            governance_key = &method.name
+            governance_key = &method.name,
+            service_name = service_name,
         ));
     }
 
@@ -329,7 +332,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
             handler = handler
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             handler = handler
         ));
     } else {
@@ -338,7 +341,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
             app_to_proto(spec, resp_ty, "resp")
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             handler = handler
         ));
     }
@@ -409,7 +412,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
             method = method.name
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             method = method.name
         ));
     } else {
@@ -418,7 +421,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
             app_to_proto(spec, resp_ty, "resp")
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             method = method.name
         ));
     }
@@ -1350,6 +1353,8 @@ mod tests {
         assert!(client.contains("RpcClientOptions::from_config(&config)"));
         assert!(client.contains("roze_rpc::rpc::client_request("));
         assert!(client.contains("roze_rpc::rpc::retry_status_for_method("));
+        assert!(client.contains("retry_status_for_method(\n            \"user\","));
+        assert!(client.contains("\"user\",\n            &context,"));
         assert!(client.contains("governance.as_ref()"));
         assert!(client.contains("\"GetUser\""));
         assert!(client.contains("let request_template = req;"));
@@ -1461,6 +1466,7 @@ mod tests {
         assert!(rendered.contains("roze_rpc::rpc::invalid_argument_status(message, &request_ctx)"));
         assert!(rendered.contains("finish_method(method_guard, \"invalid_argument\")"));
         assert!(rendered.contains("roze_rpc::rpc::apply_fallback("));
+        assert!(rendered.contains("self.ctx.config.name.as_str(),\n                    err,"));
         assert!(rendered.contains(
             "roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), \"GetUser\")"
         ));

@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use tower::{util::BoxCloneService, Layer, Service, ServiceExt};
+use tower::{util::BoxCloneSyncService, Layer, Service, ServiceExt};
 
 use crate::{
     extract::{Extension, FromRequest, FromRequestParts},
@@ -79,7 +79,8 @@ where
     }
 }
 
-impl<T> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for AddExtensionLayer<T>
+impl<T> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
+    for AddExtensionLayer<T>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -87,7 +88,7 @@ where
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         AddExtension {
             value: self.value.clone(),
@@ -96,7 +97,7 @@ where
     }
 }
 
-impl<T> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for Extension<T>
+impl<T> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>> for Extension<T>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -104,7 +105,7 @@ where
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         AddExtension {
             value: self.0.clone(),
@@ -115,7 +116,7 @@ where
 
 pub struct AddExtension<T> {
     value: T,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
 }
 
 impl<T> Clone for AddExtension<T>
@@ -189,7 +190,7 @@ where
     }
 }
 
-impl<E, S> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
+impl<E, S> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
     for FromExtractorLayer<E, S>
 where
     E: FromRequestParts + Send + 'static,
@@ -200,7 +201,7 @@ where
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         FromExtractor {
             state: self.state.clone(),
@@ -212,7 +213,7 @@ where
 
 pub struct FromExtractor<E, S = ()> {
     state: S,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     _marker: PhantomData<fn() -> E>,
 }
 
@@ -312,15 +313,15 @@ impl<F> std::fmt::Debug for MapRequestLayer<F> {
     }
 }
 
-impl<F> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for MapRequestLayer<F>
+impl<F> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>> for MapRequestLayer<F>
 where
-    F: Clone + Send + 'static,
+    F: Clone + Send + Sync + 'static,
 {
     type Service = MapRequest<F>;
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         MapRequest {
             f: self.f.clone(),
@@ -331,7 +332,7 @@ where
 
 pub struct MapRequest<F> {
     f: F,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
 }
 
 impl<F> Clone for MapRequest<F>
@@ -356,7 +357,7 @@ impl<F> std::fmt::Debug for MapRequest<F> {
 
 impl<F, Fut, Out> Service<IncomingRequest> for MapRequest<F>
 where
-    F: Fn(IncomingRequest) -> Fut + Clone + Send + 'static,
+    F: Fn(IncomingRequest) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Out> + Send + 'static,
     Out: IntoMapRequestResult + 'static,
 {
@@ -401,15 +402,16 @@ impl<F> std::fmt::Debug for MapResponseLayer<F> {
     }
 }
 
-impl<F> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for MapResponseLayer<F>
+impl<F> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
+    for MapResponseLayer<F>
 where
-    F: Clone + Send + 'static,
+    F: Clone + Send + Sync + 'static,
 {
     type Service = MapResponse<F>;
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         MapResponse {
             f: self.f.clone(),
@@ -420,7 +422,7 @@ where
 
 pub struct MapResponse<F> {
     f: F,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
 }
 
 impl<F> Clone for MapResponse<F>
@@ -445,7 +447,7 @@ impl<F> std::fmt::Debug for MapResponse<F> {
 
 impl<F, Fut, Out> Service<IncomingRequest> for MapResponse<F>
 where
-    F: Fn(HttpResponse) -> Fut + Clone + Send + 'static,
+    F: Fn(HttpResponse) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Out> + Send + 'static,
     Out: IntoResponse + 'static,
 {
@@ -499,10 +501,10 @@ where
     }
 }
 
-impl<F, Args, S> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
+impl<F, Args, S> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
     for FromFnLayer<F, Args, S>
 where
-    F: Clone + Send + 'static,
+    F: Clone + Send + Sync + 'static,
     S: Clone + Send + Sync + 'static,
     Args: 'static,
 {
@@ -510,7 +512,7 @@ where
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         FromFn {
             f: self.f.clone(),
@@ -524,7 +526,7 @@ where
 pub struct FromFn<F, Args, S = ()> {
     f: F,
     state: S,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     _marker: PhantomData<fn() -> Args>,
 }
 
@@ -557,7 +559,7 @@ where
 
 #[derive(Clone)]
 pub struct Next {
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
 }
 
 impl Next {
@@ -595,7 +597,7 @@ impl Service<IncomingRequest> for Next {
 
 impl<F, Fut, Out, Last, S> Service<IncomingRequest> for FromFn<F, (Last,), S>
 where
-    F: Fn(Last, Next) -> Fut + Clone + Send + 'static,
+    F: Fn(Last, Next) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Out> + Send + 'static,
     Out: IntoResponse + 'static,
     Last: FromRequest + Send + 'static,
@@ -630,7 +632,7 @@ macro_rules! impl_from_fn {
         impl<F, Fut, Out, S, $($ty,)* $last> Service<IncomingRequest>
             for FromFn<F, ($($ty,)* $last,), S>
         where
-            F: Fn($($ty,)* $last, Next) -> Fut + Clone + Send + 'static,
+            F: Fn($($ty,)* $last, Next) -> Fut + Clone + Send + Sync + 'static,
             Fut: Future<Output = Out> + Send + 'static,
             Out: IntoResponse + 'static,
             S: Clone + Send + Sync + 'static,

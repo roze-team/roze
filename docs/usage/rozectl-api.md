@@ -565,8 +565,11 @@ long-run evidence. The generated GitHub Actions workflow runs the same gates on
 Linux and Windows runners and uploads an `ops/**` evidence bundle. The CI
 evidence policy records artifact naming, retention, required paths, blocking
 conditions, and the rule that CI success is a precondition, not a replacement,
-for soak and failure-injection evidence. The evidence manifest indexes every
-generated ops contract, verification script, workflow, smoke surface, and
+for soak and failure-injection evidence. Each verification run writes
+`ops/production-verify-report.json`; both platform scripts validate its service
+boundary, conservative verdict, required gate list, and long-run evidence
+requirements before the report can be uploaded. The evidence manifest indexes
+every generated ops contract, verification script, workflow, smoke surface, and
 promotion evidence requirement uploaded in the CI artifact. The YAML baseline is
 machine-readable for CI/platform checks and captures the go-zero inspired
 architecture baseline Roze expects before broad rollout: simple IDL-first
@@ -1325,6 +1328,8 @@ Builder headers may include entgo's extra Go type sample argument, such as
 `field JSON("metadata", map[string]interface{}{})`, or
 `field UUID("public_id", uuid.UUID{})`; Roze uses the first argument as the
 field name and maps JSON/UUID to its string-backed model representation.
+Ent `field Any("payload")` is also accepted and maps to the same string-backed
+JSON representation, including optional fields and static map/slice defaults.
 Go map defaults such as `Default(map[string]any{})` and simple static literals
 like `Default(map[string]any{"theme": "dark", "beta": true})` or
 `Default(map[string]interface{}{"theme": "dark"})` on string-backed JSON fields
@@ -1417,8 +1422,14 @@ unique index on the local edge field and generates unique lookup helpers.
 Edge blocks also accept ent-style builder calls such as `To("User")`,
 `Field("user_id")`, `Ref("id")`, `Unique()`, `Required()`, and edge-level
 `Immutable()`; round-trip rendering normalizes generated relationship
-directives to lowercase `.ent` directives, preserves edge `Comment("...")` as
-`comment "..."`, and omits edge metadata-only directives such as `Immutable()`.
+directives to lowercase `.ent` directives and preserves edge `Comment("...")`
+as `comment "..."`. Immutable local-FK edges remain available on create
+builders, but their relationship setter, clear method, and underlying FK field
+setter are omitted from SeaORM and Toasty update/update-many builders.
+For nullable local FK fields, `Required()` is enforced in generated mutation
+builders: create rejects a missing or null relation, while update-one and
+update-many allow the relation to remain untouched but reject explicitly
+clearing it to null.
 Edge headers can also use chained ent-style syntax such as
 `edge To("user", User.Type).Field("user_id").Ref("id").Unique().Required()`;
 round-trip rendering normalizes that form to `edge user { ... }`.
@@ -1431,16 +1442,26 @@ such as `StorageKey(edge.Table("memberships"), edge.Columns("user_id",
 using `edge.Columns(...)` on a concrete local-FK edge fails fast because Roze
 does not yet generate composite edge storage columns.
 Inverse ent-style edges such as `edge From("profile", Profile.Type).Ref("user")`
-are accepted as parse-compatible no-ops when they do not declare a local
-foreign-key field for Roze to generate. If an inverse edge declares a local
-field, such as `edge From("author", User.Type).Field("author_id").Unique()`,
+resolve their named owning edge after all entities are parsed. Roze preserves
+them during canonical round-trip and generates reverse `query_<edge>` methods:
+inverse `Unique()` edges return an optional target, while non-unique inverse
+edges return a target list. `where_<edge>_with(...)` also works in the inverse
+direction by projecting the remote owning FK, dropping null FK values, and
+filtering the source ref field with a typed `IN` predicate. Inverse edges do not
+generate local FK setters, indexes, or cache keys. If an inverse edge declares
+a local field, such as `edge From("author", User.Type).Field("author_id").Unique()`,
 Roze treats it as a concrete local-FK relationship and generates the same
 repository helpers as an owning `To(...)` edge.
 Many-to-many ent-style edges such as
-`edge To("groups", Group.Type).Through("memberships", Membership.Type)` are
-also accepted as parse-compatible no-ops when they do not declare a local
-`Field(...)`/`Ref(...)`; model the join entity explicitly when Roze should
-generate repositories for that relationship.
+`edge To("groups", Group.Type).Through("memberships", Membership.Type)` resolve
+an explicit join entity when it has exactly one owning local-FK edge to the
+source model and one to the target model. Generated `query_<edge>` methods
+traverse through the join repository, and `where_<edge>_with(...)` projects
+matching target keys through the join model before filtering source rows.
+The join entity remains a normal generated model, so additional edge fields are
+available through its own CRUD API. Direct many-to-many setters are not
+generated; create/delete join rows explicitly. Ambiguous self-referential
+Through schemas fail with guidance to model both join directions explicitly.
 Plain ent-style `edge To("groups", Group.Type)` declarations without local
 `Field(...)`/`Ref(...)` are treated the same way; if either `Field(...)` or
 `Ref(...)` is present, both must be present so Roze can generate a concrete
@@ -1483,6 +1504,13 @@ Field directives also accept ent-style builder calls such as `Optional()`,
 `Nillable()`, `Unique()`, `Sensitive()`, `StorageKey("column")`,
 `MinLen(3)`, and `ClientDefault("value")`; Roze normalizes them back to the
 lowercase schema form during round-trip rendering.
+`Optional()` makes a field nullable and optional during create. `Nillable()`
+alone keeps Ent's distinct contract: the generated model uses `Option<T>`, but
+create requires a non-null value unless the field has a default, explicit null
+is rejected by create and update builders, and no `clear_*` method is emitted.
+Roze preserves this distinction in canonical `.ent` output with
+`required_on_create`. Combining `Optional().Nillable()` keeps the field
+optional and allows explicit null.
 Enum field builders such as `field Enum("state").Values("active", "disabled")`
 map to a Roze `string` field with generated enum-value validation.
 `NamedValues("Active", "active", "Disabled", "disabled")` is also accepted and
@@ -1494,9 +1522,9 @@ timestamp default for `i64`/`u64` timestamp fields. Ent-style timestamp
 closures in `Default(...)`, `DefaultFunc(...)`, `UpdateDefault(...)`, or
 `ClientDefault(...)`, such as `func() int64 { return time.Now().Unix() }`,
 `UnixMilli()`, `UnixMicro()`, and `UnixNano()`, normalize to `now_secs`,
-`now_millis`, `now_micros`, and `now_nanos` respectively. Closures returning
-`time.Now()` or `time.Now().UTC()` for `Time(...)` fields normalize to
-`now_millis`.
+`now_millis`, `now_micros`, and `now_nanos` respectively; the same mappings
+apply to `time.Now().UTC().Unix*()` chains. Closures returning `time.Now()` or
+`time.Now().UTC()` for `Time(...)` fields normalize to `now_millis`.
 UUID defaults accept ent-style `DefaultFunc(uuid.NewString)`,
 `DefaultFunc(uuid.New)`, and `DefaultFunc(uuid.NewV7)` for
 `UUID(...)`/string-backed fields. UUID closures such as
@@ -1512,9 +1540,9 @@ Literal defaults such as `Default(true)`, `Default(18)`, and
 `Default("member")` are used by generated create builders for bool, primitive
 numeric, string, and nullable variants of those fields.
 Roze also accepts common ent metadata directives on fields, edges, and indexes,
-such as `SchemaType(...)`, `GoType(...)`, `StructTag(...)`,
+such as `SchemaType(...)`, `GoType(...)`,
 `ValueScanner(...)`, `DefaultExpr(...)`, `DefaultExprs(...)`,
-`Collation(...)`, `Charset(...)`, `Annotations(...)`, `Deprecated(...)`, edge
+`Collation(...)`, `Charset(...)`, `Annotations(...)`, edge
 `StorageKey(...)`, and index `Where(...)`/Atlas index annotation helpers, as
 parse-compatible no-ops;
 round-trip rendering keeps the
@@ -1523,10 +1551,30 @@ conditions, database-side default expressions, collation/charset hints, and
 index prefix/type/order/include/operator-class hints are accepted for entgo
 input compatibility, but Roze does not emit partial-index, default-expression,
 collation/charset, or dialect-specific index DDL from them yet.
-Go-side field validators such as custom `Validate(...)` functions and
-`Match(...)` are accepted as parse-compatible no-ops; use Roze-supported
-validators such as `NotEmpty()`, `MinLen(...)`, `MaxLen(...)`, `Enum(...)`,
-and numeric bounds when generated Rust validation is required. The common ent
+Ent `Deprecated()` and `Deprecated("reason")` field metadata is preserved in
+canonical `.ent` schemas as `deprecated` or `deprecated "reason"`. Generated
+SeaORM and Toasty model fields receive Rust `#[deprecated]` attributes, including
+the migration reason when provided. Complete ORM entities still hydrate the
+column so existing data remains readable; unlike Ent's generated query selector,
+Roze does not omit deprecated columns from full-model reads.
+Ent `StructTag(...)` JSON metadata is preserved when it has a static Go tag:
+`json:"name"` generates `serde(rename)`, `omitempty` generates
+`serde(skip_serializing_if = "is_default")`, and `json:"-"` skips the field.
+Other struct-tag keys remain parse-compatible metadata and are omitted.
+Custom Go-side `Validate(...)` functions and dynamic `Match(...)` expressions
+are accepted as parse-compatible no-ops. Static
+`Match(regexp.MustCompile("..."))` expressions are validated during generation,
+normalized to `match "..."`, and enforced with Rust `regex` in generated
+mutation builders; the `regex` dependency is added only when needed. Other
+supported validators include `NotEmpty()`, `MinLen(...)`, `MaxLen(...)`,
+`MinRuneLen(...)`, `MaxRuneLen(...)`, `Enum(...)`, and numeric bounds when
+generated Rust validation is required. `NotEmpty()` rejects zero-length strings
+but permits whitespace-only strings, matching Ent's length-based behavior.
+Ent `MinLen(...)`/`MaxLen(...)` use
+UTF-8 byte length, while `MinRuneLen(...)`/`MaxRuneLen(...)` use Unicode
+character count. They normalize to `min_byte_len`/`max_byte_len` and
+`min_len`/`max_len` respectively so round-trip rendering preserves semantics.
+The common ent
 pattern `Validate(MaxRuneCount(n))` is recognized and normalized to Roze
 `max_len n`, using Rust character-count validation in generated builders.
 `.ent` fields can declare `immutable`; Roze keeps them available on create
@@ -1535,13 +1583,15 @@ builders but omits them from update, update-many, and edge update setters.
 equivalent of writing the field type with `?`, such as `string?`.
 `.ent` fields can declare `sensitive`; Roze omits `Debug` derives for those
 model rows and generates a manual `Debug` implementation that renders the
-field as `<sensitive>`.
+field as `<sensitive>`. Generated SeaORM and Toasty model fields also use
+`#[serde(skip)]`, preventing sensitive values from appearing in serialized
+output or being populated through model deserialization.
 `.ent` string fields can declare `not_empty`, `min_len <n>`, `max_len <n>`,
 `enum <value>, <value>`, `contains <value>`, `starts_with <value>`, and
 `ends_with <value>`, plus `not_contains <value>`, `not_starts_with <value>`,
-and `not_ends_with <value>`. Bytes fields can use the length validators
-`not_empty`, `min_len <n>`, and `max_len <n>` with byte-length semantics.
-Entgo's `Size(n)` builder is accepted as a `MaxLen(n)`/`max_len n` alias. Roze
+and `not_ends_with <value>`. String and bytes fields can also use explicit
+`min_byte_len <n>` and `max_byte_len <n>` constraints. Entgo's `Size(n)`
+builder is accepted as a `MaxLen(n)`/`max_byte_len n` alias. Roze
 validates those constraints in generated create, update-one, and update-many
 builders before writing through Toasty or SeaORM.
 `.ent` primitive numeric fields can declare `positive`, `non_negative`,
@@ -1618,6 +1668,10 @@ SQL repositories additionally generate:
   `order.query_user(&ctx.model().user()).await?` on SeaORM and
   `order.query_user(&mut db).await?` on Toasty; nullable foreign-key edges
   return `Ok(None)` when the local edge field is `None`
+- relation-filter query methods provide Ent-style `HasXWith` behavior through
+  `where_<edge>_with(...)`: target predicates are combined with AND, projected
+  to the configured ref key, and applied to the source query as a typed local
+  foreign-key `IN` predicate before ordering, counting, or pagination
 - nullable foreign-key edges also get `has_<edge>()` and `not_has_<edge>()`
   predicate helpers backed by the local edge field
 - create and update builders also get ent-style edge setters such as

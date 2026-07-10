@@ -12,6 +12,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 matchit.workspace = true
+percent-encoding.workspace = true
 roze-error = { path = "../roze-error" }
 roze-result = { path = "../roze-result" }
 roze-service = { path = "../roze-service" }

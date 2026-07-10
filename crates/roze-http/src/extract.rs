@@ -1,19 +1,25 @@
 use std::{
+    fmt,
     future::Future,
     ops::{Deref, DerefMut},
     pin::Pin,
+    sync::Arc,
 };
 
 use bytes::Bytes;
-use http::{header, request::Parts as HttpParts, HeaderMap, Method, Uri, Version};
-use serde::de::DeserializeOwned;
-use tower::{util::BoxCloneService, Layer, Service};
+use http::{header, request::Parts as HttpParts, Extensions, HeaderMap, Method, Uri, Version};
+use serde::de::{
+    self,
+    value::{Error as ValueError, MapDeserializer, SeqDeserializer, StrDeserializer},
+    DeserializeOwned, Deserializer, IntoDeserializer, Visitor,
+};
+use tower::{util::BoxCloneSyncService, Layer, Service};
 
 use crate::{
     body::{self, BodyError},
     response::{IntoResponse, Json},
     rest::{HttpResponse, IncomingRequest},
-    router::{MatchedPath, RouteParams},
+    route_params::RouteParams,
 };
 
 pub type Request = IncomingRequest;
@@ -49,14 +55,14 @@ impl DefaultBodyLimit {
     }
 }
 
-impl Layer<BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallible>>
+impl Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, std::convert::Infallible>>
     for DefaultBodyLimit
 {
     type Service = DefaultBodyLimitService;
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, std::convert::Infallible>,
     ) -> Self::Service {
         DefaultBodyLimitService {
             kind: self.kind,
@@ -68,7 +74,7 @@ impl Layer<BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallib
 #[derive(Clone)]
 pub struct DefaultBodyLimitService {
     kind: DefaultBodyLimitKind,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, std::convert::Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, std::convert::Infallible>,
 }
 
 impl std::fmt::Debug for DefaultBodyLimitService {
@@ -530,15 +536,52 @@ impl FromRequestParts for HeaderMap {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchedPath(Arc<str>);
+
+impl MatchedPath {
+    pub(crate) fn new(path: impl Into<Arc<str>>) -> Self {
+        Self(path.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+
+    pub fn from_request_extensions(extensions: &Extensions) -> Result<Self, roze_error::RozeError> {
+        extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or_else(|| roze_error::RozeError::Internal("missing matched path".to_string()))
+    }
+
+    #[must_use]
+    pub fn optional_from_request_extensions(extensions: &Extensions) -> Option<Self> {
+        extensions.get::<Self>().cloned()
+    }
+}
+
+impl Deref for MatchedPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for MatchedPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl FromRequestParts for MatchedPath {
     type Rejection = roze_error::RozeError;
 
     fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
-        let matched_path = parts.extensions.get::<MatchedPath>().cloned();
-        Box::pin(async move {
-            matched_path
-                .ok_or_else(|| roze_error::RozeError::Internal("missing matched path".to_string()))
-        })
+        let matched_path = Self::from_request_extensions(&parts.extensions);
+        Box::pin(async move { matched_path })
     }
 }
 
@@ -546,13 +589,8 @@ impl FromRequest for MatchedPath {
     type Rejection = roze_error::RozeError;
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
-        Box::pin(async move {
-            request
-                .extensions()
-                .get::<MatchedPath>()
-                .cloned()
-                .ok_or_else(|| roze_error::RozeError::Internal("missing matched path".to_string()))
-        })
+        let matched_path = Self::from_request_extensions(request.extensions());
+        Box::pin(async move { matched_path })
     }
 }
 
@@ -562,7 +600,7 @@ impl OptionalFromRequestParts for MatchedPath {
     fn optional_from_request_parts(
         parts: &mut HttpParts,
     ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
-        let matched_path = parts.extensions.get::<MatchedPath>().cloned();
+        let matched_path = Self::optional_from_request_extensions(&parts.extensions);
         Box::pin(async move { Ok(matched_path) })
     }
 }
@@ -573,12 +611,384 @@ impl OptionalFromRequest for MatchedPath {
     fn optional_from_request(
         request: IncomingRequest,
     ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
-        Box::pin(async move { Ok(request.extensions().get::<MatchedPath>().cloned()) })
+        let matched_path = Self::optional_from_request_extensions(request.extensions());
+        Box::pin(async move { Ok(matched_path) })
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Path<T>(pub T);
+
+struct PathDeserializer<'de> {
+    params: &'de RouteParams,
+}
+
+impl<'de> PathDeserializer<'de> {
+    fn new(params: &'de RouteParams) -> Self {
+        Self { params }
+    }
+
+    fn single(self) -> Result<&'de str, ValueError> {
+        let mut params = self.params.iter();
+        let Some((_, value)) = params.next() else {
+            return Err(de::Error::custom("expected one path parameter, got 0"));
+        };
+        if params.next().is_some() {
+            return Err(de::Error::custom(format!(
+                "expected one path parameter, got {}",
+                self.params.iter().count()
+            )));
+        }
+        Ok(value)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PathValueDeserializer<'de>(&'de str);
+
+impl<'de> IntoDeserializer<'de, ValueError> for PathValueDeserializer<'de> {
+    type Deserializer = Self;
+
+    fn into_deserializer(self) -> Self::Deserializer {
+        self
+    }
+}
+
+macro_rules! deserialize_parsed_path_value {
+    ($method:ident, $ty:ty, $visit:ident) => {
+        fn $method<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let value = self
+                .0
+                .parse::<$ty>()
+                .map_err(|error| de::Error::custom(error.to_string()))?;
+            visitor.$visit(value)
+        }
+    };
+}
+
+impl<'de> Deserializer<'de> for PathValueDeserializer<'de> {
+    type Error = ValueError;
+
+    deserialize_parsed_path_value!(deserialize_bool, bool, visit_bool);
+    deserialize_parsed_path_value!(deserialize_i8, i8, visit_i8);
+    deserialize_parsed_path_value!(deserialize_i16, i16, visit_i16);
+    deserialize_parsed_path_value!(deserialize_i32, i32, visit_i32);
+    deserialize_parsed_path_value!(deserialize_i64, i64, visit_i64);
+    deserialize_parsed_path_value!(deserialize_i128, i128, visit_i128);
+    deserialize_parsed_path_value!(deserialize_u8, u8, visit_u8);
+    deserialize_parsed_path_value!(deserialize_u16, u16, visit_u16);
+    deserialize_parsed_path_value!(deserialize_u32, u32, visit_u32);
+    deserialize_parsed_path_value!(deserialize_u64, u64, visit_u64);
+    deserialize_parsed_path_value!(deserialize_u128, u128, visit_u128);
+    deserialize_parsed_path_value!(deserialize_f32, f32, visit_f32);
+    deserialize_parsed_path_value!(deserialize_f64, f64, visit_f64);
+    deserialize_parsed_path_value!(deserialize_char, char, visit_char);
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_borrowed_str(self.0)
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_string(self.0.to_owned())
+    }
+
+    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_borrowed_bytes(self.0.as_bytes())
+    }
+
+    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_byte_buf(self.0.as_bytes().to_vec())
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_some(self)
+    }
+
+    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_unit_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_newtype_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        StrDeserializer::<ValueError>::new(self.0).deserialize_enum(name, variants, visitor)
+    }
+
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
+    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_seq<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::custom("nested path sequences are not supported"))
+    }
+
+    fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::custom("nested path tuples are not supported"))
+    }
+
+    fn deserialize_tuple_struct<V>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        _visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::custom(
+            "nested path tuple structs are not supported",
+        ))
+    }
+
+    fn deserialize_map<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::custom("nested path maps are not supported"))
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        Err(de::Error::custom("nested path structs are not supported"))
+    }
+}
+
+macro_rules! deserialize_single_path_value {
+    ($method:ident) => {
+        fn $method<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            PathValueDeserializer(self.single()?).$method(visitor)
+        }
+    };
+}
+
+impl<'de> Deserializer<'de> for PathDeserializer<'de> {
+    type Error = ValueError;
+
+    deserialize_single_path_value!(deserialize_bool);
+    deserialize_single_path_value!(deserialize_i8);
+    deserialize_single_path_value!(deserialize_i16);
+    deserialize_single_path_value!(deserialize_i32);
+    deserialize_single_path_value!(deserialize_i64);
+    deserialize_single_path_value!(deserialize_i128);
+    deserialize_single_path_value!(deserialize_u8);
+    deserialize_single_path_value!(deserialize_u16);
+    deserialize_single_path_value!(deserialize_u32);
+    deserialize_single_path_value!(deserialize_u64);
+    deserialize_single_path_value!(deserialize_u128);
+    deserialize_single_path_value!(deserialize_f32);
+    deserialize_single_path_value!(deserialize_f64);
+    deserialize_single_path_value!(deserialize_char);
+    deserialize_single_path_value!(deserialize_str);
+    deserialize_single_path_value!(deserialize_string);
+    deserialize_single_path_value!(deserialize_bytes);
+    deserialize_single_path_value!(deserialize_byte_buf);
+    deserialize_single_path_value!(deserialize_identifier);
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_some(self)
+    }
+
+    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_unit_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+
+    fn deserialize_newtype_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        SeqDeserializer::new(
+            self.params
+                .iter()
+                .map(|(_, value)| PathValueDeserializer(value)),
+        )
+        .deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        let actual = self.params.iter().count();
+        if actual != len {
+            return Err(de::Error::custom(format!(
+                "expected {len} path parameters, got {actual}"
+            )));
+        }
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple_struct<V>(
+        self,
+        _name: &'static str,
+        len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_tuple(len, visitor)
+    }
+
+    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        MapDeserializer::new(
+            self.params
+                .iter()
+                .map(|(key, value)| (key, PathValueDeserializer(value))),
+        )
+        .deserialize_map(visitor)
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        name: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        StrDeserializer::<ValueError>::new(self.single()?).deserialize_enum(name, variants, visitor)
+    }
+
+    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_unit()
+    }
+}
 
 impl<T> Deref for Path<T> {
     type Target = T;
@@ -598,14 +1008,14 @@ impl<T> Path<T>
 where
     T: DeserializeOwned,
 {
-    pub fn from_params(params: &RouteParams) -> Result<Self, roze_error::RozeError> {
-        let encoded = params.encoded();
-        let value = serde_urlencoded::from_str(&encoded)
+    fn from_route_params(params: &RouteParams) -> Result<Self, roze_error::RozeError> {
+        params.validate()?;
+        let value = T::deserialize(PathDeserializer::new(params))
             .map_err(|error| roze_error::RozeError::BadRequest(error.to_string()))?;
         Ok(Self(value))
     }
 
-    pub fn optional_from_params(
+    fn optional_from_route_params(
         params: Option<&RouteParams>,
     ) -> Result<Option<Self>, roze_error::RozeError> {
         let Some(params) = params else {
@@ -614,7 +1024,20 @@ where
         if params.is_empty() {
             return Ok(None);
         }
-        Self::from_params(params).map(Some)
+        Self::from_route_params(params).map(Some)
+    }
+
+    pub fn from_request_extensions(extensions: &Extensions) -> Result<Self, roze_error::RozeError> {
+        match extensions.get::<RouteParams>() {
+            Some(params) => Self::from_route_params(params),
+            None => Self::from_route_params(&RouteParams::default()),
+        }
+    }
+
+    pub fn optional_from_request_extensions(
+        extensions: &Extensions,
+    ) -> Result<Option<Self>, roze_error::RozeError> {
+        Self::optional_from_route_params(extensions.get::<RouteParams>())
     }
 }
 
@@ -625,14 +1048,8 @@ where
     type Rejection = roze_error::RozeError;
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
-        Box::pin(async move {
-            let params = request
-                .extensions()
-                .get::<RouteParams>()
-                .cloned()
-                .unwrap_or_default();
-            Self::from_params(&params)
-        })
+        let path = Self::from_request_extensions(request.extensions());
+        Box::pin(async move { path })
     }
 }
 
@@ -643,12 +1060,8 @@ where
     type Rejection = roze_error::RozeError;
 
     fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
-        let params = parts
-            .extensions
-            .get::<RouteParams>()
-            .cloned()
-            .unwrap_or_default();
-        Box::pin(async move { Self::from_params(&params) })
+        let path = Self::from_request_extensions(&parts.extensions);
+        Box::pin(async move { path })
     }
 }
 
@@ -661,8 +1074,22 @@ where
     fn optional_from_request_parts(
         parts: &mut HttpParts,
     ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
-        let params = parts.extensions.get::<RouteParams>().cloned();
-        Box::pin(async move { Self::optional_from_params(params.as_ref()) })
+        let path = Self::optional_from_request_extensions(&parts.extensions);
+        Box::pin(async move { path })
+    }
+}
+
+impl<T> OptionalFromRequest for Path<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    type Rejection = roze_error::RozeError;
+
+    fn optional_from_request(
+        request: IncomingRequest,
+    ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
+        let path = Self::optional_from_request_extensions(request.extensions());
+        Box::pin(async move { path })
     }
 }
 
@@ -670,14 +1097,35 @@ where
 pub struct RawPathParams(RouteParams);
 
 impl RawPathParams {
+    pub fn from_request_extensions(extensions: &Extensions) -> Result<Self, roze_error::RozeError> {
+        let params = extensions
+            .get::<RouteParams>()
+            .ok_or_else(|| roze_error::RozeError::Internal("missing path params".to_string()))?;
+        params.validate()?;
+        Ok(Self(params.clone()))
+    }
+
+    pub fn optional_from_request_extensions(
+        extensions: &Extensions,
+    ) -> Result<Option<Self>, roze_error::RozeError> {
+        let Some(params) = extensions.get::<RouteParams>() else {
+            return Ok(None);
+        };
+        params.validate()?;
+        Ok(Some(Self(params.clone())))
+    }
+
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
         self.0.get(name)
     }
 
+    #[must_use]
     pub fn iter(&self) -> RawPathParamsIter<'_> {
         self.into_iter()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.iter().next().is_none()
     }
@@ -706,12 +1154,8 @@ impl FromRequest for RawPathParams {
     type Rejection = roze_error::RozeError;
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
-        let params = request.extensions().get::<RouteParams>().cloned();
-        Box::pin(async move {
-            params
-                .map(Self)
-                .ok_or_else(|| roze_error::RozeError::Internal("missing path params".to_string()))
-        })
+        let params = Self::from_request_extensions(request.extensions());
+        Box::pin(async move { params })
     }
 }
 
@@ -719,34 +1163,30 @@ impl FromRequestParts for RawPathParams {
     type Rejection = roze_error::RozeError;
 
     fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
-        let params = parts.extensions.get::<RouteParams>().cloned();
-        Box::pin(async move {
-            params
-                .map(Self)
-                .ok_or_else(|| roze_error::RozeError::Internal("missing path params".to_string()))
-        })
+        let params = Self::from_request_extensions(&parts.extensions);
+        Box::pin(async move { params })
     }
 }
 
 impl OptionalFromRequest for RawPathParams {
-    type Rejection = std::convert::Infallible;
+    type Rejection = roze_error::RozeError;
 
     fn optional_from_request(
         request: IncomingRequest,
     ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
-        let params = request.extensions().get::<RouteParams>().cloned();
-        Box::pin(async move { Ok(params.map(Self)) })
+        let params = Self::optional_from_request_extensions(request.extensions());
+        Box::pin(async move { params })
     }
 }
 
 impl OptionalFromRequestParts for RawPathParams {
-    type Rejection = std::convert::Infallible;
+    type Rejection = roze_error::RozeError;
 
     fn optional_from_request_parts(
         parts: &mut HttpParts,
     ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
-        let params = parts.extensions.get::<RouteParams>().cloned();
-        Box::pin(async move { Ok(params.map(Self)) })
+        let params = Self::optional_from_request_extensions(&parts.extensions);
+        Box::pin(async move { params })
     }
 }
 
@@ -1062,6 +1502,58 @@ where
 #[derive(Clone, Debug)]
 pub struct ConnectInfo<T>(pub T);
 
+#[derive(Clone)]
+#[must_use = "services do nothing unless called"]
+pub struct ConnectInfoService<S, T> {
+    pub(crate) inner: S,
+    connect_info: ConnectInfo<T>,
+}
+
+impl<S, T> ConnectInfoService<S, T> {
+    pub(crate) fn new(inner: S, connect_info: T) -> Self {
+        Self {
+            inner,
+            connect_info: ConnectInfo(connect_info),
+        }
+    }
+}
+
+impl<S, T> fmt::Debug for ConnectInfoService<S, T>
+where
+    S: fmt::Debug,
+    T: fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectInfoService")
+            .field("inner", &self.inner)
+            .field("connect_info", &self.connect_info)
+            .finish()
+    }
+}
+
+impl<S, T> Service<IncomingRequest> for ConnectInfoService<S, T>
+where
+    S: Service<IncomingRequest>,
+    T: Clone + Send + Sync + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(context)
+    }
+
+    fn call(&mut self, mut request: IncomingRequest) -> Self::Future {
+        request.extensions_mut().insert(self.connect_info.clone());
+        self.inner.call(request)
+    }
+}
+
 impl<T> Deref for ConnectInfo<T> {
     type Target = T;
 
@@ -1289,6 +1781,12 @@ fn extract_optional_host(
 #[derive(Clone, Debug)]
 pub struct OriginalUri(pub Uri);
 
+fn resolve_original_uri(original_uri: Option<&OriginalUri>, current_uri: &Uri) -> OriginalUri {
+    original_uri
+        .cloned()
+        .unwrap_or_else(|| OriginalUri(current_uri.clone()))
+}
+
 impl Deref for OriginalUri {
     type Target = Uri;
 
@@ -1307,11 +1805,7 @@ impl FromRequest for OriginalUri {
     type Rejection = std::convert::Infallible;
 
     fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
-        let uri = request
-            .extensions()
-            .get::<Self>()
-            .cloned()
-            .unwrap_or_else(|| Self(request.uri().clone()));
+        let uri = resolve_original_uri(request.extensions().get::<Self>(), request.uri());
         Box::pin(async move { Ok(uri) })
     }
 }
@@ -1320,11 +1814,7 @@ impl FromRequestParts for OriginalUri {
     type Rejection = std::convert::Infallible;
 
     fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
-        let uri = parts
-            .extensions
-            .get::<Self>()
-            .cloned()
-            .unwrap_or_else(|| Self(parts.uri.clone()));
+        let uri = resolve_original_uri(parts.extensions.get::<Self>(), &parts.uri);
         Box::pin(async move { Ok(uri) })
     }
 }
@@ -1335,7 +1825,8 @@ impl OptionalFromRequest for OriginalUri {
     fn optional_from_request(
         request: IncomingRequest,
     ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
-        Box::pin(async move { Ok(Some(Self(request.uri().clone()))) })
+        let uri = resolve_original_uri(request.extensions().get::<Self>(), request.uri());
+        Box::pin(async move { Ok(Some(uri)) })
     }
 }
 
@@ -1345,8 +1836,76 @@ impl OptionalFromRequestParts for OriginalUri {
     fn optional_from_request_parts(
         parts: &mut HttpParts,
     ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
-        let uri = parts.uri.clone();
-        Box::pin(async move { Ok(Some(Self(uri))) })
+        let uri = resolve_original_uri(parts.extensions.get::<Self>(), &parts.uri);
+        Box::pin(async move { Ok(Some(uri)) })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NestedPath(String);
+
+impl NestedPath {
+    pub(crate) fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for NestedPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl FromRequest for NestedPath {
+    type Rejection = roze_error::RozeError;
+
+    fn from_request(request: IncomingRequest) -> ExtractFuture<'static, Self, Self::Rejection> {
+        Box::pin(async move {
+            request
+                .extensions()
+                .get::<Self>()
+                .cloned()
+                .ok_or_else(|| roze_error::RozeError::Internal("missing nested path".to_string()))
+        })
+    }
+}
+
+impl FromRequestParts for NestedPath {
+    type Rejection = roze_error::RozeError;
+
+    fn from_request_parts(parts: &mut HttpParts) -> ExtractFuture<'_, Self, Self::Rejection> {
+        let nested_path = parts.extensions.get::<Self>().cloned();
+        Box::pin(async move {
+            nested_path
+                .ok_or_else(|| roze_error::RozeError::Internal("missing nested path".to_string()))
+        })
+    }
+}
+
+impl OptionalFromRequest for NestedPath {
+    type Rejection = std::convert::Infallible;
+
+    fn optional_from_request(
+        request: IncomingRequest,
+    ) -> ExtractFuture<'static, Option<Self>, Self::Rejection> {
+        Box::pin(async move { Ok(request.extensions().get::<Self>().cloned()) })
+    }
+}
+
+impl OptionalFromRequestParts for NestedPath {
+    type Rejection = std::convert::Infallible;
+
+    fn optional_from_request_parts(
+        parts: &mut HttpParts,
+    ) -> ExtractFuture<'_, Option<Self>, Self::Rejection> {
+        let nested_path = parts.extensions.get::<Self>().cloned();
+        Box::pin(async move { Ok(nested_path) })
     }
 }
 
@@ -1750,6 +2309,34 @@ mod tests {
         assert_eq!(error.code(), 400);
     }
 
+    #[test]
+    fn matched_path_can_be_read_synchronously_from_extensions() {
+        let mut extensions = Extensions::new();
+        extensions.insert(MatchedPath::new("/users/{id}"));
+
+        let matched_path = MatchedPath::from_request_extensions(&extensions)
+            .expect("matched path from extensions");
+
+        assert_eq!(matched_path.as_str(), "/users/{id}");
+    }
+
+    #[test]
+    fn matched_path_clones_share_the_route_template() {
+        let matched_path = MatchedPath::new("/users/{id}");
+        let clone = matched_path.clone();
+
+        assert!(Arc::ptr_eq(&matched_path.0, &clone.0));
+    }
+
+    #[test]
+    fn optional_matched_path_from_extensions_returns_none_when_absent() {
+        let extensions = Extensions::new();
+
+        let matched_path = MatchedPath::optional_from_request_extensions(&extensions);
+
+        assert!(matched_path.is_none());
+    }
+
     #[tokio::test]
     async fn extracts_path_params() {
         let mut request = Request::builder()
@@ -1777,7 +2364,8 @@ mod tests {
     fn path_from_params_deserializes_route_params() {
         let params = RouteParams::from_pairs([("name".to_string(), "roze".to_string())]);
 
-        let Path(payload) = Path::<Payload>::from_params(&params).expect("path from params");
+        let Path(payload) =
+            Path::<Payload>::from_route_params(&params).expect("path from route params");
 
         assert_eq!(
             payload,
@@ -1788,8 +2376,99 @@ mod tests {
     }
 
     #[test]
+    fn path_from_params_preserves_form_delimiters_and_decodes_percent_escapes() {
+        let params = RouteParams::from_pairs([("name".to_string(), "a&b=c+d%20e".to_string())]);
+
+        let Path(payload) =
+            Path::<Payload>::from_route_params(&params).expect("path from route params");
+
+        assert_eq!(payload.name, "a&b=c+d e");
+    }
+
+    #[test]
+    fn path_from_params_deserializes_single_scalars() {
+        let text = RouteParams::from_pairs([("value".to_string(), "one%20two".to_string())]);
+        let number = RouteParams::from_pairs([("value".to_string(), "42".to_string())]);
+
+        assert_eq!(
+            Path::<String>::from_route_params(&text)
+                .expect("string path")
+                .0,
+            "one two"
+        );
+        assert_eq!(
+            Path::<u64>::from_route_params(&number)
+                .expect("number path")
+                .0,
+            42
+        );
+    }
+
+    #[test]
+    fn path_from_params_deserializes_positional_tuple() {
+        let params = RouteParams::from_pairs([
+            ("id".to_string(), "42".to_string()),
+            ("active".to_string(), "true".to_string()),
+            ("name".to_string(), "roze%20team".to_string()),
+        ]);
+
+        let Path(values) =
+            Path::<(u64, bool, String)>::from_route_params(&params).expect("tuple path");
+
+        assert_eq!(values, (42, true, "roze team".to_string()));
+    }
+
+    #[test]
+    fn path_from_params_deserializes_typed_struct_fields() {
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        struct TypedPath {
+            id: u64,
+            active: bool,
+        }
+
+        let params = RouteParams::from_pairs([
+            ("id".to_string(), "42".to_string()),
+            ("active".to_string(), "true".to_string()),
+        ]);
+
+        let Path(value) = Path::<TypedPath>::from_route_params(&params).expect("typed struct path");
+
+        assert_eq!(
+            value,
+            TypedPath {
+                id: 42,
+                active: true
+            }
+        );
+    }
+
+    #[test]
+    fn path_can_be_read_synchronously_from_extensions() {
+        let mut extensions = Extensions::new();
+        extensions.insert(RouteParams::from_pairs([(
+            "name".to_string(),
+            "roze%20team".to_string(),
+        )]));
+
+        let Path(payload) =
+            Path::<Payload>::from_request_extensions(&extensions).expect("path from extensions");
+
+        assert_eq!(payload.name, "roze team");
+    }
+
+    #[test]
+    fn optional_path_from_extensions_returns_none_without_params() {
+        let extensions = Extensions::new();
+
+        let path = Path::<Payload>::optional_from_request_extensions(&extensions)
+            .expect("optional path from extensions");
+
+        assert!(path.is_none());
+    }
+
+    #[test]
     fn path_optional_from_params_returns_none_without_params() {
-        let path = Path::<Payload>::optional_from_params(None).expect("optional path params");
+        let path = Path::<Payload>::optional_from_route_params(None).expect("optional path params");
 
         assert!(path.is_none());
     }
@@ -1798,7 +2477,7 @@ mod tests {
     fn path_from_params_preserves_parse_errors() {
         let params = RouteParams::from_pairs([("other".to_string(), "roze".to_string())]);
 
-        let error = Path::<Payload>::from_params(&params).unwrap_err();
+        let error = Path::<Payload>::from_route_params(&params).unwrap_err();
 
         assert_eq!(error.code(), 400);
     }
@@ -1829,6 +2508,82 @@ mod tests {
             seen.push((key, value));
         }
         assert_eq!(seen, vec![("user_id", "42"), ("team", "core")]);
+    }
+
+    #[test]
+    fn raw_path_params_can_be_read_synchronously_from_extensions() {
+        let mut extensions = Extensions::new();
+        extensions.insert(RouteParams::from_pairs([(
+            "team".to_string(),
+            "core%20team".to_string(),
+        )]));
+
+        let params = RawPathParams::from_request_extensions(&extensions)
+            .expect("raw path params from extensions");
+
+        assert_eq!(params.get("team"), Some("core team"));
+    }
+
+    #[test]
+    fn repeated_raw_path_extraction_shares_decoded_storage() {
+        let mut extensions = Extensions::new();
+        extensions.insert(RouteParams::from_pairs([(
+            "team".to_string(),
+            "core%20team".to_string(),
+        )]));
+
+        let first =
+            RawPathParams::from_request_extensions(&extensions).expect("first raw path extraction");
+        let second = RawPathParams::from_request_extensions(&extensions)
+            .expect("second raw path extraction");
+
+        assert!(first.0.shares_storage_with(&second.0));
+    }
+
+    #[test]
+    fn optional_raw_path_params_from_extensions_returns_none_when_absent() {
+        let extensions = Extensions::new();
+
+        let params = RawPathParams::optional_from_request_extensions(&extensions)
+            .expect("optional raw path params from extensions");
+
+        assert!(params.is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_path_params_percent_decode_without_treating_plus_as_space() {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/teams/core%20team%2Fblue+green")
+            .body(rest::empty_body())
+            .unwrap();
+        request.extensions_mut().insert(RouteParams::from_pairs([(
+            "team".to_string(),
+            "core%20team%2Fblue+green".to_string(),
+        )]));
+
+        let params = RawPathParams::from_request(request)
+            .await
+            .expect("raw path params");
+
+        assert_eq!(params.get("team"), Some("core team/blue+green"));
+    }
+
+    #[tokio::test]
+    async fn raw_path_params_reject_invalid_percent_decoded_utf8() {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/teams/%FF")
+            .body(rest::empty_body())
+            .unwrap();
+        request.extensions_mut().insert(RouteParams::from_pairs([(
+            "team".to_string(),
+            "%FF".to_string(),
+        )]));
+
+        let error = RawPathParams::from_request(request).await.unwrap_err();
+
+        assert_eq!(error.code(), 400);
     }
 
     #[tokio::test]
@@ -1876,6 +2631,45 @@ mod tests {
 
         assert_eq!(original.path(), "/api/users");
         assert_eq!(original.query(), Some("name=roze"));
+    }
+
+    #[tokio::test]
+    async fn optional_original_uri_prefers_request_extension() {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/users?name=roze")
+            .body(rest::empty_body())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(OriginalUri("/api/users?name=roze".parse().unwrap()));
+
+        let original = Option::<OriginalUri>::from_request(request)
+            .await
+            .expect("optional original uri")
+            .expect("original uri is always available");
+
+        assert_eq!(original.0, "/api/users?name=roze");
+    }
+
+    #[tokio::test]
+    async fn optional_original_uri_from_parts_prefers_request_extension() {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/users?name=roze")
+            .body(rest::empty_body())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(OriginalUri("/api/users?name=roze".parse().unwrap()));
+        let (mut parts, _body) = request.into_parts();
+
+        let original = Option::<OriginalUri>::from_request_parts(&mut parts)
+            .await
+            .expect("optional original uri")
+            .expect("original uri is always available");
+
+        assert_eq!(original.0, "/api/users?name=roze");
     }
 
     #[tokio::test]

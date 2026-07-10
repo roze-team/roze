@@ -5,6 +5,7 @@ pub mod handler;
 pub mod middleware;
 pub mod response;
 pub mod rest;
+mod route_params;
 pub mod router;
 
 pub use error::*;

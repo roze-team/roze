@@ -10,6 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -3092,6 +3093,7 @@ fn generate_rest_project_with_rpc_clients(
     )?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
     ensure_model_module(out)?;
+    format_new_project_rust(out, options.mode)?;
     Ok(())
 }
 
@@ -3285,6 +3287,48 @@ fn generate_rpc_project_with_rpc_clients(
     fs::write(out.join("src/main.rs"), rpc::render_main(spec))?;
     fs::write(out.join("proto/service.proto"), render_proto(spec)?)?;
     ensure_model_module(out)?;
+    format_new_project_rust(out, options.mode)?;
+    Ok(())
+}
+
+fn format_new_project_rust(out: &Path, mode: GenerateMode) -> anyhow::Result<()> {
+    if mode == GenerateMode::Update {
+        return Ok(());
+    }
+
+    let mut rust_files = Vec::new();
+    collect_rust_files(&out.join("src"), &mut rust_files)?;
+    rust_files.sort();
+    if rust_files.is_empty() {
+        return Ok(());
+    }
+
+    let status = Command::new("rustfmt")
+        .args(["--edition", "2021"])
+        .args(&rust_files)
+        .status()
+        .context("failed to run rustfmt for generated Rust files")?;
+    if !status.success() {
+        bail!("rustfmt failed for generated project at {}", out.display());
+    }
+    Ok(())
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| {
+        format!(
+            "failed to read generated source directory {}",
+            dir.display()
+        )
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
     Ok(())
 }
 
@@ -4794,6 +4838,7 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "cargo_check",
         "cargo_test_unless_skipped",
         "smoke_surface_declared",
+        "production_verification_report_schema",
     ] {
         writeln!(&mut out, "        '{gate}'").unwrap();
     }
@@ -4816,6 +4861,52 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "$verifyReport | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $VerifyReportPath -Encoding UTF8"
     )
     .unwrap();
+    writeln!(
+        &mut out,
+        "Invoke-Step 'production verification report schema' {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    $report = Get-Content -LiteralPath $VerifyReportPath -Raw | ConvertFrom-Json"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ($report.service -ne $ServiceName) {{ throw 'Verification report service does not match generated service.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ($report.boundary -ne $Boundary.ToLowerInvariant()) {{ throw 'Verification report boundary does not match generated boundary.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ($report.generated_by -ne 'rozectl') {{ throw 'Verification report generator identity is invalid.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ($report.verdict -ne 'pass_ci_precondition') {{ throw 'Verification report verdict is invalid.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ($report.broad_production -ne 'requires_long_run_evidence') {{ throw 'Verification report production scope is invalid.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if (-not ($report.gates -contains 'production_verification_report_schema')) {{ throw 'Verification report schema gate is missing.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if (-not ($report.required_followup_evidence -contains '24h_or_72h_soak_report')) {{ throw 'Verification report long-run evidence requirement is missing.' }}"
+    )
+    .unwrap();
+    writeln!(&mut out, "}}").unwrap();
     writeln!(
         &mut out,
         "Write-Host \"Production verification report: $VerifyReportPath\""
@@ -5155,7 +5246,7 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "  \"gates\": [\"generated_ops_asset_inventory\", \"evidence_manifest_coverage\", \"ci_evidence_policy_coverage\", \"cargo_fmt_check\", \"cargo_check\", \"cargo_test_unless_skipped\", \"smoke_surface_declared\"],"
+        "  \"gates\": [\"generated_ops_asset_inventory\", \"evidence_manifest_coverage\", \"ci_evidence_policy_coverage\", \"cargo_fmt_check\", \"cargo_check\", \"cargo_test_unless_skipped\", \"smoke_surface_declared\", \"production_verification_report_schema\"],"
     )
     .unwrap();
     writeln!(
@@ -5165,6 +5256,46 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     .unwrap();
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out, "JSON").unwrap();
+    writeln!(&mut out, "check_verify_report_schema() {{").unwrap();
+    writeln!(&mut out, "  local required_entry").unwrap();
+    writeln!(&mut out, "  if [[ ! -s \"$VERIFY_REPORT_PATH\" ]]; then").unwrap();
+    writeln!(
+        &mut out,
+        "    echo 'Production verification report is missing or empty.' >&2"
+    )
+    .unwrap();
+    writeln!(&mut out, "    return 1").unwrap();
+    writeln!(&mut out, "  fi").unwrap();
+    writeln!(&mut out, "  for required_entry in \\").unwrap();
+    for entry in [
+        "\"generated_by\": \"rozectl\"",
+        "\"verdict\": \"pass_ci_precondition\"",
+        "\"broad_production\": \"requires_long_run_evidence\"",
+        "\"production_verification_report_schema\"",
+        "\"24h_or_72h_soak_report\"",
+    ] {
+        writeln!(&mut out, "    {} \\", sh_single_quoted(entry)).unwrap();
+    }
+    writeln!(&mut out, "  ; do").unwrap();
+    writeln!(
+        &mut out,
+        "    if ! grep -Fq -- \"$required_entry\" \"$VERIFY_REPORT_PATH\"; then"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "      echo \"Production verification report is missing required contract entry: $required_entry\" >&2"
+    )
+    .unwrap();
+    writeln!(&mut out, "      return 1").unwrap();
+    writeln!(&mut out, "    fi").unwrap();
+    writeln!(&mut out, "  done").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(
+        &mut out,
+        "run_step \"production verification report schema\" check_verify_report_schema"
+    )
+    .unwrap();
     writeln!(
         &mut out,
         "printf 'Production verification report: %s\\n' \"$VERIFY_REPORT_PATH\""
@@ -5317,10 +5448,13 @@ required_runner_matrix:
   - windows-latest
 required_gates:
   - generated_ops_asset_inventory
+  - evidence_manifest_coverage
+  - ci_evidence_policy_coverage
   - cargo_fmt_check
   - cargo_check
   - cargo_test_unless_explicitly_skipped
   - {smoke_surface}
+  - production_verification_report_schema
 blocking_conditions:
   - missing_generated_ops_asset
   - missing_ci_evidence_policy
@@ -5329,6 +5463,7 @@ blocking_conditions:
   - fmt_drift
   - compile_failure
   - test_failure_without_approved_skip
+  - invalid_production_verification_report
   - artifact_upload_missing
 promotion:
   ci_success_is: precondition
@@ -5836,7 +5971,7 @@ groups:
           description: "Check timeout, load shedding, downstream latency, and retry budget evidence."
 
       - alert: RozeGeneratedServiceRateLimitRejecting
-        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="rate_limit",decision="rejected"}}[5m])) > 0
+        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="rate_limit",decision="rejected"}}[5m])) > 0
         for: 5m
         labels:
           severity: info
@@ -5847,7 +5982,7 @@ groups:
           description: "Verify client behavior, configured limits, and allowed/rejected counter evidence."
 
       - alert: RozeGeneratedServiceCircuitBreakerOpen
-        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="breaker",decision="open"}}[5m])) > 0
+        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="breaker",decision="open"}}[5m])) > 0
         for: 2m
         labels:
           severity: warning
@@ -5858,7 +5993,7 @@ groups:
           description: "Inspect downstream health, breaker transition metrics, and recovery objective."
 
       - alert: RozeGeneratedServiceLoadShedding
-        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="load_shedding",decision="shed"}}[5m])) > 0
+        expr: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="load_shedding",decision="shed"}}[5m])) > 0
         for: 2m
         labels:
           severity: warning
@@ -5955,7 +6090,7 @@ fn grafana_dashboard_json(spec: &ApiSpec, kind: ProjectKind) -> String {
       "type": "timeseries",
       "gridPos": {{"x": 12, "y": 8, "w": 12, "h": 8}},
       "targets": [
-        {{"expr": "sum(rate(roze_resilience_decisions_total{{service=\"$service\"}}[5m])) by (kind, decision)", "legendFormat": "{{{{kind}}}}/{{{{decision}}}}"}}
+        {{"expr": "sum(rate(roze_resilience_decisions_total{{service=\"$service\",boundary=\"{boundary}\"}}[5m])) by (kind, decision)", "legendFormat": "{{{{kind}}}}/{{{{decision}}}}"}}
       ]
     }},
     {{
@@ -6018,7 +6153,7 @@ objectives:
     target: 0.5
     unit: percent
     sli: rate_limit_breaker_and_shedding_rejections
-    prometheus: sum(rate(roze_resilience_decisions_total{{service="{name}",decision=~"rejected|open|shed"}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
+    prometheus: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",decision=~"rejected|open|shed"}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
     evidence: governance_rejection_rate_and_recovery_window
 burn_rate_alerts:
   fast:
@@ -6111,7 +6246,7 @@ scenarios:
       - deadline_propagation_reaches_logic_and_dependencies
       - p99_latency_alert_or_budget_entry_created
     evidence:
-      metrics_query: roze_resilience_decisions_total{{service="{name}",kind=~"timeout|deadline"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind=~"timeout|deadline"}}
       trace_query: slow_dependency_trace_with_deadline
       log_query: timeout_or_deadline_exceeded_logs
       recovery_time: required
@@ -6124,7 +6259,7 @@ scenarios:
       - error_rate_alert_fires
       - retry_budget_caps_amplification
     evidence:
-      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="breaker"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="breaker"}}
       trace_query: failing_dependency_trace_with_breaker_state
       log_query: breaker_transition_logs
       recovery_time: required
@@ -6137,7 +6272,7 @@ scenarios:
       - allowed_and_rejected_counters_are_visible
       - accepted_requests_remain_within_latency_budget
     evidence:
-      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="rate_limit"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="rate_limit"}}
       trace_query: rejected_request_trace_or_sampling_record
       log_query: rate_limit_decision_logs
       recovery_time: required
@@ -6150,7 +6285,7 @@ scenarios:
       - process_resource_trend_remains_bounded
       - service_recovers_without_restart_after_pressure_drops
     evidence:
-      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="load_shedding"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="load_shedding"}}
       trace_query: shed_request_trace_or_sampling_record
       log_query: load_shedding_decision_logs
       recovery_time: required
@@ -6289,7 +6424,7 @@ gates:
         - load_shedding_sustained_for_5m
         - retry_budget_exhausted
     evidence:
-      metrics_query: roze_resilience_decisions_total{{service="{name}"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}"}}
       trace_query: dependency_and_retry_trace_samples
       log_query: rate_limit_breaker_shedding_logs
 
@@ -6496,7 +6631,7 @@ response_matrix:
   - alert: RozeGeneratedServiceCircuitBreakerOpen
     severity: sev2
     confirm:
-      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="breaker"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="breaker"}}
       log_query: breaker_transition_logs
       trace_query: downstream_failure_trace_samples
     mitigate:
@@ -6516,7 +6651,7 @@ response_matrix:
   - alert: RozeGeneratedServiceLoadShedding
     severity: sev2
     confirm:
-      metrics_query: roze_resilience_decisions_total{{service="{name}",kind="load_shedding"}}
+      metrics_query: roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="load_shedding"}}
       log_query: load_shedding_decision_logs
       trace_query: shed_and_accepted_request_trace_samples
     mitigate:
@@ -6644,7 +6779,7 @@ measurements:
   request_rate: sum(rate({request_metric}{{service="{name}"}}[5m]))
   error_rate: sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
   p99_latency: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
-  resilience_decisions: sum(rate(roze_resilience_decisions_total{{service="{name}"}}[5m])) by (kind, decision)
+  resilience_decisions: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}"}}[5m])) by (kind, decision)
   restarts: increase(process_start_time_seconds{{service="{name}"}}[15m])
   memory: process_resident_memory_bytes{{service="{name}"}}
   cpu: rate(process_cpu_seconds_total{{service="{name}"}}[5m])
@@ -8355,6 +8490,12 @@ signals:
     request_metric: {request_metric}
     latency_metric: {latency_metric}
     resilience_metric: roze_resilience_decisions_total
+    resilience_labels:
+      - service
+      - boundary
+      - kind
+      - decision
+    resilience_query_schema_matches_runtime: true
     labels_required:
       - service
       - boundary
@@ -8422,7 +8563,7 @@ debug_queries:
   request_rate: sum(rate({request_metric}{{service="{name}"}}[5m]))
   error_rate: sum(rate({request_metric}{{service="{name}",status=~"5.."}}[5m])) / clamp_min(sum(rate({request_metric}{{service="{name}"}}[5m])), 1)
   p99_latency: histogram_quantile(0.99, sum(rate({latency_metric}{{service="{name}"}}[5m])) by (le))
-  resilience_decisions: sum(rate(roze_resilience_decisions_total{{service="{name}"}}[5m])) by (kind, decision)
+  resilience_decisions: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}"}}[5m])) by (kind, decision)
   restarts: increase(process_start_time_seconds{{service="{name}"}}[15m])
 retention:
   metrics: service_owner_defined_minimum_30d
@@ -8552,9 +8693,20 @@ policy:
       - closed
       - open
       - half_open
+    half_open_policy:
+      probe_concurrency: 1
+      concurrent_probe_requests: rejected
+      successful_probe: close
+      failed_probe: reopen
+      cancelled_probe: reopen_without_incrementing_failure_count
+    invariants:
+      - stale_closed_request_completion_cannot_close_newer_open_state
+      - only_the_active_probe_can_transition_half_open_state
     evidence:
       - breaker_transition_metric
       - dependency_failure_trace
+      - single_half_open_probe_test
+      - cancelled_probe_recovery_test
   load_shedding:
     required: true
     source: generated_config_or_platform_policy
@@ -8563,16 +8715,37 @@ policy:
       - queue_depth
       - latency_budget
       - cpu_or_memory_pressure
+    statistics:
+      rolling_buckets: 50
+      hot_path_memory: bounded_independent_of_request_rate
+      hard_concurrency_rejection_starts_cool_down: false
+    completion_paths:
+      - success
+      - failure
+      - cancellation_or_guard_drop
+    invariants:
+      - accepted_operation_releases_inflight_exactly_once
+      - cancellation_does_not_open_circuit_breaker
+      - statistics_memory_is_bounded_independent_of_rps
     evidence:
       - shedding_decision_metric
       - protected_latency_sample
+      - cancellation_release_test
+      - bounded_rolling_window_test
   retry_budget:
     required: true
     max_attempts: service_owner_defined
-    jitter: required
+    backoff_algorithm: exponential_full_jitter
+    backoff_cap: max_backoff_ms
+    deadline_aware: true
+    cancellation_checked_before_retry: true
+    attempt_metric_counts_actual_retry_calls_only: true
     amplification_cap: required
     evidence:
       - retry_attempt_metric
+      - jitter_bounds_test
+      - deadline_exhaustion_test
+      - cancellation_before_retry_test
       - amplification_review
   deadline_propagation:
     required: true
@@ -8614,6 +8787,12 @@ metrics:
   request_metric: {request_metric}
   latency_metric: {latency_metric}
   resilience_metric: roze_resilience_decisions_total
+  resilience_labels:
+    - service
+    - boundary
+    - kind
+    - decision
+  resilience_query_schema_matches_runtime: true
   resource_metrics:
     - process_cpu_seconds_total
     - process_resident_memory_bytes
@@ -8626,7 +8805,7 @@ tests:
       - downstream_work_receives_deadline
       - cancellation_is_observed_before_business_side_effect
     evidence:
-      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind=~"timeout|deadline"}}[5m]))
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind=~"timeout|deadline"}}[5m]))
       - trace_query: deadline_propagates_to_logic_and_dependency
       - log_query: timeout_or_cancellation_log_with_trace_id
 
@@ -8636,7 +8815,7 @@ tests:
       - accepted_work_stays_inside_latency_budget
       - retry_after_or_typed_limit_error_defined
     evidence:
-      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="rate_limit"}}[5m])) by (decision)
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="rate_limit"}}[5m])) by (decision)
       - load_profile
       - rejection_sample
 
@@ -8647,7 +8826,7 @@ tests:
       - retries_do_not_exceed_budget
       - fallback_or_degraded_response_is_documented
     evidence:
-      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind=~"breaker|retry"}}[5m])) by (decision)
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind=~"breaker|retry"}}[5m])) by (decision)
       - breaker_transition_timeline
       - retry_amplification_report
 
@@ -8657,7 +8836,7 @@ tests:
       - memory_and_cpu_trend_remain_bounded
       - queue_or_concurrency_limit_is_visible
     evidence:
-      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",kind="load_shed"}}[5m])) by (decision)
+      - metrics_query: sum(rate(roze_resilience_decisions_total{{service="{name}",boundary="{boundary}",kind="load_shedding"}}[5m])) by (decision)
       - resource_trend_report
       - protected_latency_report
 
@@ -9163,11 +9342,19 @@ client_deadlines:
 retries:
   retry_budget_required: true
   exponential_backoff_with_jitter_required: true
+  generated_rpc_client_algorithm: exponential_full_jitter
+  generated_rpc_client_backoff_cap: max_backoff_ms
+  generated_rpc_client_deadline_aware: true
+  generated_rpc_client_cancellation_aware: true
+  retry_attempt_metric_counts_actual_calls_only: true
   retryable_errors_from_error_contract_only: true
   retryable_mutation_requires_idempotency_policy: true
   retry_storm_protection_required: true
   evidence:
     - retry_budget_metric_sample
+    - retry_jitter_bounds_test
+    - retry_deadline_exhaustion_test
+    - retry_cancellation_test
     - retry_amplification_report
 circuit_breaker:
   required_for_remote_dependency: true
@@ -12252,6 +12439,9 @@ mod tests {
         assert!(rest_production_verify.contains("pass_ci_precondition"));
         assert!(rest_production_verify.contains("requires_long_run_evidence"));
         assert!(rest_production_verify.contains("required_followup_evidence"));
+        assert!(rest_production_verify.contains("production verification report schema"));
+        assert!(rest_production_verify.contains("ConvertFrom-Json"));
+        assert!(rest_production_verify.contains("production_verification_report_schema"));
         assert!(rest_production_verify.contains("Production verification report"));
         assert!(rest_production_verify.contains("GET /reports/export"));
         assert!(rest_production_verify.contains("POST /charts/query"));
@@ -12283,6 +12473,9 @@ mod tests {
         assert!(rest_production_verify_sh.contains("pass_ci_precondition"));
         assert!(rest_production_verify_sh.contains("requires_long_run_evidence"));
         assert!(rest_production_verify_sh.contains("required_followup_evidence"));
+        assert!(rest_production_verify_sh.contains("check_verify_report_schema()"));
+        assert!(rest_production_verify_sh.contains("production verification report schema"));
+        assert!(rest_production_verify_sh.contains("production_verification_report_schema"));
         assert!(rest_production_verify_sh.contains("Production verification report"));
         assert!(rest_production_verify_sh.contains("GET /reports/export"));
         assert!(rest_production_verify_sh.contains("POST /charts/query"));
@@ -12315,6 +12508,10 @@ mod tests {
         );
         assert!(rest_ci_evidence_policy.contains("produced_paths:"));
         assert!(rest_ci_evidence_policy.contains("    - ops/production-verify-report.json"));
+        assert!(rest_ci_evidence_policy.contains("  - evidence_manifest_coverage"));
+        assert!(rest_ci_evidence_policy.contains("  - ci_evidence_policy_coverage"));
+        assert!(rest_ci_evidence_policy.contains("  - production_verification_report_schema"));
+        assert!(rest_ci_evidence_policy.contains("invalid_production_verification_report"));
         assert!(rest_ci_evidence_policy
             .contains("framework_probes_report_export_chart_query_and_business_routes"));
         assert!(rest_ci_evidence_policy.contains("ci_success_is: precondition"));
@@ -12502,12 +12699,34 @@ mod tests {
         assert!(rest_observability.contains("roze_http_requests_total"));
         assert!(rest_observability.contains("method_route_status"));
         assert!(rest_observability.contains("label_cardinality_budget:"));
+        assert!(rest_observability.contains(
+            "resilience_labels:\n      - service\n      - boundary\n      - kind\n      - decision"
+        ));
+        assert!(rest_observability.contains("service=\"user-api\",boundary=\"rest\""));
+        assert!(rest_observability.contains("resilience_query_schema_matches_runtime: true"));
         assert!(rest_observability.contains("sensitive_data_in_logs_or_labels"));
         assert!(rest_runtime_hardening.contains("boundary: rest"));
         assert!(rest_runtime_hardening
             .contains("representative_http_request_with_server_timeout_and_client_cancel"));
         assert!(rest_runtime_hardening.contains("load_shedding:"));
+        assert!(rest_runtime_hardening.contains("probe_concurrency: 1"));
+        assert!(rest_runtime_hardening
+            .contains("stale_closed_request_completion_cannot_close_newer_open_state"));
+        assert!(rest_runtime_hardening.contains("cancelled_probe_recovery_test"));
+        assert!(
+            rest_runtime_hardening.contains("accepted_operation_releases_inflight_exactly_once")
+        );
+        assert!(rest_runtime_hardening.contains("cancellation_does_not_open_circuit_breaker"));
+        assert!(rest_runtime_hardening.contains("cancellation_release_test"));
+        assert!(rest_runtime_hardening.contains("rolling_buckets: 50"));
+        assert!(rest_runtime_hardening.contains("statistics_memory_is_bounded_independent_of_rps"));
+        assert!(rest_runtime_hardening.contains(
+            "resilience_labels:\n    - service\n    - boundary\n    - kind\n    - decision"
+        ));
+        assert!(rest_runtime_hardening.contains("kind=\"load_shedding\""));
         assert!(rest_runtime_hardening.contains("retry_budget:"));
+        assert!(rest_runtime_hardening.contains("backoff_algorithm: exponential_full_jitter"));
+        assert!(rest_runtime_hardening.contains("attempt_metric_counts_actual_retry_calls_only"));
         assert!(
             rest_runtime_hardening.contains("graceful_shutdown_without_readiness_drain_timeline")
         );
@@ -12608,6 +12827,9 @@ mod tests {
         assert!(rpc_production_verify.contains("pass_ci_precondition"));
         assert!(rpc_production_verify.contains("requires_long_run_evidence"));
         assert!(rpc_production_verify.contains("required_followup_evidence"));
+        assert!(rpc_production_verify.contains("production verification report schema"));
+        assert!(rpc_production_verify.contains("ConvertFrom-Json"));
+        assert!(rpc_production_verify.contains("production_verification_report_schema"));
         assert!(rpc_production_verify.contains("Production verification report"));
         assert!(rpc_production_verify.contains("RPC smoke methods required"));
         assert!(rpc_production_verify.contains("GetUser -> GetUserReq"));
@@ -12633,6 +12855,9 @@ mod tests {
         assert!(rpc_production_verify_sh.contains("pass_ci_precondition"));
         assert!(rpc_production_verify_sh.contains("requires_long_run_evidence"));
         assert!(rpc_production_verify_sh.contains("required_followup_evidence"));
+        assert!(rpc_production_verify_sh.contains("check_verify_report_schema()"));
+        assert!(rpc_production_verify_sh.contains("production verification report schema"));
+        assert!(rpc_production_verify_sh.contains("production_verification_report_schema"));
         assert!(rpc_production_verify_sh.contains("Production verification report"));
         assert!(rpc_production_verify_sh.contains("RPC smoke methods required"));
         assert!(rpc_production_verify_sh.contains("GetUser -> GetUserReq"));
@@ -12661,6 +12886,10 @@ mod tests {
         );
         assert!(rpc_ci_evidence_policy.contains("produced_paths:"));
         assert!(rpc_ci_evidence_policy.contains("    - ops/production-verify-report.json"));
+        assert!(rpc_ci_evidence_policy.contains("  - evidence_manifest_coverage"));
+        assert!(rpc_ci_evidence_policy.contains("  - ci_evidence_policy_coverage"));
+        assert!(rpc_ci_evidence_policy.contains("  - production_verification_report_schema"));
+        assert!(rpc_ci_evidence_policy.contains("invalid_production_verification_report"));
         assert!(rpc_evidence_manifest.contains("service: user"));
         assert!(rpc_evidence_manifest.contains("boundary: rpc"));
         assert!(rpc_evidence_manifest.contains("path: ops/production-verify.ps1"));
@@ -12712,13 +12941,33 @@ mod tests {
         assert!(rpc_observability.contains("boundary: rpc"));
         assert!(rpc_observability.contains("roze_rpc_requests_total"));
         assert!(rpc_observability.contains("service_method_status"));
+        assert!(rpc_observability.contains(
+            "resilience_labels:\n      - service\n      - boundary\n      - kind\n      - decision"
+        ));
+        assert!(rpc_observability.contains("service=\"user\",boundary=\"rpc\""));
+        assert!(rpc_observability.contains("resilience_query_schema_matches_runtime: true"));
         assert!(rpc_observability.contains("trace_propagation"));
         assert!(rpc_observability.contains("no_debug_query_for_primary_slo"));
         assert!(rpc_runtime_hardening.contains("boundary: rpc"));
         assert!(rpc_runtime_hardening
             .contains("representative_rpc_call_with_client_deadline_and_cancel"));
         assert!(rpc_runtime_hardening.contains("timeout_and_deadline"));
+        assert!(rpc_runtime_hardening.contains("probe_concurrency: 1"));
+        assert!(rpc_runtime_hardening
+            .contains("stale_closed_request_completion_cannot_close_newer_open_state"));
+        assert!(rpc_runtime_hardening.contains("cancelled_probe_recovery_test"));
+        assert!(rpc_runtime_hardening.contains("accepted_operation_releases_inflight_exactly_once"));
+        assert!(rpc_runtime_hardening.contains("cancellation_does_not_open_circuit_breaker"));
+        assert!(rpc_runtime_hardening.contains("cancellation_release_test"));
+        assert!(rpc_runtime_hardening.contains("rolling_buckets: 50"));
+        assert!(rpc_runtime_hardening.contains("statistics_memory_is_bounded_independent_of_rps"));
+        assert!(rpc_runtime_hardening.contains(
+            "resilience_labels:\n    - service\n    - boundary\n    - kind\n    - decision"
+        ));
+        assert!(rpc_runtime_hardening.contains("kind=\"load_shedding\""));
         assert!(rpc_runtime_hardening.contains("breaker_and_retry_budget"));
+        assert!(rpc_runtime_hardening.contains("backoff_algorithm: exponential_full_jitter"));
+        assert!(rpc_runtime_hardening.contains("deadline_exhaustion_test"));
         assert!(rpc_runtime_hardening.contains("unbounded_retry_amplification"));
         assert!(rpc_error_contract.contains("boundary: rpc"));
         assert!(rpc_error_contract.contains("grpc_status_mapping:"));
@@ -12736,6 +12985,9 @@ mod tests {
         assert!(rpc_service_communication
             .contains("representative_rpc_method_calls_declared_downstream_or_declares_none"));
         assert!(rpc_service_communication.contains("retry_without_budget_or_jitter"));
+        assert!(rpc_service_communication
+            .contains("generated_rpc_client_algorithm: exponential_full_jitter"));
+        assert!(rpc_service_communication.contains("retry_attempt_metric_counts_actual_calls_only"));
         assert!(rpc_service_communication.contains("missing_trace_context_on_downstream_call"));
         assert!(rpc_cache_governance.contains("boundary: rpc"));
         assert!(rpc_cache_governance

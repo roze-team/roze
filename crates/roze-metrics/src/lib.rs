@@ -305,14 +305,16 @@ pub fn record_queue_offset(
 }
 
 pub fn record_resilience_decision(
-    transport: impl Into<String>,
-    component: impl Into<String>,
-    outcome: impl Into<String>,
+    service: impl Into<String>,
+    boundary: impl Into<String>,
+    kind: impl Into<String>,
+    decision: impl Into<String>,
 ) {
     let labels = MetricLabels::new()
-        .insert("transport", transport.into())
-        .insert("component", component.into())
-        .insert("outcome", outcome.into());
+        .insert("service", service.into())
+        .insert("boundary", boundary.into())
+        .insert("kind", kind.into())
+        .insert("decision", decision.into());
     resilience_metrics_registry().inc_counter("roze_resilience_decisions_total", labels, 1);
 }
 
@@ -506,13 +508,14 @@ mod tests {
 
     #[test]
     fn renders_resilience_decision_metrics() {
-        record_resilience_decision("http", "breaker", "open");
+        record_resilience_decision("catalog", "rest", "breaker", "open");
 
         let metrics = http_metrics();
 
         assert!(metrics.contains("roze_resilience_decisions_total"));
-        assert!(metrics.contains(r#"transport="http""#));
-        assert!(metrics.contains(r#"component="breaker""#));
-        assert!(metrics.contains(r#"outcome="open""#));
+        assert!(metrics.contains(r#"service="catalog""#));
+        assert!(metrics.contains(r#"boundary="rest""#));
+        assert!(metrics.contains(r#"kind="breaker""#));
+        assert!(metrics.contains(r#"decision="open""#));
     }
 }

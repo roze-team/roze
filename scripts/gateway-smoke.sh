@@ -13,6 +13,7 @@ rm -f "$BASE/gateway.out" "$BASE/gateway.err" "$BASE/upstream.out" "$BASE/upstre
 cat >"$BASE/upstream.js" <<EOF_NODE
 const http = require("http");
 let flaky = 0;
+let activeShed = 0;
 const server = http.createServer((req, res) => {
   res.setHeader("content-type", "application/json");
   if (req.url === "/healthz") {
@@ -37,8 +38,14 @@ const server = http.createServer((req, res) => {
     return setTimeout(() => res.end(JSON.stringify({ slow: true })), 1000);
   }
   if (req.url === "/shed-slow") {
-    console.log("shed hit");
-    return setTimeout(() => res.end(JSON.stringify({ slow: true })), 1000);
+    activeShed += 1;
+    return setTimeout(() => {
+      activeShed -= 1;
+      res.end(JSON.stringify({ slow: true }));
+    }, 1000);
+  }
+  if (req.url === "/shed-active") {
+    return res.end(String(activeShed));
   }
   res.statusCode = 404;
   res.end(JSON.stringify({ error: "not found", url: req.url }));
@@ -170,8 +177,8 @@ require_status 429 "http://127.0.0.1:$GATEWAY_PORT/limited"
 
 curl -sS -o "$BASE/shed-first.json" "http://127.0.0.1:$GATEWAY_PORT/shed" &
 shed_pid=$!
-for _ in $(seq 1 50); do
-  if grep -q "shed hit" "$BASE/upstream.out"; then
+for _ in $(seq 1 200); do
+  if [[ "$(curl -sS "http://127.0.0.1:$UPSTREAM_PORT/shed-active" 2>/dev/null || true)" == "1" ]]; then
     break
   fi
   sleep 0.02

@@ -7,15 +7,15 @@ use std::{
     task::{Context, Poll},
 };
 
-use tower::{service_fn, util::BoxCloneService, Layer, Service, ServiceExt};
+use tower::{service_fn, util::BoxCloneSyncService, Layer, Service, ServiceExt};
 
 use crate::{
-    extract::{ConnectInfo, FromRef, FromRequest, FromRequestParts},
+    extract::{ConnectInfoService, FromRef, FromRequest, FromRequestParts},
     response::IntoResponse,
     rest::{HttpResponse, IncomingRequest, SharedService},
 };
 
-pub trait Handler<Args>: Clone + Send + 'static {
+pub trait Handler<Args>: Clone + Send + Sync + 'static {
     type Future: Future<Output = HttpResponse> + Send + 'static;
 
     fn call(self, request: IncomingRequest) -> Self::Future;
@@ -37,33 +37,34 @@ pub trait Handler<Args>: Clone + Send + 'static {
 
     fn layer<L>(self, layer: L) -> LayeredHandler<Args>
     where
-        L: Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
+        L: Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
             + Clone
             + Send
+            + Sync
             + 'static,
         L::Service: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
             + Clone
             + Send
+            + Sync
             + 'static,
         <L::Service as Service<IncomingRequest>>::Future: Send + 'static,
     {
         LayeredHandler {
-            service: layer.layer(self.into_service()).boxed_clone(),
+            service: BoxCloneSyncService::new(layer.layer(self.into_service())),
             _marker: PhantomData,
         }
     }
 
-    fn into_service(self) -> BoxCloneService<IncomingRequest, HttpResponse, Infallible> {
-        service_fn(move |request| {
+    fn into_service(self) -> BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible> {
+        BoxCloneSyncService::new(service_fn(move |request| {
             let handler = self.clone();
             async move { Ok::<_, Infallible>(handler.call(request).await) }
-        })
-        .boxed_clone()
+        }))
     }
 
     fn into_make_service(
         self,
-    ) -> SharedService<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> {
+    ) -> SharedService<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>> {
         SharedService::new(self.into_service())
     }
 
@@ -101,7 +102,8 @@ where
     T: Clone + Send + Sync + 'static,
     Target: Into<T>,
 {
-    type Response = BoxCloneService<IncomingRequest, HttpResponse, Infallible>;
+    type Response =
+        ConnectInfoService<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>, T>;
     type Error = Infallible;
     type Future = Ready<Result<Self::Response, Infallible>>;
 
@@ -110,11 +112,10 @@ where
     }
 
     fn call(&mut self, target: Target) -> Self::Future {
-        ready(Ok(self
-            .handler
-            .clone()
-            .with_state(ConnectInfo(target.into()))
-            .into_service()))
+        ready(Ok(ConnectInfoService::new(
+            self.handler.clone().into_service(),
+            target.into(),
+        )))
     }
 }
 
@@ -123,7 +124,8 @@ struct HandlerStateLayer<T> {
     state: T,
 }
 
-impl<T> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for HandlerStateLayer<T>
+impl<T> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
+    for HandlerStateLayer<T>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -131,7 +133,7 @@ where
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         HandlerStateService {
             state: self.state.clone(),
@@ -143,7 +145,7 @@ where
 #[derive(Clone)]
 struct HandlerStateService<T> {
     state: T,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
 }
 
 impl<T> Service<IncomingRequest> for HandlerStateService<T>
@@ -183,7 +185,7 @@ impl<Outer, Inner> HandlerStateFromRefLayer<Outer, Inner> {
     }
 }
 
-impl<Outer, Inner> Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
+impl<Outer, Inner> Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
     for HandlerStateFromRefLayer<Outer, Inner>
 where
     Outer: Clone + Send + Sync + 'static,
@@ -193,7 +195,7 @@ where
 
     fn layer(
         &self,
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     ) -> Self::Service {
         HandlerStateFromRefService {
             state: self.state.clone(),
@@ -206,7 +208,7 @@ where
 #[derive(Clone)]
 struct HandlerStateFromRefService<Outer, Inner> {
     state: Outer,
-    inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     _marker: PhantomData<fn() -> Inner>,
 }
 
@@ -236,7 +238,7 @@ where
 }
 
 pub struct LayeredHandler<Args> {
-    service: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+    service: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     _marker: PhantomData<fn() -> Args>,
 }
 
@@ -273,7 +275,7 @@ pub struct NoArgs;
 
 impl<T> Handler<StaticResponse> for T
 where
-    T: IntoResponse + Clone + Send + 'static,
+    T: IntoResponse + Clone + Send + Sync + 'static,
 {
     type Future = std::future::Ready<HttpResponse>;
 
@@ -286,7 +288,7 @@ pub struct StaticResponse;
 
 impl<F, Fut, R> Handler<NoArgs> for F
 where
-    F: Fn() -> Fut + Clone + Send + 'static,
+    F: Fn() -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoResponse + 'static,
 {
@@ -301,7 +303,7 @@ macro_rules! impl_handler {
     ($last:ident) => {
         impl<F, Fut, R, $last> Handler<($last,)> for F
         where
-            F: Fn($last) -> Fut + Clone + Send + 'static,
+            F: Fn($last) -> Fut + Clone + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
             R: IntoResponse + 'static,
             $last: FromRequest + Send + 'static,
@@ -323,7 +325,7 @@ macro_rules! impl_handler {
     ($($ty:ident),+ => $last:ident) => {
         impl<F, Fut, R, $($ty,)* $last> Handler<($($ty,)* $last)> for F
         where
-            F: Fn($($ty,)* $last) -> Fut + Clone + Send + 'static,
+            F: Fn($($ty,)* $last) -> Fut + Clone + Send + Sync + 'static,
             Fut: Future<Output = R> + Send + 'static,
             R: IntoResponse + 'static,
             $($ty: FromRequestParts + Send + 'static,)*
@@ -376,7 +378,7 @@ mod tests {
         extract::{ConnectInfo, Host, OriginalUri, Parts, Path, Query, State},
         response::Json,
         rest,
-        router::RouteParams,
+        route_params::RouteParams,
     };
 
     #[derive(Debug, Deserialize)]
@@ -761,12 +763,12 @@ mod tests {
     #[derive(Clone)]
     struct TestHeaderLayer;
 
-    impl Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for TestHeaderLayer {
+    impl Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>> for TestHeaderLayer {
         type Service = TestHeaderService;
 
         fn layer(
             &self,
-            inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+            inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
         ) -> Self::Service {
             TestHeaderService { inner }
         }
@@ -774,7 +776,7 @@ mod tests {
 
     #[derive(Clone)]
     struct TestHeaderService {
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     }
 
     impl Service<IncomingRequest> for TestHeaderService {
@@ -801,12 +803,12 @@ mod tests {
     #[derive(Clone)]
     struct FallibleLayer;
 
-    impl Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>> for FallibleLayer {
+    impl Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>> for FallibleLayer {
         type Service = FallibleService;
 
         fn layer(
             &self,
-            inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+            inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
         ) -> Self::Service {
             FallibleService { inner }
         }
@@ -814,7 +816,7 @@ mod tests {
 
     #[derive(Clone)]
     struct FallibleService {
-        inner: BoxCloneService<IncomingRequest, HttpResponse, Infallible>,
+        inner: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     }
 
     #[derive(Debug)]

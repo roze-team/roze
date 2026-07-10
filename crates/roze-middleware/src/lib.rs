@@ -8,7 +8,9 @@ use std::{
 use async_trait::async_trait;
 use roze_context::Context;
 use roze_error::RozeError;
-use roze_resilience::{BreakerRegistry, RateLimitRegistry, SheddingRegistry};
+use roze_resilience::{
+    BreakerDecision, BreakerPermit, BreakerRegistry, RateLimitRegistry, SheddingRegistry,
+};
 use serde::Serialize;
 
 static ROUTE_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
@@ -141,7 +143,7 @@ pub fn resolve_middleware_plan(middlewares: &[String]) -> MiddlewarePlan {
     plan
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RouteGuard {
     key: String,
     service: String,
@@ -149,7 +151,47 @@ pub struct RouteGuard {
     method: String,
     started: Instant,
     breaker: Option<RouteBreakerConfig>,
+    breaker_permit: Option<BreakerPermit>,
     shedding: Option<RouteSheddingConfig>,
+    finished: bool,
+}
+
+impl Drop for RouteGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        let elapsed = self.started.elapsed();
+        if let (Some(config), Some(permit)) = (self.breaker, self.breaker_permit) {
+            route_breaker_cancel(&self.key, permit, &config);
+            if permit == BreakerPermit::Probe {
+                roze_metrics::record_resilience_decision(
+                    self.service.as_str(),
+                    "rest",
+                    "breaker",
+                    "probe_cancelled",
+                );
+            }
+        }
+        if self.shedding.is_some() {
+            route_shedding_release(&self.key);
+            roze_metrics::record_resilience_decision(
+                self.service.as_str(),
+                "rest",
+                "load_shedding",
+                "cancelled",
+            );
+        }
+        roze_metrics::record_http_request(false, elapsed);
+        roze_metrics::record_http_route(
+            self.service.as_str(),
+            self.route.as_str(),
+            self.method.as_str(),
+            "cancelled",
+            elapsed,
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +284,7 @@ pub fn route_fallback(
 }
 
 pub fn apply_fallback(
+    service: impl Into<String>,
     error: RozeError,
     fallback: Option<roze_config::GovernanceFallbackConfig>,
 ) -> RozeError {
@@ -251,7 +294,7 @@ pub fn apply_fallback(
     let Some(fallback) = fallback else {
         return error;
     };
-    roze_metrics::record_resilience_decision("http", "fallback", "served");
+    roze_metrics::record_resilience_decision(service, "rest", "fallback", "served");
     RozeError::fallback_response(fallback.status, fallback.body, fallback.headers)
 }
 
@@ -282,29 +325,65 @@ pub fn begin_route(
     let key = format!("{service}:{method}:{route}");
     if let Some(config) = &policy.rate_limit {
         match enforce_route_rate_limit(&key, config) {
-            Ok(()) => roze_metrics::record_resilience_decision("http", "rate_limit", "allowed"),
+            Ok(()) => roze_metrics::record_resilience_decision(
+                service.as_str(),
+                "rest",
+                "rate_limit",
+                "allowed",
+            ),
             Err(err) => {
-                roze_metrics::record_resilience_decision("http", "rate_limit", "rejected");
+                roze_metrics::record_resilience_decision(
+                    service.as_str(),
+                    "rest",
+                    "rate_limit",
+                    "rejected",
+                );
                 return Err(err);
             }
         }
     }
-    if policy
-        .breaker
-        .as_ref()
-        .is_some_and(|_| route_breaker_is_open(&key))
-    {
-        roze_metrics::record_resilience_decision("http", "breaker", "open");
-        return Err(RozeError::Unavailable("circuit open".to_string()));
-    }
-    if policy.breaker.is_some() {
-        roze_metrics::record_resilience_decision("http", "breaker", "allowed");
-    }
+    let breaker_permit = match policy.breaker {
+        Some(_) => match route_breaker_allow(&key) {
+            BreakerDecision::Allow(permit) => {
+                roze_metrics::record_resilience_decision(
+                    service.as_str(),
+                    "rest",
+                    "breaker",
+                    if permit == BreakerPermit::Probe {
+                        "half_open_probe"
+                    } else {
+                        "allowed"
+                    },
+                );
+                Some(permit)
+            }
+            BreakerDecision::Reject => {
+                roze_metrics::record_resilience_decision(
+                    service.as_str(),
+                    "rest",
+                    "breaker",
+                    "open",
+                );
+                return Err(RozeError::Unavailable("circuit open".to_string()));
+            }
+        },
+        None => None,
+    };
     if let Some(config) = &policy.shedding {
         match enforce_route_shedding(&key, config) {
-            Ok(()) => roze_metrics::record_resilience_decision("http", "load_shedding", "allowed"),
+            Ok(()) => roze_metrics::record_resilience_decision(
+                service.as_str(),
+                "rest",
+                "load_shedding",
+                "allowed",
+            ),
             Err(err) => {
-                roze_metrics::record_resilience_decision("http", "load_shedding", "shed");
+                roze_metrics::record_resilience_decision(
+                    service.as_str(),
+                    "rest",
+                    "load_shedding",
+                    "shed",
+                );
                 return Err(err);
             }
         }
@@ -322,24 +401,33 @@ pub fn begin_route(
             method,
             started: Instant::now(),
             breaker: policy.breaker,
+            breaker_permit,
             shedding: policy.shedding,
+            finished: false,
         },
     ))
 }
 
-pub fn finish_route(guard: RouteGuard, success: bool, status: impl Into<String>) {
+pub fn finish_route(mut guard: RouteGuard, success: bool, status: impl Into<String>) {
     let status = status.into();
     let elapsed = guard.started.elapsed();
-    roze_metrics::record_http_request(success, elapsed);
-    if let Some(config) = guard.breaker {
+    if let (Some(config), Some(permit)) = (guard.breaker, guard.breaker_permit) {
         let breaker_success = success || !status.starts_with('5');
-        route_breaker_record(&guard.key, breaker_success, &config);
+        route_breaker_record(&guard.key, permit, breaker_success, &config);
     }
     if let Some(config) = guard.shedding {
         let shedding_success = success || !status.starts_with('5');
         route_shedding_record(&guard.key, shedding_success, elapsed, &config);
     }
-    roze_metrics::record_http_route(guard.service, guard.route, guard.method, status, elapsed);
+    guard.finished = true;
+    roze_metrics::record_http_request(success, elapsed);
+    roze_metrics::record_http_route(
+        guard.service.as_str(),
+        guard.route.as_str(),
+        guard.method.as_str(),
+        status,
+        elapsed,
+    );
 }
 
 fn enforce_route_rate_limit(key: &str, config: &RouteRateLimitConfig) -> Result<(), RozeError> {
@@ -360,20 +448,35 @@ fn route_rate_limit_config(config: RouteRateLimitConfig) -> roze_resilience::Rat
     }
 }
 
-fn route_breaker_is_open(key: &str) -> bool {
-    ROUTE_BREAKERS
-        .get_or_init(BreakerRegistry::new)
-        .is_open(key)
+fn route_breaker_allow(key: &str) -> BreakerDecision {
+    ROUTE_BREAKERS.get_or_init(BreakerRegistry::new).allow(key)
 }
 
-fn route_breaker_record(key: &str, success: bool, config: &RouteBreakerConfig) {
+fn route_breaker_record(
+    key: &str,
+    permit: BreakerPermit,
+    success: bool,
+    config: &RouteBreakerConfig,
+) {
     let registry = ROUTE_BREAKERS.get_or_init(BreakerRegistry::new);
     if success {
-        registry.record_success(key);
+        registry.record_success(key, permit);
         return;
     }
     registry.record_failure(
         key,
+        permit,
+        roze_resilience::BreakerConfig {
+            failure_threshold: config.failure_threshold,
+            reset_timeout: config.reset_timeout,
+        },
+    );
+}
+
+fn route_breaker_cancel(key: &str, permit: BreakerPermit, config: &RouteBreakerConfig) {
+    ROUTE_BREAKERS.get_or_init(BreakerRegistry::new).cancel(
+        key,
+        permit,
         roze_resilience::BreakerConfig {
             failure_threshold: config.failure_threshold,
             reset_timeout: config.reset_timeout,
@@ -404,6 +507,12 @@ fn route_shedding_record(
         elapsed,
         route_shedding_config(*config),
     );
+}
+
+fn route_shedding_release(key: &str) {
+    ROUTE_SHEDDERS
+        .get_or_init(SheddingRegistry::new)
+        .release(key);
 }
 
 fn route_shedding_config(config: RouteSheddingConfig) -> roze_resilience::SheddingConfig {
@@ -866,11 +975,19 @@ mod tests {
         };
 
         assert_eq!(
-            apply_fallback(RozeError::BadRequest("bad".into()), Some(fallback.clone())),
+            apply_fallback(
+                "catalog",
+                RozeError::BadRequest("bad".into()),
+                Some(fallback.clone())
+            ),
             RozeError::BadRequest("bad".into())
         );
         assert!(matches!(
-            apply_fallback(RozeError::Internal("boom".into()), Some(fallback)),
+            apply_fallback(
+                "catalog",
+                RozeError::Internal("boom".into()),
+                Some(fallback)
+            ),
             RozeError::Fallback { status: 598, .. }
         ));
     }
@@ -956,6 +1073,83 @@ mod tests {
     }
 
     #[test]
+    fn route_breaker_serializes_half_open_probe_and_recovers_after_cancel() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let route = format!("half_open_{}", std::process::id());
+        governance.routes.insert(
+            route.clone(),
+            roze_config::RouteGovernanceConfig {
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 1,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let (_ctx, failing) = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("closed breaker should allow request");
+        finish_route(failing, false, "500");
+        std::thread::sleep(Duration::from_millis(2));
+
+        let (_ctx, cancelled_probe) = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("expired breaker should allow one probe");
+        drop(cancelled_probe);
+        let protected = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(
+            matches!(protected, Err(RozeError::Unavailable(message)) if message == "circuit open")
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        let (_ctx, successful_probe) = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("cancelled probe should become retryable after reset timeout");
+        let concurrent = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(
+            matches!(concurrent, Err(RozeError::Unavailable(message)) if message == "circuit open")
+        );
+        finish_route(successful_probe, true, "200");
+
+        let recovered = begin_route(
+            "svc".to_string(),
+            route,
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(recovered.is_ok());
+    }
+
+    #[test]
     fn begin_route_sheds_when_concurrency_is_full() {
         let mut governance = roze_config::GovernanceConfig::default();
         let route = format!("shed_{}", std::process::id());
@@ -990,5 +1184,48 @@ mod tests {
             Some(&governance),
         );
         assert!(matches!(second, Err(RozeError::Unavailable(message)) if message == "load shed"));
+    }
+
+    #[test]
+    fn dropping_route_guard_releases_shedding_without_opening_breaker() {
+        let mut governance = roze_config::GovernanceConfig::default();
+        let route = format!("cancelled_{}", std::process::id());
+        governance.routes.insert(
+            route.clone(),
+            roze_config::RouteGovernanceConfig {
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 60_000,
+                }),
+                shedding: Some(roze_config::SheddingConfig {
+                    concurrency: 1,
+                    window_ms: 1_000,
+                    min_samples: 1,
+                    max_avg_latency_ms: 1_000,
+                    max_failure_ratio_per_mille: 0,
+                    cool_down_ms: 60_000,
+                }),
+                ..Default::default()
+            },
+        );
+
+        let (_ctx, guard) = begin_route(
+            "svc".to_string(),
+            route.clone(),
+            "GET",
+            Context::background(),
+            Some(&governance),
+        )
+        .expect("first request should acquire shedding capacity");
+        drop(guard);
+
+        let next = begin_route(
+            "svc".to_string(),
+            route,
+            "GET",
+            Context::background(),
+            Some(&governance),
+        );
+        assert!(next.is_ok());
     }
 }
