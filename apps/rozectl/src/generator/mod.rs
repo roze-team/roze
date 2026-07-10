@@ -2886,6 +2886,7 @@ fn generate_rest_project_with_rpc_clients(
     rpc_clients: &[RpcClientBinding],
 ) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
+    remove_path_if_exists(&out.join("src/handler"))?;
 
     fs::create_dir_all(out.join("src"))?;
     fs::create_dir_all(out.join("src/config"))?;
@@ -3045,7 +3046,7 @@ fn generate_rest_project_with_rpc_clients(
     for (group, handler, content) in rest::render_handler_files(spec) {
         let dir = out.join("src/handler").join(&group);
         fs::create_dir_all(&dir)?;
-        write_preserved(&dir.join(format!("{handler}.rs")), content, options.mode)?;
+        fs::write(dir.join(format!("{handler}.rs")), content)?;
     }
     migrate_flat_module_file(
         out,
@@ -12602,7 +12603,7 @@ mod tests {
     }
 
     #[test]
-    fn api_update_preserves_config_module_and_handler_adapters() {
+    fn api_update_preserves_config_module_and_refreshes_handler_adapters() {
         let spec = parse_api(
             r#"
             service admin-api {
@@ -12655,12 +12656,84 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config module")
             .contains("rpc_clients"));
-        assert!(fs::read_to_string(out.join("src/handler/admin/auth_me.rs"))
-            .expect("read handler adapter")
-            .contains("HeaderMap"));
+        let handler = fs::read_to_string(out.join("src/handler/admin/auth_me.rs"))
+            .expect("read handler adapter");
+        assert!(!handler.contains("pub async fn auth_me(headers: HeaderMap)"));
+        assert!(handler.contains("let req = EmptyReq {};"));
         assert!(fs::read_to_string(out.join("src/handler/admin/mod.rs"))
             .expect("read handler group mod")
             .contains("pub(crate) use auth_me::auth_me;"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn api_update_refreshes_handler_when_route_request_changes() {
+        let initial = parse_api(
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/current returns (UserResp)
+            }
+
+            type UserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid initial api");
+        let updated = parse_api(
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/current (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                include_profile: bool `query:"includeProfile"`
+            }
+
+            type UserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid updated api");
+        let root = temp_test_root("rozectl-api-update-handler-request-test");
+        let out = root.join("user");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rest_project(
+            &initial,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+        fs::write(
+            out.join("src/logic/users/get_user.rs"),
+            "// application-owned logic\n",
+        )
+        .expect("write application logic");
+
+        generate_rest_project(
+            &updated,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update generation");
+
+        let handler = fs::read_to_string(out.join("src/handler/users/get_user.rs"))
+            .expect("read refreshed handler");
+        assert!(handler.contains("Query(query): Query<GetUserGetUserReqQuery>"));
+        assert!(handler.contains("let req = GetUserReq"));
+        assert!(!handler.contains("let req = EmptyReq {};"));
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/users/get_user.rs"))
+                .expect("read application logic"),
+            "// application-owned logic\n"
+        );
 
         fs::remove_dir_all(root).expect("remove test output");
     }
