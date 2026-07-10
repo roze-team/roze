@@ -5,9 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use roze_context::Context;
 use roze_error::RozeError;
 use roze_resilience::{BreakerRegistry, RateLimitRegistry, SheddingRegistry};
+use serde::Serialize;
 
 static ROUTE_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
 static ROUTE_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
@@ -429,53 +431,209 @@ pub enum IdempotencyDecision {
     Execute,
     Replay(serde_json::Value),
     InFlight,
+    Conflict,
 }
 
-#[derive(Debug, Clone)]
-enum IdempotencyState {
-    InFlight,
-    Completed(serde_json::Value),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdempotencyPolicy {
+    pub lease_millis: u64,
+}
+
+impl Default for IdempotencyPolicy {
+    fn default() -> Self {
+        Self {
+            lease_millis: 30_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct IdempotencyRecord {
+    fingerprint: String,
+    response: Option<serde_json::Value>,
+    lease_until_millis: Option<u64>,
+}
+
+#[async_trait]
+pub trait IdempotencyStore: std::fmt::Debug + Send + Sync + 'static {
+    async fn begin(
+        &self,
+        scope: &str,
+        key: &str,
+        fingerprint: &str,
+        now_millis: u64,
+        policy: IdempotencyPolicy,
+    ) -> anyhow::Result<IdempotencyDecision>;
+    async fn complete(
+        &self,
+        scope: &str,
+        key: &str,
+        fingerprint: &str,
+        response: serde_json::Value,
+    ) -> anyhow::Result<()>;
+    async fn fail(&self, scope: &str, key: &str, fingerprint: &str) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryIdempotencyStore {
-    states: Arc<Mutex<BTreeMap<String, IdempotencyState>>>,
+    states: Arc<Mutex<BTreeMap<String, IdempotencyRecord>>>,
 }
 
-impl InMemoryIdempotencyStore {
-    pub fn begin(&self, scope: impl AsRef<str>, key: impl AsRef<str>) -> IdempotencyDecision {
-        let key = format!("{}:{}", scope.as_ref(), key.as_ref());
+#[async_trait]
+impl IdempotencyStore for InMemoryIdempotencyStore {
+    async fn begin(
+        &self,
+        scope: &str,
+        key: &str,
+        fingerprint: &str,
+        now_millis: u64,
+        policy: IdempotencyPolicy,
+    ) -> anyhow::Result<IdempotencyDecision> {
+        let key = format!("{scope}:{key}");
         let mut states = self.states.lock().expect("idempotency lock poisoned");
-        match states.get(&key) {
-            Some(IdempotencyState::Completed(value)) => IdempotencyDecision::Replay(value.clone()),
-            Some(IdempotencyState::InFlight) => IdempotencyDecision::InFlight,
-            None => {
-                states.insert(key, IdempotencyState::InFlight);
+        let decision = match states.get_mut(&key) {
+            Some(record) if record.fingerprint != fingerprint => IdempotencyDecision::Conflict,
+            Some(record) if record.response.is_some() => {
+                IdempotencyDecision::Replay(record.response.clone().expect("response checked"))
+            }
+            Some(record)
+                if record
+                    .lease_until_millis
+                    .is_some_and(|lease| lease > now_millis) =>
+            {
+                IdempotencyDecision::InFlight
+            }
+            Some(record) => {
+                record.lease_until_millis = Some(now_millis.saturating_add(policy.lease_millis));
                 IdempotencyDecision::Execute
             }
-        }
+            None => {
+                states.insert(
+                    key,
+                    IdempotencyRecord {
+                        fingerprint: fingerprint.to_string(),
+                        response: None,
+                        lease_until_millis: Some(now_millis.saturating_add(policy.lease_millis)),
+                    },
+                );
+                IdempotencyDecision::Execute
+            }
+        };
+        Ok(decision)
     }
 
-    pub fn complete(
+    async fn complete(
         &self,
-        scope: impl AsRef<str>,
-        key: impl AsRef<str>,
+        scope: &str,
+        key: &str,
+        fingerprint: &str,
         response: serde_json::Value,
-    ) {
-        self.states
-            .lock()
-            .expect("idempotency lock poisoned")
-            .insert(
-                format!("{}:{}", scope.as_ref(), key.as_ref()),
-                IdempotencyState::Completed(response),
-            );
+    ) -> anyhow::Result<()> {
+        let mut states = self.states.lock().expect("idempotency lock poisoned");
+        let record = states
+            .get_mut(&format!("{scope}:{key}"))
+            .ok_or_else(|| anyhow::anyhow!("idempotency request was not started"))?;
+        if record.fingerprint != fingerprint {
+            anyhow::bail!("idempotency request fingerprint changed");
+        }
+        record.response = Some(response);
+        record.lease_until_millis = None;
+        Ok(())
     }
 
-    pub fn fail(&self, scope: impl AsRef<str>, key: impl AsRef<str>) {
-        self.states
-            .lock()
-            .expect("idempotency lock poisoned")
-            .remove(&format!("{}:{}", scope.as_ref(), key.as_ref()));
+    async fn fail(&self, scope: &str, key: &str, fingerprint: &str) -> anyhow::Result<()> {
+        let storage_key = format!("{scope}:{key}");
+        let mut states = self.states.lock().expect("idempotency lock poisoned");
+        if states
+            .get(&storage_key)
+            .is_some_and(|record| record.fingerprint == fingerprint && record.response.is_none())
+        {
+            states.remove(&storage_key);
+        }
+        Ok(())
+    }
+}
+
+pub const IDEMPOTENCY_MISSING_KEY: &str = "IDEMPOTENCY_MISSING_KEY";
+pub const IDEMPOTENCY_IN_FLIGHT: &str = "IDEMPOTENCY_IN_FLIGHT";
+pub const IDEMPOTENCY_KEY_REUSED: &str = "IDEMPOTENCY_KEY_REUSED";
+pub const IDEMPOTENCY_STORAGE_UNAVAILABLE: &str = "IDEMPOTENCY_STORAGE_UNAVAILABLE";
+pub const IDEMPOTENCY_REPLAY_INVALID: &str = "IDEMPOTENCY_REPLAY_INVALID";
+
+pub fn idempotency_fingerprint(value: &impl Serialize) -> Result<String, RozeError> {
+    serde_json::to_string(value)
+        .map_err(|error| RozeError::Internal(format!("idempotency fingerprint failed: {error}")))
+}
+
+pub fn idempotency_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn idempotency_error(status: u16, code: &str, message: &str) -> RozeError {
+    let mut headers = BTreeMap::new();
+    headers.insert("x-roze-error-code".to_string(), code.to_string());
+    RozeError::fallback_response(
+        status,
+        Some(serde_json::json!({"code": code, "message": message})),
+        headers,
+    )
+}
+
+pub async fn begin_idempotency(
+    store: &dyn IdempotencyStore,
+    scope: &str,
+    key: &str,
+    fingerprint: &str,
+    now_millis: u64,
+) -> Result<IdempotencyDecision, RozeError> {
+    store
+        .begin(
+            scope,
+            key,
+            fingerprint,
+            now_millis,
+            IdempotencyPolicy::default(),
+        )
+        .await
+        .map_err(|error| {
+            idempotency_error(
+                503,
+                IDEMPOTENCY_STORAGE_UNAVAILABLE,
+                &format!("idempotency storage unavailable: {error}"),
+            )
+        })
+}
+
+pub async fn complete_idempotency(
+    store: &dyn IdempotencyStore,
+    scope: &str,
+    key: &str,
+    fingerprint: &str,
+    response: serde_json::Value,
+) -> Result<(), RozeError> {
+    store
+        .complete(scope, key, fingerprint, response)
+        .await
+        .map_err(|error| {
+            idempotency_error(
+                503,
+                IDEMPOTENCY_STORAGE_UNAVAILABLE,
+                &format!("idempotency storage unavailable: {error}"),
+            )
+        })
+}
+
+pub async fn fail_idempotency(
+    store: &dyn IdempotencyStore,
+    scope: &str,
+    key: &str,
+    fingerprint: &str,
+) {
+    if let Err(error) = store.fail(scope, key, fingerprint).await {
+        tracing::warn!(scope, key, error = %error, "failed to release idempotency request");
     }
 }
 
@@ -505,30 +663,126 @@ mod tests {
         assert_eq!(plan.custom, vec!["audit"]);
     }
 
-    #[test]
-    fn idempotency_store_replays_completed_requests_and_releases_failures() {
+    #[tokio::test]
+    async fn idempotency_store_replays_completed_requests_and_releases_failures() {
         let store = InMemoryIdempotencyStore::default();
         assert_eq!(
-            store.begin("create-order", "key-1"),
+            store
+                .begin(
+                    "create-order",
+                    "key-1",
+                    "fingerprint-1",
+                    100,
+                    IdempotencyPolicy::default(),
+                )
+                .await
+                .unwrap(),
             IdempotencyDecision::Execute
         );
         assert_eq!(
-            store.begin("create-order", "key-1"),
+            store
+                .begin(
+                    "create-order",
+                    "key-1",
+                    "fingerprint-1",
+                    101,
+                    IdempotencyPolicy::default(),
+                )
+                .await
+                .unwrap(),
             IdempotencyDecision::InFlight
         );
-        store.complete("create-order", "key-1", serde_json::json!({"id": 1}));
         assert_eq!(
-            store.begin("create-order", "key-1"),
+            store
+                .begin(
+                    "create-order",
+                    "key-1",
+                    "fingerprint-2",
+                    101,
+                    IdempotencyPolicy::default(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Conflict
+        );
+        store
+            .complete(
+                "create-order",
+                "key-1",
+                "fingerprint-1",
+                serde_json::json!({"id": 1}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .begin(
+                    "create-order",
+                    "key-1",
+                    "fingerprint-1",
+                    102,
+                    IdempotencyPolicy::default(),
+                )
+                .await
+                .unwrap(),
             IdempotencyDecision::Replay(serde_json::json!({"id": 1}))
         );
 
         assert_eq!(
-            store.begin("create-order", "key-2"),
+            store
+                .begin(
+                    "create-order",
+                    "key-2",
+                    "fingerprint-2",
+                    100,
+                    IdempotencyPolicy::default(),
+                )
+                .await
+                .unwrap(),
             IdempotencyDecision::Execute
         );
-        store.fail("create-order", "key-2");
+        store
+            .fail("create-order", "key-2", "fingerprint-2")
+            .await
+            .unwrap();
         assert_eq!(
-            store.begin("create-order", "key-2"),
+            store
+                .begin(
+                    "create-order",
+                    "key-2",
+                    "fingerprint-2",
+                    101,
+                    IdempotencyPolicy::default(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Execute
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotency_store_recovers_expired_processing_lease() {
+        let store = InMemoryIdempotencyStore::default();
+        let policy = IdempotencyPolicy { lease_millis: 10 };
+        assert_eq!(
+            store
+                .begin("orders", "key", "body", 100, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::Execute
+        );
+        assert_eq!(
+            store
+                .begin("orders", "key", "body", 109, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::InFlight
+        );
+        assert_eq!(
+            store
+                .begin("orders", "key", "body", 110, policy)
+                .await
+                .unwrap(),
             IdempotencyDecision::Execute
         );
     }

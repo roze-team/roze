@@ -10005,7 +10005,7 @@ pub struct ServiceContext {
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
-    pub idempotency: roze_middleware::InMemoryIdempotencyStore,
+    pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
 
 impl ServiceContext {
@@ -10039,7 +10039,7 @@ impl ServiceContext {
             cache,
             mq,
             outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
-            idempotency: roze_middleware::InMemoryIdempotencyStore::default(),
+            idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
         })
     }
 
@@ -10048,6 +10048,14 @@ impl ServiceContext {
         outbox: Arc<dyn roze_transaction::OutboxStore>,
     ) -> Self {
         self.outbox = outbox;
+        self
+    }
+
+    pub fn with_idempotency_store(
+        mut self,
+        idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
+    ) -> Self {
+        self.idempotency = idempotency;
         self
     }
 
@@ -10103,7 +10111,7 @@ pub struct ServiceContext {
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
-    pub idempotency: roze_middleware::InMemoryIdempotencyStore,
+    pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
 
 impl ServiceContext {
@@ -10147,7 +10155,7 @@ impl ServiceContext {
             cache,
             mq,
             outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
-            idempotency: roze_middleware::InMemoryIdempotencyStore::default(),
+            idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
         })
     }
 
@@ -10156,6 +10164,14 @@ impl ServiceContext {
         outbox: Arc<dyn roze_transaction::OutboxStore>,
     ) -> Self {
         self.outbox = outbox;
+        self
+    }
+
+    pub fn with_idempotency_store(
+        mut self,
+        idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
+    ) -> Self {
+        self.idempotency = idempotency;
         self
     }
 
@@ -10395,6 +10411,8 @@ mod tests {
             assert!(rendered.contains("Arc<dyn roze_transaction::OutboxStore>"));
             assert!(rendered.contains("pub fn with_outbox_store"));
             assert!(rendered.contains("Arc::new(roze_transaction::InMemoryOutbox::new())"));
+            assert!(rendered.contains("Arc<dyn roze_middleware::IdempotencyStore>"));
+            assert!(rendered.contains("pub fn with_idempotency_store"));
         }
     }
 

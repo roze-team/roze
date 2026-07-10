@@ -588,7 +588,16 @@ fn grpc_code_from_error(error: &RozeError) -> Code {
         RozeError::NotFound(_) => Code::NotFound,
         RozeError::Unavailable(_) => Code::Unavailable,
         RozeError::Internal(_) => Code::Internal,
-        RozeError::Fallback { .. } => Code::Unavailable,
+        RozeError::Fallback { status, .. } => match *status {
+            400 | 422 => Code::InvalidArgument,
+            401 => Code::Unauthenticated,
+            403 => Code::PermissionDenied,
+            404 => Code::NotFound,
+            409 => Code::AlreadyExists,
+            429 => Code::ResourceExhausted,
+            500 => Code::Internal,
+            _ => Code::Unavailable,
+        },
     }
 }
 
@@ -1323,6 +1332,36 @@ mod tests {
                 .get(FALLBACK_HEADERS_METADATA)
                 .and_then(|value| value.to_str().ok()),
             Some(r#"{"x-roze-fallback":"method"}"#)
+        );
+    }
+
+    #[test]
+    fn conflict_fallback_maps_to_already_exists() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1");
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "x-roze-error-code".to_string(),
+            "IDEMPOTENCY_KEY_REUSED".to_string(),
+        );
+        let status = status_from_error(
+            RozeError::fallback_response(
+                409,
+                Some(serde_json::json!({
+                    "code": "IDEMPOTENCY_KEY_REUSED",
+                    "message": "idempotency key was reused"
+                })),
+                headers,
+            ),
+            &context,
+        );
+
+        assert_eq!(status.code(), Code::AlreadyExists);
+        assert_eq!(
+            status
+                .metadata()
+                .get(FALLBACK_STATUS_METADATA)
+                .and_then(|value| value.to_str().ok()),
+            Some("409")
         );
     }
 

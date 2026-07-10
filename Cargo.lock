@@ -3905,6 +3905,8 @@ dependencies = [
 name = "roze-middleware"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "roze-auth",
  "roze-config",
  "roze-context",
@@ -3913,6 +3915,7 @@ dependencies = [
  "roze-metrics",
  "roze-resilience",
  "roze-trace",
+ "serde",
  "serde_json",
  "tokio",
  "tower",

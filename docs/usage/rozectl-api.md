@@ -186,12 +186,20 @@ service order-api {
 ```
 
 Generated REST handlers require an `Idempotency-Key` header. Generated RPC
-servers require `idempotency-key` metadata. Roze stores in-flight and completed
-responses in the generated `ServiceContext` idempotency store. A completed key
-replays the cached response, a concurrent in-flight key returns conflict
-behavior (`409` for REST, `AlreadyExists` for RPC), and failed logic releases the
-key so callers can retry. Applications can replace or wrap the generated store
-from `src/svc/mod.rs` without editing generated handler/server files.
+servers require `idempotency-key` metadata. The generated `ServiceContext`
+holds `Arc<dyn roze_middleware::IdempotencyStore>` and provides
+`with_idempotency_store` for a persistent Redis or database adapter. The
+in-memory default is for local development and tests.
+
+Each record contains the key scope, a canonical request fingerprint, a
+processing lease, and the completed JSON response. A completed matching request
+replays the response, a live processing lease returns conflict, an expired
+lease can be reclaimed, and reusing a key for a different request returns a
+distinct conflict. Failed logic releases its unfinished record. REST error
+bodies and headers and RPC status metadata expose stable codes including
+`IDEMPOTENCY_MISSING_KEY`, `IDEMPOTENCY_IN_FLIGHT`,
+`IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_STORAGE_UNAVAILABLE`, and
+`IDEMPOTENCY_REPLAY_INVALID`.
 
 Preview regeneration before writing files:
 

@@ -5,6 +5,8 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
@@ -15,6 +17,7 @@ roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
 tokio.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true

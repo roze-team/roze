@@ -972,7 +972,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     out.push_str(&render_request_validation_checks(&request_ty.fields));
     if uses_idempotency {
         out.push_str(&format!(
-            "    let idempotency_key: String = header_value(&headers, \"idempotency-key\")?;\n    match ctx.idempotency.begin({handler:?}, &idempotency_key) {{\n        roze_middleware::IdempotencyDecision::Execute => {{}}\n        roze_middleware::IdempotencyDecision::Replay(value) => {{\n            let resp = serde_json::from_value(value)\n                .map_err(|err| RozeError::Internal(format!(\"invalid idempotency replay response: {{err}}\")))?;\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            return Ok(ApiResponse::ok(resp));\n        }}\n        roze_middleware::IdempotencyDecision::InFlight => {{\n            let err = RozeError::fallback_response(\n                409,\n                Some(serde_json::json!({{\"message\": \"idempotency request is in progress\"}})),\n                std::collections::BTreeMap::new(),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n    }}\n",
+            "    let idempotency_key: String = header_value(&headers, \"idempotency-key\").map_err(|_| roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing Idempotency-Key header\"))?;\n    let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req)?;\n    match roze_middleware::begin_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await? {{\n        roze_middleware::IdempotencyDecision::Execute => {{}}\n        roze_middleware::IdempotencyDecision::Replay(value) => {{\n            let resp = serde_json::from_value(value).map_err(|err| roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")))?;\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            return Ok(ApiResponse::ok(resp));\n        }}\n        roze_middleware::IdempotencyDecision::InFlight => {{\n            let err = roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\");\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n        roze_middleware::IdempotencyDecision::Conflict => {{\n            let err = roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\");\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n    }}\n",
             handler = handler
         ));
     }
@@ -982,7 +982,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     ));
     if uses_idempotency {
         out.push_str(&format!(
-            "    match result {{\n        Ok(resp) => {{\n            match serde_json::to_value(&resp) {{\n                Ok(value) => ctx.idempotency.complete({handler:?}, &idempotency_key, value),\n                Err(err) => {{\n                    ctx.idempotency.fail({handler:?}, &idempotency_key);\n                    let err = RozeError::Internal(format!(\"invalid idempotency response: {{err}}\"));\n                    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n                    return Err(err);\n                }}\n            }}\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }}\n        Err(mut err) => {{\n            ctx.idempotency.fail({handler:?}, &idempotency_key);\n            err = roze_middleware::apply_fallback(\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
+            "    match result {{\n        Ok(resp) => {{\n            let value = serde_json::to_value(&resp).map_err(|err| roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")))?;\n            roze_middleware::complete_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, value).await?;\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }}\n        Err(mut err) => {{\n            roze_middleware::fail_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n            err = roze_middleware::apply_fallback(\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
             handler = handler
         ));
     } else {
@@ -2408,14 +2408,15 @@ mod tests {
 
         let handlers = render_handlers(&spec);
         assert!(handlers.contains("headers: HeaderMap"));
-        assert!(handlers.contains(
-            "let idempotency_key: String = header_value(&headers, \"idempotency-key\")?;"
-        ));
-        assert!(handlers.contains("ctx.idempotency.begin("));
+        assert!(handlers.contains("IDEMPOTENCY_MISSING_KEY"));
+        assert!(handlers.contains("idempotency_fingerprint(&req)"));
+        assert!(handlers.contains("begin_idempotency(ctx.idempotency.as_ref()"));
         assert!(handlers.contains("roze_middleware::IdempotencyDecision::Replay(value)"));
-        assert!(handlers.contains("RozeError::fallback_response(\n                409,"));
-        assert!(handlers.contains("ctx.idempotency.complete("));
-        assert!(handlers.contains("ctx.idempotency.fail("));
+        assert!(handlers.contains("roze_middleware::IdempotencyDecision::Conflict"));
+        assert!(handlers.contains("IDEMPOTENCY_IN_FLIGHT"));
+        assert!(handlers.contains("IDEMPOTENCY_KEY_REUSED"));
+        assert!(handlers.contains("complete_idempotency(ctx.idempotency.as_ref()"));
+        assert!(handlers.contains("fail_idempotency(ctx.idempotency.as_ref()"));
     }
 
     #[test]

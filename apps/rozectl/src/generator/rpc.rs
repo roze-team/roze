@@ -295,7 +295,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         ));
     }
     if uses_idempotency {
-        out.push_str("        let idempotency_key = match request.metadata().get(\"idempotency-key\").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty()) {\n            Some(value) => value.to_string(),\n            None => {\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::invalid_argument_status(\"missing idempotency-key metadata\", &request_ctx));\n            }\n        };\n");
+        out.push_str("        let idempotency_key = match request.metadata().get(\"idempotency-key\").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty()) {\n            Some(value) => value.to_string(),\n            None => {\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing idempotency-key metadata\"), &request_ctx));\n            }\n        };\n");
     }
     out.push_str("        let req = request.into_inner();\n");
     out.push_str(&format!(
@@ -311,7 +311,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
     if uses_idempotency {
         out.push_str(&format!(
-            "        match self.ctx.idempotency.begin({handler:?}, &idempotency_key) {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value)\n                    .map_err(|err| Status::internal(format!(\"invalid idempotency replay response: {{err}}\")))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(Response::new({}));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(Status::already_exists(\"idempotency request is in progress\"));\n            }}\n        }}\n",
+            "        let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req).map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n        match roze_middleware::begin_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))? {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")), &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(Response::new({}));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\"), &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::Conflict => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\"), &request_ctx));\n            }}\n        }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             handler = handler
         ));
@@ -324,12 +324,12 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str("        match result {\n");
     if uses_idempotency {
         out.push_str(&format!(
-            "            Ok(resp) => {{\n                match serde_json::to_value(&resp) {{\n                    Ok(value) => self.ctx.idempotency.complete({handler:?}, &idempotency_key, value),\n                    Err(err) => {{\n                        self.ctx.idempotency.fail({handler:?}, &idempotency_key);\n                        roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                        return Err(Status::internal(format!(\"invalid idempotency response: {{err}}\")));\n                    }}\n                }}\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
+            "            Ok(resp) => {{\n                let value = serde_json::to_value(&resp).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")), &request_ctx))?;\n                roze_middleware::complete_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, value).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             handler = handler
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                self.ctx.idempotency.fail({handler:?}, &idempotency_key);\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             handler = handler
         ));
     } else {
@@ -376,7 +376,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         ));
     }
     if uses_idempotency {
-        out.push_str("        let idempotency_key = match request.metadata().get(\"idempotency-key\").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty()) {\n            Some(value) => value.to_string(),\n            None => {\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::invalid_argument_status(\"missing idempotency-key metadata\", &request_ctx));\n            }\n        };\n");
+        out.push_str("        let idempotency_key = match request.metadata().get(\"idempotency-key\").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty()) {\n            Some(value) => value.to_string(),\n            None => {\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing idempotency-key metadata\"), &request_ctx));\n            }\n        };\n");
     }
     out.push_str("        let req = request.into_inner();\n");
     out.push_str(&format!(
@@ -392,7 +392,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
     if uses_idempotency {
         out.push_str(&format!(
-            "        match self.ctx.idempotency.begin({method:?}, &idempotency_key) {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value)\n                    .map_err(|err| Status::internal(format!(\"invalid idempotency replay response: {{err}}\")))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(Response::new({}));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(Status::already_exists(\"idempotency request is in progress\"));\n            }}\n        }}\n",
+            "        let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req).map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n        match roze_middleware::begin_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))? {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")), &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(Response::new({}));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\"), &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::Conflict => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\"), &request_ctx));\n            }}\n        }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             method = method.name
         ));
@@ -404,12 +404,12 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     out.push_str("        match result {\n");
     if uses_idempotency {
         out.push_str(&format!(
-            "            Ok(resp) => {{\n                match serde_json::to_value(&resp) {{\n                    Ok(value) => self.ctx.idempotency.complete({method:?}, &idempotency_key, value),\n                    Err(err) => {{\n                        self.ctx.idempotency.fail({method:?}, &idempotency_key);\n                        roze_rpc::rpc::finish_method(method_guard, \"internal\");\n                        return Err(Status::internal(format!(\"invalid idempotency response: {{err}}\")));\n                    }}\n                }}\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
+            "            Ok(resp) => {{\n                let value = serde_json::to_value(&resp).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")), &request_ctx))?;\n                roze_middleware::complete_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint, value).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             method = method.name
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                self.ctx.idempotency.fail({method:?}, &idempotency_key);\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             method = method.name
         ));
     } else {
@@ -1474,12 +1474,15 @@ mod tests {
 
         let server = render_rpc(&spec);
         assert!(server.contains("request.metadata().get(\"idempotency-key\")"));
-        assert!(server.contains("self.ctx.idempotency.begin(\"CreateOrder\", &idempotency_key)"));
+        assert!(server.contains("IDEMPOTENCY_MISSING_KEY"));
+        assert!(server.contains("idempotency_fingerprint(&req)"));
+        assert!(server.contains("begin_idempotency(self.ctx.idempotency.as_ref()"));
         assert!(server.contains("roze_middleware::IdempotencyDecision::Replay(value)"));
-        assert!(server.contains("Status::already_exists(\"idempotency request is in progress\")"));
-        assert!(server
-            .contains("self.ctx.idempotency.complete(\"CreateOrder\", &idempotency_key, value)"));
-        assert!(server.contains("self.ctx.idempotency.fail(\"CreateOrder\", &idempotency_key)"));
+        assert!(server.contains("roze_middleware::IdempotencyDecision::Conflict"));
+        assert!(server.contains("IDEMPOTENCY_IN_FLIGHT"));
+        assert!(server.contains("IDEMPOTENCY_KEY_REUSED"));
+        assert!(server.contains("complete_idempotency(self.ctx.idempotency.as_ref()"));
+        assert!(server.contains("fail_idempotency(self.ctx.idempotency.as_ref()"));
     }
 
     #[test]
