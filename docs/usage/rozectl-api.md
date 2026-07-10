@@ -442,6 +442,31 @@ scaffolds: they publish stable HTTP/OpenAPI boundaries for export jobs and
 chart data lookup, while application teams replace the default accepted/empty
 responses with their own report catalog, BI query, async export, object-store
 download, authorization, and audit implementation.
+
+## Read-model query composition
+
+Generated REST and RPC projects include `roze-query`. Application-owned logic
+can build named `QueryTask` values and execute them through `QueryComposer`.
+`QueryCompositionConfig` defines a total request budget, per-upstream timeout,
+maximum fan-out, maximum concurrent calls, and either strict or partial-failure
+behavior. Results retain declaration order even when upstream calls complete
+out of order. Partial mode returns successful values alongside structured
+timeout, upstream, or cancellation failures; strict mode returns an error when
+any upstream fails. Every call creates a `roze.query.call` tracing span with the
+upstream name.
+
+```rust
+let batch = roze_query::QueryComposer::new(roze_query::QueryCompositionConfig {
+    partial_failure: roze_query::PartialFailurePolicy::Allow,
+    ..Default::default()
+})
+.execute(vec![
+    roze_query::QueryTask::new("catalog", || async { Ok(load_catalog().await?) }),
+    roze_query::QueryTask::new("inventory", || async { Ok(load_inventory().await?) }),
+])
+.await?;
+```
+
 New generated REST, RPC, and stream worker entrypoints run under
 `roze_service::ServiceGroup`. When shutdown starts, generated REST/RPC lifecycle
 tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops

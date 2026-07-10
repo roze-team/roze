@@ -27,6 +27,7 @@ members = [
     "crates/roze-db",
     "crates/roze-mongo",
     "crates/roze-search",
+    "crates/roze-query",
     "crates/roze-storage",
     "crates/roze-orm",
     "crates/roze-sqlx",

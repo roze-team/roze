@@ -18,7 +18,7 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 18] = [
+const REST_ROZE_CRATES: [&str; 19] = [
     "roze-config",
     "roze-error",
     "roze-health",
@@ -32,6 +32,7 @@ const REST_ROZE_CRATES: [&str; 18] = [
     "roze-mq",
     "roze-nats",
     "roze-openapi",
+    "roze-query",
     "roze-result",
     "roze-service",
     "roze-transaction",
@@ -39,7 +40,7 @@ const REST_ROZE_CRATES: [&str; 18] = [
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 19] = [
+const RPC_ROZE_CRATES: [&str; 20] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -54,6 +55,7 @@ const RPC_ROZE_CRATES: [&str; 19] = [
     "roze-mq",
     "roze-nats",
     "roze-result",
+    "roze-query",
     "roze-rpc",
     "roze-service",
     "roze-trace",
