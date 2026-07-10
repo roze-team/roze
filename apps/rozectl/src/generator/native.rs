@@ -849,17 +849,18 @@ fn render_markdown_doc(spec: &ApiSpec) -> String {
         }
         out.push('\n');
     }
-    out.push_str("## Routes\n\n| Method | Path | Handler | Request | Response | Middleware | JWT |\n| --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("## Routes\n\n| Method | Path | Handler | Request | Response | Middleware | Permissions | JWT |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for route in &spec.rest_routes {
         let server = route.server.as_ref().or(spec.server.as_ref());
         out.push_str(&format!(
-            "| {} | `{}` | `{}` | `{}` | `{}` | `{}` | {} |\n",
+            "| {} | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} |\n",
             method_name(&route.method),
             route.path,
             route.handler.as_deref().unwrap_or("-"),
             route.request,
             route.response,
             route.middlewares.join(", "),
+            route.permissions.join(", "),
             if server.and_then(|server| server.jwt.as_ref()).is_some() {
                 "yes"
             } else {
@@ -949,6 +950,7 @@ fn route_json(route: &RestRoute) -> serde_json::Value {
         "handler": route.handler,
         "doc": route.doc,
         "middlewares": route.middlewares,
+        "permissions": route.permissions,
         "server": route.server.as_ref().map(server_json),
         "method": method_name(&route.method),
         "path": route.path,
@@ -962,6 +964,7 @@ fn rpc_method_json(method: &RpcMethod) -> serde_json::Value {
         "name": method.name,
         "request": method.request,
         "response": method.response,
+        "permissions": method.permissions,
     })
 }
 
@@ -1235,6 +1238,7 @@ fn parse_proto_rpcs(source: &str) -> anyhow::Result<Vec<RpcMethod>> {
             name: name.trim().to_string(),
             request: normalize_proto_rpc_type(request),
             response: normalize_proto_rpc_type(response),
+            permissions: Vec::new(),
         });
         rest = after_response
             .split_once(';')

@@ -597,6 +597,20 @@ pub fn invalid_argument_status(message: impl Into<String>, context: &Context) ->
     status_from_error(error, context)
 }
 
+pub fn enforce_permissions<S>(context: &Context, required: &[S]) -> Result<(), Status>
+where
+    S: AsRef<str>,
+{
+    if required.is_empty() {
+        return Ok(());
+    }
+    if context.has_permissions(required.iter().map(AsRef::as_ref)) {
+        Ok(())
+    } else {
+        Err(status_from_error(RozeError::Forbidden, context))
+    }
+}
+
 pub fn error_from_status(status: &Status) -> RozeError {
     if metadata_value(status.metadata(), ERROR_KIND_METADATA) == Some("fallback") {
         let fallback_status = metadata_value(status.metadata(), FALLBACK_STATUS_METADATA)
@@ -1787,6 +1801,16 @@ mod tests {
         };
 
         assert!(method_fallback(Some(&governance), "GetUser").is_none());
+    }
+
+    #[test]
+    fn permission_enforcement_returns_permission_denied_status() {
+        let context = Context::background().with_permissions(["users:read"]);
+
+        assert!(enforce_permissions(&context, &["users:read"]).is_ok());
+        let status = enforce_permissions(&context, &["users:write"])
+            .expect_err("missing permission should be rejected");
+        assert_eq!(status.code(), Code::PermissionDenied);
     }
 
     #[test]

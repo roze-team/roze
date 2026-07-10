@@ -2258,6 +2258,9 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
         for middleware in &route.middlewares {
             out.push_str(&format!("    @middleware {}\n", middleware));
         }
+        for permission in &route.permissions {
+            out.push_str(&format!("    @permission {}\n", permission));
+        }
         if let Some(handler) = &route.handler {
             out.push_str(&format!("    @handler {}\n", handler));
         }
@@ -2270,6 +2273,9 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
         ));
     }
     for method in &spec.rpc_methods {
+        for permission in &method.permissions {
+            out.push_str(&format!("    @permission {}\n", permission));
+        }
         out.push_str(&format!(
             "    rpc {} ({}) returns ({})\n",
             method.name, method.request, method.response

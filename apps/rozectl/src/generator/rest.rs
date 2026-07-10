@@ -560,9 +560,10 @@ fn render_logic_fn(route: &RestRoute) -> String {
 }
 
 pub fn render_logic_mod(spec: &ApiSpec) -> String {
-    let mut out = String::from("use roze_error::RozeError;\n\n");
+    let mut out = String::from("#![allow(dead_code)]\n\nuse roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
+    out.push_str(&render_auth_context_helpers());
 
     for group in route_groups(spec).keys() {
         out.push_str(&format!("pub mod {group};\n"));
@@ -573,6 +574,10 @@ pub fn render_logic_mod(spec: &ApiSpec) -> String {
     }
 
     out
+}
+
+fn render_auth_context_helpers() -> &'static str {
+    "pub fn current_subject(request_ctx: &roze_context::Context) -> Option<String> {\n    request_ctx\n        .subject()\n        .or_else(|| request_ctx.metadata_value(roze_context::USER_ID_METADATA_KEY))\n}\n\npub fn current_user_id(request_ctx: &roze_context::Context) -> Option<String> {\n    current_subject(request_ctx)\n}\n\npub fn current_admin_id(request_ctx: &roze_context::Context) -> Option<String> {\n    current_subject(request_ctx)\n}\n\npub fn current_tenant(request_ctx: &roze_context::Context) -> Option<String> {\n    request_ctx.tenant()\n}\n\npub fn current_roles(request_ctx: &roze_context::Context) -> Vec<String> {\n    request_ctx.roles()\n}\n\npub fn current_permissions(request_ctx: &roze_context::Context) -> Vec<String> {\n    request_ctx.permissions()\n}\n\npub fn current_scope(request_ctx: &roze_context::Context) -> Option<String> {\n    request_ctx.metadata_value(roze_context::SCOPE_METADATA_KEY)\n}\n\n"
 }
 
 pub fn render_logic_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
@@ -693,6 +698,12 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
         out.push_str(&format!(".tag({:?})", spec.service));
         if route_has_jwt(spec, route) {
             out.push_str(".require_security(\"bearerAuth\")");
+        }
+        if !route.permissions.is_empty() {
+            out.push_str(&format!(
+                ".extension(\"x-roze-permissions\", serde_json::json!({:?}))",
+                route.permissions
+            ));
         }
         out.push_str(
             ".parameter(\"x-roze-locale\", roze_openapi::ParameterLocation::Header, \"String\", false)",
@@ -834,10 +845,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     let handler = resolved_handler_name(route);
     let middlewares = route_middlewares(spec, route);
     let plan = roze_middleware::resolve_middleware_plan(&middlewares);
-    let uses_auth = route_has_jwt(spec, route)
-        || plan
-            .builtins
-            .contains(&roze_middleware::BuiltInMiddleware::Auth);
+    let uses_auth = route_uses_auth(spec, route);
     let custom = plan
         .custom
         .into_iter()
@@ -906,6 +914,17 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     ));
     if uses_auth {
         out.push_str("    let request_ctx = match authorize(headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
+    }
+    if !route.permissions.is_empty() {
+        out.push_str(&format!(
+            "    if let Err(err) = roze_middleware::enforce_permissions(&request_ctx, &[{}]) {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+            route
+                .permissions
+                .iter()
+                .map(|permission| format!("{permission:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     for name in custom {
         out.push_str(&format!(
@@ -1029,6 +1048,7 @@ fn route_has_jwt(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
 
 fn route_uses_auth(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
     route_has_jwt(spec, route)
+        || !route.permissions.is_empty()
         || route_middlewares(spec, route).iter().any(|name| {
             roze_middleware::BuiltInMiddleware::parse(name)
                 == Some(roze_middleware::BuiltInMiddleware::Auth)
@@ -2309,6 +2329,37 @@ mod tests {
         assert!(openapi.contains("builder.add_operation(\"/ping-head\", HttpMethod::Head"));
         assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
+    }
+
+    #[test]
+    fn rest_generation_enforces_declared_permissions_and_exposes_auth_helpers() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @permission users:read, users:list
+                get /users (ListUsersReq) returns (ListUsersResp)
+            }
+
+            type ListUsersReq {
+            }
+            type ListUsersResp {
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let handlers = render_handlers(&spec);
+        assert!(handlers.contains(
+            "roze_middleware::enforce_permissions(&request_ctx, &[\"users:read\", \"users:list\"])"
+        ));
+        assert!(handlers.contains("let request_ctx = match authorize(headers, &ctx)"));
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi.contains(".extension(\"x-roze-permissions\", serde_json::json!([\"users:read\", \"users:list\"]))"));
+
+        let logic_mod = render_logic_mod(&spec);
+        assert!(logic_mod.contains("pub fn current_user_id"));
+        assert!(logic_mod.contains("pub fn current_permissions"));
     }
 
     #[test]

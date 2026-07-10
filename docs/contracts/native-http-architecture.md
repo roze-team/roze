@@ -100,7 +100,9 @@ let app = Router::new()
   custom 405 payloads from handlers or Tower services
 - route nesting with `Router::nest(prefix, router)`
 - service nesting with `Router::nest_service(prefix, service)`; mounting at
-  `/prefix` serves `/prefix`, `/prefix/`, and `/prefix/...`
+  `/prefix` serves `/prefix`, `/prefix/`, and `/prefix/...`; nested services
+  receive the prefix-stripped URI path while `OriginalUri` preserves the
+  external request URI
 - nesting prefixes must be concrete path prefixes and cannot contain
   catch-all wildcard captures
 - root nesting is rejected: compose routers with `Router::merge`, and use
@@ -119,8 +121,9 @@ let app = Router::new()
 - service registration, method service helpers, and service-backed fallback
   APIs reject `Router` values as services; use `Router::nest` when composing
   routers so child route matching remains explicit
-- route-builder APIs that can reject invalid composition use caller-tracked
-  panics so diagnostics point at the route registration site
+- route-builder APIs, including handler helpers, service helpers, fallback
+  hooks, and method-not-allowed hooks that can reject invalid composition, use
+  caller-tracked panics so diagnostics point at the route registration site
 - handler-backed route registration
 - Roze `Handler` conversion into Tower services
 - handler-level `Handler::layer` for applying Tower layers to one handler

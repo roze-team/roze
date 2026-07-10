@@ -9,7 +9,11 @@ use std::{
     task::{Context, Poll},
 };
 
-use http::{header, Method, StatusCode};
+use http::{
+    header,
+    uri::{PathAndQuery, Uri},
+    Method, StatusCode,
+};
 use matchit::Router as MatchRouter;
 use tower::{util::BoxCloneService, Layer, Service, ServiceExt};
 
@@ -378,6 +382,7 @@ impl Router {
         S::Future: Send + 'static,
     {
         let prefix = normalize_nest_prefix(prefix.into(), "use Router::fallback_service instead");
+        let service = StripPrefixService::new(prefix.clone(), service);
         self.route(prefix.clone(), any_service(service.clone()))
             .route(format!("{prefix}/"), any_service(service.clone()))
             .route(format!("{prefix}/{{*tail}}"), any_service(service))
@@ -414,6 +419,7 @@ impl Router {
         self.route_method_service(method, path, handler.into_service())
     }
 
+    #[track_caller]
     pub fn get<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -421,6 +427,7 @@ impl Router {
         self.route_handler(Method::GET, path, handler)
     }
 
+    #[track_caller]
     pub fn post<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -428,6 +435,7 @@ impl Router {
         self.route_handler(Method::POST, path, handler)
     }
 
+    #[track_caller]
     pub fn put<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -435,6 +443,7 @@ impl Router {
         self.route_handler(Method::PUT, path, handler)
     }
 
+    #[track_caller]
     pub fn patch<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -442,6 +451,7 @@ impl Router {
         self.route_handler(Method::PATCH, path, handler)
     }
 
+    #[track_caller]
     pub fn delete<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -449,6 +459,7 @@ impl Router {
         self.route_handler(Method::DELETE, path, handler)
     }
 
+    #[track_caller]
     pub fn head<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -456,6 +467,7 @@ impl Router {
         self.route_handler(Method::HEAD, path, handler)
     }
 
+    #[track_caller]
     pub fn options<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -463,6 +475,7 @@ impl Router {
         self.route_handler(Method::OPTIONS, path, handler)
     }
 
+    #[track_caller]
     pub fn trace<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -470,6 +483,7 @@ impl Router {
         self.route_handler(Method::TRACE, path, handler)
     }
 
+    #[track_caller]
     pub fn connect<H, T>(self, path: impl Into<String>, handler: H) -> Self
     where
         H: Handler<T>,
@@ -490,6 +504,7 @@ impl Router {
         self
     }
 
+    #[track_caller]
     pub fn fallback<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -519,6 +534,7 @@ impl Router {
         self
     }
 
+    #[track_caller]
     pub fn method_not_allowed_fallback<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -924,6 +940,7 @@ impl MethodRouter {
         }
     }
 
+    #[track_caller]
     pub fn on<M, H, T>(self, method: M, handler: H) -> Self
     where
         M: Into<MethodSelection>,
@@ -964,6 +981,7 @@ impl MethodRouter {
         self
     }
 
+    #[track_caller]
     pub fn any<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -995,6 +1013,7 @@ impl MethodRouter {
         self
     }
 
+    #[track_caller]
     pub fn get<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1013,6 +1032,7 @@ impl MethodRouter {
         self.on_service(Method::GET, service)
     }
 
+    #[track_caller]
     pub fn post<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1031,6 +1051,7 @@ impl MethodRouter {
         self.on_service(Method::POST, service)
     }
 
+    #[track_caller]
     pub fn put<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1049,6 +1070,7 @@ impl MethodRouter {
         self.on_service(Method::PUT, service)
     }
 
+    #[track_caller]
     pub fn patch<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1067,6 +1089,7 @@ impl MethodRouter {
         self.on_service(Method::PATCH, service)
     }
 
+    #[track_caller]
     pub fn delete<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1085,6 +1108,7 @@ impl MethodRouter {
         self.on_service(Method::DELETE, service)
     }
 
+    #[track_caller]
     pub fn head<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1103,6 +1127,7 @@ impl MethodRouter {
         self.on_service(Method::HEAD, service)
     }
 
+    #[track_caller]
     pub fn options<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1121,6 +1146,7 @@ impl MethodRouter {
         self.on_service(Method::OPTIONS, service)
     }
 
+    #[track_caller]
     pub fn trace<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1139,6 +1165,7 @@ impl MethodRouter {
         self.on_service(Method::TRACE, service)
     }
 
+    #[track_caller]
     pub fn connect<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1172,6 +1199,7 @@ impl MethodRouter {
         self.layer(StateFromRefLayer::<Outer, Inner>::new(state))
     }
 
+    #[track_caller]
     pub fn method_not_allowed_fallback<H, T>(self, handler: H) -> Self
     where
         H: Handler<T>,
@@ -1391,6 +1419,7 @@ impl<T> fmt::Debug for MethodRouterIntoMakeServiceWithConnectInfo<T> {
     }
 }
 
+#[track_caller]
 pub fn get<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1398,6 +1427,7 @@ where
     MethodRouter::new().get(handler)
 }
 
+#[track_caller]
 pub fn any<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1417,6 +1447,7 @@ where
     MethodRouter::new().any_service(service)
 }
 
+#[track_caller]
 pub fn on<H, T>(filter: MethodFilter, handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1448,6 +1479,7 @@ where
     MethodRouter::new().get_service(service)
 }
 
+#[track_caller]
 pub fn post<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1467,6 +1499,7 @@ where
     MethodRouter::new().post_service(service)
 }
 
+#[track_caller]
 pub fn put<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1486,6 +1519,7 @@ where
     MethodRouter::new().put_service(service)
 }
 
+#[track_caller]
 pub fn patch<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1505,6 +1539,7 @@ where
     MethodRouter::new().patch_service(service)
 }
 
+#[track_caller]
 pub fn delete<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1524,6 +1559,7 @@ where
     MethodRouter::new().delete_service(service)
 }
 
+#[track_caller]
 pub fn head<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1543,6 +1579,7 @@ where
     MethodRouter::new().head_service(service)
 }
 
+#[track_caller]
 pub fn options<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1562,6 +1599,7 @@ where
     MethodRouter::new().options_service(service)
 }
 
+#[track_caller]
 pub fn trace<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1581,6 +1619,7 @@ where
     MethodRouter::new().trace_service(service)
 }
 
+#[track_caller]
 pub fn connect<H, T>(handler: H) -> MethodRouter
 where
     H: Handler<T>,
@@ -1639,6 +1678,66 @@ where
     <L::Service as Service<IncomingRequest>>::Future: Send + 'static,
 {
     layer.layer(service).boxed_clone()
+}
+
+#[derive(Clone)]
+struct StripPrefixService<S> {
+    prefix: String,
+    inner: S,
+}
+
+impl<S> StripPrefixService<S> {
+    fn new(prefix: String, inner: S) -> Self {
+        Self { prefix, inner }
+    }
+}
+
+impl<S> Service<IncomingRequest> for StripPrefixService<S>
+where
+    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = HttpResponse;
+    type Error = Infallible;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: IncomingRequest) -> Self::Future {
+        let stripped = strip_prefix_from_uri(request.uri(), &self.prefix);
+        *request.uri_mut() = stripped;
+        self.inner.call(request)
+    }
+}
+
+fn strip_prefix_from_uri(uri: &Uri, prefix: &str) -> Uri {
+    let path = uri.path();
+    let stripped_path = path
+        .strip_prefix(prefix)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .unwrap_or(path);
+    let stripped_path = if stripped_path.is_empty() {
+        "/"
+    } else {
+        stripped_path
+    };
+    let path_and_query = match uri.query() {
+        Some(query) => format!("{stripped_path}?{query}"),
+        None => stripped_path.to_string(),
+    };
+
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(
+        path_and_query
+            .parse::<PathAndQuery>()
+            .expect("stripped nested service path must be a valid path and query"),
+    );
+    Uri::from_parts(parts).expect("stripped nested service URI must be valid")
 }
 
 #[derive(Clone)]
@@ -3613,9 +3712,19 @@ mod tests {
     #[tokio::test]
     async fn nests_service_under_prefix() {
         let service = tower::service_fn(|request: IncomingRequest| async move {
+            let current_uri = request
+                .uri()
+                .path_and_query()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| request.uri().path().to_string());
+            let original_uri = request
+                .extensions()
+                .get::<OriginalUri>()
+                .map(|uri| uri.0.to_string())
+                .unwrap_or_default();
             Ok::<_, Infallible>(rest::text_response(
                 StatusCode::OK,
-                request.uri().path().to_string(),
+                format!("{current_uri}|{original_uri}"),
             ))
         });
         let mut router = Router::new().nest_service("/proxy", service);
@@ -3623,7 +3732,7 @@ mod tests {
             .call(
                 Request::builder()
                     .method(Method::DELETE)
-                    .uri("/proxy/users/42")
+                    .uri("/proxy/users/42?active=1")
                     .body(empty_incoming())
                     .unwrap(),
             )
@@ -3631,7 +3740,7 @@ mod tests {
             .unwrap();
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"/proxy/users/42");
+        assert_eq!(&body[..], b"/users/42?active=1|/proxy/users/42?active=1");
     }
 
     #[tokio::test]
@@ -3655,7 +3764,7 @@ mod tests {
             .await
             .unwrap();
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"/proxy");
+        assert_eq!(&body[..], b"/");
 
         let response = router
             .call(
@@ -3668,7 +3777,7 @@ mod tests {
             .await
             .unwrap();
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"/proxy/");
+        assert_eq!(&body[..], b"/");
     }
 
     fn empty_incoming() -> crate::rest::Body {

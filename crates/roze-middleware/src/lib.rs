@@ -251,6 +251,20 @@ pub fn apply_fallback(
     RozeError::fallback_response(fallback.status, fallback.body, fallback.headers)
 }
 
+pub fn enforce_permissions<S>(request_ctx: &Context, required: &[S]) -> Result<(), RozeError>
+where
+    S: AsRef<str>,
+{
+    if required.is_empty() {
+        return Ok(());
+    }
+    if request_ctx.has_permissions(required.iter().map(AsRef::as_ref)) {
+        Ok(())
+    } else {
+        Err(RozeError::Forbidden)
+    }
+}
+
 pub fn begin_route(
     service: String,
     route: impl Into<String>,
@@ -519,6 +533,18 @@ mod tests {
         assert!(matches!(
             apply_fallback(RozeError::Internal("boom".into()), Some(fallback)),
             RozeError::Fallback { status: 598, .. }
+        ));
+    }
+
+    #[test]
+    fn permission_enforcement_requires_all_declared_permissions() {
+        let context = Context::background().with_permissions(["users:read", "users:write"]);
+
+        assert!(enforce_permissions(&context, &["users:read"]).is_ok());
+        assert!(enforce_permissions(&context, &["users:read", "users:write"]).is_ok());
+        assert!(matches!(
+            enforce_permissions(&context, &["users:delete"]),
+            Err(RozeError::Forbidden)
         ));
     }
 

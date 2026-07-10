@@ -2059,6 +2059,12 @@ fn openapi_operation(spec: &ApiSpec, route: &crate::parser::RestRoute) -> serde_
             serde_json::json!([{ "bearerAuth": [] }]),
         );
     }
+    if !route.permissions.is_empty() {
+        operation.insert(
+            "x-roze-permissions".to_string(),
+            serde_json::json!(route.permissions),
+        );
+    }
 
     let mut parameters = Vec::new();
     let mut json_body_fields = Vec::new();
@@ -4285,6 +4291,16 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "$EvidenceManifestPath = Join-Path $ProjectRoot 'ops/evidence-manifest.yaml'"
     )
     .unwrap();
+    writeln!(
+        &mut out,
+        "$CiEvidencePolicyPath = Join-Path $ProjectRoot 'ops/ci-evidence-policy.yaml'"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "$VerifyReportPath = Join-Path $ProjectRoot 'ops/production-verify-report.json'"
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "if (-not $SkipEvidenceInventory) {{").unwrap();
     writeln!(
@@ -4328,12 +4344,46 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "            if (-not $manifest.Contains($relativePath)) {{"
+        "            $manifestEntry = \"path: $relativePath\""
     )
     .unwrap();
     writeln!(
         &mut out,
-        "                throw \"Evidence manifest does not index generated asset: $relativePath\""
+        "            if (-not $manifest.Contains($manifestEntry)) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "                throw \"Evidence manifest does not index generated asset entry: $manifestEntry\""
+    )
+    .unwrap();
+    writeln!(&mut out, "            }}").unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out, "    Invoke-Step 'ci evidence policy coverage' {{").unwrap();
+    writeln!(
+        &mut out,
+        "        $policy = Get-Content -LiteralPath $CiEvidencePolicyPath -Raw"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        foreach ($relativePath in $requiredOpsFiles) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            $policyEntry = \"    - $relativePath\""
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            if (-not $policy.Contains($policyEntry)) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "                throw \"CI evidence policy does not require generated asset path: $policyEntry\""
     )
     .unwrap();
     writeln!(&mut out, "            }}").unwrap();
@@ -4408,6 +4458,85 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
             .unwrap();
         }
     }
+    writeln!(&mut out, "$rustcVersion = (& rustc --version) -join ''").unwrap();
+    writeln!(&mut out, "$cargoVersion = (& cargo --version) -join ''").unwrap();
+    writeln!(&mut out, "$rozeRevision = 'unknown'").unwrap();
+    writeln!(
+        &mut out,
+        "if (Get-Command git -ErrorAction SilentlyContinue) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    $gitRevision = & git -C $ProjectRoot rev-parse HEAD 2>$null"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ($LASTEXITCODE -eq 0) {{ $rozeRevision = ($gitRevision -join '') }}"
+    )
+    .unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out, "$verifyReport = [ordered]@{{").unwrap();
+    writeln!(&mut out, "    service = $ServiceName").unwrap();
+    writeln!(&mut out, "    boundary = $Boundary.ToLowerInvariant()").unwrap();
+    writeln!(&mut out, "    generated_by = 'rozectl'").unwrap();
+    writeln!(&mut out, "    verdict = 'pass_ci_precondition'").unwrap();
+    writeln!(
+        &mut out,
+        "    broad_production = 'requires_long_run_evidence'"
+    )
+    .unwrap();
+    writeln!(&mut out, "    skip_tests = [bool]$SkipTests").unwrap();
+    writeln!(
+        &mut out,
+        "    timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription"
+    )
+    .unwrap();
+    writeln!(&mut out, "    rustc = $rustcVersion").unwrap();
+    writeln!(&mut out, "    cargo = $cargoVersion").unwrap();
+    writeln!(&mut out, "    roze_revision = $rozeRevision").unwrap();
+    writeln!(&mut out, "    gates = @(").unwrap();
+    for gate in [
+        "generated_ops_asset_inventory",
+        "evidence_manifest_coverage",
+        "ci_evidence_policy_coverage",
+        "cargo_fmt_check",
+        "cargo_check",
+        "cargo_test_unless_skipped",
+        "smoke_surface_declared",
+    ] {
+        writeln!(&mut out, "        '{gate}'").unwrap();
+    }
+    writeln!(&mut out, "    )").unwrap();
+    writeln!(&mut out, "    required_followup_evidence = @(").unwrap();
+    for evidence in [
+        "24h_or_72h_soak_report",
+        "failure_injection_report",
+        "dashboard_and_alert_evidence",
+        "rollback_or_rollforward_evidence",
+        "security_readiness_signoff",
+        "capacity_and_resource_trend",
+    ] {
+        writeln!(&mut out, "        '{evidence}'").unwrap();
+    }
+    writeln!(&mut out, "    )").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(
+        &mut out,
+        "$verifyReport | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $VerifyReportPath -Encoding UTF8"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "Write-Host \"Production verification report: $VerifyReportPath\""
+    )
+    .unwrap();
     writeln!(
         &mut out,
         "Write-Host \"Production verification passed for $ServiceName ($Boundary). Attach long-run soak, failure-injection, dashboard, alert, and rollback evidence before broad rollout.\""
@@ -4457,6 +4586,16 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
         "EVIDENCE_MANIFEST_PATH=\"$PROJECT_ROOT/ops/evidence-manifest.yaml\""
     )
     .unwrap();
+    writeln!(
+        &mut out,
+        "CI_EVIDENCE_POLICY_PATH=\"$PROJECT_ROOT/ops/ci-evidence-policy.yaml\""
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "VERIFY_REPORT_PATH=\"$PROJECT_ROOT/ops/production-verify-report.json\""
+    )
+    .unwrap();
     writeln!(&mut out, "SKIP_TESTS=\"${{SKIP_TESTS:-0}}\"").unwrap();
     writeln!(
         &mut out,
@@ -4471,6 +4610,14 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(&mut out, "  shift").unwrap();
     writeln!(&mut out, "  echo \"==> $name\"").unwrap();
     writeln!(&mut out, "  \"$@\"").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "json_escape() {{").unwrap();
+    writeln!(&mut out, "  local value=\"$1\"").unwrap();
+    writeln!(&mut out, "  value=${{value//\\\\/\\\\\\\\}}").unwrap();
+    writeln!(&mut out, "  value=${{value//\\\"/\\\\\\\"}}").unwrap();
+    writeln!(&mut out, "  value=${{value//$'\\n'/ }}").unwrap();
+    writeln!(&mut out, "  printf '%s' \"$value\"").unwrap();
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "required_ops_files=(").unwrap();
@@ -4532,19 +4679,45 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "check_evidence_manifest_coverage() {{").unwrap();
     writeln!(&mut out, "  local relative_path").unwrap();
+    writeln!(&mut out, "  local manifest_entry").unwrap();
     writeln!(
         &mut out,
         "  for relative_path in \"${{required_ops_files[@]}}\"; do"
     )
     .unwrap();
+    writeln!(&mut out, "    manifest_entry=\"path: $relative_path\"").unwrap();
     writeln!(
         &mut out,
-        "    if ! grep -Fq -- \"$relative_path\" \"$EVIDENCE_MANIFEST_PATH\"; then"
+        "    if ! grep -Fq -- \"$manifest_entry\" \"$EVIDENCE_MANIFEST_PATH\"; then"
     )
     .unwrap();
     writeln!(
         &mut out,
-        "      echo \"Evidence manifest does not index generated asset: $relative_path\" >&2"
+        "      echo \"Evidence manifest does not index generated asset entry: $manifest_entry\" >&2"
+    )
+    .unwrap();
+    writeln!(&mut out, "      return 1").unwrap();
+    writeln!(&mut out, "    fi").unwrap();
+    writeln!(&mut out, "  done").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "check_ci_evidence_policy_coverage() {{").unwrap();
+    writeln!(&mut out, "  local relative_path").unwrap();
+    writeln!(&mut out, "  local policy_entry").unwrap();
+    writeln!(
+        &mut out,
+        "  for relative_path in \"${{required_ops_files[@]}}\"; do"
+    )
+    .unwrap();
+    writeln!(&mut out, "    policy_entry=\"    - $relative_path\"").unwrap();
+    writeln!(
+        &mut out,
+        "    if ! grep -Fq -- \"$policy_entry\" \"$CI_EVIDENCE_POLICY_PATH\"; then"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "      echo \"CI evidence policy does not require generated asset path: $policy_entry\" >&2"
     )
     .unwrap();
     writeln!(&mut out, "      return 1").unwrap();
@@ -4565,6 +4738,11 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(
         &mut out,
         "  run_step \"evidence manifest coverage\" check_evidence_manifest_coverage"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  run_step \"ci evidence policy coverage\" check_ci_evidence_policy_coverage"
     )
     .unwrap();
     writeln!(&mut out, "fi").unwrap();
@@ -4626,6 +4804,88 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
             .unwrap();
         }
     }
+    writeln!(&mut out, "rustc_version=\"$(rustc --version)\"").unwrap();
+    writeln!(&mut out, "cargo_version=\"$(cargo --version)\"").unwrap();
+    writeln!(&mut out, "roze_revision=\"unknown\"").unwrap();
+    writeln!(
+        &mut out,
+        "if command -v git >/dev/null 2>&1 && git -C \"$PROJECT_ROOT\" rev-parse HEAD >/dev/null 2>&1; then"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  roze_revision=\"$(git -C \"$PROJECT_ROOT\" rev-parse HEAD)\""
+    )
+    .unwrap();
+    writeln!(&mut out, "fi").unwrap();
+    writeln!(&mut out, "skip_tests_json=false").unwrap();
+    writeln!(
+        &mut out,
+        "if [[ \"$SKIP_TESTS\" == \"1\" ]]; then skip_tests_json=true; fi"
+    )
+    .unwrap();
+    writeln!(&mut out, "cat > \"$VERIFY_REPORT_PATH\" <<JSON").unwrap();
+    writeln!(&mut out, "{{").unwrap();
+    writeln!(
+        &mut out,
+        "  \"service\": \"$(json_escape \"$SERVICE_NAME\")\","
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"boundary\": \"$(json_escape \"${{BOUNDARY,,}}\")\","
+    )
+    .unwrap();
+    writeln!(&mut out, "  \"generated_by\": \"rozectl\",").unwrap();
+    writeln!(&mut out, "  \"verdict\": \"pass_ci_precondition\",").unwrap();
+    writeln!(
+        &mut out,
+        "  \"broad_production\": \"requires_long_run_evidence\","
+    )
+    .unwrap();
+    writeln!(&mut out, "  \"skip_tests\": $skip_tests_json,").unwrap();
+    writeln!(
+        &mut out,
+        "  \"timestamp_utc\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"os\": \"$(json_escape \"$(uname -s)-$(uname -m)\")\","
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"rustc\": \"$(json_escape \"$rustc_version\")\","
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"cargo\": \"$(json_escape \"$cargo_version\")\","
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"roze_revision\": \"$(json_escape \"$roze_revision\")\","
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"gates\": [\"generated_ops_asset_inventory\", \"evidence_manifest_coverage\", \"ci_evidence_policy_coverage\", \"cargo_fmt_check\", \"cargo_check\", \"cargo_test_unless_skipped\", \"smoke_surface_declared\"],"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  \"required_followup_evidence\": [\"24h_or_72h_soak_report\", \"failure_injection_report\", \"dashboard_and_alert_evidence\", \"rollback_or_rollforward_evidence\", \"security_readiness_signoff\", \"capacity_and_resource_trend\"]"
+    )
+    .unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out, "JSON").unwrap();
+    writeln!(
+        &mut out,
+        "printf 'Production verification report: %s\\n' \"$VERIFY_REPORT_PATH\""
+    )
+    .unwrap();
     writeln!(
         &mut out,
         "printf 'Production verification passed for %s (%s). Attach long-run soak, failure-injection, dashboard, alert, and rollback evidence before broad rollout.\\n' \"$SERVICE_NAME\" \"$BOUNDARY\""
@@ -4736,9 +4996,38 @@ artifact:
   upload_on: always
   if_no_files_found: error
   required_paths:
-    - ops/**
+    - ops/production-evidence.md
+    - ops/governance-baseline.yaml
+    - ops/prometheus-rules.yaml
+    - ops/grafana-dashboard.json
+    - ops/slo.yaml
+    - ops/failure-injection-plan.yaml
+    - ops/release-rollout.yaml
+    - ops/incident-response.yaml
+    - ops/capacity-plan.yaml
+    - ops/security-readiness.yaml
+    - ops/production-gate.yaml
+    - ops/regeneration-policy.yaml
+    - ops/client-contract.yaml
+    - ops/config-governance.yaml
+    - ops/reliable-events.yaml
+    - ops/dependency-governance.yaml
+    - ops/data-consistency.yaml
+    - ops/observability-contract.yaml
+    - ops/runtime-hardening.yaml
+    - ops/error-contract.yaml
+    - ops/deployment-topology.yaml
+    - ops/service-communication.yaml
+    - ops/cache-governance.yaml
+    - ops/data-access-governance.yaml
+    - ops/interface-governance.yaml
+    - ops/production-verify.ps1
+    - ops/production-verify.sh
+    - ops/ci-evidence-policy.yaml
     - ops/evidence-manifest.yaml
     - .github/workflows/roze-production-verify.yml
+  produced_paths:
+    - ops/production-verify-report.json
 required_runner_matrix:
   - ubuntu-latest
   - windows-latest
@@ -4749,10 +5038,10 @@ required_gates:
   - cargo_test_unless_explicitly_skipped
   - {smoke_surface}
 blocking_conditions:
-    - missing_generated_ops_asset
-    - missing_ci_evidence_policy
-    - missing_evidence_manifest
-    - missing_github_actions_workflow
+  - missing_generated_ops_asset
+  - missing_ci_evidence_policy
+  - missing_evidence_manifest
+  - missing_github_actions_workflow
   - fmt_drift
   - compile_failure
   - test_failure_without_approved_skip
@@ -4975,6 +5264,16 @@ fn evidence_manifest_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         writeln!(&mut out, "    purpose: {purpose}").unwrap();
         writeln!(&mut out, "    blocking: {blocking}").unwrap();
     }
+    writeln!(&mut out, "runtime_artifacts:").unwrap();
+    writeln!(&mut out, "  - path: ops/production-verify-report.json").unwrap();
+    writeln!(&mut out, "    kind: verification_report").unwrap();
+    writeln!(
+        &mut out,
+        "    purpose: machine-readable CI gate verdict and follow-up evidence checklist"
+    )
+    .unwrap();
+    writeln!(&mut out, "    producer: ops/production-verify.*").unwrap();
+    writeln!(&mut out, "    blocking: false").unwrap();
     writeln!(&mut out, "smoke_surface:").unwrap();
     match kind {
         ProjectKind::Rest => {
@@ -11419,8 +11718,16 @@ mod tests {
         assert!(rest_production_verify.contains("function Invoke-Step"));
         assert!(rest_production_verify.contains("$requiredOpsFiles"));
         assert!(rest_production_verify.contains("$EvidenceManifestPath"));
+        assert!(rest_production_verify.contains("$CiEvidencePolicyPath"));
+        assert!(rest_production_verify.contains("$VerifyReportPath"));
         assert!(rest_production_verify.contains("evidence manifest coverage"));
-        assert!(rest_production_verify.contains("Evidence manifest does not index generated asset"));
+        assert!(rest_production_verify.contains("$manifestEntry = \"path: $relativePath\""));
+        assert!(rest_production_verify
+            .contains("Evidence manifest does not index generated asset entry"));
+        assert!(rest_production_verify.contains("ci evidence policy coverage"));
+        assert!(rest_production_verify.contains("$policyEntry = \"    - $relativePath\""));
+        assert!(rest_production_verify
+            .contains("CI evidence policy does not require generated asset path"));
         assert!(rest_production_verify.contains("ops/production-gate.yaml"));
         assert!(rest_production_verify.contains("ops/production-verify.sh"));
         assert!(rest_production_verify.contains("ops/ci-evidence-policy.yaml"));
@@ -11429,6 +11736,11 @@ mod tests {
         assert!(rest_production_verify.contains("cargo fmt --manifest-path"));
         assert!(rest_production_verify.contains("cargo check --manifest-path"));
         assert!(rest_production_verify.contains("cargo test --manifest-path"));
+        assert!(rest_production_verify.contains("production-verify-report.json"));
+        assert!(rest_production_verify.contains("pass_ci_precondition"));
+        assert!(rest_production_verify.contains("requires_long_run_evidence"));
+        assert!(rest_production_verify.contains("required_followup_evidence"));
+        assert!(rest_production_verify.contains("Production verification report"));
         assert!(rest_production_verify.contains("GET /reports/export"));
         assert!(rest_production_verify.contains("POST /charts/query"));
         assert!(rest_production_verify.contains("GET /users/:id"));
@@ -11437,8 +11749,16 @@ mod tests {
         assert!(rest_production_verify_sh.contains("run_step()"));
         assert!(rest_production_verify_sh.contains("required_ops_files=("));
         assert!(rest_production_verify_sh.contains("EVIDENCE_MANIFEST_PATH"));
+        assert!(rest_production_verify_sh.contains("CI_EVIDENCE_POLICY_PATH"));
+        assert!(rest_production_verify_sh.contains("VERIFY_REPORT_PATH"));
         assert!(rest_production_verify_sh.contains("check_evidence_manifest_coverage()"));
         assert!(rest_production_verify_sh.contains("evidence manifest coverage"));
+        assert!(rest_production_verify_sh.contains("manifest_entry=\"path: $relative_path\""));
+        assert!(rest_production_verify_sh.contains("check_ci_evidence_policy_coverage()"));
+        assert!(rest_production_verify_sh.contains("ci evidence policy coverage"));
+        assert!(rest_production_verify_sh.contains("policy_entry=\"    - $relative_path\""));
+        assert!(rest_production_verify_sh
+            .contains("CI evidence policy does not require generated asset path"));
         assert!(rest_production_verify_sh.contains("ops/production-verify.ps1"));
         assert!(rest_production_verify_sh.contains("ops/production-verify.sh"));
         assert!(rest_production_verify_sh.contains("ops/ci-evidence-policy.yaml"));
@@ -11447,6 +11767,11 @@ mod tests {
         assert!(rest_production_verify_sh.contains("cargo fmt --manifest-path"));
         assert!(rest_production_verify_sh.contains("cargo check --manifest-path"));
         assert!(rest_production_verify_sh.contains("cargo test --manifest-path"));
+        assert!(rest_production_verify_sh.contains("production-verify-report.json"));
+        assert!(rest_production_verify_sh.contains("pass_ci_precondition"));
+        assert!(rest_production_verify_sh.contains("requires_long_run_evidence"));
+        assert!(rest_production_verify_sh.contains("required_followup_evidence"));
+        assert!(rest_production_verify_sh.contains("Production verification report"));
         assert!(rest_production_verify_sh.contains("GET /reports/export"));
         assert!(rest_production_verify_sh.contains("POST /charts/query"));
         assert!(rest_production_verify_sh.contains("GET /users/:id"));
@@ -11468,7 +11793,16 @@ mod tests {
         assert!(rest_ci_evidence_policy.contains("artifact_upload_missing"));
         assert!(rest_ci_evidence_policy.contains("missing_ci_evidence_policy"));
         assert!(rest_ci_evidence_policy.contains("missing_evidence_manifest"));
+        assert!(rest_ci_evidence_policy.contains("    - ops/production-gate.yaml"));
+        assert!(rest_ci_evidence_policy.contains("    - ops/production-verify.ps1"));
+        assert!(rest_ci_evidence_policy.contains("    - ops/production-verify.sh"));
+        assert!(rest_ci_evidence_policy.contains("    - ops/ci-evidence-policy.yaml"));
         assert!(rest_ci_evidence_policy.contains("ops/evidence-manifest.yaml"));
+        assert!(
+            rest_ci_evidence_policy.contains("    - .github/workflows/roze-production-verify.yml")
+        );
+        assert!(rest_ci_evidence_policy.contains("produced_paths:"));
+        assert!(rest_ci_evidence_policy.contains("    - ops/production-verify-report.json"));
         assert!(rest_ci_evidence_policy
             .contains("framework_probes_report_export_chart_query_and_business_routes"));
         assert!(rest_ci_evidence_policy.contains("ci_success_is: precondition"));
@@ -11477,6 +11811,9 @@ mod tests {
         assert!(rest_evidence_manifest.contains("manifest: production_evidence"));
         assert!(rest_evidence_manifest.contains("path: ops/evidence-manifest.yaml"));
         assert!(rest_evidence_manifest.contains("kind: manifest"));
+        assert!(rest_evidence_manifest.contains("runtime_artifacts:"));
+        assert!(rest_evidence_manifest.contains("path: ops/production-verify-report.json"));
+        assert!(rest_evidence_manifest.contains("kind: verification_report"));
         assert!(rest_evidence_manifest.contains("GET /reports/export"));
         assert!(rest_evidence_manifest.contains("POST /charts/query"));
         assert!(rest_evidence_manifest.contains("path: \"/users/:id\""));
@@ -11741,25 +12078,50 @@ mod tests {
         assert!(rpc_production_verify.contains("function Invoke-Step"));
         assert!(rpc_production_verify.contains("$requiredOpsFiles"));
         assert!(rpc_production_verify.contains("$EvidenceManifestPath"));
+        assert!(rpc_production_verify.contains("$CiEvidencePolicyPath"));
+        assert!(rpc_production_verify.contains("$VerifyReportPath"));
         assert!(rpc_production_verify.contains("evidence manifest coverage"));
+        assert!(rpc_production_verify.contains("$manifestEntry = \"path: $relativePath\""));
+        assert!(rpc_production_verify.contains("ci evidence policy coverage"));
+        assert!(rpc_production_verify.contains("$policyEntry = \"    - $relativePath\""));
+        assert!(rpc_production_verify
+            .contains("CI evidence policy does not require generated asset path"));
         assert!(rpc_production_verify.contains("ops/production-verify.ps1"));
         assert!(rpc_production_verify.contains("ops/production-verify.sh"));
         assert!(rpc_production_verify.contains("ops/ci-evidence-policy.yaml"));
         assert!(rpc_production_verify.contains("ops/evidence-manifest.yaml"));
         assert!(rpc_production_verify.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rpc_production_verify.contains("cargo check --manifest-path"));
+        assert!(rpc_production_verify.contains("production-verify-report.json"));
+        assert!(rpc_production_verify.contains("pass_ci_precondition"));
+        assert!(rpc_production_verify.contains("requires_long_run_evidence"));
+        assert!(rpc_production_verify.contains("required_followup_evidence"));
+        assert!(rpc_production_verify.contains("Production verification report"));
         assert!(rpc_production_verify.contains("RPC smoke methods required"));
         assert!(rpc_production_verify.contains("GetUser -> GetUserReq"));
         assert!(rpc_production_verify_sh.starts_with("#!/usr/bin/env bash"));
         assert!(rpc_production_verify_sh.contains("set -euo pipefail"));
         assert!(rpc_production_verify_sh.contains("run_step()"));
+        assert!(rpc_production_verify_sh.contains("CI_EVIDENCE_POLICY_PATH"));
+        assert!(rpc_production_verify_sh.contains("VERIFY_REPORT_PATH"));
         assert!(rpc_production_verify_sh.contains("check_evidence_manifest_coverage()"));
+        assert!(rpc_production_verify_sh.contains("manifest_entry=\"path: $relative_path\""));
+        assert!(rpc_production_verify_sh.contains("check_ci_evidence_policy_coverage()"));
+        assert!(rpc_production_verify_sh.contains("ci evidence policy coverage"));
+        assert!(rpc_production_verify_sh.contains("policy_entry=\"    - $relative_path\""));
+        assert!(rpc_production_verify_sh
+            .contains("CI evidence policy does not require generated asset path"));
         assert!(rpc_production_verify_sh.contains("ops/production-verify.ps1"));
         assert!(rpc_production_verify_sh.contains("ops/production-verify.sh"));
         assert!(rpc_production_verify_sh.contains("ops/ci-evidence-policy.yaml"));
         assert!(rpc_production_verify_sh.contains("ops/evidence-manifest.yaml"));
         assert!(rpc_production_verify_sh.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rpc_production_verify_sh.contains("cargo check --manifest-path"));
+        assert!(rpc_production_verify_sh.contains("production-verify-report.json"));
+        assert!(rpc_production_verify_sh.contains("pass_ci_precondition"));
+        assert!(rpc_production_verify_sh.contains("requires_long_run_evidence"));
+        assert!(rpc_production_verify_sh.contains("required_followup_evidence"));
+        assert!(rpc_production_verify_sh.contains("Production verification report"));
         assert!(rpc_production_verify_sh.contains("RPC smoke methods required"));
         assert!(rpc_production_verify_sh.contains("GetUser -> GetUserReq"));
         assert!(rpc_production_workflow.contains("ROZE_SERVICE_NAME: user"));
@@ -11777,11 +12139,23 @@ mod tests {
             .contains("startup_readiness_metrics_and_representative_rpc_methods"));
         assert!(rpc_ci_evidence_policy.contains("test_failure_without_approved_skip"));
         assert!(rpc_ci_evidence_policy.contains("failure_injection_report"));
+        assert!(rpc_ci_evidence_policy.contains("    - ops/production-gate.yaml"));
+        assert!(rpc_ci_evidence_policy.contains("    - ops/production-verify.ps1"));
+        assert!(rpc_ci_evidence_policy.contains("    - ops/production-verify.sh"));
+        assert!(rpc_ci_evidence_policy.contains("    - ops/ci-evidence-policy.yaml"));
         assert!(rpc_ci_evidence_policy.contains("ops/evidence-manifest.yaml"));
+        assert!(
+            rpc_ci_evidence_policy.contains("    - .github/workflows/roze-production-verify.yml")
+        );
+        assert!(rpc_ci_evidence_policy.contains("produced_paths:"));
+        assert!(rpc_ci_evidence_policy.contains("    - ops/production-verify-report.json"));
         assert!(rpc_evidence_manifest.contains("service: user"));
         assert!(rpc_evidence_manifest.contains("boundary: rpc"));
         assert!(rpc_evidence_manifest.contains("path: ops/production-verify.ps1"));
         assert!(rpc_evidence_manifest.contains("path: ops/evidence-manifest.yaml"));
+        assert!(rpc_evidence_manifest.contains("runtime_artifacts:"));
+        assert!(rpc_evidence_manifest.contains("path: ops/production-verify-report.json"));
+        assert!(rpc_evidence_manifest.contains("kind: verification_report"));
         assert!(rpc_evidence_manifest.contains("startup_readiness_metrics"));
         assert!(rpc_evidence_manifest.contains("client_deadline_and_cancel"));
         assert!(rpc_evidence_manifest.contains("name: \"GetUser\""));
@@ -12596,6 +12970,7 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
             handler: None,
             doc: None,
             middlewares: Vec::new(),
+            permissions: Vec::new(),
             server: None,
             method: HttpMethod::Get,
             path: "/users/:id".to_string(),

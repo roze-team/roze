@@ -56,6 +56,7 @@ pub struct RestRoute {
     pub handler: Option<String>,
     pub doc: Option<String>,
     pub middlewares: Vec<String>,
+    pub permissions: Vec<String>,
     pub server: Option<ServerSpec>,
     pub method: HttpMethod,
     pub path: String,
@@ -81,6 +82,7 @@ pub struct RpcMethod {
     pub name: String,
     pub request: String,
     pub response: String,
+    pub permissions: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -184,6 +186,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                 let mut current_handler = None;
                 let mut current_doc = None;
                 let mut current_middlewares: Vec<String> = Vec::new();
+                let mut current_permissions: Vec<String> = Vec::new();
                 let mut current_server = None;
                 let mut service_server = None;
 
@@ -217,14 +220,21 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         current_middlewares.extend(parse_name_list(middleware));
                         continue;
                     }
+                    if let Some(permission) = parse_annotation_arg(svc_line, "@permission") {
+                        current_permissions.extend(parse_name_list(permission));
+                        continue;
+                    }
                     if let Some(method) = svc_line.strip_prefix("rpc ") {
-                        rpc_methods.push(parse_rpc_method(method, svc_line_no)?);
+                        let mut method = parse_rpc_method(method, svc_line_no)?;
+                        method.permissions = std::mem::take(&mut current_permissions);
+                        rpc_methods.push(method);
                         continue;
                     }
                     if let Some(mut route) = parse_rest_route(svc_line, svc_line_no)? {
                         route.handler = current_handler.take();
                         route.doc = current_doc.take();
                         route.middlewares = std::mem::take(&mut current_middlewares);
+                        route.permissions = std::mem::take(&mut current_permissions);
                         route.server = current_server.clone();
                         rest_routes.push(route);
                         continue;
@@ -232,7 +242,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
 
                     return invalid(
                         svc_line_no,
-                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, RPC method or route declaration",
+                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, RPC method or route declaration",
                     );
                 }
 
@@ -361,6 +371,7 @@ fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, Par
         handler: None,
         doc: None,
         middlewares: Vec::new(),
+        permissions: Vec::new(),
         server: None,
         method,
         path: path.to_string(),
@@ -591,6 +602,7 @@ fn parse_rpc_method(input: &str, line_no: usize) -> Result<RpcMethod, ParseError
         name: name.to_string(),
         request,
         response,
+        permissions: Vec::new(),
     })
 }
 
@@ -770,6 +782,7 @@ mod tests {
                 name: "GetUser".to_string(),
                 request: "GetUserReq".to_string(),
                 response: "UserResp".to_string(),
+                permissions: Vec::new(),
             }]
         );
     }
@@ -1067,6 +1080,37 @@ mod tests {
             spec.types[0].fields[4].validate.as_deref(),
             Some("required,min=2,max=16")
         );
+    }
+
+    #[test]
+    fn parses_route_and_rpc_permissions() {
+        let spec = parse_api(
+            r#"
+            service user {
+                @permission users:read, users:write
+                get /users (ListUsersReq) returns (ListUsersResp)
+
+                @permission users:write
+                rpc CreateUser (CreateUserReq) returns (UserResp)
+            }
+
+            type ListUsersReq {
+            }
+            type ListUsersResp {
+            }
+            type CreateUserReq {
+            }
+            type UserResp {
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        assert_eq!(
+            spec.rest_routes[0].permissions,
+            vec!["users:read", "users:write"]
+        );
+        assert_eq!(spec.rpc_methods[0].permissions, vec!["users:write"]);
     }
 
     #[test]

@@ -10233,6 +10233,9 @@ fn normalize_ent_default_value(value: &str) -> String {
     if let Some(value) = normalize_ent_timestamp_default_func(value) {
         return value;
     }
+    if let Some(value) = normalize_ent_uuid_default_func(value) {
+        return value;
+    }
     match value.trim() {
         "time.Now" | "time.Now()" => "now_millis".to_string(),
         "uuid.NewString" | "uuid.NewString()" | "uuid.New" | "uuid.New()" | "uuid.NewV7"
@@ -10350,13 +10353,30 @@ fn parse_ent_default_func_value(value: &str, line_no: usize) -> anyhow::Result<S
     if let Some(value) = normalize_ent_timestamp_default_func(&value) {
         return Ok(value);
     }
+    if let Some(value) = normalize_ent_uuid_default_func(&value) {
+        return Ok(value);
+    }
     let normalized = normalize_ent_default_value(&value);
     if matches!(normalized.as_str(), "now_millis" | "uuid_new_string") {
         return Ok(normalized);
     }
     bail!(
-        "line {line_no}: DefaultFunc currently supports time.Now, time.Now Unix closures, uuid.NewString, uuid.New, and uuid.NewV7 only"
+        "line {line_no}: DefaultFunc currently supports time.Now, time.Now Unix closures, uuid.NewString, uuid.New, uuid.NewV7, and UUID string closures only"
     )
+}
+
+fn normalize_ent_uuid_default_func(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<String>();
+    if compact.contains("uuid.NewString()")
+        || compact.contains("uuid.New().String()")
+        || compact.contains("uuid.NewV7().String()")
+        || compact.contains("uuid.New()")
+        || compact.contains("uuid.NewV7()")
+    {
+        Some("uuid_new_string".to_string())
+    } else {
+        None
+    }
 }
 
 fn normalize_ent_timestamp_default_func(value: &str) -> Option<String> {
@@ -13390,6 +13410,51 @@ mod tests {
     }
 
     #[test]
+    fn ent_uuid_closures_generate_uuid_defaults() {
+        let source = r#"
+        entity Token {
+            table "tokens"
+            field Int64("id").Primary() {
+            }
+            field UUID("public_id", uuid.UUID{}).DefaultFunc(func() string { return uuid.NewString() }) {
+            }
+            field UUID("invite_id", uuid.UUID{}).Default(func() string { return uuid.New().String() }) {
+            }
+            field UUID("trace_id", uuid.UUID{}).ClientDefault(func() string { return uuid.NewV7().String() }) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let public_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "public_id")
+            .expect("public_id field");
+        assert_eq!(public_id.default_value.as_deref(), Some("uuid_new_string"));
+        let invite_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "invite_id")
+            .expect("invite_id field");
+        assert_eq!(invite_id.default_value.as_deref(), Some("uuid_new_string"));
+        let trace_id = model
+            .fields
+            .iter()
+            .find(|field| field.name == "trace_id")
+            .expect("trace_id field");
+        assert_eq!(
+            trace_id.client_default_value.as_deref(),
+            Some("uuid_new_string")
+        );
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"uuid_new_string\""));
+        assert!(ent.contains("client_default \"uuid_new_string\""));
+    }
+
+    #[test]
     fn ent_default_func_rejects_unsupported_functions() {
         let err = parse_models_with_format(
             r#"
@@ -13406,7 +13471,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("DefaultFunc currently supports time.Now, time.Now Unix closures, uuid.NewString, uuid.New, and uuid.NewV7 only"));
+            .contains("DefaultFunc currently supports time.Now, time.Now Unix closures, uuid.NewString, uuid.New, uuid.NewV7, and UUID string closures only"));
     }
 
     #[test]

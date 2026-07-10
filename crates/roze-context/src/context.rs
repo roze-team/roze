@@ -23,6 +23,7 @@ pub const LOCALE_METADATA_KEY: &str = "locale";
 pub const USER_ID_METADATA_KEY: &str = "uid";
 pub const DEVICE_ID_METADATA_KEY: &str = "device_id";
 pub const SCOPE_METADATA_KEY: &str = "scope";
+pub const PERMISSIONS_METADATA_KEY: &str = "permissions";
 pub const IDEMPOTENCY_KEY_METADATA_KEY: &str = "idempotency_key";
 
 pub const HULA_TENANT_ID_HEADER: &str = "x-hula-tenant-id";
@@ -286,6 +287,36 @@ impl Context {
 
     pub fn roles(&self) -> Vec<String> {
         self.auth().map(|auth| auth.roles).unwrap_or_default()
+    }
+
+    pub fn permissions(&self) -> Vec<String> {
+        self.metadata_value(PERMISSIONS_METADATA_KEY)
+            .map(|value| split_context_list(&value))
+            .unwrap_or_default()
+    }
+
+    pub fn with_permissions<I, S>(&self, permissions: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let permissions = permissions
+            .into_iter()
+            .map(|permission| permission.as_ref().trim().to_string())
+            .filter(|permission| !permission.is_empty())
+            .collect::<Vec<_>>();
+        self.with_metadata(PERMISSIONS_METADATA_KEY, permissions.join(","))
+    }
+
+    pub fn has_permissions<I, S>(&self, required: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let permissions = self.permissions();
+        required
+            .into_iter()
+            .all(|permission| permissions.iter().any(|owned| owned == permission.as_ref()))
     }
 
     pub fn metadata(&self) -> BTreeMap<String, String> {
@@ -643,6 +674,14 @@ fn metadata_from_headers_with_aliases(
     metadata
 }
 
+fn split_context_list(raw: &str) -> Vec<String> {
+    raw.split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn auth_from_headers_with_aliases(
     headers: &BTreeMap<String, String>,
     aliases: HeaderAliases,
@@ -733,6 +772,19 @@ mod tests {
         assert_eq!(restored.tenant().as_deref(), Some("tenant-1"));
         assert_eq!(restored.roles(), vec!["admin", "ops"]);
         assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
+    }
+
+    #[test]
+    fn context_permissions_round_trip_and_require_every_permission() {
+        let ctx = Context::background().with_permissions(["users:read", "users:write"]);
+
+        assert_eq!(ctx.permissions(), vec!["users:read", "users:write"]);
+        assert!(ctx.has_permissions(["users:read"]));
+        assert!(ctx.has_permissions(["users:read", "users:write"]));
+        assert!(!ctx.has_permissions(["users:delete"]));
+
+        let restored = Context::from_propagation_headers(&ctx.propagation_headers());
+        assert_eq!(restored.permissions(), vec!["users:read", "users:write"]);
     }
 
     #[test]

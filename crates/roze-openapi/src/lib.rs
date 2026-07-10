@@ -54,6 +54,8 @@ pub struct Operation {
     pub security: Vec<SecurityRequirement>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub responses: BTreeMap<String, Response>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +259,7 @@ impl Operation {
             request_body: None,
             security: Vec::new(),
             responses: BTreeMap::new(),
+            extensions: BTreeMap::new(),
         }
     }
 
@@ -364,6 +367,11 @@ impl Operation {
 
     pub fn require_security(mut self, name: impl Into<String>) -> Self {
         self.security.push(SecurityRequirement::bearer(name));
+        self
+    }
+
+    pub fn extension(mut self, name: impl Into<String>, value: serde_json::Value) -> Self {
+        self.extensions.insert(name.into(), value);
         self
     }
 }

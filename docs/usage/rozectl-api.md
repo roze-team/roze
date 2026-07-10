@@ -142,6 +142,34 @@ Generated glue such as route registration, handler module indexes, DTOs,
 OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`, and
 `proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.
 
+## Permission annotations and request context
+
+Use `@permission` immediately before a REST route or RPC method to declare all
+permissions required by that operation:
+
+```text
+service user-api {
+    @permission users:read, users:list
+    get /users (ListUsersReq) returns (ListUsersResp)
+
+    @permission users:write
+    rpc CreateUser (CreateUserReq) returns (UserResp)
+}
+```
+
+Generated REST handlers call `roze_middleware::enforce_permissions` after
+authentication; generated RPC servers call `roze_rpc::rpc::enforce_permissions`.
+Every declared permission is required. Permission values are read from the
+Roze request context metadata and propagate as `x-roze-meta-permissions`.
+REST OpenAPI operations expose the declaration as `x-roze-permissions`.
+
+Generated `src/logic/mod.rs` exposes stable helpers for application-owned
+logic: `current_subject`, `current_user_id`, `current_admin_id`,
+`current_tenant`, `current_roles`, `current_permissions`, and `current_scope`.
+They read `roze_context::Context`; no generated file needs to be patched after
+regeneration. Applications remain responsible for authenticating a request and
+populating the context's subject, tenant, roles, scopes, and permissions.
+
 Preview regeneration before writing files:
 
 ```bash
@@ -1326,9 +1354,12 @@ closures in `Default(...)`, `DefaultFunc(...)`, `UpdateDefault(...)`, or
 `now_millis`.
 UUID defaults accept ent-style `DefaultFunc(uuid.NewString)`,
 `DefaultFunc(uuid.New)`, and `DefaultFunc(uuid.NewV7)` for
-`UUID(...)`/string-backed fields; generated Rust create builders use
-`uuid::Uuid::now_v7().to_string()` and model generation adds the `uuid`
-dependency when needed.
+`UUID(...)`/string-backed fields. UUID closures such as
+`func() string { return uuid.NewString() }`, `uuid.New().String()`, and
+`uuid.NewV7().String()` in `Default(...)`, `DefaultFunc(...)`, or
+`ClientDefault(...)` normalize to the same `uuid_new_string` default; generated
+Rust create builders use `uuid::Uuid::now_v7().to_string()` and model
+generation adds the `uuid` dependency when needed.
 The ent-style `field Time("created_at").Default(time.Now)` builder maps to a
 Roze `i64` epoch-millis timestamp field and uses the same numeric timestamp
 default generation.

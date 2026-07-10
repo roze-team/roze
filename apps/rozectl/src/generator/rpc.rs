@@ -282,6 +282,17 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         "        let (request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
         handler
     ));
+    if !route.permissions.is_empty() {
+        out.push_str(&format!(
+            "        if let Err(status) = roze_rpc::rpc::enforce_permissions(&request_ctx, &[{}]) {{\n            roze_rpc::rpc::finish_method(method_guard, \"permission_denied\");\n            return Err(status);\n        }}\n",
+            route
+                .permissions
+                .iter()
+                .map(|permission| format!("{permission:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     out.push_str("        let req = request.into_inner();\n");
     out.push_str(&format!(
         "        let req = {};\n",
@@ -329,6 +340,17 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         "        let (request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
         method.name
     ));
+    if !method.permissions.is_empty() {
+        out.push_str(&format!(
+            "        if let Err(status) = roze_rpc::rpc::enforce_permissions(&request_ctx, &[{}]) {{\n            roze_rpc::rpc::finish_method(method_guard, \"permission_denied\");\n            return Err(status);\n        }}\n",
+            method
+                .permissions
+                .iter()
+                .map(|permission| format!("{permission:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     out.push_str("        let req = request.into_inner();\n");
     out.push_str(&format!(
         "        let req = {};\n",
@@ -359,14 +381,19 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
 }
 
 pub fn render_logic_mod(spec: &ApiSpec) -> String {
-    let mut out = String::from("use roze_error::RozeError;\n\n");
+    let mut out = String::from("#![allow(dead_code)]\n\nuse roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
+    out.push_str(render_auth_context_helpers());
     for method in rpc_logic_methods(spec) {
         out.push_str(&format!("mod {method};\n"));
         out.push_str(&format!("pub use {method}::{method};\n"));
     }
     out
+}
+
+fn render_auth_context_helpers() -> &'static str {
+    "pub fn current_subject(request_ctx: &roze_context::Context) -> Option<String> {\n    request_ctx\n        .subject()\n        .or_else(|| request_ctx.metadata_value(roze_context::USER_ID_METADATA_KEY))\n}\n\npub fn current_user_id(request_ctx: &roze_context::Context) -> Option<String> {\n    current_subject(request_ctx)\n}\n\npub fn current_admin_id(request_ctx: &roze_context::Context) -> Option<String> {\n    current_subject(request_ctx)\n}\n\npub fn current_tenant(request_ctx: &roze_context::Context) -> Option<String> {\n    request_ctx.tenant()\n}\n\npub fn current_roles(request_ctx: &roze_context::Context) -> Vec<String> {\n    request_ctx.roles()\n}\n\npub fn current_permissions(request_ctx: &roze_context::Context) -> Vec<String> {\n    request_ctx.permissions()\n}\n\npub fn current_scope(request_ctx: &roze_context::Context) -> Option<String> {\n    request_ctx.metadata_value(roze_context::SCOPE_METADATA_KEY)\n}\n\n"
 }
 
 pub fn render_logic_files(spec: &ApiSpec) -> Vec<(String, String)> {
@@ -1312,6 +1339,34 @@ mod tests {
         assert!(rendered.contains("for item in &req.tags"));
         assert!(rendered.contains("if item.chars().count() < 2"));
         assert!(rendered.contains("if !item.chars().all(|ch| ch.is_alphanumeric())"));
+    }
+
+    #[test]
+    fn rpc_generation_enforces_declared_permissions_and_exposes_auth_helpers() {
+        let spec = parse_api(
+            r#"
+            service user {
+                @permission users:write
+                rpc CreateUser (CreateUserReq) returns (UserResp)
+            }
+
+            type CreateUserReq {
+            }
+            type UserResp {
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let server = render_rpc(&spec);
+        assert!(
+            server.contains("roze_rpc::rpc::enforce_permissions(&request_ctx, &[\"users:write\"])")
+        );
+        assert!(server.contains("finish_method(method_guard, \"permission_denied\")"));
+
+        let logic_mod = render_logic_mod(&spec);
+        assert!(logic_mod.contains("pub fn current_user_id"));
+        assert!(logic_mod.contains("pub fn current_permissions"));
     }
 
     #[test]
