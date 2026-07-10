@@ -48,6 +48,23 @@ pub struct TransactionPlan {
 
 pub type Saga = TransactionPlan;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaRetryPolicy {
+    pub max_attempts: u32,
+    pub initial_backoff_millis: u64,
+    pub max_backoff_millis: u64,
+}
+
+impl Default for SagaRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff_millis: 100,
+            max_backoff_millis: 5_000,
+        }
+    }
+}
+
 impl TransactionPlan {
     pub fn new() -> Self {
         Self { steps: Vec::new() }
@@ -77,6 +94,27 @@ impl TransactionPlan {
             applied.push(action);
         }
         Ok(())
+    }
+
+    pub async fn execute_with_retry(&self, policy: SagaRetryPolicy) -> Result<()> {
+        let attempts = policy.max_attempts.max(1);
+        for attempt in 0..attempts {
+            match self.execute().await {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt + 1 == attempts => return Err(err),
+                Err(_) => {
+                    let multiplier = 2u64.saturating_pow(attempt.min(6));
+                    let delay = policy
+                        .initial_backoff_millis
+                        .saturating_mul(multiplier)
+                        .min(policy.max_backoff_millis);
+                    if delay > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
+                }
+            }
+        }
+        unreachable!("at least one saga execution attempt is required")
     }
 }
 
@@ -500,6 +538,50 @@ mod tests {
         assert!(plan.execute().await.is_err());
         assert_eq!(applied.load(Ordering::SeqCst), 3);
         assert_eq!(rolled_back.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_only_after_a_failed_attempt_has_been_compensated() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let rollbacks = Arc::new(AtomicUsize::new(0));
+        let mut plan = TransactionPlan::new();
+        let attempts_for_apply = attempts.clone();
+        let rollbacks_for_rollback = rollbacks.clone();
+        plan.push(TransactionAction::new(
+            "local-write",
+            || async { Ok(()) },
+            move || {
+                let rollbacks = rollbacks_for_rollback.clone();
+                async move {
+                    rollbacks.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        ));
+        plan.push(TransactionAction::new(
+            "remote-write",
+            move || {
+                let attempts = attempts_for_apply.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        anyhow::bail!("transient failure");
+                    }
+                    Ok(())
+                }
+            },
+            || async { Ok(()) },
+        ));
+
+        plan.execute_with_retry(SagaRetryPolicy {
+            max_attempts: 2,
+            initial_backoff_millis: 0,
+            max_backoff_millis: 0,
+        })
+        .await
+        .expect("second attempt succeeds");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
     }
 
     #[test]
