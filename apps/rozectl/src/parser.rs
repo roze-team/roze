@@ -82,6 +82,7 @@ pub struct RpcMethod {
     pub name: String,
     pub request: String,
     pub response: String,
+    pub middlewares: Vec<String>,
     pub permissions: Vec<String>,
 }
 
@@ -226,6 +227,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                     }
                     if let Some(method) = svc_line.strip_prefix("rpc ") {
                         let mut method = parse_rpc_method(method, svc_line_no)?;
+                        method.middlewares = std::mem::take(&mut current_middlewares);
                         method.permissions = std::mem::take(&mut current_permissions);
                         rpc_methods.push(method);
                         continue;
@@ -602,6 +604,7 @@ fn parse_rpc_method(input: &str, line_no: usize) -> Result<RpcMethod, ParseError
         name: name.to_string(),
         request,
         response,
+        middlewares: Vec::new(),
         permissions: Vec::new(),
     })
 }
@@ -782,6 +785,7 @@ mod tests {
                 name: "GetUser".to_string(),
                 request: "GetUserReq".to_string(),
                 response: "UserResp".to_string(),
+                middlewares: Vec::new(),
                 permissions: Vec::new(),
             }]
         );
@@ -1111,6 +1115,33 @@ mod tests {
             vec!["users:read", "users:write"]
         );
         assert_eq!(spec.rpc_methods[0].permissions, vec!["users:write"]);
+    }
+
+    #[test]
+    fn parses_rpc_method_middlewares() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @middleware idempotency
+                rpc CreateUser (CreateUserReq) returns (UserResp)
+
+                get /users (ListUsersReq) returns (ListUsersResp)
+            }
+
+            type CreateUserReq {
+            }
+            type UserResp {
+            }
+            type ListUsersReq {
+            }
+            type ListUsersResp {
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        assert_eq!(spec.rpc_methods[0].middlewares, vec!["idempotency"]);
+        assert!(spec.rest_routes[0].middlewares.is_empty());
     }
 
     #[test]

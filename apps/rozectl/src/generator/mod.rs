@@ -39,7 +39,7 @@ const REST_ROZE_CRATES: [&str; 18] = [
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 18] = [
+const RPC_ROZE_CRATES: [&str; 19] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -49,6 +49,7 @@ const RPC_ROZE_CRATES: [&str; 18] = [
     "roze-health",
     "roze-jwt",
     "roze-log",
+    "roze-middleware",
     "roze-cache",
     "roze-mq",
     "roze-nats",

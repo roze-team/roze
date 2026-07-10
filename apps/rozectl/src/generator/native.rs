@@ -1238,6 +1238,7 @@ fn parse_proto_rpcs(source: &str) -> anyhow::Result<Vec<RpcMethod>> {
             name: name.trim().to_string(),
             request: normalize_proto_rpc_type(request),
             response: normalize_proto_rpc_type(response),
+            middlewares: Vec::new(),
             permissions: Vec::new(),
         });
         rest = after_response
