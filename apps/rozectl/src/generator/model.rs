@@ -9667,7 +9667,7 @@ fn parse_ent_index(
             });
         }
         if let Some(value) = ent_field_arg(&inner, &["fields"]) {
-            fields = parse_ent_ident_list(value, inner_line_no + 1)?;
+            fields.extend(parse_ent_ident_list(value, inner_line_no + 1)?);
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["edges"]) {
@@ -10230,6 +10230,9 @@ fn parse_ent_string_or_ident(value: &str, line_no: usize) -> anyhow::Result<Stri
 }
 
 fn normalize_ent_default_value(value: &str) -> String {
+    if let Some(value) = normalize_ent_timestamp_default_func(value) {
+        return value;
+    }
     match value.trim() {
         "time.Now" | "time.Now()" => "now_millis".to_string(),
         "uuid.NewString" | "uuid.NewString()" | "uuid.New" | "uuid.New()" | "uuid.NewV7"
@@ -10344,13 +10347,39 @@ fn normalize_ent_duration_default_value(value: &str) -> Option<String> {
 
 fn parse_ent_default_func_value(value: &str, line_no: usize) -> anyhow::Result<String> {
     let value = parse_ent_string_or_ident(value, line_no)?;
+    if let Some(value) = normalize_ent_timestamp_default_func(&value) {
+        return Ok(value);
+    }
     let normalized = normalize_ent_default_value(&value);
     if matches!(normalized.as_str(), "now_millis" | "uuid_new_string") {
         return Ok(normalized);
     }
     bail!(
-        "line {line_no}: DefaultFunc currently supports time.Now, uuid.NewString, uuid.New, and uuid.NewV7 only"
+        "line {line_no}: DefaultFunc currently supports time.Now, time.Now Unix closures, uuid.NewString, uuid.New, and uuid.NewV7 only"
     )
+}
+
+fn normalize_ent_timestamp_default_func(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<String>();
+    if !compact.contains("time.Now()") {
+        return None;
+    }
+    if compact.contains("time.Now().UnixNano()") {
+        Some("now_nanos".to_string())
+    } else if compact.contains("time.Now().UnixMicro()") {
+        Some("now_micros".to_string())
+    } else if compact.contains("time.Now().UnixMilli()") {
+        Some("now_millis".to_string())
+    } else if compact.contains("time.Now().Unix()") {
+        Some("now_secs".to_string())
+    } else if compact.contains("returntime.Now()")
+        || compact.contains("=>time.Now()")
+        || compact.contains("time.Now().UTC()")
+    {
+        Some("now_millis".to_string())
+    } else {
+        None
+    }
 }
 
 fn ent_type_to_rust_type(ty: &str) -> String {
@@ -12094,13 +12123,15 @@ mod tests {
             }
             field Int64("tenant_id") {
             }
+            field Int64("region_id") {
+            }
             field Int64("user_id") {
             }
             edge To("user", User.Type).Field("user_id") {
             }
             index Edges("user").Unique() {
             }
-            index Fields("tenant_id").Edges("user") {
+            index Fields("tenant_id").Fields("region_id").Edges("user") {
             }
         }
         "#;
@@ -12115,14 +12146,14 @@ mod tests {
             && index.fields == ["user_id"]));
         assert!(profile.indexes.iter().any(|index| {
             !index.unique
-                && index.name == "idx_tenant_id_user_id"
-                && index.fields == ["tenant_id", "user_id"]
+                && index.name == "idx_tenant_id_region_id_user_id"
+                && index.fields == ["tenant_id", "region_id", "user_id"]
         }));
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("field user_id: i64 {\n    unique\n  }"));
-        assert!(ent.contains("index idx_tenant_id_user_id {"));
-        assert!(ent.contains("    fields tenant_id, user_id"));
+        assert!(ent.contains("index idx_tenant_id_region_id_user_id {"));
+        assert!(ent.contains("    fields tenant_id, region_id, user_id"));
     }
 
     #[test]
@@ -13174,6 +13205,137 @@ mod tests {
     }
 
     #[test]
+    fn ent_default_func_time_unix_closures_generate_timestamp_defaults() {
+        let source = r#"
+        entity Event {
+            table "events"
+            field Int64("id").Primary() {
+            }
+            field Int64("created_secs").DefaultFunc(func() int64 { return time.Now().Unix() }) {
+            }
+            field Int64("created_millis").DefaultFunc(func() int64 { return time.Now().UnixMilli() }) {
+            }
+            field Int64("created_micros").DefaultFunc(func() int64 { return time.Now().UnixMicro() }) {
+            }
+            field Int64("created_nanos").DefaultFunc(func() int64 { return time.Now().UnixNano() }) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let default_for = |name: &str| {
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .and_then(|field| field.default_value.as_deref())
+        };
+        assert_eq!(default_for("created_secs"), Some("now_secs"));
+        assert_eq!(default_for("created_millis"), Some("now_millis"));
+        assert_eq!(default_for("created_micros"), Some("now_micros"));
+        assert_eq!(default_for("created_nanos"), Some("now_nanos"));
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"now_secs\""));
+        assert!(ent.contains("default \"now_millis\""));
+        assert!(ent.contains("default \"now_micros\""));
+        assert!(ent.contains("default \"now_nanos\""));
+    }
+
+    #[test]
+    fn ent_time_unix_closures_generate_default_update_and_client_defaults() {
+        let source = r#"
+        entity Event {
+            table "events"
+            field Int64("id").Primary() {
+            }
+            field Int64("created_secs").Default(func() int64 { return time.Now().Unix() }) {
+            }
+            field Int64("updated_micros").UpdateDefault(func() int64 { return time.Now().UnixMicro() }) {
+            }
+            field Int64("seen_nanos").ClientDefault(func() int64 { return time.Now().UnixNano() }) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        let created_secs = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_secs")
+            .expect("created_secs field");
+        assert_eq!(created_secs.default_value.as_deref(), Some("now_secs"));
+        let updated_micros = model
+            .fields
+            .iter()
+            .find(|field| field.name == "updated_micros")
+            .expect("updated_micros field");
+        assert_eq!(updated_micros.update_default.as_deref(), Some("now_micros"));
+        let seen_nanos = model
+            .fields
+            .iter()
+            .find(|field| field.name == "seen_nanos")
+            .expect("seen_nanos field");
+        assert_eq!(
+            seen_nanos.client_default_value.as_deref(),
+            Some("now_nanos")
+        );
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("default \"now_secs\""));
+        assert!(ent.contains("update_default now_micros"));
+        assert!(ent.contains("client_default \"now_nanos\""));
+    }
+
+    #[test]
+    fn ent_time_now_closures_generate_epoch_millis_defaults() {
+        let source = r#"
+        entity Event {
+            table "events"
+            field Int64("id").Primary() {
+            }
+            field Time("created_at").DefaultFunc(func() time.Time { return time.Now() }) {
+            }
+            field Time("synced_at").Default(func() time.Time { return time.Now().UTC() }) {
+            }
+            field Time("seen_at").ClientDefault(func() time.Time { return time.Now() }) {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let model = &models[0];
+        for name in ["created_at", "synced_at", "seen_at"] {
+            let field = model
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .expect("time field");
+            assert_eq!(field.ty, "i64");
+        }
+        let created_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "created_at")
+            .expect("created_at field");
+        assert_eq!(created_at.default_value.as_deref(), Some("now_millis"));
+        let synced_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "synced_at")
+            .expect("synced_at field");
+        assert_eq!(synced_at.default_value.as_deref(), Some("now_millis"));
+        let seen_at = model
+            .fields
+            .iter()
+            .find(|field| field.name == "seen_at")
+            .expect("seen_at field");
+        assert_eq!(seen_at.client_default_value.as_deref(), Some("now_millis"));
+    }
+
+    #[test]
     fn ent_default_func_uuid_new_string_generates_uuid_default() {
         let source = r#"
         entity User {
@@ -13244,7 +13406,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("DefaultFunc currently supports time.Now, uuid.NewString, uuid.New, and uuid.NewV7 only"));
+            .contains("DefaultFunc currently supports time.Now, time.Now Unix closures, uuid.NewString, uuid.New, and uuid.NewV7 only"));
     }
 
     #[test]

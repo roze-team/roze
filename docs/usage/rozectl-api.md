@@ -393,7 +393,7 @@ Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/service-communication.yaml`, `ops/cache-governance.yaml`, and
 `ops/data-access-governance.yaml`, `ops/interface-governance.yaml`,
 `ops/production-verify.ps1`, `ops/production-verify.sh`,
-`ops/ci-evidence-policy.yaml`, and
+`ops/ci-evidence-policy.yaml`, `ops/evidence-manifest.yaml`, and
 `.github/workflows/roze-production-verify.yml`. The runbook records the
 generated service boundary, required production gates,
 `scripts/production-evidence.sh --area generated-services`, and lifecycle
@@ -405,7 +405,9 @@ long-run evidence. The generated GitHub Actions workflow runs the same gates on
 Linux and Windows runners and uploads an `ops/**` evidence bundle. The CI
 evidence policy records artifact naming, retention, required paths, blocking
 conditions, and the rule that CI success is a precondition, not a replacement,
-for soak and failure-injection evidence. The YAML baseline is
+for soak and failure-injection evidence. The evidence manifest indexes every
+generated ops contract, verification script, workflow, smoke surface, and
+promotion evidence requirement uploaded in the CI artifact. The YAML baseline is
 machine-readable for CI/platform checks and captures the go-zero inspired
 architecture baseline Roze expects before broad rollout: simple IDL-first
 ownership, timeout, rate limit, circuit breaker, load shedding, retry budget,
@@ -1294,6 +1296,9 @@ Index headers can also use chained ent-style syntax such as
 `index Fields("tenant_id", "code").Unique().StorageKey("tenant_code")`;
 `StorageKey(...)` becomes the Roze index name, and unnamed indexes are
 assigned stable `idx_<field>` or `uniq_<field>` names during normalization.
+Repeated `Fields(...)` calls append fields in builder order, so
+`Fields("tenant_id").Fields("region_id").Edges("user")` normalizes to the
+local field list `tenant_id, region_id, user_id`.
 Index builders with `Edges("user")` map to the owning edge's local FK field
 when that edge declares one, such as `user_id`; unresolved edge-only indexes
 are accepted as parse-compatible no-ops because Roze cannot generate a concrete
@@ -1312,7 +1317,13 @@ normalizes to the stored values `active` and `disabled`.
 Timestamp defaults accept ent-style `Default(time.Now)`,
 `DefaultFunc(time.Now)`, `UpdateDefault(time.Now)`, and
 `ClientDefault(time.Now)` and normalize them to Roze's numeric `now_millis`
-timestamp default for `i64`/`u64` timestamp fields.
+timestamp default for `i64`/`u64` timestamp fields. Ent-style timestamp
+closures in `Default(...)`, `DefaultFunc(...)`, `UpdateDefault(...)`, or
+`ClientDefault(...)`, such as `func() int64 { return time.Now().Unix() }`,
+`UnixMilli()`, `UnixMicro()`, and `UnixNano()`, normalize to `now_secs`,
+`now_millis`, `now_micros`, and `now_nanos` respectively. Closures returning
+`time.Now()` or `time.Now().UTC()` for `Time(...)` fields normalize to
+`now_millis`.
 UUID defaults accept ent-style `DefaultFunc(uuid.NewString)`,
 `DefaultFunc(uuid.New)`, and `DefaultFunc(uuid.NewV7)` for
 `UUID(...)`/string-backed fields; generated Rust create builders use

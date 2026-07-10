@@ -306,6 +306,7 @@ impl Router {
         }
     }
 
+    #[track_caller]
     pub fn route(mut self, path: impl Into<String>, method_router: MethodRouter) -> Self {
         let path = normalize_path(path.into());
         let group_index = self.ensure_route_group(path);
@@ -336,8 +337,9 @@ impl Router {
         self
     }
 
+    #[track_caller]
     pub fn nest(mut self, prefix: impl Into<String>, router: Router) -> Self {
-        let prefix = normalize_nest_prefix(prefix.into());
+        let prefix = normalize_nest_prefix(prefix.into(), "use Router::merge instead");
         for (path, group_index) in router.path_index {
             let nested_path = join_paths(&prefix, &path);
             let group = router.route_groups[group_index].clone();
@@ -346,6 +348,7 @@ impl Router {
         self
     }
 
+    #[track_caller]
     pub fn merge<R>(mut self, router: R) -> Self
     where
         R: Into<Router>,
@@ -365,6 +368,7 @@ impl Router {
         self
     }
 
+    #[track_caller]
     pub fn nest_service<S>(self, prefix: impl Into<String>, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -373,12 +377,13 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
-        let prefix = normalize_nest_prefix(prefix.into());
+        let prefix = normalize_nest_prefix(prefix.into(), "use Router::fallback_service instead");
         self.route(prefix.clone(), any_service(service.clone()))
             .route(format!("{prefix}/"), any_service(service.clone()))
             .route(format!("{prefix}/{{*tail}}"), any_service(service))
     }
 
+    #[track_caller]
     pub fn route_service<S>(self, path: impl Into<String>, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -387,7 +392,7 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
-        assert_route_service_not_router::<S>();
+        assert_service_not_router::<S>("Router::route_service");
         self.route(path, any_service(service))
     }
 
@@ -495,6 +500,7 @@ impl Router {
         router
     }
 
+    #[track_caller]
     pub fn fallback_service<S>(self, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -503,6 +509,7 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert_service_not_router::<S>("Router::fallback_service");
         self.fallback_route_service(service)
     }
 
@@ -519,6 +526,7 @@ impl Router {
         self.method_not_allowed_fallback_service(handler.into_service())
     }
 
+    #[track_caller]
     pub fn method_not_allowed_fallback_service<S>(mut self, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -527,6 +535,7 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert_service_not_router::<S>("Router::method_not_allowed_fallback_service");
         let fallback = service.boxed_clone();
         self.method_not_allowed_fallback = Some(fallback.clone());
         for group in &mut self.route_groups {
@@ -640,6 +649,7 @@ impl Router {
         self
     }
 
+    #[track_caller]
     pub fn route_layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
@@ -922,6 +932,7 @@ impl MethodRouter {
         self.on_service(method, handler.into_service())
     }
 
+    #[track_caller]
     pub fn on_service<M, S>(mut self, method: M, service: S) -> Self
     where
         M: Into<MethodSelection>,
@@ -931,6 +942,7 @@ impl MethodRouter {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert_service_not_router::<S>("MethodRouter::on_service");
         let methods = method.into().methods();
         if methods.is_empty() {
             panic!("method filter must not be empty");
@@ -959,6 +971,7 @@ impl MethodRouter {
         self.any_service(handler.into_service())
     }
 
+    #[track_caller]
     pub fn any_service<S>(mut self, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -967,6 +980,7 @@ impl MethodRouter {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert_service_not_router::<S>("MethodRouter::any_service");
         if self
             .endpoints
             .iter()
@@ -1165,6 +1179,7 @@ impl MethodRouter {
         self.method_not_allowed_fallback_service(handler.into_service())
     }
 
+    #[track_caller]
     pub fn method_not_allowed_fallback_service<S>(mut self, service: S) -> Self
     where
         S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1173,6 +1188,7 @@ impl MethodRouter {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert_service_not_router::<S>("MethodRouter::method_not_allowed_fallback_service");
         if self.method_not_allowed_fallback.is_some() {
             panic!("overlapping method-not-allowed fallback");
         }
@@ -1192,6 +1208,7 @@ impl MethodRouter {
         (!filter.is_empty()).then_some(filter)
     }
 
+    #[track_caller]
     pub fn merge(mut self, other: MethodRouter) -> Self {
         for endpoint in other.endpoints {
             if self
@@ -1244,6 +1261,7 @@ impl MethodRouter {
         self
     }
 
+    #[track_caller]
     pub fn route_layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<BoxCloneService<IncomingRequest, HttpResponse, Infallible>>
@@ -1387,6 +1405,7 @@ where
     MethodRouter::new().any(handler)
 }
 
+#[track_caller]
 pub fn any_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1405,6 +1424,7 @@ where
     MethodRouter::new().on(filter, handler)
 }
 
+#[track_caller]
 pub fn on_service<S>(filter: MethodFilter, service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1416,6 +1436,7 @@ where
     MethodRouter::new().on_service(filter, service)
 }
 
+#[track_caller]
 pub fn get_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1434,6 +1455,7 @@ where
     MethodRouter::new().post(handler)
 }
 
+#[track_caller]
 pub fn post_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1452,6 +1474,7 @@ where
     MethodRouter::new().put(handler)
 }
 
+#[track_caller]
 pub fn put_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1470,6 +1493,7 @@ where
     MethodRouter::new().patch(handler)
 }
 
+#[track_caller]
 pub fn patch_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1488,6 +1512,7 @@ where
     MethodRouter::new().delete(handler)
 }
 
+#[track_caller]
 pub fn delete_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1506,6 +1531,7 @@ where
     MethodRouter::new().head(handler)
 }
 
+#[track_caller]
 pub fn head_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1524,6 +1550,7 @@ where
     MethodRouter::new().options(handler)
 }
 
+#[track_caller]
 pub fn options_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1542,6 +1569,7 @@ where
     MethodRouter::new().trace(handler)
 }
 
+#[track_caller]
 pub fn trace_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1560,6 +1588,7 @@ where
     MethodRouter::new().connect(handler)
 }
 
+#[track_caller]
 pub fn connect_service<S>(service: S) -> MethodRouter
 where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
@@ -1781,9 +1810,9 @@ fn allow_header_from_methods(methods: impl IntoIterator<Item = Method>) -> Strin
     methods.join(", ")
 }
 
-fn assert_route_service_not_router<S: 'static>() {
+fn assert_service_not_router<S: 'static>(method: &str) {
     if TypeId::of::<S>() == TypeId::of::<Router>() {
-        panic!("Router::route_service cannot be used with Router; use Router::nest instead");
+        panic!("{method} cannot be used with Router; use Router::nest instead");
     }
 }
 
@@ -1809,11 +1838,11 @@ fn validate_path_segments(path: &str) {
     }
 }
 
-fn normalize_nest_prefix(prefix: String) -> String {
+fn normalize_nest_prefix(prefix: String, root_hint: &str) -> String {
     let prefix = normalize_path(prefix);
     let prefix = prefix.trim_end_matches('/').to_string();
     if prefix.is_empty() || prefix == "/" {
-        panic!("nest prefix must not be root");
+        panic!("nest prefix must not be root; {root_hint}");
     }
     if prefix
         .split('/')
@@ -1962,6 +1991,13 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"service fallback");
+    }
+
+    #[test]
+    #[should_panic(expected = "Router::fallback_service cannot be used with Router")]
+    fn fallback_service_panics_when_service_is_router() {
+        let child = Router::new().route("/users", get(|| async { "users" }));
+        let _router = Router::new().fallback_service(child);
     }
 
     #[tokio::test]
@@ -2345,6 +2381,15 @@ mod tests {
         assert_eq!(&body[..], b"service fallback PUT");
     }
 
+    #[test]
+    #[should_panic(
+        expected = "MethodRouter::method_not_allowed_fallback_service cannot be used with Router"
+    )]
+    fn method_router_method_not_allowed_fallback_service_panics_when_service_is_router() {
+        let child = Router::new().route("/users", get(|| async { "users" }));
+        let _router = get(|| async { "list" }).method_not_allowed_fallback_service(child);
+    }
+
     #[tokio::test]
     async fn method_router_merge_combines_distinct_methods() {
         let mut router = get(|| async { "get" }).merge(post(|| async { "post" }));
@@ -2445,6 +2490,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"router service fallback PUT");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Router::method_not_allowed_fallback_service cannot be used with Router"
+    )]
+    fn router_method_not_allowed_fallback_service_panics_when_service_is_router() {
+        let child = Router::new().route("/users", get(|| async { "users" }));
+        let _router = Router::new()
+            .route("/users", get(|| async { "list" }))
+            .method_not_allowed_fallback_service(child);
     }
 
     #[tokio::test]
@@ -3096,6 +3152,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "nest prefix must not be root; use Router::merge instead")]
+    fn nest_panics_on_root_prefix() {
+        let _router = Router::new().nest(
+            "/",
+            Router::new().route("/users", get(|| async { "users" })),
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "nest prefix must not contain wildcard captures")]
     fn nest_panics_on_wildcard_prefix() {
         let _router = Router::new().nest(
@@ -3111,6 +3176,15 @@ mod tests {
             Ok::<_, Infallible>(rest::text_response(StatusCode::OK, "service"))
         });
         let _router = Router::new().nest_service("/api/{*tail}", service);
+    }
+
+    #[test]
+    #[should_panic(expected = "nest prefix must not be root; use Router::fallback_service instead")]
+    fn nest_service_panics_on_root_prefix() {
+        let service = tower::service_fn(|_request: IncomingRequest| async {
+            Ok::<_, Infallible>(rest::text_response(StatusCode::OK, "service"))
+        });
+        let _router = Router::new().nest_service("/", service);
     }
 
     #[tokio::test]
@@ -3175,6 +3249,13 @@ mod tests {
         assert!(response.headers().get(header::ALLOW).is_none());
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"TRACE /events");
+    }
+
+    #[test]
+    #[should_panic(expected = "MethodRouter::any_service cannot be used with Router")]
+    fn any_service_panics_when_service_is_router() {
+        let child = Router::new().route("/users", get(|| async { "users" }));
+        let _router = any_service(child);
     }
 
     #[tokio::test]
@@ -3256,6 +3337,13 @@ mod tests {
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"service get");
+    }
+
+    #[test]
+    #[should_panic(expected = "MethodRouter::on_service cannot be used with Router")]
+    fn method_service_helper_panics_when_service_is_router() {
+        let child = Router::new().route("/users", get(|| async { "users" }));
+        let _router = get_service(child);
     }
 
     #[tokio::test]

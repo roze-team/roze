@@ -2865,6 +2865,10 @@ fn generate_rest_project_with_rpc_clients(
         ci_evidence_policy_yaml(spec, ProjectKind::Rest),
     )?;
     fs::write(
+        out.join("ops/evidence-manifest.yaml"),
+        evidence_manifest_yaml(spec, ProjectKind::Rest),
+    )?;
+    fs::write(
         out.join(".github/workflows/roze-production-verify.yml"),
         production_verify_workflow_yml(spec, ProjectKind::Rest),
     )?;
@@ -3073,6 +3077,10 @@ pub(super) fn generate_rpc_project(
     fs::write(
         out.join("ops/ci-evidence-policy.yaml"),
         ci_evidence_policy_yaml(spec, ProjectKind::Rpc),
+    )?;
+    fs::write(
+        out.join("ops/evidence-manifest.yaml"),
+        evidence_manifest_yaml(spec, ProjectKind::Rpc),
     )?;
     fs::write(
         out.join(".github/workflows/roze-production-verify.yml"),
@@ -3929,7 +3937,7 @@ cargo run
 ## Production Evidence
 
 Use `ops/production-evidence.md` before promoting this service beyond a controlled production path.
-Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or `bash ops/production-verify.sh` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures. GitHub Actions wiring is generated at `.github/workflows/roze-production-verify.yml`; CI evidence policy is generated at `ops/ci-evidence-policy.yaml`.
+Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or `bash ops/production-verify.sh` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures. GitHub Actions wiring is generated at `.github/workflows/roze-production-verify.yml`; CI evidence policy is generated at `ops/ci-evidence-policy.yaml`; the evidence index is generated at `ops/evidence-manifest.yaml`.
 "#,
             name = spec.service,
             rest_routes = spec
@@ -3961,7 +3969,7 @@ cargo run
 ## Production Evidence
 
 Use `ops/production-evidence.md` before promoting this service beyond a controlled production path.
-Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or `bash ops/production-verify.sh` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures. GitHub Actions wiring is generated at `.github/workflows/roze-production-verify.yml`; CI evidence policy is generated at `ops/ci-evidence-policy.yaml`.
+Run `powershell -ExecutionPolicy Bypass -File ops\production-verify.ps1` or `bash ops/production-verify.sh` in CI to fail fast on missing generated ops assets, format drift, compile errors, or test failures. GitHub Actions wiring is generated at `.github/workflows/roze-production-verify.yml`; CI evidence policy is generated at `ops/ci-evidence-policy.yaml`; the evidence index is generated at `ops/evidence-manifest.yaml`.
 "#,
             name = spec.service,
             rpc_methods = spec
@@ -4127,6 +4135,10 @@ CI evidence policy is generated at `ops/ci-evidence-policy.yaml`; use it to
 validate artifact naming, retention, uploaded evidence paths, blocking gates,
 and the promotion rule that CI success is only a precondition for long-run
 production evidence.
+Evidence manifests are generated at `ops/evidence-manifest.yaml`; use them as
+the machine-readable index for every generated ops contract, verification
+script, workflow, smoke surface, and promotion evidence requirement uploaded in
+the CI artifact.
 
 ## Evidence Scaffold
 
@@ -4261,11 +4273,18 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "ops/production-verify.ps1",
         "ops/production-verify.sh",
         "ops/ci-evidence-policy.yaml",
+        "ops/evidence-manifest.yaml",
         ".github/workflows/roze-production-verify.yml",
     ] {
         writeln!(&mut out, "    '{path}'").unwrap();
     }
     writeln!(&mut out, ")").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "$EvidenceManifestPath = Join-Path $ProjectRoot 'ops/evidence-manifest.yaml'"
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "if (-not $SkipEvidenceInventory) {{").unwrap();
     writeln!(
@@ -4291,6 +4310,30 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(
         &mut out,
         "                throw \"Missing generated ops asset: $relativePath\""
+    )
+    .unwrap();
+    writeln!(&mut out, "            }}").unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out, "    Invoke-Step 'evidence manifest coverage' {{").unwrap();
+    writeln!(
+        &mut out,
+        "        $manifest = Get-Content -LiteralPath $EvidenceManifestPath -Raw"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        foreach ($relativePath in $requiredOpsFiles) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            if (-not $manifest.Contains($relativePath)) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "                throw \"Evidence manifest does not index generated asset: $relativePath\""
     )
     .unwrap();
     writeln!(&mut out, "            }}").unwrap();
@@ -4409,6 +4452,11 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
         "MANIFEST_PATH=\"${{MANIFEST_PATH:-$PROJECT_ROOT/Cargo.toml}}\""
     )
     .unwrap();
+    writeln!(
+        &mut out,
+        "EVIDENCE_MANIFEST_PATH=\"$PROJECT_ROOT/ops/evidence-manifest.yaml\""
+    )
+    .unwrap();
     writeln!(&mut out, "SKIP_TESTS=\"${{SKIP_TESTS:-0}}\"").unwrap();
     writeln!(
         &mut out,
@@ -4455,6 +4503,7 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
         "ops/production-verify.ps1",
         "ops/production-verify.sh",
         "ops/ci-evidence-policy.yaml",
+        "ops/evidence-manifest.yaml",
         ".github/workflows/roze-production-verify.yml",
     ] {
         writeln!(&mut out, "  {}", sh_single_quoted(path)).unwrap();
@@ -4481,6 +4530,28 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(&mut out, "  done").unwrap();
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    writeln!(&mut out, "check_evidence_manifest_coverage() {{").unwrap();
+    writeln!(&mut out, "  local relative_path").unwrap();
+    writeln!(
+        &mut out,
+        "  for relative_path in \"${{required_ops_files[@]}}\"; do"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if ! grep -Fq -- \"$relative_path\" \"$EVIDENCE_MANIFEST_PATH\"; then"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "      echo \"Evidence manifest does not index generated asset: $relative_path\" >&2"
+    )
+    .unwrap();
+    writeln!(&mut out, "      return 1").unwrap();
+    writeln!(&mut out, "    fi").unwrap();
+    writeln!(&mut out, "  done").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
         "if [[ \"$SKIP_EVIDENCE_INVENTORY\" != \"1\" ]]; then"
@@ -4489,6 +4560,11 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(
         &mut out,
         "  run_step \"generated ops asset inventory\" check_ops_inventory"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  run_step \"evidence manifest coverage\" check_evidence_manifest_coverage"
     )
     .unwrap();
     writeln!(&mut out, "fi").unwrap();
@@ -4661,6 +4737,7 @@ artifact:
   if_no_files_found: error
   required_paths:
     - ops/**
+    - ops/evidence-manifest.yaml
     - .github/workflows/roze-production-verify.yml
 required_runner_matrix:
   - ubuntu-latest
@@ -4672,9 +4749,10 @@ required_gates:
   - cargo_test_unless_explicitly_skipped
   - {smoke_surface}
 blocking_conditions:
-  - missing_generated_ops_asset
-  - missing_ci_evidence_policy
-  - missing_github_actions_workflow
+    - missing_generated_ops_asset
+    - missing_ci_evidence_policy
+    - missing_evidence_manifest
+    - missing_github_actions_workflow
   - fmt_drift
   - compile_failure
   - test_failure_without_approved_skip
@@ -4695,12 +4773,305 @@ promotion:
     )
 }
 
+fn evidence_manifest_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
+    use std::fmt::Write as _;
+
+    let boundary = match kind {
+        ProjectKind::Rest => "rest",
+        ProjectKind::Rpc => "rpc",
+    };
+    let mut out = String::new();
+
+    writeln!(
+        &mut out,
+        "# Generated by rozectl. Keep this manifest machine-readable for evidence indexing."
+    )
+    .unwrap();
+    writeln!(&mut out, "service: {}", spec.service).unwrap();
+    writeln!(&mut out, "boundary: {boundary}").unwrap();
+    writeln!(&mut out, "manifest: production_evidence").unwrap();
+    writeln!(&mut out, "version: 1").unwrap();
+    writeln!(&mut out, "generated_from: idl").unwrap();
+    writeln!(&mut out, "artifacts:").unwrap();
+    for (path, kind, purpose, blocking) in [
+        (
+            "ops/production-evidence.md",
+            "runbook",
+            "human production evidence workflow",
+            true,
+        ),
+        (
+            "ops/governance-baseline.yaml",
+            "governance",
+            "go-zero inspired resilience and ownership baseline",
+            true,
+        ),
+        (
+            "ops/prometheus-rules.yaml",
+            "observability",
+            "alert rule scaffold",
+            true,
+        ),
+        (
+            "ops/grafana-dashboard.json",
+            "observability",
+            "dashboard scaffold",
+            true,
+        ),
+        ("ops/slo.yaml", "slo", "availability and error budget", true),
+        (
+            "ops/failure-injection-plan.yaml",
+            "resilience",
+            "failure drills and recovery evidence",
+            true,
+        ),
+        (
+            "ops/release-rollout.yaml",
+            "release",
+            "canary blue-green rollback gates",
+            true,
+        ),
+        (
+            "ops/incident-response.yaml",
+            "operations",
+            "alert triage rollback and postmortem playbook",
+            true,
+        ),
+        (
+            "ops/capacity-plan.yaml",
+            "capacity",
+            "load soak burst and scaling evidence",
+            true,
+        ),
+        (
+            "ops/security-readiness.yaml",
+            "security",
+            "auth tenant isolation key rotation mtls audit evidence",
+            true,
+        ),
+        (
+            "ops/production-gate.yaml",
+            "gate",
+            "release promotion gate",
+            true,
+        ),
+        (
+            "ops/regeneration-policy.yaml",
+            "generation",
+            "IDL drift and generated ownership policy",
+            true,
+        ),
+        (
+            "ops/client-contract.yaml",
+            "contract",
+            "SDK OpenAPI proto typed error and auth contract",
+            true,
+        ),
+        (
+            "ops/config-governance.yaml",
+            "config",
+            "config diff reload rollback and audit policy",
+            true,
+        ),
+        (
+            "ops/reliable-events.yaml",
+            "events",
+            "event envelope idempotency DLQ and retry storm policy",
+            true,
+        ),
+        (
+            "ops/dependency-governance.yaml",
+            "dependency",
+            "discovery load balancing deadline breaker and fallback evidence",
+            true,
+        ),
+        (
+            "ops/data-consistency.yaml",
+            "data",
+            "transaction migration outbox DTM and backup restore evidence",
+            true,
+        ),
+        (
+            "ops/observability-contract.yaml",
+            "observability",
+            "metric log trace profile and cardinality contract",
+            true,
+        ),
+        (
+            "ops/runtime-hardening.yaml",
+            "runtime",
+            "timeout rate limit breaker load shedding retry and shutdown evidence",
+            true,
+        ),
+        (
+            "ops/error-contract.yaml",
+            "contract",
+            "typed error mapping retryability and redaction evidence",
+            true,
+        ),
+        (
+            "ops/deployment-topology.yaml",
+            "deployment",
+            "probes resources scaling registry network and rollback topology",
+            true,
+        ),
+        (
+            "ops/service-communication.yaml",
+            "dependency",
+            "service call discovery balancing retry fallback and tracing policy",
+            true,
+        ),
+        (
+            "ops/cache-governance.yaml",
+            "cache",
+            "TTL ownership singleflight invalidation and cache metrics",
+            true,
+        ),
+        (
+            "ops/data-access-governance.yaml",
+            "data",
+            "query deadline pool slow query pagination and index review",
+            true,
+        ),
+        (
+            "ops/interface-governance.yaml",
+            "interface",
+            "framework and business interface smoke contract",
+            true,
+        ),
+        (
+            "ops/production-verify.ps1",
+            "verification",
+            "Windows fail-fast production verification",
+            true,
+        ),
+        (
+            "ops/production-verify.sh",
+            "verification",
+            "Linux fail-fast production verification",
+            true,
+        ),
+        (
+            "ops/ci-evidence-policy.yaml",
+            "ci",
+            "CI artifact and promotion evidence policy",
+            true,
+        ),
+        (
+            "ops/evidence-manifest.yaml",
+            "manifest",
+            "machine-readable evidence index",
+            true,
+        ),
+        (
+            ".github/workflows/roze-production-verify.yml",
+            "ci",
+            "cross-platform production verification workflow",
+            true,
+        ),
+    ] {
+        writeln!(&mut out, "  - path: {path}").unwrap();
+        writeln!(&mut out, "    kind: {kind}").unwrap();
+        writeln!(&mut out, "    purpose: {purpose}").unwrap();
+        writeln!(&mut out, "    blocking: {blocking}").unwrap();
+    }
+    writeln!(&mut out, "smoke_surface:").unwrap();
+    match kind {
+        ProjectKind::Rest => {
+            writeln!(&mut out, "  framework:").unwrap();
+            for endpoint in [
+                "GET /healthz",
+                "GET /readyz",
+                "GET /startupz",
+                "GET /metrics",
+                "GET /openapi.json",
+                "GET /reports/export",
+                "POST /charts/query",
+            ] {
+                writeln!(&mut out, "    - {}", yaml_double_quoted(endpoint)).unwrap();
+            }
+            writeln!(&mut out, "  business:").unwrap();
+            if spec.rest_routes.is_empty() {
+                writeln!(&mut out, "    - none_declared").unwrap();
+            } else {
+                for route in &spec.rest_routes {
+                    writeln!(&mut out, "    - method: {}", method_name(&route.method)).unwrap();
+                    writeln!(&mut out, "      path: {}", yaml_double_quoted(&route.path)).unwrap();
+                    writeln!(
+                        &mut out,
+                        "      request: {}",
+                        yaml_double_quoted(&route.request)
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut out,
+                        "      response: {}",
+                        yaml_double_quoted(&route.response)
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        ProjectKind::Rpc => {
+            writeln!(&mut out, "  framework:").unwrap();
+            writeln!(&mut out, "    - startup_readiness_metrics").unwrap();
+            writeln!(&mut out, "    - client_deadline_and_cancel").unwrap();
+            writeln!(&mut out, "  methods:").unwrap();
+            if spec.rpc_methods.is_empty() {
+                writeln!(&mut out, "    - none_declared").unwrap();
+            } else {
+                for method in &spec.rpc_methods {
+                    writeln!(&mut out, "    - name: {}", yaml_double_quoted(&method.name)).unwrap();
+                    writeln!(
+                        &mut out,
+                        "      request: {}",
+                        yaml_double_quoted(&method.request)
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut out,
+                        "      response: {}",
+                        yaml_double_quoted(&method.response)
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    writeln!(&mut out, "promotion_evidence:").unwrap();
+    for item in [
+        "ci_evidence_bundle",
+        "24h_or_72h_soak_report",
+        "failure_injection_report",
+        "dashboard_and_alert_evidence",
+        "rollback_or_rollforward_evidence",
+        "security_readiness_signoff",
+        "capacity_and_resource_trend",
+    ] {
+        writeln!(&mut out, "  - {item}").unwrap();
+    }
+    writeln!(&mut out, "policy:").unwrap();
+    writeln!(&mut out, "  ci_success_is_precondition: true").unwrap();
+    writeln!(
+        &mut out,
+        "  broad_production_requires_long_run_evidence: true"
+    )
+    .unwrap();
+    writeln!(&mut out, "  missing_manifest_blocks_promotion: true").unwrap();
+
+    out
+}
+
 fn ps_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
 fn sh_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn yaml_double_quoted(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn governance_baseline_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
@@ -10904,6 +11275,9 @@ mod tests {
         let rest_ci_evidence_policy =
             fs::read_to_string(rest_out.join("ops/ci-evidence-policy.yaml"))
                 .expect("read rest ci evidence policy");
+        let rest_evidence_manifest =
+            fs::read_to_string(rest_out.join("ops/evidence-manifest.yaml"))
+                .expect("read rest evidence manifest");
         let rest_production_workflow =
             fs::read_to_string(rest_out.join(".github/workflows/roze-production-verify.yml"))
                 .expect("read rest production verify workflow");
@@ -10972,6 +11346,8 @@ mod tests {
         let rpc_ci_evidence_policy =
             fs::read_to_string(rpc_out.join("ops/ci-evidence-policy.yaml"))
                 .expect("read rpc ci evidence policy");
+        let rpc_evidence_manifest = fs::read_to_string(rpc_out.join("ops/evidence-manifest.yaml"))
+            .expect("read rpc evidence manifest");
         let rpc_production_workflow =
             fs::read_to_string(rpc_out.join(".github/workflows/roze-production-verify.yml"))
                 .expect("read rpc production verify workflow");
@@ -10984,6 +11360,8 @@ mod tests {
         assert!(rpc_readme.contains("ops/production-verify.sh"));
         assert!(rest_readme.contains("ops/ci-evidence-policy.yaml"));
         assert!(rpc_readme.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_readme.contains("ops/evidence-manifest.yaml"));
+        assert!(rpc_readme.contains("ops/evidence-manifest.yaml"));
         assert!(rest_readme.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rpc_readme.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_config.contains("routes:\n    get_user:"));
@@ -11036,12 +11414,17 @@ mod tests {
         assert!(rest_runbook.contains("ops/production-verify.ps1"));
         assert!(rest_runbook.contains("ops/production-verify.sh"));
         assert!(rest_runbook.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_runbook.contains("ops/evidence-manifest.yaml"));
         assert!(rest_runbook.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_production_verify.contains("function Invoke-Step"));
         assert!(rest_production_verify.contains("$requiredOpsFiles"));
+        assert!(rest_production_verify.contains("$EvidenceManifestPath"));
+        assert!(rest_production_verify.contains("evidence manifest coverage"));
+        assert!(rest_production_verify.contains("Evidence manifest does not index generated asset"));
         assert!(rest_production_verify.contains("ops/production-gate.yaml"));
         assert!(rest_production_verify.contains("ops/production-verify.sh"));
         assert!(rest_production_verify.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_production_verify.contains("ops/evidence-manifest.yaml"));
         assert!(rest_production_verify.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_production_verify.contains("cargo fmt --manifest-path"));
         assert!(rest_production_verify.contains("cargo check --manifest-path"));
@@ -11053,9 +11436,13 @@ mod tests {
         assert!(rest_production_verify_sh.contains("set -euo pipefail"));
         assert!(rest_production_verify_sh.contains("run_step()"));
         assert!(rest_production_verify_sh.contains("required_ops_files=("));
+        assert!(rest_production_verify_sh.contains("EVIDENCE_MANIFEST_PATH"));
+        assert!(rest_production_verify_sh.contains("check_evidence_manifest_coverage()"));
+        assert!(rest_production_verify_sh.contains("evidence manifest coverage"));
         assert!(rest_production_verify_sh.contains("ops/production-verify.ps1"));
         assert!(rest_production_verify_sh.contains("ops/production-verify.sh"));
         assert!(rest_production_verify_sh.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rest_production_verify_sh.contains("ops/evidence-manifest.yaml"));
         assert!(rest_production_verify_sh.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rest_production_verify_sh.contains("cargo fmt --manifest-path"));
         assert!(rest_production_verify_sh.contains("cargo check --manifest-path"));
@@ -11080,9 +11467,21 @@ mod tests {
         assert!(rest_ci_evidence_policy.contains("retention_days: 30"));
         assert!(rest_ci_evidence_policy.contains("artifact_upload_missing"));
         assert!(rest_ci_evidence_policy.contains("missing_ci_evidence_policy"));
+        assert!(rest_ci_evidence_policy.contains("missing_evidence_manifest"));
+        assert!(rest_ci_evidence_policy.contains("ops/evidence-manifest.yaml"));
         assert!(rest_ci_evidence_policy
             .contains("framework_probes_report_export_chart_query_and_business_routes"));
         assert!(rest_ci_evidence_policy.contains("ci_success_is: precondition"));
+        assert!(rest_evidence_manifest.contains("service: user-api"));
+        assert!(rest_evidence_manifest.contains("boundary: rest"));
+        assert!(rest_evidence_manifest.contains("manifest: production_evidence"));
+        assert!(rest_evidence_manifest.contains("path: ops/evidence-manifest.yaml"));
+        assert!(rest_evidence_manifest.contains("kind: manifest"));
+        assert!(rest_evidence_manifest.contains("GET /reports/export"));
+        assert!(rest_evidence_manifest.contains("POST /charts/query"));
+        assert!(rest_evidence_manifest.contains("path: \"/users/:id\""));
+        assert!(rest_evidence_manifest.contains("ci_evidence_bundle"));
+        assert!(rest_evidence_manifest.contains("missing_manifest_blocks_promotion: true"));
         assert!(rest_governance.contains("boundary: rest"));
         assert!(rest_governance.contains("endpoint_count: 1"));
         assert!(rest_governance.contains("failure_oriented_resilience"));
@@ -11341,9 +11740,12 @@ mod tests {
         assert!(rpc_production_gate.contains("stage: interface_governance"));
         assert!(rpc_production_verify.contains("function Invoke-Step"));
         assert!(rpc_production_verify.contains("$requiredOpsFiles"));
+        assert!(rpc_production_verify.contains("$EvidenceManifestPath"));
+        assert!(rpc_production_verify.contains("evidence manifest coverage"));
         assert!(rpc_production_verify.contains("ops/production-verify.ps1"));
         assert!(rpc_production_verify.contains("ops/production-verify.sh"));
         assert!(rpc_production_verify.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rpc_production_verify.contains("ops/evidence-manifest.yaml"));
         assert!(rpc_production_verify.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rpc_production_verify.contains("cargo check --manifest-path"));
         assert!(rpc_production_verify.contains("RPC smoke methods required"));
@@ -11351,9 +11753,11 @@ mod tests {
         assert!(rpc_production_verify_sh.starts_with("#!/usr/bin/env bash"));
         assert!(rpc_production_verify_sh.contains("set -euo pipefail"));
         assert!(rpc_production_verify_sh.contains("run_step()"));
+        assert!(rpc_production_verify_sh.contains("check_evidence_manifest_coverage()"));
         assert!(rpc_production_verify_sh.contains("ops/production-verify.ps1"));
         assert!(rpc_production_verify_sh.contains("ops/production-verify.sh"));
         assert!(rpc_production_verify_sh.contains("ops/ci-evidence-policy.yaml"));
+        assert!(rpc_production_verify_sh.contains("ops/evidence-manifest.yaml"));
         assert!(rpc_production_verify_sh.contains(".github/workflows/roze-production-verify.yml"));
         assert!(rpc_production_verify_sh.contains("cargo check --manifest-path"));
         assert!(rpc_production_verify_sh.contains("RPC smoke methods required"));
@@ -11373,6 +11777,16 @@ mod tests {
             .contains("startup_readiness_metrics_and_representative_rpc_methods"));
         assert!(rpc_ci_evidence_policy.contains("test_failure_without_approved_skip"));
         assert!(rpc_ci_evidence_policy.contains("failure_injection_report"));
+        assert!(rpc_ci_evidence_policy.contains("ops/evidence-manifest.yaml"));
+        assert!(rpc_evidence_manifest.contains("service: user"));
+        assert!(rpc_evidence_manifest.contains("boundary: rpc"));
+        assert!(rpc_evidence_manifest.contains("path: ops/production-verify.ps1"));
+        assert!(rpc_evidence_manifest.contains("path: ops/evidence-manifest.yaml"));
+        assert!(rpc_evidence_manifest.contains("startup_readiness_metrics"));
+        assert!(rpc_evidence_manifest.contains("client_deadline_and_cancel"));
+        assert!(rpc_evidence_manifest.contains("name: \"GetUser\""));
+        assert!(rpc_evidence_manifest.contains("request: \"GetUserReq\""));
+        assert!(rpc_evidence_manifest.contains("broad_production_requires_long_run_evidence: true"));
         assert!(
             rpc_production_gate.contains("startup_readiness_metrics_and_representative_rpc_call")
         );

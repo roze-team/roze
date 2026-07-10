@@ -103,6 +103,8 @@ let app = Router::new()
   `/prefix` serves `/prefix`, `/prefix/`, and `/prefix/...`
 - nesting prefixes must be concrete path prefixes and cannot contain
   catch-all wildcard captures
+- root nesting is rejected: compose routers with `Router::merge`, and use
+  `Router::fallback_service` for root-level service fallback
 - router composition with `Router::merge(router)`
 - `Router::merge` follows explicit fallback composition rules: a default
   fallback can be replaced by the merged router's custom fallback, while merging
@@ -114,8 +116,11 @@ let app = Router::new()
 - Axum-style `Router::route_service(path, service)` for attaching a Tower
   service to all methods for one path; method-specific services use
   `route(path, get_service(service))` and the other method service helpers
-- `Router::route_service` rejects `Router` values as services; use
-  `Router::nest` when composing routers so child route matching remains explicit
+- service registration, method service helpers, and service-backed fallback
+  APIs reject `Router` values as services; use `Router::nest` when composing
+  routers so child route matching remains explicit
+- route-builder APIs that can reject invalid composition use caller-tracked
+  panics so diagnostics point at the route registration site
 - handler-backed route registration
 - Roze `Handler` conversion into Tower services
 - handler-level `Handler::layer` for applying Tower layers to one handler
