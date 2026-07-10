@@ -7153,7 +7153,8 @@ fn model_fixture_value_expr(model: &ModelSpec, field: &ModelField, ty: &str) -> 
     match ty {
         "String" => model_fixture_string_expr(model, field),
         "bool" => "index % 2 == 0".to_string(),
-        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+        "u64" => "index.saturating_add(1)".to_string(),
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "usize" => {
             format!("index.saturating_add(1) as {ty}")
         }
         "f32" | "f64" => format!("index.saturating_add(1) as {ty}"),
@@ -15978,6 +15979,8 @@ mod tests {
         assert!(rendered.contains("pub struct UserCreate"));
         assert!(rendered.contains("pub fn fixture(index: u64) -> Self"));
         assert!(rendered.contains("fixture-user-email-{index}@example.test"));
+        assert!(rendered.contains("id: index.saturating_add(1),"));
+        assert!(!rendered.contains("index.saturating_add(1) as u64"));
         assert!(rendered.contains("pub async fn seed_fixtures("));
         assert!(rendered.contains("pub struct UserUpdate"));
         assert!(rendered.contains("pub struct UserDelete"));
