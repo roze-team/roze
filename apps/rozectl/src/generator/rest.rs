@@ -149,6 +149,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
     if spec.rest_routes.iter().any(|route| {
         route_request_spec(spec, route).is_some_and(|spec| spec.has_header)
             || route_uses_auth(spec, route)
+            || route_uses_idempotency(spec, route)
     }) {
         out.push_str(
             "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
@@ -185,6 +186,7 @@ pub fn render_handler_mod(spec: &ApiSpec) -> String {
     if spec.rest_routes.iter().any(|route| {
         route_request_spec(spec, route).is_some_and(|spec| spec.has_header)
             || route_uses_auth(spec, route)
+            || route_uses_idempotency(spec, route)
     }) {
         out.push_str(
             "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
@@ -846,6 +848,9 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     let middlewares = route_middlewares(spec, route);
     let plan = roze_middleware::resolve_middleware_plan(&middlewares);
     let uses_auth = route_uses_auth(spec, route);
+    let uses_idempotency = plan
+        .builtins
+        .contains(&roze_middleware::BuiltInMiddleware::Idempotency);
     let custom = plan
         .custom
         .into_iter()
@@ -897,7 +902,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
             partial_struct_name(&handler, &request_ty.name, FieldSource::Json)
         ));
     }
-    if route_spec.has_header || uses_auth {
+    if route_spec.has_header || uses_auth || uses_idempotency {
         params.push("headers: HeaderMap".to_string());
     }
 
@@ -965,14 +970,27 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         out.push_str("    };\n");
     }
     out.push_str(&render_request_validation_checks(&request_ty.fields));
+    if uses_idempotency {
+        out.push_str(&format!(
+            "    let idempotency_key: String = header_value(&headers, \"idempotency-key\")?;\n    match ctx.idempotency.begin({handler:?}, &idempotency_key) {{\n        roze_middleware::IdempotencyDecision::Execute => {{}}\n        roze_middleware::IdempotencyDecision::Replay(value) => {{\n            let resp = serde_json::from_value(value)\n                .map_err(|err| RozeError::Internal(format!(\"invalid idempotency replay response: {{err}}\")))?;\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            return Ok(ApiResponse::ok(resp));\n        }}\n        roze_middleware::IdempotencyDecision::InFlight => {{\n            let err = RozeError::fallback_response(\n                409,\n                Some(serde_json::json!({{\"message\": \"idempotency request is in progress\"}})),\n                std::collections::BTreeMap::new(),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n    }}\n",
+            handler = handler
+        ));
+    }
     out.push_str(&format!(
         "    let timeout_enabled = ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n",
         handler = handler
     ));
-    out.push_str(&format!(
-        "    match result {{\n        Ok(resp) => {{\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }}\n        Err(mut err) => {{\n            err = roze_middleware::apply_fallback(\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
-        handler = handler
-    ));
+    if uses_idempotency {
+        out.push_str(&format!(
+            "    match result {{\n        Ok(resp) => {{\n            match serde_json::to_value(&resp) {{\n                Ok(value) => ctx.idempotency.complete({handler:?}, &idempotency_key, value),\n                Err(err) => {{\n                    ctx.idempotency.fail({handler:?}, &idempotency_key);\n                    let err = RozeError::Internal(format!(\"invalid idempotency response: {{err}}\"));\n                    roze_middleware::finish_route(route_guard, false, err.code().to_string());\n                    return Err(err);\n                }}\n            }}\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }}\n        Err(mut err) => {{\n            ctx.idempotency.fail({handler:?}, &idempotency_key);\n            err = roze_middleware::apply_fallback(\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
+            handler = handler
+        ));
+    } else {
+        out.push_str(&format!(
+            "    match result {{\n        Ok(resp) => {{\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok(ApiResponse::ok(resp))\n        }}\n        Err(mut err) => {{\n            err = roze_middleware::apply_fallback(\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
+            handler = handler
+        ));
+    }
     out.push_str("}\n\n");
 
     out
@@ -1053,6 +1071,13 @@ fn route_uses_auth(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
             roze_middleware::BuiltInMiddleware::parse(name)
                 == Some(roze_middleware::BuiltInMiddleware::Auth)
         })
+}
+
+fn route_uses_idempotency(spec: &ApiSpec, route: &crate::parser::RestRoute) -> bool {
+    route_middlewares(spec, route).iter().any(|name| {
+        roze_middleware::BuiltInMiddleware::parse(name)
+            == Some(roze_middleware::BuiltInMiddleware::Idempotency)
+    })
 }
 
 fn custom_middlewares(spec: &ApiSpec) -> Vec<String> {
@@ -2360,6 +2385,37 @@ mod tests {
         let logic_mod = render_logic_mod(&spec);
         assert!(logic_mod.contains("pub fn current_user_id"));
         assert!(logic_mod.contains("pub fn current_permissions"));
+    }
+
+    #[test]
+    fn rest_generation_wires_idempotency_middleware() {
+        let spec = parse_api(
+            r#"
+            service order-api {
+                @middleware idempotency
+                post /orders (CreateOrderReq) returns (CreateOrderResp)
+            }
+
+            type CreateOrderReq {
+                sku string `json:"sku"`
+            }
+            type CreateOrderResp {
+                id string `json:"id"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let handlers = render_handlers(&spec);
+        assert!(handlers.contains("headers: HeaderMap"));
+        assert!(handlers.contains(
+            "let idempotency_key: String = header_value(&headers, \"idempotency-key\")?;"
+        ));
+        assert!(handlers.contains("ctx.idempotency.begin("));
+        assert!(handlers.contains("roze_middleware::IdempotencyDecision::Replay(value)"));
+        assert!(handlers.contains("RozeError::fallback_response(\n                409,"));
+        assert!(handlers.contains("ctx.idempotency.complete("));
+        assert!(handlers.contains("ctx.idempotency.fail("));
     }
 
     #[test]
