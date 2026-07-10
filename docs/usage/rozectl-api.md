@@ -170,6 +170,29 @@ They read `roze_context::Context`; no generated file needs to be patched after
 regeneration. Applications remain responsible for authenticating a request and
 populating the context's subject, tenant, roles, scopes, and permissions.
 
+## Idempotency middleware
+
+Use `@middleware idempotency` immediately before a mutating REST route or RPC
+method to opt into generated duplicate-request handling:
+
+```text
+service order-api {
+    @middleware idempotency
+    post /orders (CreateOrderReq) returns (CreateOrderResp)
+
+    @middleware idempotency
+    rpc CreateOrder (CreateOrderReq) returns (CreateOrderResp)
+}
+```
+
+Generated REST handlers require an `Idempotency-Key` header. Generated RPC
+servers require `idempotency-key` metadata. Roze stores in-flight and completed
+responses in the generated `ServiceContext` idempotency store. A completed key
+replays the cached response, a concurrent in-flight key returns conflict
+behavior (`409` for REST, `AlreadyExists` for RPC), and failed logic releases the
+key so callers can retry. Applications can replace or wrap the generated store
+from `src/svc/mod.rs` without editing generated handler/server files.
+
 Preview regeneration before writing files:
 
 ```bash
