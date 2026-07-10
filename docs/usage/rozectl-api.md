@@ -334,6 +334,13 @@ generates smoke checks for the framework-owned production endpoints:
 `http://127.0.0.1:3000`; pass `--base-url` when generating or set
 `ROZE_TEST_BASE_URL` at runtime.
 
+Regeneration refreshes `Cargo.toml`, `README.md`, `tests/http_smoke.rs`, and
+`tests/multi_service_smoke.rs`. Application-owned `tests/fixtures.rs` and
+`tests/assertions.rs` are created once and never overwritten; use them for auth,
+seed identifiers, request overrides, and domain assertions. Set
+`ROZE_E2E_SERVICES=name=http://host:port,...` to run the generated readiness
+flow against several services with one test command.
+
 Check the local development environment:
 
 ```bash

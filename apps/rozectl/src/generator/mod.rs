@@ -491,15 +491,8 @@ pub fn write_http_smoke_test_project(
     api: &Path,
     out: &Path,
     base_url: &str,
-    force: bool,
+    _force: bool,
 ) -> anyhow::Result<()> {
-    if out.exists() && !force {
-        bail!(
-            "{} already exists; pass --force to overwrite contract test files",
-            out.display()
-        );
-    }
-
     let source = read_api_source(api)?;
     let spec = crate::parser::parse_api(&source)
         .with_context(|| format!("failed to parse api file {}", api.display()))?;
@@ -523,11 +516,36 @@ pub fn write_http_smoke_test_project(
         )
     })?;
     fs::write(
+        out.join("tests/multi_service_smoke.rs"),
+        render_multi_service_smoke_tests(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("tests/multi_service_smoke.rs").display()
+        )
+    })?;
+    write_application_owned_file(
+        &out.join("tests/fixtures.rs"),
+        &render_http_smoke_fixtures(),
+    )?;
+    write_application_owned_file(
+        &out.join("tests/assertions.rs"),
+        &render_http_smoke_assertions(),
+    )?;
+    fs::write(
         out.join("README.md"),
         render_http_smoke_test_readme(&spec, api, base_url),
     )
     .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
     Ok(())
+}
+
+fn write_application_owned_file(path: &Path, content: &str) -> anyhow::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub fn write_stream_worker_project(
@@ -1372,9 +1390,98 @@ tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
     )
 }
 
+fn render_http_smoke_fixtures() -> String {
+    r#"#[derive(Debug, Clone, Default)]
+pub struct RequestFixture {
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+    pub json_body: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceFixture {
+    pub name: String,
+    pub base_url: String,
+}
+
+pub fn request(_route: &str) -> RequestFixture {
+    RequestFixture::default()
+}
+
+pub fn services() -> Vec<ServiceFixture> {
+    std::env::var("ROZE_E2E_SERVICES")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|entry| {
+            let (name, base_url) = entry.split_once('=')?;
+            Some(ServiceFixture {
+                name: name.trim().to_string(),
+                base_url: base_url.trim().trim_end_matches('/').to_string(),
+            })
+        })
+        .filter(|service| !service.name.is_empty() && !service.base_url.is_empty())
+        .collect()
+}
+"#
+    .to_string()
+}
+
+fn render_http_smoke_assertions() -> String {
+    r#"pub async fn assert_route(
+    _route: &str,
+    _status: reqwest::StatusCode,
+    _body: Option<&serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+pub async fn assert_service_ready(
+    _name: &str,
+    status: reqwest::StatusCode,
+    _body: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert!(status.is_success(), "service readiness returned {status}");
+    Ok(())
+}
+"#
+    .to_string()
+}
+
+fn render_multi_service_smoke_tests() -> String {
+    r#"#[path = "assertions.rs"]
+mod assertions;
+#[path = "fixtures.rs"]
+mod fixtures;
+
+#[tokio::test]
+async fn smoke_configured_services_are_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let services = fixtures::services();
+    if services.is_empty() {
+        return Ok(());
+    }
+    let client = reqwest::Client::new();
+    for service in services {
+        let response = client
+            .get(format!("{}/readyz", service.base_url))
+            .send()
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await?;
+        assertions::assert_service_ready(&service.name, status, &body).await?;
+    }
+    Ok(())
+}
+"#
+    .to_string()
+}
+
 fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    writeln!(&mut out, "#[path = \"assertions.rs\"]").unwrap();
+    writeln!(&mut out, "mod assertions;").unwrap();
+    writeln!(&mut out, "#[path = \"fixtures.rs\"]").unwrap();
+    writeln!(&mut out, "mod fixtures;").unwrap();
     writeln!(&mut out, "use reqwest::StatusCode;").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -1408,7 +1515,7 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
             path
         )
         .unwrap();
-        writeln!(&mut out, "    let response = client.{method}(url)").unwrap();
+        writeln!(&mut out, "    let mut request = client.{method}(url)").unwrap();
         for (name, value) in headers {
             writeln!(&mut out, "        .header({name:?}, {value:?})").unwrap();
         }
@@ -1436,17 +1543,38 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
             let body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".to_string());
             writeln!(&mut out, "        .json(&serde_json::json!({body}))").unwrap();
         }
-        writeln!(&mut out, "        .send()").unwrap();
-        writeln!(&mut out, "        .await?;").unwrap();
+        writeln!(&mut out, "        ;").unwrap();
+        writeln!(
+            &mut out,
+            "    let fixture = fixtures::request({test_name:?});"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    for (name, value) in fixture.headers {{ request = request.header(name, value); }}"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    if !fixture.query.is_empty() {{ request = request.query(&fixture.query); }}"
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "    if let Some(body) = fixture.json_body {{ request = request.json(&body); }}"
+        )
+        .unwrap();
+        writeln!(&mut out, "    let response = request.send().await?;").unwrap();
         writeln!(&mut out).unwrap();
         writeln!(
             &mut out,
             "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
         )
         .unwrap();
+        writeln!(&mut out, "    let status = response.status();").unwrap();
         writeln!(
             &mut out,
-            "    if response.status() != StatusCode::NO_CONTENT {{"
+            "    let body = if status != StatusCode::NO_CONTENT {{"
         )
         .unwrap();
         writeln!(
@@ -1461,10 +1589,15 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
         .unwrap();
         writeln!(
             &mut out,
-            "        let _: serde_json::Value = response.json().await?;"
+            "        Some(response.json::<serde_json::Value>().await?)"
         )
         .unwrap();
-        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out, "    }} else {{ None }};").unwrap();
+        writeln!(
+            &mut out,
+            "    assertions::assert_route({test_name:?}, status, body.as_ref()).await?;"
+        )
+        .unwrap();
         writeln!(&mut out, "    Ok(())").unwrap();
         writeln!(&mut out, "}}").unwrap();
         writeln!(&mut out).unwrap();
@@ -1616,6 +1749,9 @@ fn render_http_smoke_test_readme(spec: &ApiSpec, api: &Path, base_url: &str) -> 
         base_url
     )
     .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "`tests/fixtures.rs` and `tests/assertions.rs` are application-owned and preserved across regeneration.").unwrap();
+    writeln!(&mut out, "Set `ROZE_E2E_SERVICES=name=http://host:port,...` to run the generated multi-service readiness flow.").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "## Framework Smoke").unwrap();
     writeln!(&mut out).unwrap();
@@ -11443,6 +11579,36 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "compile-smoke: generates HTTP and multi-service smoke tests and runs cargo check"]
+    fn generated_http_smoke_project_compiles() {
+        let root = generated_compile_workspace("rozectl-http-smoke-compile");
+        let api = root.join("smoke.api");
+        let out = root.join("apps/smoke-tests");
+        fs::write(
+            &api,
+            r#"
+            service smoke-api {
+                @handler createItem
+                post /items (CreateItemReq) returns (ItemResp)
+            }
+            type CreateItemReq {
+                name string `json:"name"`
+            }
+            type ItemResp {
+                id u64 `json:"id"`
+            }
+            "#,
+        )
+        .expect("write smoke api");
+
+        write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", false)
+            .expect("generate smoke tests");
+        register_workspace_member(&out).expect("register smoke workspace member");
+        cargo_check_generated(&out.join("Cargo.toml"));
+        fs::remove_dir_all(root).expect("remove compile workspace");
+    }
+
+    #[test]
     fn writes_stream_worker_project() {
         let root = temp_test_root("rozectl-stream-gen");
         fs::create_dir_all(&root).expect("create stream root");
@@ -13003,7 +13169,9 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         let tests = fs::read_to_string(out.join("tests/http_smoke.rs")).expect("read tests");
         assert!(cargo.contains(r#"name = "user-api-contract-tests""#));
         assert!(tests.contains(r#"std::env::var("ROZE_TEST_BASE_URL")"#));
-        assert!(tests.contains("let response = client.get(url)"));
+        assert!(tests.contains("let mut request = client.get(url)"));
+        assert!(tests.contains("let fixture = fixtures::request("));
+        assert!(tests.contains("assertions::assert_route"));
         assert!(tests.contains("async fn smoke_framework_healthz()"));
         assert!(tests.contains("async fn smoke_framework_report_export()"));
         assert!(tests.contains("async fn smoke_framework_chart_query()"));
@@ -13018,9 +13186,32 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(readme.contains("## Framework Smoke"));
         assert!(readme.contains("`GET` `/api/reports/export`"));
         assert!(readme.contains("`GET` `/api/charts/query`"));
-        assert!(write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", false).is_err());
+        let fixtures_path = out.join("tests/fixtures.rs");
+        let assertions_path = out.join("tests/assertions.rs");
+        let generated_fixtures = fs::read_to_string(&fixtures_path).expect("read fixtures");
+        let multi_service = fs::read_to_string(out.join("tests/multi_service_smoke.rs"))
+            .expect("read multi-service smoke");
+        assert!(generated_fixtures.contains("ROZE_E2E_SERVICES"));
+        assert!(multi_service.contains("fixtures::services()"));
+        assert!(multi_service.contains("assert_service_ready"));
+        fs::write(&fixtures_path, "// application fixtures\n").expect("customize fixtures");
+        fs::write(&assertions_path, "// application assertions\n").expect("customize assertions");
+        write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", false)
+            .expect("update contract tests");
+        assert_eq!(
+            fs::read_to_string(&fixtures_path).expect("read fixtures"),
+            "// application fixtures\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&assertions_path).expect("read assertions"),
+            "// application assertions\n"
+        );
         write_http_smoke_test_project(&api, &out, "http://127.0.0.1:3000", true)
             .expect("force contract tests");
+        assert_eq!(
+            fs::read_to_string(&fixtures_path).expect("read fixtures after force"),
+            "// application fixtures\n"
+        );
 
         fs::remove_dir_all(root).expect("remove contract test project");
     }
