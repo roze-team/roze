@@ -2318,7 +2318,7 @@ fn render_model_module(model: &ModelSpec) -> String {
         .unwrap();
         writeln!(
             &mut out,
-            "        format!(\"{}:{{}}:{{}}\", field, value)",
+            "        roze_cache::model_cache_key(\"{}\", field, value)",
             cache_prefix
         )
         .unwrap();
@@ -7339,7 +7339,7 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
         .unwrap();
         writeln!(
             &mut out,
-            "        format!(\"{}:{{}}:{{}}\", field, value)",
+            "        roze_cache::model_cache_key(\"{}\", field, value)",
             cache_prefix
         )
         .unwrap();
@@ -16675,7 +16675,7 @@ sea-orm = { version = "1", default-features = false, features = ["macros", "runt
         assert!(rendered.contains("pub async fn find_by_username"));
         assert!(rendered.contains("pub async fn cached_find_by_username"));
         assert!(rendered.contains("Self::filter_by(\"_id\", &id)?"));
-        assert!(rendered.contains("format!(\"account:{}:{}\", field, value)"));
+        assert!(rendered.contains("roze_cache::model_cache_key(\"account\", field, value)"));
         assert!(rendered.contains("cache.del(&self.cache_key(\"username\", &model.username))"));
     }
 

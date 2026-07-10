@@ -481,6 +481,23 @@ uses a public object URL when available and otherwise returns a time-bounded
 provider URL plus required headers. Application logic therefore stores object
 keys and metadata rather than constructing provider URLs itself.
 
+## Cache consistency
+
+Generated model repositories use versioned keys from
+`roze_cache::model_cache_key`: `model:v1:<prefix>:<field>:<escaped-value>`.
+Create, update, delete, and soft-delete paths invalidate every configured lookup
+key after the database write succeeds. `InvalidationPlan` provides the same
+deduplicated key convention to RPC methods and application-owned workflows that
+perform writes outside a generated repository.
+
+For read models that may tolerate bounded staleness,
+`get_or_load_consistent_option` accepts `CacheConsistencyPolicy` with fresh,
+stale, and negative TTLs. Fresh entries are returned immediately; expired-fresh
+entries are reloaded, and may be returned as `CacheFreshness::Stale` only when
+the reload fails and `stale_on_error` is enabled. The hard Redis TTL is the
+fresh plus stale window, so stale values cannot survive beyond the configured
+bound.
+
 New generated REST, RPC, and stream worker entrypoints run under
 `roze_service::ServiceGroup`. When shutdown starts, generated REST/RPC lifecycle
 tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops
