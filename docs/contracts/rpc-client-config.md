@@ -14,7 +14,8 @@ rpc_client:
   timeout_ms: 2000
 ```
 
-Use `rpc_clients.<name>` for API services that aggregate multiple RPC services:
+Use `rpc_clients.<name>` for REST or RPC services that aggregate multiple RPC
+services:
 
 ```yaml
 rpc_clients:
@@ -38,3 +39,31 @@ contexts to use names.
 
 `ServiceConfig::rpc_client_config_ref(name)` provides the same lookup without
 cloning.
+
+## Generated service dependencies
+
+`rozectl api generate` and `rozectl rpc generate`/`rpc protoc` discover local
+RPC service dependencies declared as `*-rpc` path dependencies in the target
+service's `Cargo.toml`. The final name segment before `-rpc` is the named client
+key, so `shop-catalog-rpc` maps to `rpc_clients.catalog`. REST `.api` imports of
+pure RPC contracts declare the same dependency surface automatically.
+
+Generated `ServiceContext` code connects each declared client once during
+startup, stores the cloneable client in a framework-owned field, registers an
+`rpc:<name>` readiness dependency after connection succeeds, and exposes a
+`<name>()` accessor. Client channels are owned by the service context and are
+dropped through the normal service shutdown lifecycle.
+
+For an existing service, declare both surfaces before running `--update`:
+
+```toml
+[dependencies]
+shop-catalog-rpc = { path = "../shop-catalog-rpc" }
+```
+
+```yaml
+rpc_clients:
+  catalog:
+    endpoints:
+      - 127.0.0.1:4002
+```

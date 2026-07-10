@@ -2640,7 +2640,10 @@ pub fn write_swift_client(api: &Path, out: &Path) -> anyhow::Result<()> {
 fn api_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
     match command {
         GeneratorCommand::ApiGenerate { api, out, options } => {
-            let rpc_clients = read_api_rpc_client_bindings(&api)?;
+            let rpc_clients = merge_rpc_client_bindings(
+                read_api_rpc_client_bindings(&api)?,
+                read_project_rpc_client_bindings(&out)?,
+            );
             let source = read_api_source(&api)?;
             let spec = crate::parser::parse_api(&source)?;
             validate_project_kind(&spec, ProjectKind::Rest)?;
@@ -2876,7 +2879,8 @@ fn generate_rest_project(
     out: &Path,
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
-    generate_rest_project_with_rpc_clients(spec, out, options, &[])
+    let rpc_clients = read_project_rpc_client_bindings(out)?;
+    generate_rest_project_with_rpc_clients(spec, out, options, &rpc_clients)
 }
 
 fn generate_rest_project_with_rpc_clients(
@@ -3080,10 +3084,11 @@ fn generate_rest_project_with_rpc_clients(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
     )?;
-    write_preserved(
+    write_service_context(
         &out.join("src/svc/mod.rs"),
         rest_service_context_rs(rpc_clients),
         options.mode,
+        rpc_clients,
     )?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
     ensure_model_module(out)?;
@@ -3094,6 +3099,16 @@ pub(super) fn generate_rpc_project(
     spec: &ApiSpec,
     out: &Path,
     options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let rpc_clients = read_project_rpc_client_bindings(out)?;
+    generate_rpc_project_with_rpc_clients(spec, out, options, &rpc_clients)
+}
+
+fn generate_rpc_project_with_rpc_clients(
+    spec: &ApiSpec,
+    out: &Path,
+    options: GenerateOptions,
+    rpc_clients: &[RpcClientBinding],
 ) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
 
@@ -3114,7 +3129,7 @@ pub(super) fn generate_rpc_project(
     remove_path_if_exists(&out.join("src/pb.rs"))?;
     remove_path_if_exists(&out.join("src/rpc.rs"))?;
     remove_path_if_exists(&out.join("src/types.rs"))?;
-    write_cargo_toml(spec, out, options, ProjectKind::Rpc)?;
+    write_cargo_toml_with_rpc_clients(spec, out, options, ProjectKind::Rpc, rpc_clients)?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rpc))?;
     fs::write(
@@ -3246,10 +3261,11 @@ pub(super) fn generate_rpc_project(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
     )?;
-    write_preserved(
+    write_service_context(
         &out.join("src/svc/mod.rs"),
-        service_context_rs(ProjectKind::Rpc),
+        rpc_service_context_rs(rpc_clients),
         options.mode,
+        rpc_clients,
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
@@ -3288,6 +3304,22 @@ fn write_preserved(path: &Path, content: String, mode: GenerateMode) -> anyhow::
         return Ok(());
     }
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_service_context(
+    path: &Path,
+    content: String,
+    mode: GenerateMode,
+    rpc_clients: &[RpcClientBinding],
+) -> anyhow::Result<()> {
+    if mode != GenerateMode::Update || !path.exists() {
+        return fs::write(path, content)
+            .with_context(|| format!("failed to write {}", path.display()));
+    }
+    let existing =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let updated = inject_rpc_clients_into_service_context(existing, rpc_clients);
+    fs::write(path, updated).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn write_preserved_logic(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
@@ -3592,15 +3624,6 @@ fn ensure_model_module(out: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", main_path.display()))
 }
 
-fn write_cargo_toml(
-    spec: &ApiSpec,
-    out: &Path,
-    options: GenerateOptions,
-    kind: ProjectKind,
-) -> anyhow::Result<()> {
-    write_cargo_toml_with_rpc_clients(spec, out, options, kind, &[])
-}
-
 fn write_cargo_toml_with_rpc_clients(
     spec: &ApiSpec,
     out: &Path,
@@ -3747,6 +3770,72 @@ fn read_api_rpc_client_bindings(path: &Path) -> anyhow::Result<Vec<RpcClientBind
     let mut bindings = BTreeSet::new();
     collect_api_rpc_client_bindings(path, true, &mut seen, &mut bindings)?;
     Ok(bindings.into_iter().collect())
+}
+
+fn read_project_rpc_client_bindings(out: &Path) -> anyhow::Result<Vec<RpcClientBinding>> {
+    let manifest_path = out.join("Cargo.toml");
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let document = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let Some(dependencies) = document
+        .get("dependencies")
+        .and_then(toml_edit::Item::as_table)
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut clients = Vec::new();
+    for (dep_name, item) in dependencies {
+        if dep_name == "roze-rpc" || !dep_name.ends_with("-rpc") {
+            continue;
+        }
+        let Some(path) = dependency_path(item) else {
+            continue;
+        };
+        let service_name = dep_name
+            .strip_suffix("-rpc")
+            .unwrap_or(dep_name)
+            .rsplit('-')
+            .next()
+            .unwrap_or(dep_name)
+            .to_string();
+        clients.push(RpcClientBinding {
+            name: service_name,
+            dep_name: dep_name.to_string(),
+            crate_name: dep_name.replace('-', "_"),
+            path: path.to_string(),
+        });
+    }
+    clients.sort();
+    Ok(clients)
+}
+
+fn dependency_path(item: &toml_edit::Item) -> Option<&str> {
+    item.as_value()
+        .and_then(toml_edit::Value::as_inline_table)
+        .and_then(|table| table.get("path"))
+        .and_then(toml_edit::Value::as_str)
+        .or_else(|| {
+            item.as_table()
+                .and_then(|table| table.get("path"))
+                .and_then(toml_edit::Item::as_str)
+        })
+}
+
+fn merge_rpc_client_bindings(
+    explicit: Vec<RpcClientBinding>,
+    discovered: Vec<RpcClientBinding>,
+) -> Vec<RpcClientBinding> {
+    let mut bindings = BTreeMap::new();
+    for binding in discovered.into_iter().chain(explicit) {
+        bindings.insert(binding.name.clone(), binding);
+    }
+    bindings.into_values().collect()
 }
 
 fn collect_api_rpc_client_bindings(
@@ -10177,13 +10266,6 @@ pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigE
     .to_string()
 }
 
-fn service_context_rs(kind: ProjectKind) -> String {
-    match kind {
-        ProjectKind::Rest => rest_service_context_rs(&[]),
-        ProjectKind::Rpc => rpc_service_context_rs(),
-    }
-}
-
 fn rest_service_context_rs(rpc_clients: &[RpcClientBinding]) -> String {
     let mut out = r#"#![allow(dead_code)]
 
@@ -10291,33 +10373,12 @@ impl ServiceContext {
     }
 "#
     .to_string();
-
-    for client in rpc_clients {
-        out.push_str(&format!(
-            r#"
-
-    pub async fn {name}(&self) -> anyhow::Result<{crate_name}::client::RpcClient> {{
-        let config = self
-            .config
-            .rpc_client_config("{name}")
-            .ok_or_else(|| anyhow::anyhow!("rpc client `{name}` is not configured"))?;
-        {crate_name}::client::RpcClient::connect_from_config(config).await
-    }}
-"#,
-            name = rust_identifier(&client.name),
-            crate_name = client.crate_name
-        ));
-    }
-
-    out.push_str(
-        r#"}
-"#,
-    );
-    out
+    out.push_str("}\n");
+    inject_rpc_clients_into_service_context(out, rpc_clients)
 }
 
-fn rpc_service_context_rs() -> String {
-    r#"#![allow(dead_code)]
+fn rpc_service_context_rs(rpc_clients: &[RpcClientBinding]) -> String {
+    let out = r#"#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -10449,7 +10510,143 @@ impl ServiceContext {
     }
 }
 "#
-    .to_string()
+    .to_string();
+    inject_rpc_clients_into_service_context(out, rpc_clients)
+}
+
+fn inject_rpc_clients_into_service_context(
+    mut content: String,
+    rpc_clients: &[RpcClientBinding],
+) -> String {
+    let fields = rpc_clients
+        .iter()
+        .map(|client| {
+            format!(
+                "    pub {}_client: {}::client::RpcClient,",
+                rust_identifier(&client.name),
+                client.crate_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let startup = rpc_clients
+        .iter()
+        .map(|client| {
+            let name = rust_identifier(&client.name);
+            format!(
+                r#"        let {name}_client = {{
+            let client_config = config
+                .rpc_client_config("{config_name}")
+                .ok_or_else(|| anyhow::anyhow!("rpc client `{config_name}` is not configured"))?;
+            let client = {crate_name}::client::RpcClient::connect_from_config(client_config).await?;
+            health.register_static(roze_health::HealthCheck::healthy("rpc:{config_name}"));
+            client
+        }};"#,
+                config_name = client.name,
+                crate_name = client.crate_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let values = rpc_clients
+        .iter()
+        .map(|client| format!("            {}_client,", rust_identifier(&client.name)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let accessors = rpc_clients
+        .iter()
+        .map(|client| {
+            let name = rust_identifier(&client.name);
+            format!(
+                r#"    pub fn {name}(&self) -> {crate_name}::client::RpcClient {{
+        self.{name}_client.clone()
+    }}"#,
+                crate_name = client.crate_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    content = upsert_generated_section(
+        content,
+        "rpc-client-fields",
+        &fields,
+        "}\n\nimpl ServiceContext {",
+        true,
+    );
+    content = upsert_generated_section(
+        content,
+        "rpc-client-startup",
+        &startup,
+        "        health.mark_ready();",
+        true,
+    );
+    content = upsert_generated_section(
+        content,
+        "rpc-client-values",
+        &values,
+        "        })\n    }",
+        true,
+    );
+    let accessor_anchor = content.rfind("\n}").unwrap_or(content.len());
+    upsert_generated_section_at(content, "rpc-client-accessors", &accessors, accessor_anchor)
+}
+
+fn upsert_generated_section(
+    content: String,
+    name: &str,
+    body: &str,
+    anchor: &str,
+    before: bool,
+) -> String {
+    let Some(anchor_index) = content.find(anchor) else {
+        return content;
+    };
+    let insert_at = if before {
+        anchor_index
+    } else {
+        anchor_index + anchor.len()
+    };
+    upsert_generated_section_at(content, name, body, insert_at)
+}
+
+fn upsert_generated_section_at(
+    mut content: String,
+    name: &str,
+    body: &str,
+    insert_at: usize,
+) -> String {
+    let start = format!("// <roze:generated-{name}>");
+    let end = format!("// </roze:generated-{name}>");
+    if let Some(start_index) = content.find(&start) {
+        if let Some(relative_end) = content[start_index..].find(&end) {
+            let end_index = start_index + relative_end + end.len();
+            let end_index = end_index + content[end_index..].strip_prefix('\n').map_or(0, |_| 1);
+            content.replace_range(start_index..end_index, "");
+            if body.is_empty() {
+                return content;
+            }
+            return upsert_generated_section_at(content, name, body, start_index);
+        }
+    }
+    if body.is_empty() {
+        return content;
+    }
+    let indent = content[..insert_at]
+        .rsplit_once('\n')
+        .map(|(_, line)| {
+            line.chars()
+                .take_while(|ch| ch.is_whitespace())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let section = format!(
+        "{indent}{start}\n{body}\n{indent}{end}\n",
+        start = start,
+        end = end
+    );
+    content.insert_str(insert_at, &section);
+    content
 }
 
 fn render_pb(spec: &ApiSpec) -> String {
@@ -10656,7 +10853,7 @@ mod tests {
 
     #[test]
     fn generated_service_context_accepts_persistent_outbox_store() {
-        for rendered in [rest_service_context_rs(&[]), rpc_service_context_rs()] {
+        for rendered in [rest_service_context_rs(&[]), rpc_service_context_rs(&[])] {
             assert!(rendered.contains("Arc<dyn roze_transaction::OutboxStore>"));
             assert!(rendered.contains("pub fn with_outbox_store"));
             assert!(rendered.contains("Arc::new(roze_transaction::InMemoryOutbox::new())"));
@@ -10873,10 +11070,14 @@ mod tests {
         .expect("generate admin api");
 
         let svc = std::fs::read_to_string(admin.join("src/svc/mod.rs")).expect("read svc");
-        assert!(svc.contains("pub async fn order(&self)"));
+        assert!(svc.contains("pub order_client: shop_order_rpc::client::RpcClient"));
+        assert!(svc.contains("pub fn order(&self)"));
         assert!(svc.contains("rpc_client_config(\"order\")"));
-        assert!(svc.contains("shop_order_rpc::client::RpcClient::connect_from_config(config)"));
-        assert!(svc.contains("pub async fn payment(&self)"));
+        assert!(
+            svc.contains("shop_order_rpc::client::RpcClient::connect_from_config(client_config)")
+        );
+        assert!(svc.contains("HealthCheck::healthy(\"rpc:order\")"));
+        assert!(svc.contains("pub fn payment(&self)"));
         assert!(svc.contains("rpc_client_config(\"payment\")"));
         assert!(!svc.trim_end().ends_with("}\n}\n}"));
 
@@ -12860,6 +13061,85 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config module")
             .contains("registry_namespace"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_update_generates_managed_clients_from_local_rpc_dependencies() {
+        let spec = parse_api(
+            r#"
+            service order-rpc {
+                rpc GetOrder (GetOrderReq) returns (GetOrderResp)
+            }
+
+            type GetOrderReq {
+                id: u64
+            }
+
+            type GetOrderResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rpc-update-managed-clients-test");
+        let out = root.join("order");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+        let manifest_path = out.join("Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path).expect("read manifest");
+        let mut document = manifest
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse manifest");
+        document["dependencies"]["shop-catalog-rpc"] = r#"{ path = "../shop-catalog-rpc" }"#
+            .parse::<toml_edit::Item>()
+            .expect("rpc dependency");
+        fs::write(&manifest_path, document.to_string()).expect("add local rpc dependency");
+        fs::write(
+            out.join("config.yaml"),
+            "rpc_clients:\n  catalog:\n    target: http://127.0.0.1:9001\n",
+        )
+        .expect("write named rpc client config");
+        let svc_path = out.join("src/svc/mod.rs");
+        let svc = fs::read_to_string(&svc_path).expect("read service context");
+        fs::write(
+            &svc_path,
+            format!(
+                "{svc}\nimpl ServiceContext {{\n    pub fn custom_dependency(&self) {{}}\n}}\n"
+            ),
+        )
+        .expect("write custom service extension");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update generation");
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("repeat update generation");
+
+        let svc = fs::read_to_string(&svc_path).expect("read updated service context");
+        assert!(svc.contains("pub catalog_client: shop_catalog_rpc::client::RpcClient"));
+        assert!(svc.contains("rpc_client_config(\"catalog\")"));
+        assert!(svc.contains("HealthCheck::healthy(\"rpc:catalog\")"));
+        assert!(svc.contains("catalog_client,"));
+        assert!(svc.contains("pub fn catalog(&self) -> shop_catalog_rpc::client::RpcClient"));
+        assert!(svc.contains("pub fn custom_dependency(&self)"));
+        assert_eq!(svc.matches("<roze:generated-rpc-client-fields>").count(), 1);
 
         fs::remove_dir_all(root).expect("remove test output");
     }
