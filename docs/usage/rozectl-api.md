@@ -505,6 +505,18 @@ the reload fails and `stale_on_error` is enabled. The hard Redis TTL is the
 fresh plus stale window, so stale values cannot survive beyond the configured
 bound.
 
+## Model fixtures and seeds
+
+Every generated SeaORM, Toasty, and Mongo model exposes
+`Model::fixture(index)` (or the generated Toasty model type's equivalent).
+Fixture values are deterministic for the same index, generate distinct common
+scalar values, choose the first declared enum value, and populate `Option` and
+collection fields. Generated repositories expose `seed_fixtures(count)` to
+insert a repeatable sequence with the model's normal write and cache
+invalidation path. Put application-specific relationships, cleanup, and
+assertions in the preserved `<model>_ext.rs` module rather than editing the
+generated fixture code.
+
 New generated REST, RPC, and stream worker entrypoints run under
 `roze_service::ServiceGroup`. When shutdown starts, generated REST/RPC lifecycle
 tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops

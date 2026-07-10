@@ -2002,6 +2002,7 @@ fn render_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_model_fixture_impl(&mut out, model, "Model");
     if has_sensitive_fields(model) {
         render_debug_impl(&mut out, "Model", &model.fields);
     }
@@ -2054,6 +2055,26 @@ fn render_model_module(model: &ModelSpec) -> String {
     render_sea_orm_transaction_method(&mut out);
     writeln!(&mut out, "    pub fn table_name() -> &'static str {{").unwrap();
     writeln!(&mut out, "        \"{}\"", table_name).unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn seed_fixtures(&self, count: u64) -> anyhow::Result<Vec<Model>> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let mut seeded = Vec::with_capacity(count as usize);"
+    )
+    .unwrap();
+    writeln!(&mut out, "        for index in 0..count {{").unwrap();
+    writeln!(
+        &mut out,
+        "            seeded.push(self.insert(Model::fixture(index)).await?);"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "        Ok(seeded)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_sea_orm_scope_methods(&mut out, model);
@@ -6626,6 +6647,7 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_model_fixture_impl(&mut out, model, &pascal);
     if has_sensitive_fields(model) {
         render_debug_impl(&mut out, &pascal, &model.fields);
     }
@@ -6643,6 +6665,15 @@ fn render_toasty_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out, "impl {}Repository {{", pascal).unwrap();
     writeln!(&mut out, "    pub fn table_name() -> &'static str {{").unwrap();
     writeln!(&mut out, "        \"{}\"", table_name).unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "    pub async fn seed_fixtures(db: &mut dyn toasty::Executor, count: u64) -> toasty::Result<Vec<{pascal}>> {{").unwrap();
+    writeln!(
+        &mut out,
+        "        let fixtures = (0..count).map({pascal}::fixture).collect();"
+    )
+    .unwrap();
+    writeln!(&mut out, "        Self::insert_many(db, fixtures).await").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -7090,6 +7121,62 @@ fn optional_inner_type(ty: &str) -> Option<&str> {
         .and_then(|ty| ty.strip_suffix('>'))
 }
 
+fn render_model_fixture_impl(out: &mut String, model: &ModelSpec, type_name: &str) {
+    use std::fmt::Write as _;
+
+    writeln!(out, "impl {type_name} {{").unwrap();
+    writeln!(out, "    pub fn fixture(index: u64) -> Self {{").unwrap();
+    writeln!(out, "        Self {{").unwrap();
+    for field in &model.fields {
+        writeln!(
+            out,
+            "            {}: {},",
+            model_field_ident(field),
+            model_fixture_value_expr(model, field, &field.ty)
+        )
+        .unwrap();
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn model_fixture_value_expr(model: &ModelSpec, field: &ModelField, ty: &str) -> String {
+    let ty = ty.trim();
+    if let Some(inner) = optional_inner_type(ty) {
+        return format!("Some({})", model_fixture_value_expr(model, field, inner));
+    }
+    if let Some(inner) = vec_inner_type(ty) {
+        return format!("vec![{}]", model_fixture_value_expr(model, field, inner));
+    }
+    match ty {
+        "String" => model_fixture_string_expr(model, field),
+        "bool" => "index % 2 == 0".to_string(),
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+            format!("index.saturating_add(1) as {ty}")
+        }
+        "f32" | "f64" => format!("index.saturating_add(1) as {ty}"),
+        "rust_decimal::Decimal" => {
+            "rust_decimal::Decimal::from(index.saturating_add(1))".to_string()
+        }
+        "serde_json::Value" => "serde_json::json!({\"fixture\": index})".to_string(),
+        _ => "Default::default()".to_string(),
+    }
+}
+
+fn model_fixture_string_expr(model: &ModelSpec, field: &ModelField) -> String {
+    if let Some(value) = field.validation.enum_values.first() {
+        return format!("{value:?}.to_string()");
+    }
+    let model_name = to_snake_case(&model.name);
+    let field_name = &field.name;
+    if field_name.to_ascii_lowercase().contains("email") {
+        return format!("format!(\"fixture-{model_name}-{field_name}-{{index}}@example.test\")");
+    }
+    format!("format!(\"fixture-{model_name}-{field_name}-{{index}}\")")
+}
+
 fn vec_inner_type(ty: &str) -> Option<&str> {
     ty.trim()
         .strip_prefix("Vec<")
@@ -7160,6 +7247,7 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
     }
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
+    render_model_fixture_impl(&mut out, model, "Model");
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
     writeln!(&mut out, "}}").unwrap();
@@ -7207,6 +7295,26 @@ fn render_mongo_model_module(model: &ModelSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "    pub fn collection_name() -> &'static str {{").unwrap();
     writeln!(&mut out, "        \"{}\"", collection_name).unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn seed_fixtures(&self, count: u64) -> anyhow::Result<Vec<Model>> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        let mut seeded = Vec::with_capacity(count as usize);"
+    )
+    .unwrap();
+    writeln!(&mut out, "        for index in 0..count {{").unwrap();
+    writeln!(
+        &mut out,
+        "            seeded.push(self.insert(Model::fixture(index)).await?);"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "        Ok(seeded)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_mongo_find_methods(&mut out, model, primary_field, true);
@@ -15605,6 +15713,9 @@ mod tests {
         assert!(rendered.contains("pub enum UserOrder"));
         assert!(rendered.contains("pub enum UserPredicate"));
         assert!(rendered.contains("pub struct UserCreate"));
+        assert!(rendered.contains("pub fn fixture(index: u64) -> Self"));
+        assert!(rendered.contains("fixture-user-name-{index}"));
+        assert!(rendered.contains("pub async fn seed_fixtures(&self, count: u64)"));
         assert!(rendered.contains("pub struct UserUpdate"));
         assert!(rendered.contains("pub struct UserDelete"));
         assert!(rendered.contains("pub struct UserUpdateMany"));
@@ -15865,6 +15976,9 @@ mod tests {
         assert!(rendered.contains("pub enum UserOrder"));
         assert!(rendered.contains("pub enum UserPredicate"));
         assert!(rendered.contains("pub struct UserCreate"));
+        assert!(rendered.contains("pub fn fixture(index: u64) -> Self"));
+        assert!(rendered.contains("fixture-user-email-{index}@example.test"));
+        assert!(rendered.contains("pub async fn seed_fixtures("));
         assert!(rendered.contains("pub struct UserUpdate"));
         assert!(rendered.contains("pub struct UserDelete"));
         assert!(rendered.contains("pub struct UserUpdateMany"));
@@ -16674,6 +16788,8 @@ sea-orm = { version = "1", default-features = false, features = ["macros", "runt
         assert!(rendered.contains("#[serde(rename = \"_id\")]"));
         assert!(rendered.contains("pub async fn find_by_username"));
         assert!(rendered.contains("pub async fn cached_find_by_username"));
+        assert!(rendered.contains("pub fn fixture(index: u64) -> Self"));
+        assert!(rendered.contains("pub async fn seed_fixtures(&self, count: u64)"));
         assert!(rendered.contains("Self::filter_by(\"_id\", &id)?"));
         assert!(rendered.contains("roze_cache::model_cache_key(\"account\", field, value)"));
         assert!(rendered.contains("cache.del(&self.cache_key(\"username\", &model.username))"));
