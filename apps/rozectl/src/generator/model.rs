@@ -1001,6 +1001,7 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
         })
         .unwrap_or(updated);
     }
+    updated = synchronize_toasty_model_registry(updated, &model_list);
     if !updated.contains("            toasty_db,\n") {
         updated = insert_after_module(
             &updated,
@@ -1038,6 +1039,19 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
     }
 
     fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
+}
+
+fn synchronize_toasty_model_registry(mut content: String, model_list: &str) -> String {
+    const REGISTRY_START: &str = ".models(toasty::models!(";
+    let Some(start) = content.find(REGISTRY_START) else {
+        return content;
+    };
+    let models_start = start + REGISTRY_START.len();
+    let Some(models_end) = content[models_start..].find("))") else {
+        return content;
+    };
+    content.replace_range(models_start..models_start + models_end, model_list);
+    content
 }
 
 fn update_model_service_context(out: &Path) -> anyhow::Result<()> {
@@ -16470,6 +16484,28 @@ impl ServiceContext {
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));
         assert!(!ext.contains(MODEL_GENERATED_MARKER));
+
+        generate_model_project(
+            r#"
+            CREATE TABLE users (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                config JSONB NOT NULL DEFAULT '{}'::jsonb
+            );
+            CREATE TABLE admin_tokens (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                token VARCHAR(255) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            ModelFormat::Sql,
+            ModelOrm::Toasty,
+        )
+        .expect("update generate");
+
+        let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("updated svc read");
+        assert!(svc.contains("toasty::models!(crate::model::User, crate::model::AdminToken)"));
     }
 
     #[test]
