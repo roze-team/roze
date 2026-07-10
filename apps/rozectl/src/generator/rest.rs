@@ -565,7 +565,7 @@ pub fn render_logic_mod(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(dead_code)]\n\nuse roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
-    out.push_str(&render_auth_context_helpers());
+    out.push_str(render_auth_context_helpers());
 
     for group in route_groups(spec).keys() {
         out.push_str(&format!("pub mod {group};\n"));
@@ -1049,7 +1049,7 @@ fn route_group_segments(route: &RestRoute) -> Vec<String> {
 
 fn group_segments(group: &str) -> Vec<String> {
     group
-        .split(|ch: char| ch == '/' || ch == '\\' || ch == '.' || ch == ':')
+        .split(['/', '\\', '.', ':'])
         .map(to_snake_case)
         .filter(|segment| !segment.is_empty())
         .collect()

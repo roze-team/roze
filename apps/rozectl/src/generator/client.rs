@@ -485,7 +485,7 @@ fn render_java_model(spec: &ApiSpec, ty: &TypeDef) -> String {
             java_field_name(field)
         ));
     }
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&format!("    public {}() {{}}\n\n", ty.name));
     out.push_str(&format!("    public {}(", ty.name));
     let params = fields

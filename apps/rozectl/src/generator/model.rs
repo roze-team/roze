@@ -9603,7 +9603,7 @@ fn parse_ent_field_header(
 ) -> anyhow::Result<(String, String, Vec<String>)> {
     let colon_before_call = value
         .find(':')
-        .is_some_and(|colon| value.find('(').map_or(true, |open| colon < open));
+        .is_some_and(|colon| value.find('(').is_none_or(|open| colon < open));
     if colon_before_call {
         let Some((name, ty)) = value.split_once(':') else {
             unreachable!("colon_before_call requires a colon");
@@ -9643,9 +9643,9 @@ fn parse_ent_field_header(
 
 fn parse_ent_field_builder_name(args: &str, line_no: usize) -> anyhow::Result<String> {
     let args = args.trim();
-    if args.starts_with('"') {
+    if let Some(stripped) = args.strip_prefix('"') {
         let mut escaped = false;
-        for (offset, ch) in args[1..].char_indices() {
+        for (offset, ch) in stripped.char_indices() {
             if escaped {
                 escaped = false;
                 continue;
@@ -9974,15 +9974,14 @@ fn parse_ent_edge(
             comment = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
             continue;
         }
-        if inverse {
-            if ent_field_arg(&inner, &["to"]).is_some()
+        if inverse
+            && (ent_field_arg(&inner, &["to"]).is_some()
                 || ent_field_arg(&inner, &["from"]).is_some()
                 || ent_field_arg(&inner, &["through"]).is_some()
                 || ent_field_flag(&inner, &["immutable"])
-                || is_ent_ignored_metadata_directive(&inner)
-            {
-                continue;
-            }
+                || is_ent_ignored_metadata_directive(&inner))
+        {
+            continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["to"]) {
             target = Some(clean_ent_type_ref(&parse_ent_string_or_ident(

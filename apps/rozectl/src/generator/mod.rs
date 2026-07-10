@@ -3570,7 +3570,6 @@ fn write_cargo_toml_with_rpc_clients(
         return fs::write(
             &path,
             cargo_toml(
-                spec,
                 &package_name,
                 options.dependency_source,
                 local_crates_prefix.as_deref(),
@@ -3820,7 +3819,6 @@ git-fetch-with-cli = true
 }
 
 fn cargo_toml(
-    _spec: &ApiSpec,
     package_name: &str,
     dependency_source: DependencySource,
     local_crates_prefix: Option<&str>,
@@ -10995,25 +10993,7 @@ mod tests {
 
     #[test]
     fn generated_cargo_uses_git_dependencies_for_roze_crates() {
-        let spec = parse_api(
-            r#"
-            service user-api {
-                get /users/:id (GetUserReq) returns (UserResp)
-            }
-
-            type GetUserReq {
-                id: u64
-            }
-
-            type UserResp {
-                name: string
-            }
-            "#,
-        )
-        .expect("valid api");
-
         let cargo = cargo_toml(
-            &spec,
             "user-api",
             DependencySource::Git,
             None,
@@ -11036,25 +11016,7 @@ mod tests {
 
     #[test]
     fn generated_cargo_can_use_local_roze_dependencies() {
-        let spec = parse_api(
-            r#"
-            service user-api {
-                get /users/:id (GetUserReq) returns (UserResp)
-            }
-
-            type GetUserReq {
-                id: u64
-            }
-
-            type UserResp {
-                name: string
-            }
-            "#,
-        )
-        .expect("valid api");
-
         let cargo = cargo_toml(
-            &spec,
             "user-api",
             DependencySource::Path,
             Some("../../crates"),
@@ -11074,25 +11036,7 @@ mod tests {
 
     #[test]
     fn generated_cargo_is_standalone_outside_workspace() {
-        let spec = parse_api(
-            r#"
-            service user {
-                rpc GetUser (GetUserReq) returns (GetUserResp)
-            }
-
-            type GetUserReq {
-                id: u64
-            }
-
-            type GetUserResp {
-                id: u64
-            }
-            "#,
-        )
-        .expect("valid api");
-
         let cargo = cargo_toml(
-            &spec,
             "user",
             DependencySource::Git,
             None,
