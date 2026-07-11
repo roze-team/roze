@@ -6,9 +6,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
     },
+    time::Duration,
 };
 
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthStatus {
@@ -70,11 +74,23 @@ impl Display for ServicePhase {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HealthRegistry {
     checks: Arc<RwLock<Vec<RegisteredCheck>>>,
     startup_complete: Arc<AtomicBool>,
     draining: Arc<AtomicBool>,
+    check_timeout: Duration,
+}
+
+impl Default for HealthRegistry {
+    fn default() -> Self {
+        Self {
+            checks: Arc::default(),
+            startup_complete: Arc::default(),
+            draining: Arc::default(),
+            check_timeout: DEFAULT_CHECK_TIMEOUT,
+        }
+    }
 }
 
 impl fmt::Debug for HealthRegistry {
@@ -96,6 +112,16 @@ impl fmt::Debug for HealthRegistry {
 impl HealthRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_check_timeout(mut self, timeout: Duration) -> Self {
+        assert!(!timeout.is_zero(), "health check timeout must be positive");
+        self.check_timeout = timeout;
+        self
+    }
+
+    pub fn check_timeout(&self) -> Duration {
+        self.check_timeout
     }
 
     pub fn mark_started(&self) {
@@ -202,15 +228,23 @@ impl HealthRegistry {
             .read()
             .expect("health registry lock poisoned")
             .clone();
-        let mut out = Vec::with_capacity(checks.len());
-        for registered in checks {
-            let mut check = (registered.check)().await;
-            if check.name.is_empty() {
-                check.name = registered.name;
+        let timeout = self.check_timeout;
+        join_all(checks.into_iter().map(|registered| async move {
+            let name = registered.name;
+            match tokio::time::timeout(timeout, (registered.check)()).await {
+                Ok(mut check) => {
+                    if check.name.is_empty() {
+                        check.name = name;
+                    }
+                    check
+                }
+                Err(_) => HealthCheck::unhealthy(
+                    name,
+                    format!("health check timed out after {}ms", timeout.as_millis()),
+                ),
             }
-            out.push(check);
-        }
-        out
+        }))
+        .await
     }
 
     fn phase_checks(&self) -> Vec<HealthCheck> {
@@ -389,5 +423,62 @@ mod tests {
         assert!(!draining.is_ready());
         assert_eq!(draining.checks[0].status, HealthStatus::Degraded);
         assert!(draining.is_alive());
+    }
+
+    #[tokio::test]
+    async fn dependency_checks_run_concurrently_and_preserve_order() {
+        let registry = HealthRegistry::new().with_check_timeout(Duration::from_secs(1));
+        registry.mark_ready();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_barrier = barrier.clone();
+        registry.register_dependency("first", move || {
+            let barrier = first_barrier.clone();
+            async move {
+                barrier.wait().await;
+                Ok(())
+            }
+        });
+        let second_barrier = barrier.clone();
+        registry.register_dependency("second", move || {
+            let barrier = second_barrier.clone();
+            async move {
+                barrier.wait().await;
+                Ok(())
+            }
+        });
+
+        let report_task = tokio::spawn(async move { registry.readiness_report().await });
+        tokio::time::timeout(Duration::from_millis(200), barrier.wait())
+            .await
+            .expect("both checks entered concurrently");
+        let report = report_task.await.expect("readiness task");
+
+        assert_eq!(report.checks[1].name, "first");
+        assert_eq!(report.checks[2].name, "second");
+    }
+
+    #[tokio::test]
+    async fn dependency_timeout_is_reported_as_unhealthy() {
+        let registry = HealthRegistry::new().with_check_timeout(Duration::from_millis(20));
+        registry.mark_ready();
+        registry.register_dependency("stalled", || async {
+            std::future::pending::<anyhow::Result<()>>().await
+        });
+
+        let report = registry.readiness_report().await;
+
+        assert!(!report.is_ready());
+        assert_eq!(report.checks[1].name, "stalled");
+        assert_eq!(report.checks[1].status, HealthStatus::Unhealthy);
+        assert_eq!(
+            report.checks[1].message.as_deref(),
+            Some("health check timed out after 20ms")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "health check timeout must be positive")]
+    fn rejects_zero_check_timeout() {
+        let _ = HealthRegistry::new().with_check_timeout(Duration::ZERO);
     }
 }

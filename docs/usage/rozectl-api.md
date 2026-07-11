@@ -459,6 +459,10 @@ standard `ApiResponse` wrapper. Generated `ServiceContext` owns a
 startup are registered as readiness checks, and the registry tracks startup,
 ready, and draining phases. Applications can add more dynamic checks with
 `HealthRegistry::register_dependency` or `HealthRegistry::register_check`.
+Registered checks execute concurrently and retain registration order in the
+report. Each check has a two-second default timeout; a timeout is returned as
+an unhealthy result instead of stalling the probe. Services can set a stricter
+budget with `HealthRegistry::with_check_timeout(Duration)`.
 Generated report and chart endpoints are framework-owned production interface
 scaffolds: they publish stable HTTP/OpenAPI boundaries for export jobs and
 chart data lookup, while application teams replace the default accepted/empty
