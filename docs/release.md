@@ -124,6 +124,11 @@ rdkafka`.
 - Create a release tracking issue from the release checklist template.
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- The `supply-chain` CI job passes RustSec advisory, dependency license, and
+  dependency source-policy checks against `Cargo.lock` and `deny.toml`.
+- Security advisory exceptions must be narrowly scoped in both `audit.toml`
+  and `deny.toml`, explain why the vulnerable operation is unreachable, and be
+  removed when the upstream dependency provides a safe path.
 - `cargo test --workspace`
 - `cargo check --workspace`
 - `cargo check -p roze-kafka --features rdkafka`

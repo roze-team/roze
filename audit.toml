@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # The remaining rsa edge is SQLx MySQL client public-key encryption. Roze
+    # does not expose rsa private-key operations affected by the Marvin attack.
+    "RUSTSEC-2023-0071",
+]

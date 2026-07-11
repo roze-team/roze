@@ -1,9 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     convert::Infallible,
-    fs::File,
     future::Future,
-    io::BufReader,
     pin::Pin,
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     task::{Context as TaskContext, Poll},
@@ -30,6 +28,7 @@ use roze_resilience::{
     RetryBudgetRegistry, SheddingRegistry,
 };
 use roze_rpc::registry::{Registry, ServiceInstance};
+use rustls_pki_types::pem::PemObject;
 use sha1::{Digest as _, Sha1};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -2436,24 +2435,10 @@ fn build_service_websocket_tls_configs(
                     service.name,
                     certificate_path.display()
                 );
-                let key_file = File::open(key_path).map_err(|error| {
-                    anyhow::anyhow!(
-                        "gateway service '{}' cannot open client key '{}': {error}",
-                        service.name,
-                        key_path.display()
-                    )
-                })?;
-                let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-                    .map_err(|error| {
+                let key =
+                    rustls::pki_types::PrivateKeyDer::from_pem_file(key_path).map_err(|error| {
                         anyhow::anyhow!(
                             "gateway service '{}' cannot parse client key '{}': {error}",
-                            service.name,
-                            key_path.display()
-                        )
-                    })?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "gateway service '{}' client key file '{}' contains no private key",
                             service.name,
                             key_path.display()
                         )
@@ -2478,10 +2463,10 @@ fn build_service_websocket_tls_configs(
 fn read_pem_certificates(
     path: &std::path::Path,
 ) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let file = File::open(path).map_err(|error| {
-        anyhow::anyhow!("cannot open TLS certificate '{}': {error}", path.display())
-    })?;
-    rustls_pemfile::certs(&mut BufReader::new(file))
+    rustls::pki_types::CertificateDer::pem_file_iter(path)
+        .map_err(|error| {
+            anyhow::anyhow!("cannot open TLS certificate '{}': {error}", path.display())
+        })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| {
             anyhow::anyhow!("cannot parse TLS certificate '{}': {error}", path.display())

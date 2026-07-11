@@ -34,6 +34,25 @@ on:
       - ".github/workflows/release-gate.yml"
 
 jobs:
+  supply-chain:
+    name: dependency security and licenses
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit RustSec advisories
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check dependency licenses and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses sources
+
   release-gate:
     name: release stability gate
     runs-on: ubuntu-latest

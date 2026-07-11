@@ -118,4 +118,6 @@ crate, generator, or runtime module is broadly production-stable.
 - JWT claims, key rotation, tenant isolation, and role/permission checks are
   documented.
 - OpenAPI security declarations match runtime auth behavior.
-- Dependency audit and license checks run in CI.
+- The required `supply-chain` CI job passes RustSec advisory, dependency
+  license, and registry/source checks; exceptions are documented in
+  `deny.toml` with an owner and review date.

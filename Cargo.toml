@@ -92,7 +92,7 @@ thiserror = "2.0.18"
 validator = { version = "0.20", features = ["derive"] }
 base64 = "0.22"
 sha1 = "0.10"
-jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 mongodb = "3.7.0"
 moka = { version = "0.12", features = ["future"] }
 redis = { version = "0.27", features = ["aio", "tokio-comp"] }
@@ -100,7 +100,7 @@ regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
-rustls-pemfile = "2"
+rustls-pki-types = "1"
 tokio-rustls = "0.26"
 webpki-roots = "1"
 rcgen = "0.13"
