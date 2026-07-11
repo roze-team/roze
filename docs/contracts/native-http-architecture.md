@@ -125,6 +125,10 @@ let app = Router::new()
   insertion, overlap rejection, fallback merge, and Allow refresh to PathRouter
 - nested path graph rewriting, strip-prefix wrapping, and path graph merging are
   PathRouter operations; Router retains ownership of global fallback conflicts
+- PathRouter's matcher, route groups, and exact-path index are private; Router
+  diagnostics and copy-on-write tests use narrow read-only query methods
+- global fallback state is represented by `Fallback::{Default, Custom}` rather
+  than a service plus boolean, making merge, reset, layer, and dispatch coherent
 - handler, routed service, and layer values are `Clone + Send + Sync + 'static`
   and are erased through Tower `BoxCloneSyncService`, keeping the shared router
   graph safely usable across runtime worker threads

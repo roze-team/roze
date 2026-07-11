@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, convert::Infallible, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, fmt, sync::Arc};
 
 use http::{request::Parts, Method};
 use matchit::Router as MatchRouter;
@@ -20,9 +20,9 @@ use super::{
 
 #[derive(Clone)]
 pub(super) struct PathRouter {
-    pub(super) routes: MatchRouter<usize>,
-    pub(super) route_groups: Vec<RouteGroup>,
-    pub(super) path_index: BTreeMap<String, usize>,
+    routes: MatchRouter<usize>,
+    route_groups: Vec<RouteGroup>,
+    path_index: BTreeMap<String, usize>,
 }
 
 impl Default for PathRouter {
@@ -36,6 +36,19 @@ impl Default for PathRouter {
 }
 
 impl PathRouter {
+    pub(super) fn route_count(&self) -> usize {
+        self.route_groups.len()
+    }
+
+    pub(super) fn paths(&self) -> impl Iterator<Item = &str> {
+        self.route_groups.iter().map(|group| group.path.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains_exact_path(&self, path: &str) -> bool {
+        self.path_index.contains_key(path)
+    }
+
     pub(super) fn nest(
         &mut self,
         prefix: String,
@@ -276,6 +289,16 @@ impl PathRouter {
             self.route_groups[group_index].method_not_allowed_fallback = Some(fallback);
         }
         self.route_groups[group_index].refresh_allow_header();
+    }
+}
+
+impl fmt::Debug for PathRouter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PathRouter")
+            .field("route_count", &self.route_count())
+            .field("paths", &self.paths().collect::<Vec<_>>())
+            .finish()
     }
 }
 

@@ -21,6 +21,7 @@ use crate::{
     rest::{HttpResponse, IncomingRequest, SharedService},
 };
 
+mod fallback;
 mod future;
 mod into_make_service;
 mod method_filter;
@@ -46,9 +47,9 @@ pub use method_routing::{
 };
 pub use service::{RouterAsService, RouterIntoService};
 
+use fallback::Fallback;
 use method_not_allowed::{AllowHeader, MethodNotAllowed};
 use method_routing::{chained_handler_fn, chained_service_fn};
-use not_found::NotFound;
 use path::{normalize_nest_prefix, normalize_path};
 use path_router::{method_label, routes_overlap, PathRouter};
 use route::{boxed_service, layer_service};
@@ -66,8 +67,7 @@ pub struct Router {
 #[derive(Clone)]
 struct RouterInner {
     path_router: PathRouter,
-    fallback: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
-    has_custom_fallback: bool,
+    fallback: Fallback,
     method_not_allowed_fallback:
         Option<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>,
 }
@@ -90,18 +90,12 @@ impl fmt::Debug for Router {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Router")
-            .field("route_count", &self.inner.path_router.route_groups.len())
+            .field("route_count", &self.inner.path_router.route_count())
             .field(
                 "routes",
-                &self
-                    .inner
-                    .path_router
-                    .route_groups
-                    .iter()
-                    .map(|group| group.path.as_ref())
-                    .collect::<Vec<_>>(),
+                &self.inner.path_router.paths().collect::<Vec<_>>(),
             )
-            .field("has_custom_fallback", &self.inner.has_custom_fallback)
+            .field("has_custom_fallback", &self.inner.fallback.is_custom())
             .field(
                 "has_method_not_allowed_fallback",
                 &self.inner.method_not_allowed_fallback.is_some(),
@@ -115,8 +109,7 @@ impl Router {
         Self {
             inner: Arc::new(RouterInner {
                 path_router: PathRouter::default(),
-                fallback: boxed_service(NotFound),
-                has_custom_fallback: false,
+                fallback: Fallback::default_route(),
                 method_not_allowed_fallback: None,
             }),
         }
@@ -157,14 +150,13 @@ impl Router {
         R: Into<Router>,
     {
         let router = router.into().into_inner();
-        if self.inner.has_custom_fallback && router.has_custom_fallback {
-            panic!("cannot merge two routers that both have a fallback");
-        }
-        if !self.inner.has_custom_fallback && router.has_custom_fallback {
-            let inner = self.inner_mut();
-            inner.fallback = router.fallback.clone();
-            inner.has_custom_fallback = true;
-        }
+        let fallback = self
+            .inner
+            .fallback
+            .clone()
+            .merge(router.fallback)
+            .unwrap_or_else(|| panic!("cannot merge two routers that both have a fallback"));
+        self.inner_mut().fallback = fallback;
         let fallback = self.inner.method_not_allowed_fallback.clone();
         self.inner_mut()
             .path_router
@@ -303,8 +295,7 @@ impl Router {
             + 'static,
         S::Future: Send + 'static,
     {
-        self.inner_mut().fallback = boxed_service(service);
-        self.inner_mut().has_custom_fallback = true;
+        self.inner_mut().fallback = Fallback::custom(boxed_service(service));
         self
     }
 
@@ -315,8 +306,7 @@ impl Router {
     {
         let mut router = self;
         let inner = router.inner_mut();
-        inner.fallback = handler.into_service();
-        inner.has_custom_fallback = true;
+        inner.fallback = Fallback::custom(handler.into_service());
         router
     }
 
@@ -336,8 +326,7 @@ impl Router {
 
     pub fn reset_fallback(mut self) -> Self {
         let inner = self.inner_mut();
-        inner.fallback = boxed_service(NotFound);
-        inner.has_custom_fallback = false;
+        inner.fallback = Fallback::default_route();
         self
     }
 
@@ -419,8 +408,7 @@ impl Router {
         self.inner_mut()
             .path_router
             .layer_routes(layer.clone(), true);
-        let fallback = self.inner.fallback.clone();
-        self.inner_mut().fallback = layer_service(layer, fallback);
+        self.inner_mut().fallback.layer(layer);
         self
     }
 
@@ -469,7 +457,7 @@ impl Service<IncomingRequest> for Router {
             .inner
             .path_router
             .match_service(&mut parts)
-            .unwrap_or_else(|| self.inner.fallback.clone());
+            .unwrap_or_else(|| self.inner.fallback.service());
         let request = IncomingRequest::from_parts(parts, body);
         RouteFuture::new(method, Box::pin(service.oneshot(request)))
     }
@@ -1034,12 +1022,8 @@ mod tests {
         let modified = clone.route("/readyz", get(|| async { "ready" }));
 
         assert!(!Arc::ptr_eq(&router.inner, &modified.inner));
-        assert!(!router.inner.path_router.path_index.contains_key("/readyz"));
-        assert!(modified
-            .inner
-            .path_router
-            .path_index
-            .contains_key("/readyz"));
+        assert!(!router.inner.path_router.contains_exact_path("/readyz"));
+        assert!(modified.inner.path_router.contains_exact_path("/readyz"));
     }
 
     #[test]
