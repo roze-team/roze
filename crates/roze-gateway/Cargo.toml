@@ -17,6 +17,7 @@ hyper-util.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
@@ -36,3 +37,7 @@ roze-resilience = { path = "../roze-resilience" }
 roze-http = { path = "../roze-http" }
 roze-rpc = { path = "../roze-rpc" }
 roze-trace = { path = "../roze-trace" }
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true

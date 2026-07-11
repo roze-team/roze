@@ -53,6 +53,12 @@ crate, generator, or runtime module is broadly production-stable.
 - Rate limit, breaker, shedding, and fallback behavior are documented.
 - Gateway routes have explicit upstreams, rewrite rules, auth expectations, and
   fallback boundaries.
+- Every network dependency declares its plaintext or TLS policy; sensitive or
+  privileged internal dependencies use private-CA mutual TLS.
+- TLS server identity validation is enabled, private keys come from managed
+  secrets, and WSS/streaming transports cannot downgrade to plaintext.
+- Certificate rotation and invalid TLS hot reload are tested; invalid updates
+  retain the last valid runtime snapshot without interrupting in-flight calls.
 - Error codes are stable and documented.
 
 ## MQ and Background Work
@@ -68,8 +74,26 @@ crate, generator, or runtime module is broadly production-stable.
 - `/readyz` reports dependency readiness.
 - `/startupz` reports startup probe state where generated HTTP services are used.
 - `/metrics` is scraped by Prometheus.
+- Generated Pod discovery annotations or an equivalent ServiceMonitor expose
+  the framework `/metrics` endpoint on the configured service port.
+- Prometheus Operator deployments enable the generated ServiceMonitor with an
+  explicit scrape interval, timeout, and platform discovery labels.
 - Kubernetes liveness/readiness/startup probes are configured.
+- Generated workloads run as a fixed non-root UID/GID, use RuntimeDefault
+  Seccomp, disable privilege escalation, mount a read-only root filesystem, and
+  drop all Linux capabilities.
+- Workload images are pinned by SHA-256 digest and unnecessary ServiceAccount
+  token auto-mounting is disabled.
+- Helm values are constrained by the generated JSON Schema before rendering or
+  deployment.
+- Offline Helm validation parses values and verifies cross-field HPA, metrics
+  port, and scrape interval/timeout invariants.
 - HPA/PDB behavior is known for rolling deploys.
+- HPA covers CPU and memory pressure, caps scale velocity, and uses a
+  stabilization window to prevent recovery-time replica thrashing.
+- Rolling updates guarantee zero configured unavailability, define surge and
+  rollout deadlines, spread replicas across hosts, and allow readiness draining
+  during the generated pre-stop window.
 - SIGINT/SIGTERM graceful shutdown is verified.
 
 ## Observability

@@ -11,7 +11,7 @@ use crate::{
     rest::{HttpResponse, IncomingRequest},
 };
 
-use super::join_paths;
+use super::path::join_paths;
 
 #[derive(Clone)]
 pub(super) struct StripPrefixService<S> {

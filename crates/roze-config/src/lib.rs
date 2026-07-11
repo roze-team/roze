@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, net::IpAddr, net::SocketAddr, path::Path};
+use std::{
+    collections::BTreeMap,
+    net::IpAddr,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -95,6 +100,20 @@ pub struct GatewayService {
     pub outlier: Option<GatewayOutlierConfig>,
     #[serde(default)]
     pub health_check: Option<GatewayHealthCheckConfig>,
+    #[serde(default)]
+    pub tls: Option<GatewayUpstreamTlsConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GatewayUpstreamTlsConfig {
+    #[serde(default)]
+    pub ca_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub client_cert_file: Option<PathBuf>,
+    #[serde(default)]
+    pub client_key_file: Option<PathBuf>,
+    #[serde(default)]
+    pub server_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1409,6 +1428,50 @@ governance: {}
             .try_deserialize()
             .expect("deserialize");
         assert!(config.rpc_client_config("missing").is_none());
+    }
+
+    #[test]
+    fn loads_gateway_upstream_mutual_tls_config() {
+        let source = r#"
+name: edge
+gateway:
+  services:
+    - name: user
+      upstream: "wss://user.internal/ws"
+      tls:
+        ca_files:
+          - certs/internal-ca.pem
+        client_cert_file: certs/gateway-client.pem
+        client_key_file: certs/gateway-client.key
+        server_name: user.internal
+governance: {}
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let tls = config
+            .gateway
+            .expect("gateway")
+            .services
+            .into_iter()
+            .next()
+            .expect("service")
+            .tls
+            .expect("tls");
+        assert_eq!(tls.ca_files, vec![PathBuf::from("certs/internal-ca.pem")]);
+        assert_eq!(
+            tls.client_cert_file,
+            Some(PathBuf::from("certs/gateway-client.pem"))
+        );
+        assert_eq!(
+            tls.client_key_file,
+            Some(PathBuf::from("certs/gateway-client.key"))
+        );
+        assert_eq!(tls.server_name.as_deref(), Some("user.internal"));
     }
 
     #[test]

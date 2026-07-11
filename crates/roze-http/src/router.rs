@@ -1,9 +1,7 @@
 use std::{
     any::TypeId,
-    collections::BTreeMap,
     convert::Infallible,
     fmt,
-    future::{ready, Ready},
     sync::Arc,
     task::{Context, Poll},
 };
@@ -11,29 +9,49 @@ use std::{
 #[cfg(test)]
 use std::{future::Future, pin::Pin};
 
-use http::{header, Method, StatusCode};
-use matchit::Router as MatchRouter;
+#[cfg(test)]
+use crate::{extract::MatchedPath, route_params::RouteParams};
+
+use http::Method;
 use tower::{util::BoxCloneSyncService, Layer, Service, ServiceExt};
 
 use crate::{
-    extract::{ConnectInfoService, FromRef, MatchedPath, OriginalUri},
+    extract::{FromRef, OriginalUri},
     handler::Handler,
-    rest::{self, HttpResponse, IncomingRequest, SharedService},
-    route_params::RouteParams,
+    rest::{HttpResponse, IncomingRequest, SharedService},
 };
 
 mod future;
 mod into_make_service;
 mod method_filter;
+mod method_not_allowed;
+mod method_routing;
 mod not_found;
+mod path;
+mod path_router;
+mod route;
+mod service;
 mod state;
 mod strip_prefix;
 
 pub use future::RouteFuture;
-pub use into_make_service::{IntoMakeService, IntoMakeServiceWithConnectInfo};
+pub use into_make_service::{
+    IntoMakeService, IntoMakeServiceWithConnectInfo, MethodRouterIntoMakeServiceWithConnectInfo,
+};
 pub use method_filter::{MethodFilter, MethodSelection};
+pub use method_routing::{
+    any, any_service, connect, connect_service, delete, delete_service, get, get_service, head,
+    head_service, on, on_service, options, options_service, patch, patch_service, post,
+    post_service, put, put_service, trace, trace_service,
+};
+pub use service::{RouterAsService, RouterIntoService};
 
+use method_not_allowed::{AllowHeader, MethodNotAllowed};
+use method_routing::{chained_handler_fn, chained_service_fn};
 use not_found::NotFound;
+use path::{normalize_nest_prefix, normalize_path};
+use path_router::{method_label, routes_overlap, PathRouter};
+use route::{boxed_service, layer_service};
 use state::{StateFromRefLayer, StateLayer};
 use strip_prefix::StripPrefixService;
 
@@ -47,9 +65,7 @@ pub struct Router {
 
 #[derive(Clone)]
 struct RouterInner {
-    routes: MatchRouter<usize>,
-    route_groups: Vec<RouteGroup>,
-    path_index: BTreeMap<String, usize>,
+    path_router: PathRouter,
     fallback: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
     has_custom_fallback: bool,
     method_not_allowed_fallback:
@@ -64,20 +80,6 @@ impl Clone for Router {
     }
 }
 
-#[derive(Clone)]
-struct RouteGroup {
-    path: Arc<str>,
-    routes: Vec<Route>,
-    method_not_allowed_fallback:
-        Option<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>,
-}
-
-#[derive(Clone)]
-struct Route {
-    method: Option<Method>,
-    service: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
-}
-
 impl Default for Router {
     fn default() -> Self {
         Self::new()
@@ -88,11 +90,12 @@ impl fmt::Debug for Router {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Router")
-            .field("route_count", &self.inner.route_groups.len())
+            .field("route_count", &self.inner.path_router.route_groups.len())
             .field(
                 "routes",
                 &self
                     .inner
+                    .path_router
                     .route_groups
                     .iter()
                     .map(|group| group.path.as_ref())
@@ -111,9 +114,7 @@ impl Router {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RouterInner {
-                routes: MatchRouter::new(),
-                route_groups: Vec::new(),
-                path_index: BTreeMap::new(),
+                path_router: PathRouter::default(),
                 fallback: boxed_service(NotFound),
                 has_custom_fallback: false,
                 method_not_allowed_fallback: None,
@@ -132,59 +133,21 @@ impl Router {
     #[track_caller]
     pub fn route(mut self, path: impl Into<String>, method_router: MethodRouter) -> Self {
         let path = normalize_path(path.into());
-        let group_index = self.ensure_route_group(path);
-
-        let group = &mut self.inner_mut().route_groups[group_index];
-        for endpoint in method_router.endpoints {
-            if group
-                .routes
-                .iter()
-                .any(|route| routes_overlap(&route.method, &endpoint.method))
-            {
-                panic!(
-                    "overlapping method route for {}",
-                    method_label(&endpoint.method)
-                );
-            }
-            group.routes.push(Route {
-                method: endpoint.method,
-                service: endpoint.service,
-            });
-        }
-        if let Some(fallback) = method_router.method_not_allowed_fallback {
-            if group.method_not_allowed_fallback.is_some() {
-                panic!("overlapping method-not-allowed fallback for {}", group.path);
-            }
-            group.method_not_allowed_fallback = Some(fallback);
-        }
+        let fallback = self.inner.method_not_allowed_fallback.clone();
+        self.inner_mut()
+            .path_router
+            .route(path, method_router, fallback);
         self
     }
 
     #[track_caller]
     pub fn nest(mut self, prefix: impl Into<String>, router: Router) -> Self {
         let prefix = normalize_nest_prefix(prefix.into(), "use Router::merge instead");
-        let RouterInner {
-            path_index,
-            route_groups,
-            ..
-        } = router.into_inner();
-        for (path, group_index) in path_index {
-            let nested_path = join_paths(&prefix, &path);
-            let mut group = route_groups[group_index].clone();
-            for route in &mut group.routes {
-                route.service = boxed_service(StripPrefixService::new(
-                    prefix.clone(),
-                    route.service.clone(),
-                ));
-            }
-            if let Some(fallback) = group.method_not_allowed_fallback.take() {
-                group.method_not_allowed_fallback = Some(boxed_service(StripPrefixService::new(
-                    prefix.clone(),
-                    fallback,
-                )));
-            }
-            self.insert_group_routes(nested_path, group, "nested");
-        }
+        let path_router = router.into_inner().path_router;
+        let fallback = self.inner.method_not_allowed_fallback.clone();
+        self.inner_mut()
+            .path_router
+            .nest(prefix, path_router, fallback);
         self
     }
 
@@ -202,10 +165,10 @@ impl Router {
             inner.fallback = router.fallback.clone();
             inner.has_custom_fallback = true;
         }
-        for (path, group_index) in router.path_index {
-            let group = router.route_groups[group_index].clone();
-            self.insert_group_routes(path, group, "merged");
-        }
+        let fallback = self.inner.method_not_allowed_fallback.clone();
+        self.inner_mut()
+            .path_router
+            .merge(router.path_router, fallback);
         self
     }
 
@@ -400,22 +363,20 @@ impl Router {
         let fallback = boxed_service(service);
         let inner = self.inner_mut();
         inner.method_not_allowed_fallback = Some(fallback.clone());
-        for group in &mut inner.route_groups {
-            group.method_not_allowed_fallback = Some(fallback.clone());
-        }
+        inner.path_router.set_method_not_allowed_fallback(fallback);
         self
     }
 
     pub fn has_routes(&self) -> bool {
-        !self.inner.route_groups.is_empty()
+        self.inner.path_router.has_routes()
     }
 
     pub fn as_service(&mut self) -> RouterAsService<'_> {
-        RouterAsService { router: self }
+        RouterAsService::new(self)
     }
 
     pub fn into_service(self) -> RouterIntoService {
-        RouterIntoService { router: self }
+        RouterIntoService::new(self)
     }
 
     pub fn into_make_service(self) -> IntoMakeService {
@@ -441,59 +402,6 @@ impl Router {
         self.layer(StateFromRefLayer::<Outer, Inner>::new(state))
     }
 
-    fn ensure_route_group(&mut self, path: String) -> usize {
-        match self.inner.path_index.get(&path).copied() {
-            Some(index) => index,
-            None => {
-                let inner = self.inner_mut();
-                let index = inner.route_groups.len();
-                inner
-                    .routes
-                    .insert(path.clone(), index)
-                    .expect("invalid route path");
-                inner.route_groups.push(RouteGroup {
-                    path: Arc::from(path.as_str()),
-                    routes: Vec::new(),
-                    method_not_allowed_fallback: inner.method_not_allowed_fallback.clone(),
-                });
-                inner.path_index.insert(path, index);
-                index
-            }
-        }
-    }
-
-    fn insert_group_routes(&mut self, path: String, group: RouteGroup, action: &str) {
-        let RouteGroup {
-            routes,
-            method_not_allowed_fallback,
-            ..
-        } = group;
-        let group_index = self.ensure_route_group(path);
-        let inner = self.inner_mut();
-        for route in routes {
-            if inner.route_groups[group_index]
-                .routes
-                .iter()
-                .any(|existing| routes_overlap(&existing.method, &route.method))
-            {
-                panic!(
-                    "overlapping {action} route for {}",
-                    method_label(&route.method)
-                );
-            }
-            inner.route_groups[group_index].routes.push(route);
-        }
-        if let Some(fallback) = method_not_allowed_fallback {
-            if inner.route_groups[group_index]
-                .method_not_allowed_fallback
-                .is_some()
-            {
-                panic!("overlapping {action} method-not-allowed fallback");
-            }
-            inner.route_groups[group_index].method_not_allowed_fallback = Some(fallback);
-        }
-    }
-
     pub fn layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
@@ -508,7 +416,9 @@ impl Router {
             + 'static,
         <L::Service as Service<IncomingRequest>>::Future: Send + 'static,
     {
-        self.layer_routes(layer.clone(), true);
+        self.inner_mut()
+            .path_router
+            .layer_routes(layer.clone(), true);
         let fallback = self.inner.fallback.clone();
         self.inner_mut().fallback = layer_service(layer, fallback);
         self
@@ -529,91 +439,13 @@ impl Router {
             + 'static,
         <L::Service as Service<IncomingRequest>>::Future: Send + 'static,
     {
-        if self.inner.route_groups.is_empty() {
+        if !self.inner.path_router.has_routes() {
             panic!(
                 "adding a route_layer before any routes is a no-op; add the routes you want the layer to apply to first"
             );
         }
-        self.layer_routes(layer, false);
+        self.inner_mut().path_router.layer_routes(layer, false);
         self
-    }
-
-    fn layer_routes<L>(&mut self, layer: L, include_method_fallbacks: bool)
-    where
-        L: Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        L::Service: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        <L::Service as Service<IncomingRequest>>::Future: Send + 'static,
-    {
-        for group in &mut self.inner_mut().route_groups {
-            for route in &mut group.routes {
-                route.service = layer_service(layer.clone(), route.service.clone());
-            }
-            if include_method_fallbacks {
-                if let Some(fallback) = group.method_not_allowed_fallback.take() {
-                    group.method_not_allowed_fallback =
-                        Some(layer_service(layer.clone(), fallback));
-                }
-            }
-        }
-    }
-}
-
-#[must_use = "service adapters do nothing unless used"]
-pub struct RouterAsService<'a> {
-    router: &'a mut Router,
-}
-
-impl Service<IncomingRequest> for RouterAsService<'_> {
-    type Response = HttpResponse;
-    type Error = Infallible;
-    type Future = RouteFuture;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.router.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: IncomingRequest) -> Self::Future {
-        self.router.call(request)
-    }
-}
-
-impl fmt::Debug for RouterAsService<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RouterAsService").finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone)]
-#[must_use = "service adapters do nothing unless used"]
-pub struct RouterIntoService {
-    router: Router,
-}
-
-impl Service<IncomingRequest> for RouterIntoService {
-    type Response = HttpResponse;
-    type Error = Infallible;
-    type Future = RouteFuture;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.router.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: IncomingRequest) -> Self::Future {
-        self.router.call(request)
-    }
-}
-
-impl fmt::Debug for RouterIntoService {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RouterIntoService").finish_non_exhaustive()
     }
 }
 
@@ -633,46 +465,11 @@ impl Service<IncomingRequest> for Router {
             parts.extensions.insert(OriginalUri(original_uri));
         }
         let method = parts.method.clone();
-        let matched = self.inner.routes.at(parts.uri.path()).ok();
-        let service = match matched {
-            Some(matched) => {
-                let route_params = RouteParams::from_pairs(
-                    matched
-                        .params
-                        .iter()
-                        .map(|(key, value)| (key.to_string(), value.to_string())),
-                );
-                parts.extensions.insert(route_params);
-                let group = &self.inner.route_groups[*matched.value];
-                parts
-                    .extensions
-                    .insert(MatchedPath::new(group.path.clone()));
-                let route = group
-                    .routes
-                    .iter()
-                    .find(|route| route.method.as_ref() == Some(&parts.method))
-                    .or_else(|| {
-                        (parts.method == Method::HEAD).then(|| {
-                            group
-                                .routes
-                                .iter()
-                                .find(|route| route.method.as_ref() == Some(&Method::GET))
-                        })?
-                    })
-                    .or_else(|| group.routes.iter().find(|route| route.method.is_none()));
-                route.map(|route| route.service.clone()).unwrap_or_else(|| {
-                    group
-                        .method_not_allowed_fallback
-                        .clone()
-                        .unwrap_or_else(|| method_not_allowed_service(allow_header(group)))
-                })
-            }
-            None => {
-                parts.extensions.remove::<MatchedPath>();
-                parts.extensions.remove::<RouteParams>();
-                self.inner.fallback.clone()
-            }
-        };
+        let service = self
+            .inner
+            .path_router
+            .match_service(&mut parts)
+            .unwrap_or_else(|| self.inner.fallback.clone());
         let request = IncomingRequest::from_parts(parts, body);
         RouteFuture::new(method, Box::pin(service.oneshot(request)))
     }
@@ -682,6 +479,7 @@ impl Service<IncomingRequest> for Router {
 #[must_use = "method routers must be used as services or retained after configuration"]
 pub struct MethodRouter {
     endpoints: Vec<MethodEndpoint>,
+    allow_header: AllowHeader,
     method_not_allowed_fallback:
         Option<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>,
 }
@@ -728,8 +526,17 @@ impl MethodRouter {
     pub fn new() -> Self {
         Self {
             endpoints: Vec::new(),
+            allow_header: AllowHeader::default(),
             method_not_allowed_fallback: None,
         }
+    }
+
+    fn refresh_allow_header(&mut self) {
+        self.allow_header = AllowHeader::from_methods(
+            self.endpoints
+                .iter()
+                .map(|endpoint| endpoint.method.as_ref()),
+        );
     }
 
     #[track_caller]
@@ -771,6 +578,7 @@ impl MethodRouter {
                 service: service.clone(),
             });
         }
+        self.refresh_allow_header();
         self
     }
 
@@ -804,188 +612,29 @@ impl MethodRouter {
             method: None,
             service: boxed_service(service),
         });
+        self.refresh_allow_header();
         self
     }
 
-    #[track_caller]
-    pub fn get<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::GET, handler)
-    }
+    chained_handler_fn!(get, GET);
+    chained_handler_fn!(post, POST);
+    chained_handler_fn!(put, PUT);
+    chained_handler_fn!(patch, PATCH);
+    chained_handler_fn!(delete, DELETE);
+    chained_handler_fn!(head, HEAD);
+    chained_handler_fn!(options, OPTIONS);
+    chained_handler_fn!(trace, TRACE);
+    chained_handler_fn!(connect, CONNECT);
 
-    pub fn get_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::GET, service)
-    }
-
-    #[track_caller]
-    pub fn post<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::POST, handler)
-    }
-
-    pub fn post_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::POST, service)
-    }
-
-    #[track_caller]
-    pub fn put<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::PUT, handler)
-    }
-
-    pub fn put_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::PUT, service)
-    }
-
-    #[track_caller]
-    pub fn patch<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::PATCH, handler)
-    }
-
-    pub fn patch_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::PATCH, service)
-    }
-
-    #[track_caller]
-    pub fn delete<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::DELETE, handler)
-    }
-
-    pub fn delete_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::DELETE, service)
-    }
-
-    #[track_caller]
-    pub fn head<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::HEAD, handler)
-    }
-
-    pub fn head_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::HEAD, service)
-    }
-
-    #[track_caller]
-    pub fn options<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::OPTIONS, handler)
-    }
-
-    pub fn options_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::OPTIONS, service)
-    }
-
-    #[track_caller]
-    pub fn trace<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::TRACE, handler)
-    }
-
-    pub fn trace_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::TRACE, service)
-    }
-
-    #[track_caller]
-    pub fn connect<H, T>(self, handler: H) -> Self
-    where
-        H: Handler<T>,
-    {
-        self.on(Method::CONNECT, handler)
-    }
-
-    pub fn connect_service<S>(self, service: S) -> Self
-    where
-        S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.on_service(Method::CONNECT, service)
-    }
+    chained_service_fn!(get_service, GET);
+    chained_service_fn!(post_service, POST);
+    chained_service_fn!(put_service, PUT);
+    chained_service_fn!(patch_service, PATCH);
+    chained_service_fn!(delete_service, DELETE);
+    chained_service_fn!(head_service, HEAD);
+    chained_service_fn!(options_service, OPTIONS);
+    chained_service_fn!(trace_service, TRACE);
+    chained_service_fn!(connect_service, CONNECT);
 
     pub fn with_state<T>(self, state: T) -> Self
     where
@@ -1069,6 +718,7 @@ impl MethodRouter {
             }
             (true, None) => {}
         }
+        self.refresh_allow_header();
         self
     }
 
@@ -1128,10 +778,7 @@ impl MethodRouter {
     pub fn into_make_service_with_connect_info<T>(
         self,
     ) -> MethodRouterIntoMakeServiceWithConnectInfo<T> {
-        MethodRouterIntoMakeServiceWithConnectInfo {
-            method_router: self,
-            _marker: std::marker::PhantomData,
-        }
+        MethodRouterIntoMakeServiceWithConnectInfo::new(self)
     }
 }
 
@@ -1164,386 +811,12 @@ impl Service<IncomingRequest> for MethodRouter {
             })
             .map(|endpoint| endpoint.service.clone())
             .unwrap_or_else(|| {
-                self.method_not_allowed_fallback
-                    .clone()
-                    .unwrap_or_else(|| method_not_allowed_service(method_router_allow_header(self)))
+                self.method_not_allowed_fallback.clone().unwrap_or_else(|| {
+                    boxed_service(MethodNotAllowed::new(self.allow_header.clone()))
+                })
             });
         RouteFuture::new(method, Box::pin(service.oneshot(request)))
     }
-}
-
-#[derive(Clone)]
-#[must_use = "make services do nothing unless used"]
-pub struct MethodRouterIntoMakeServiceWithConnectInfo<T> {
-    method_router: MethodRouter,
-    _marker: std::marker::PhantomData<fn() -> T>,
-}
-
-impl<T, Target> Service<Target> for MethodRouterIntoMakeServiceWithConnectInfo<T>
-where
-    T: Clone + Send + Sync + 'static,
-    Target: Into<T>,
-{
-    type Response = ConnectInfoService<MethodRouter, T>;
-    type Error = Infallible;
-    type Future = Ready<Result<Self::Response, Infallible>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, target: Target) -> Self::Future {
-        ready(Ok(ConnectInfoService::new(
-            self.method_router.clone(),
-            target.into(),
-        )))
-    }
-}
-
-impl<T> fmt::Debug for MethodRouterIntoMakeServiceWithConnectInfo<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MethodRouterIntoMakeServiceWithConnectInfo")
-            .finish_non_exhaustive()
-    }
-}
-
-#[track_caller]
-pub fn get<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().get(handler)
-}
-
-#[track_caller]
-pub fn any<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().any(handler)
-}
-
-#[track_caller]
-pub fn any_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().any_service(service)
-}
-
-#[track_caller]
-pub fn on<H, T>(filter: MethodFilter, handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().on(filter, handler)
-}
-
-#[track_caller]
-pub fn on_service<S>(filter: MethodFilter, service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().on_service(filter, service)
-}
-
-#[track_caller]
-pub fn get_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().get_service(service)
-}
-
-#[track_caller]
-pub fn post<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().post(handler)
-}
-
-#[track_caller]
-pub fn post_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().post_service(service)
-}
-
-#[track_caller]
-pub fn put<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().put(handler)
-}
-
-#[track_caller]
-pub fn put_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().put_service(service)
-}
-
-#[track_caller]
-pub fn patch<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().patch(handler)
-}
-
-#[track_caller]
-pub fn patch_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().patch_service(service)
-}
-
-#[track_caller]
-pub fn delete<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().delete(handler)
-}
-
-#[track_caller]
-pub fn delete_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().delete_service(service)
-}
-
-#[track_caller]
-pub fn head<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().head(handler)
-}
-
-#[track_caller]
-pub fn head_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().head_service(service)
-}
-
-#[track_caller]
-pub fn options<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().options(handler)
-}
-
-#[track_caller]
-pub fn options_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().options_service(service)
-}
-
-#[track_caller]
-pub fn trace<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().trace(handler)
-}
-
-#[track_caller]
-pub fn trace_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().trace_service(service)
-}
-
-#[track_caller]
-pub fn connect<H, T>(handler: H) -> MethodRouter
-where
-    H: Handler<T>,
-{
-    MethodRouter::new().connect(handler)
-}
-
-#[track_caller]
-pub fn connect_service<S>(service: S) -> MethodRouter
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    MethodRouter::new().connect_service(service)
-}
-
-fn boxed_service<S>(service: S) -> BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>
-where
-    S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send + 'static,
-{
-    BoxCloneSyncService::new(service)
-}
-
-fn method_not_allowed_service(
-    allow: Option<String>,
-) -> BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible> {
-    BoxCloneSyncService::new(tower::service_fn(move |_request: IncomingRequest| {
-        let allow = allow.clone();
-        async move {
-            let mut response =
-                rest::text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
-            if let Some(allow) = allow {
-                if let Ok(value) = allow.parse() {
-                    response.headers_mut().insert(header::ALLOW, value);
-                }
-            }
-            Ok::<_, Infallible>(response)
-        }
-    }))
-}
-
-fn layer_service<L>(
-    layer: L,
-    service: BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>,
-) -> BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>
-where
-    L: Layer<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    L::Service: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    <L::Service as Service<IncomingRequest>>::Future: Send + 'static,
-{
-    BoxCloneSyncService::new(layer.layer(service))
-}
-
-fn routes_overlap(left: &Option<Method>, right: &Option<Method>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => left == right,
-        (None, None) => true,
-        (Some(_), None) | (None, Some(_)) => false,
-    }
-}
-
-fn method_label(method: &Option<Method>) -> String {
-    method
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "any".to_string())
-}
-
-fn allow_header(group: &RouteGroup) -> Option<String> {
-    if group.routes.iter().any(|route| route.method.is_none()) {
-        return None;
-    }
-    Some(allow_header_from_methods(
-        group
-            .routes
-            .iter()
-            .filter_map(|route| route.method.as_ref())
-            .cloned(),
-    ))
-}
-
-fn method_router_allow_header(method_router: &MethodRouter) -> Option<String> {
-    if method_router
-        .endpoints
-        .iter()
-        .any(|endpoint| endpoint.method.is_none())
-    {
-        return None;
-    }
-    Some(allow_header_from_methods(
-        method_router
-            .endpoints
-            .iter()
-            .filter_map(|endpoint| endpoint.method.as_ref())
-            .cloned(),
-    ))
-}
-
-fn allow_header_from_methods(methods: impl IntoIterator<Item = Method>) -> String {
-    let mut methods = methods
-        .into_iter()
-        .map(|method| method.to_string())
-        .collect::<Vec<_>>();
-    if methods.iter().any(|method| method == Method::GET.as_str()) {
-        methods.push(Method::HEAD.to_string());
-    }
-    methods.sort();
-    methods.dedup();
-    methods.join(", ")
 }
 
 fn assert_service_not_router<S: 'static>(method: &str) {
@@ -1552,56 +825,12 @@ fn assert_service_not_router<S: 'static>(method: &str) {
     }
 }
 
-fn normalize_path(path: String) -> String {
-    if path.is_empty() {
-        panic!("route path must not be empty");
-    }
-    if !path.starts_with('/') {
-        panic!("route path must start with `/`");
-    }
-    validate_path_segments(&path);
-    path
-}
-
-fn validate_path_segments(path: &str) {
-    for segment in path.split('/') {
-        if segment.starts_with(':') {
-            panic!("route path segments must not start with `:`; use `{{param}}` captures");
-        }
-        if segment.starts_with('*') {
-            panic!("route path segments must not start with `*`; use `{{*wildcard}}` captures");
-        }
-    }
-}
-
-fn normalize_nest_prefix(prefix: String, root_hint: &str) -> String {
-    let prefix = normalize_path(prefix);
-    let prefix = prefix.trim_end_matches('/').to_string();
-    if prefix.is_empty() || prefix == "/" {
-        panic!("nest prefix must not be root; {root_hint}");
-    }
-    if prefix
-        .split('/')
-        .any(|segment| segment.starts_with("{*") && segment.ends_with('}'))
-    {
-        panic!("nest prefix must not contain wildcard captures");
-    }
-    prefix
-}
-
-fn join_paths(prefix: &str, path: &str) -> String {
-    if path == "/" {
-        prefix.to_string()
-    } else {
-        format!("{prefix}{}", normalize_path(path.to_string()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rest;
     use crate::{ConnectInfo, NestedPath, OriginalUri, Path, State};
-    use http::{HeaderValue, Request, Uri};
+    use http::{header, HeaderValue, Request, StatusCode, Uri};
     use http_body_util::BodyExt;
     use std::net::SocketAddr;
 
@@ -1805,8 +1034,12 @@ mod tests {
         let modified = clone.route("/readyz", get(|| async { "ready" }));
 
         assert!(!Arc::ptr_eq(&router.inner, &modified.inner));
-        assert!(!router.inner.path_index.contains_key("/readyz"));
-        assert!(modified.inner.path_index.contains_key("/readyz"));
+        assert!(!router.inner.path_router.path_index.contains_key("/readyz"));
+        assert!(modified
+            .inner
+            .path_router
+            .path_index
+            .contains_key("/readyz"));
     }
 
     #[test]

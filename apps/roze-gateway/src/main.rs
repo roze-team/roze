@@ -18,13 +18,13 @@ async fn main() -> anyhow::Result<()> {
         .listen
         .unwrap_or_else(|| "127.0.0.1:8081".parse().expect("default addr"));
     let registry = roze_rpc::registry::build_service_registry(&config)?;
-    let service = roze_gateway::build_router_with_registry_governance_and_auth(
+    let service = roze_gateway::try_build_router_with_registry_governance_and_auth(
         gateway,
         jwt,
         api_keys,
         registry,
         Some(config.governance),
-    );
+    )?;
     if let Some(center) = center {
         let reload_service = service.clone();
         center

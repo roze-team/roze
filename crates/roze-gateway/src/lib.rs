@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap},
     convert::Infallible,
+    fs::File,
     future::Future,
+    io::BufReader,
     pin::Pin,
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     task::{Context as TaskContext, Poll},
@@ -85,6 +87,7 @@ struct GatewayRuntime {
     cors: Option<CorsPolicy>,
     stream_connection_states: Arc<StdMutex<HashMap<String, u32>>>,
     websocket_tls_config: Arc<OnceLock<Arc<rustls::ClientConfig>>>,
+    websocket_tls_configs: HashMap<String, Arc<rustls::ClientConfig>>,
 }
 
 #[derive(Debug, Clone)]
@@ -542,7 +545,7 @@ impl GatewayServiceRuntime {
         let current = self.current.load_full();
         let _runtime_context = self.runtime_handle.as_ref().map(|handle| handle.enter());
         let next =
-            build_gateway_runtime(config, jwt, api_keys, registry, governance, Some(&current));
+            build_gateway_runtime(config, jwt, api_keys, registry, governance, Some(&current))?;
         current.stop_health_checks();
         self.current.store(next);
         Ok(())
@@ -565,14 +568,26 @@ pub fn build_router_with_registry_governance_and_auth(
     registry: Option<Arc<dyn Registry>>,
     governance: Option<GovernanceConfig>,
 ) -> GatewayServiceRuntime {
-    let runtime = build_gateway_runtime(config, jwt, api_keys, registry, governance, None);
-    GatewayServiceRuntime {
+    try_build_router_with_registry_governance_and_auth(config, jwt, api_keys, registry, governance)
+        .expect("invalid gateway runtime configuration")
+}
+
+pub fn try_build_router_with_registry_governance_and_auth(
+    config: GatewayConfig,
+    jwt: Option<JwtConfig>,
+    api_keys: Option<roze_auth::ApiKeyConfig>,
+    registry: Option<Arc<dyn Registry>>,
+    governance: Option<GovernanceConfig>,
+) -> anyhow::Result<GatewayServiceRuntime> {
+    validate_gateway_config(&config)?;
+    let runtime = build_gateway_runtime(config, jwt, api_keys, registry, governance, None)?;
+    Ok(GatewayServiceRuntime {
         current: Arc::new(ArcSwap::from(runtime.clone())),
         reload_lock: Arc::new(StdMutex::new(())),
         runtime_handle: tokio::runtime::Handle::try_current().ok(),
         #[cfg(test)]
         runtime,
-    }
+    })
 }
 
 fn build_gateway_runtime(
@@ -582,7 +597,8 @@ fn build_gateway_runtime(
     registry: Option<Arc<dyn Registry>>,
     governance: Option<GovernanceConfig>,
     previous: Option<&GatewayRuntime>,
-) -> Arc<GatewayRuntime> {
+) -> anyhow::Result<Arc<GatewayRuntime>> {
+    let websocket_tls_configs = build_service_websocket_tls_configs(&config.services)?;
     let cors = config.cors.map(CorsPolicy::new);
     let global_stream_idle_timeout = config.stream_idle_timeout_ms.map(Duration::from_millis);
     let global_max_stream_connections = config.max_stream_connections;
@@ -649,9 +665,10 @@ fn build_gateway_runtime(
         websocket_tls_config: previous
             .map(|runtime| runtime.websocket_tls_config.clone())
             .unwrap_or_else(|| Arc::new(OnceLock::new())),
+        websocket_tls_configs,
     });
     runtime.spawn_health_checks();
-    runtime
+    Ok(runtime)
 }
 
 impl Drop for GatewayRuntime {
@@ -1252,7 +1269,15 @@ impl GatewayRuntime {
             upstream_url.push('?');
             upstream_url.push_str(query);
         }
-        let websocket_target = websocket_target(&upstream_url)?;
+        let mut websocket_target = websocket_target(&upstream_url)?;
+        if let Some(server_name) = service
+            .tls
+            .as_ref()
+            .and_then(|tls| tls.server_name.as_ref())
+            .filter(|server_name| !server_name.trim().is_empty())
+        {
+            websocket_target.server_name = server_name.clone();
+        }
         let expected_accept = expected_websocket_accept(request.headers())?;
         let timeout = context.remaining_timeout().unwrap_or(Duration::ZERO);
         if timeout.is_zero() {
@@ -1273,7 +1298,11 @@ impl GatewayRuntime {
                 }
             };
         let mut upstream: Box<dyn WebSocketIo> = if websocket_target.secure {
-            let tls_config = self.websocket_tls_config();
+            let tls_config = self
+                .websocket_tls_configs
+                .get(&service.name)
+                .cloned()
+                .unwrap_or_else(|| self.websocket_tls_config());
             let timeout = context.remaining_timeout().unwrap_or(Duration::ZERO);
             match tokio::time::timeout(
                 timeout,
@@ -1815,6 +1844,29 @@ pub fn validate_gateway_config(config: &GatewayConfig) -> anyhow::Result<()> {
                 service.name
             );
         }
+        if let Some(tls) = service.tls.as_ref() {
+            anyhow::ensure!(
+                tls.client_cert_file.is_some() == tls.client_key_file.is_some(),
+                "gateway service '{}' must configure client_cert_file and client_key_file together",
+                service.name
+            );
+            for path in &tls.ca_files {
+                anyhow::ensure!(
+                    !path.as_os_str().is_empty(),
+                    "gateway service '{}' has an empty CA path",
+                    service.name
+                );
+            }
+            if let Some(server_name) = tls.server_name.as_ref() {
+                rustls::pki_types::ServerName::try_from(server_name.clone()).map_err(|error| {
+                    anyhow::anyhow!(
+                        "gateway service '{}' has invalid TLS server_name '{}': {error}",
+                        service.name,
+                        server_name
+                    )
+                })?;
+            }
+        }
     }
     for route in &config.routes {
         anyhow::ensure!(
@@ -2313,7 +2365,7 @@ fn websocket_target(upstream_url: &str) -> Result<WebSocketTarget, UpstreamError
     })
 }
 
-fn build_websocket_tls_config() -> Arc<rustls::ClientConfig> {
+fn default_websocket_root_store() -> rustls::RootCertStore {
     let mut roots =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let loaded = rustls_native_certs::load_native_certs();
@@ -2333,15 +2385,107 @@ fn build_websocket_tls_config() -> Arc<rustls::ClientConfig> {
             );
         }
     }
-    Arc::new(
-        rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
+    roots
+}
+
+fn websocket_tls_builder(
+    roots: rustls::RootCertStore,
+) -> rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert> {
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("Ring supports Rustls safe protocol versions")
         .with_root_certificates(roots)
-        .with_no_client_auth(),
-    )
+}
+
+fn build_websocket_tls_config() -> Arc<rustls::ClientConfig> {
+    Arc::new(websocket_tls_builder(default_websocket_root_store()).with_no_client_auth())
+}
+
+fn build_service_websocket_tls_configs(
+    services: &[GatewayService],
+) -> anyhow::Result<HashMap<String, Arc<rustls::ClientConfig>>> {
+    let mut configs = HashMap::new();
+    for service in services {
+        let Some(tls) = service.tls.as_ref() else {
+            continue;
+        };
+        if tls.ca_files.is_empty()
+            && tls.client_cert_file.is_none()
+            && tls.client_key_file.is_none()
+        {
+            continue;
+        }
+        let mut roots = default_websocket_root_store();
+        for path in &tls.ca_files {
+            for certificate in read_pem_certificates(path)? {
+                roots.add(certificate).map_err(|error| {
+                    anyhow::anyhow!(
+                        "gateway service '{}' rejected CA '{}': {error}",
+                        service.name,
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        let config = match (&tls.client_cert_file, &tls.client_key_file) {
+            (Some(certificate_path), Some(key_path)) => {
+                let certificates = read_pem_certificates(certificate_path)?;
+                anyhow::ensure!(
+                    !certificates.is_empty(),
+                    "gateway service '{}' client certificate file '{}' is empty",
+                    service.name,
+                    certificate_path.display()
+                );
+                let key_file = File::open(key_path).map_err(|error| {
+                    anyhow::anyhow!(
+                        "gateway service '{}' cannot open client key '{}': {error}",
+                        service.name,
+                        key_path.display()
+                    )
+                })?;
+                let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "gateway service '{}' cannot parse client key '{}': {error}",
+                            service.name,
+                            key_path.display()
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "gateway service '{}' client key file '{}' contains no private key",
+                            service.name,
+                            key_path.display()
+                        )
+                    })?;
+                websocket_tls_builder(roots)
+                    .with_client_auth_cert(certificates, key)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "gateway service '{}' client identity is invalid: {error}",
+                            service.name
+                        )
+                    })?
+            }
+            (None, None) => websocket_tls_builder(roots).with_no_client_auth(),
+            _ => unreachable!("gateway TLS identity pair was validated"),
+        };
+        configs.insert(service.name.clone(), Arc::new(config));
+    }
+    Ok(configs)
+}
+
+fn read_pem_certificates(
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let file = File::open(path).map_err(|error| {
+        anyhow::anyhow!("cannot open TLS certificate '{}': {error}", path.display())
+    })?;
+    rustls_pemfile::certs(&mut BufReader::new(file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot parse TLS certificate '{}': {error}", path.display())
+        })
 }
 
 async fn connect_websocket_tls(
@@ -2644,6 +2788,7 @@ mod tests {
                 max_stream_connections: None,
                 outlier: None,
                 health_check: None,
+                tls: None,
             }],
             routes: vec![GatewayRoute {
                 path: "/catalog".to_string(),
@@ -2807,7 +2952,7 @@ mod tests {
 
     #[tokio::test]
     async fn hot_reload_atomically_replaces_runtime_and_rejects_invalid_snapshot() {
-        let (old_upstream, old_hits, _) = scripted_upstream(vec![200, 200]).await;
+        let (old_upstream, old_hits, _) = scripted_upstream(vec![200, 200, 200]).await;
         let (new_upstream, new_hits, _) = scripted_upstream(vec![200]).await;
         let old_config = gateway_config(old_upstream, "GET");
         let runtime = build_router(old_config.clone(), None);
@@ -2830,6 +2975,17 @@ mod tests {
             StatusCode::OK
         );
 
+        let mut invalid_tls = old_config.clone();
+        invalid_tls.services[0].tls = Some(roze_config::GatewayUpstreamTlsConfig {
+            ca_files: vec!["missing-private-ca.pem".into()],
+            ..Default::default()
+        });
+        assert!(runtime.reload(invalid_tls, None, None, None, None).is_err());
+        assert_eq!(
+            runtime.current.load_full().handle(request()).await.status(),
+            StatusCode::OK
+        );
+
         let updated = gateway_config(new_upstream, "GET");
         runtime
             .reload(updated, None, None, None, None)
@@ -2838,7 +2994,7 @@ mod tests {
             runtime.current.load_full().handle(request()).await.status(),
             StatusCode::OK
         );
-        assert_eq!(old_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(old_hits.load(Ordering::SeqCst), 3);
         assert_eq!(new_hits.load(Ordering::SeqCst), 1);
     }
 
@@ -3572,5 +3728,113 @@ mod tests {
             .await
             .expect_err("plaintext response must not be accepted as wss");
         assert!(error.to_string().contains("TLS handshake failed"));
+    }
+
+    #[tokio::test]
+    async fn private_ca_and_client_certificate_complete_mutual_tls_handshake() {
+        use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
+
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate().expect("CA key");
+        let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
+
+        let mut server_params =
+            CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+        server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_key = KeyPair::generate().expect("server key");
+        let server = server_params
+            .signed_by(&server_key, &ca, &ca_key)
+            .expect("server certificate");
+
+        let mut client_params =
+            CertificateParams::new(vec!["roze-client".to_string()]).expect("client params");
+        client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let client_key = KeyPair::generate().expect("client key");
+        let client = client_params
+            .signed_by(&client_key, &ca, &ca_key)
+            .expect("client certificate");
+
+        let directory = tempfile::tempdir().expect("TLS fixture directory");
+        let ca_path = directory.path().join("ca.pem");
+        let client_cert_path = directory.path().join("client.pem");
+        let client_key_path = directory.path().join("client.key");
+        std::fs::write(&ca_path, ca.pem()).expect("write CA");
+        std::fs::write(&client_cert_path, client.pem()).expect("write client certificate");
+        std::fs::write(&client_key_path, client_key.serialize_pem()).expect("write client key");
+
+        let mut gateway = gateway_config("wss://localhost:1".to_string(), "GET");
+        gateway.services[0].tls = Some(roze_config::GatewayUpstreamTlsConfig {
+            ca_files: vec![ca_path],
+            client_cert_file: Some(client_cert_path),
+            client_key_file: Some(client_key_path),
+            server_name: Some("localhost".to_string()),
+        });
+        let profiles =
+            build_service_websocket_tls_configs(&gateway.services).expect("gateway mTLS profile");
+        let client_config = profiles
+            .get("catalog")
+            .expect("catalog TLS profile")
+            .clone();
+
+        let mut client_roots = rustls::RootCertStore::empty();
+        client_roots.add(ca.der().clone()).expect("client CA root");
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(client_roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .expect("client certificate verifier");
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("server protocol versions")
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(
+            vec![server.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+        )
+        .expect("server TLS config");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mTLS server");
+        let addr = listener.local_addr().expect("mTLS server addr");
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept mTLS client");
+            let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(server_config))
+                .accept(stream)
+                .await
+                .expect("accept verified mTLS client");
+            let mut message = [0_u8; 4];
+            stream
+                .read_exact(&mut message)
+                .await
+                .expect("read mTLS message");
+            assert_eq!(&message, b"ping");
+            stream
+                .write_all(b"pong")
+                .await
+                .expect("write mTLS response");
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("connect mTLS server");
+        let target = WebSocketTarget {
+            addr: addr.to_string(),
+            authority: "localhost".to_string(),
+            path_and_query: "/socket".to_string(),
+            server_name: "localhost".to_string(),
+            secure: true,
+        };
+        let mut tls = connect_websocket_tls(tcp, &target, client_config)
+            .await
+            .expect("mutual TLS handshake");
+        tls.write_all(b"ping").await.expect("write through mTLS");
+        let mut response = [0_u8; 4];
+        tls.read_exact(&mut response)
+            .await
+            .expect("read through mTLS");
+        assert_eq!(&response, b"pong");
+        server_task.await.expect("mTLS server task");
     }
 }

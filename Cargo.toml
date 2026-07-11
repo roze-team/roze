@@ -100,8 +100,11 @@ regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+rustls-pemfile = "2"
 tokio-rustls = "0.26"
 webpki-roots = "1"
+rcgen = "0.13"
+tempfile = "3"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1.10.1", features = ["server", "http1"] }

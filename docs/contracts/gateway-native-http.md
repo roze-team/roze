@@ -53,10 +53,14 @@ upstream-to-client traffic, and concurrent-connection rejection. `wss` and
 provider, strict SNI/certificate validation, bundled WebPKI public roots plus
 valid system roots, and the remaining route handshake deadline. TLS state is
 initialized once per gateway runtime and plaintext fallback is forbidden.
-
-JWT/API-key enforcement is active on the native path. Private CA/client-certificate
-mTLS configuration remains separate work and must not be claimed until its
-native integration tests pass.
+Each service may add private CA files, override the validated SNI server name,
+and provide a PEM client certificate/private-key pair for mutual TLS. TLS files
+are parsed and validated while building the immutable snapshot; missing files,
+invalid certificates or keys, incomplete client credentials, and invalid server
+names reject the snapshot before traffic can observe it. A native integration
+test completes an actual private-CA mutual TLS handshake and verifies client
+certificate authentication. JWT/API-key enforcement is also active on the
+native path.
 
 Config-center reloads build a complete immutable gateway runtime before an
 atomic `ArcSwap` replacement. New requests use the new snapshot immediately;

@@ -24,7 +24,9 @@ Axum and must not expose Axum types in generated services or framework crates.
   `MethodRouter`.
 - Keep path definitions explicit. Route paths and nest prefixes must be
   non-empty and start with `/`; Roze rejects invalid paths during router
-  construction instead of silently normalizing them.
+  construction instead of silently normalizing them. Path validation, legacy
+  capture rejection, nest-prefix validation, and nested path composition are
+  isolated in `router/path.rs` rather than mixed into runtime dispatch.
 - Keep middleware separate from routing. Cross-cutting behavior belongs in
   Tower layers or Roze middleware primitives, not inside business handlers.
 
@@ -101,8 +103,28 @@ let app = Router::new()
 - connect-info make services wrap Router, MethodRouter, or Handler services in
   `ConnectInfoService` and inject connection metadata at request entry; they do
   not apply a state layer to every route or copy the route graph per connection;
-  Router make-service construction lives behind the dedicated
+  Router and MethodRouter make-service construction lives behind the dedicated
   `router/into_make_service.rs` boundary
+- erased route storage and Tower layer application live behind
+  `router/route.rs`, keeping service normalization out of Router composition
+- top-level HTTP method handler and service constructors live behind
+  `router/method_routing.rs` and are generated from shared method macros
+- MethodRouter's standard chained handler and service methods use the same
+  method-routing macro boundary, leaving custom `on` and `any` behavior explicit
+- per-path route groups and their cached Allow metadata live behind
+  `router/path_router.rs`, separating path-owned state from Router composition
+- matchit nodes, route groups, and the exact-path index are owned together by
+  `PathRouter`, preventing their indices from drifting as Router evolves
+- PathRouter owns route-group creation and merge invariants, including method
+  overlap checks, fallback conflicts, and cached Allow metadata refresh
+- request path matching, route-parameter extension insertion, HEAD-to-GET
+  selection, and path-local 405 resolution are performed by PathRouter
+- route presence, path-local 405 fallback propagation, and route-layer
+  application are PathRouter operations; Router separately layers global fallback
+- `Router::route` normalizes the public path then delegates MethodRouter endpoint
+  insertion, overlap rejection, fallback merge, and Allow refresh to PathRouter
+- nested path graph rewriting, strip-prefix wrapping, and path graph merging are
+  PathRouter operations; Router retains ownership of global fallback conflicts
 - handler, routed service, and layer values are `Clone + Send + Sync + 'static`
   and are erased through Tower `BoxCloneSyncService`, keeping the shared router
   graph safely usable across runtime worker threads
@@ -137,7 +159,10 @@ let app = Router::new()
   without wrapping them as handlers
 - `405 Method Not Allowed` responses include an `Allow` header for known paths
   and standalone method routers; empty method routers return an empty `Allow`
-  header rather than omitting it
+  header rather than omitting it; the internal `MethodNotAllowed` Tower service
+  and `AllowHeader` cache in `router/method_not_allowed.rs` build and validate
+  the header when routes are registered or merged, so 405 dispatch only clones
+  an existing `HeaderValue`
 - route-level and router-level `method_not_allowed_fallback` /
   `method_not_allowed_fallback_service` hooks for generated services that need
   custom 405 payloads from handlers or Tower services
@@ -201,7 +226,9 @@ let app = Router::new()
   Roze handler through the same make-service boundary as routers, including
   connection metadata injection through `ConnectInfo<T>`
 - `Router::as_service` and `Router::into_service` adapters for tests and
-  Tower call sites that need an explicit service value
+  Tower call sites that need an explicit service value; their borrowed and
+  owned Tower implementations live in `router/service.rs`, outside path and
+  method dispatch
 - `Router::into_make_service` and `RestServer::from_make_service` for the
   serve boundary, separating request handling from per-connection service
   construction while keeping `RestServer::new(addr, service)` available for

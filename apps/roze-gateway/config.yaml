@@ -15,6 +15,12 @@ gateway:
   services:
     - name: user
       upstream: "http://127.0.0.1:3000"
+      # For private WSS/HTTPS upstreams, enable strict per-service mTLS:
+      # tls:
+      #   ca_files: ["certs/internal-ca.pem"]
+      #   client_cert_file: "certs/gateway-client.pem"
+      #   client_key_file: "certs/gateway-client.key"
+      #   server_name: "user.internal"
       outlier:
         failure_threshold: 3
         ejection_ms: 30000

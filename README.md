@@ -214,7 +214,7 @@ rozectl rpc protoc example/user.proto --out apps/user-rpc
 rozectl model generate example/user.sql --out apps/roze-example --format sql
 rozectl model generate example/user.model --out apps/roze-example --format mongo
 rozectl docker --binary user-api --port 8080
-rozectl kube deploy --name user-api --image registry.example.com/user-api:latest
+rozectl kube deploy --name user-api --image registry.example.com/user-api@sha256:<64-hex-digest>
 rozectl openapi generate example/user.api --out docs/openapi.json
 rozectl search generate example/user.search --engine elasticsearch --out apps/roze-example
 rozectl search inspect users --engine meilisearch --url http://127.0.0.1:7700 --out apps/roze-example
