@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use roze_error::RozeError;
 
 use crate::svc::ServiceContext;

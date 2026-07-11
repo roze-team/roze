@@ -253,7 +253,6 @@ where
     S: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
         + Clone
         + Send
-        + Sync
         + 'static,
     S::Future: Send + 'static,
 {

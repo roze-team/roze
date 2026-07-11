@@ -986,7 +986,7 @@ mod tests {
                 .with_dead_letter_topic("dead")
                 .with_idempotency_key(format!("soak-{sent}"));
             broker.publish(message.clone()).await.expect("publish");
-            if sent % 97 == 0 {
+            if sent.is_multiple_of(97) {
                 broker.publish(message).await.expect("publish duplicate");
             }
 
@@ -994,7 +994,7 @@ mod tests {
                 .await
                 .expect("delivery timeout")
                 .expect("delivery");
-            if sent % 13 == 0 {
+            if sent.is_multiple_of(13) {
                 delivery.nack().await.expect("nack");
                 let dead_delivery =
                     tokio::time::timeout(std::time::Duration::from_secs(1), dead.recv())

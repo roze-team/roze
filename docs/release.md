@@ -108,6 +108,19 @@ Before cutting a release:
 bash scripts/release-gate.sh
 ```
 
+On Windows, run the non-authoritative preflight first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release-preflight.ps1
+```
+
+The Windows preflight excludes `user-service` and `roze-example` because they
+enable the vendored `rdkafka` build, whose Unix configure path is not a native
+Windows release target. It must not be reported as a complete release gate.
+Run `scripts/release-gate.sh` on Linux or WSL, where CI also verifies the
+rdkafka-enabled applications and `cargo check -p roze-kafka --features
+rdkafka`.
+
 - Create a release tracking issue from the release checklist template.
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`

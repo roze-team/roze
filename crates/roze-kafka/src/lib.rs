@@ -219,6 +219,7 @@ impl KafkaConfig {
     }
 }
 
+#[cfg(any(feature = "rdkafka", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RecoverAction {
     Retry {
@@ -234,6 +235,7 @@ enum RecoverAction {
     },
 }
 
+#[cfg(any(feature = "rdkafka", test))]
 fn recover_action(cfg: &KafkaConfig, message: &KafkaRecord) -> RecoverAction {
     if cfg.max_retries == 0 {
         return cfg

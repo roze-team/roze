@@ -10,6 +10,9 @@ crate, generator, or runtime module is broadly production-stable.
 - Service is built from a tagged Roze release or a pinned Git revision.
 - `CHANGELOG.md` and upgrade notes have been reviewed.
 - `bash scripts/production-smoke.sh` passes.
+- On Windows, `scripts/release-preflight.ps1` passes before the authoritative
+  Linux/WSL `scripts/release-gate.sh`; the Windows preflight alone is not
+  release evidence.
 - `bash scripts/rozectl-smoke.sh` passes.
 - `bash scripts/roze-project-external-smoke.sh` passes when validating the full
   external dependency profile locally.
@@ -84,6 +87,8 @@ crate, generator, or runtime module is broadly production-stable.
   drop all Linux capabilities.
 - Workload images are pinned by SHA-256 digest and unnecessary ServiceAccount
   token auto-mounting is disabled.
+- Private registry credentials are referenced through validated
+  `imagePullSecrets`; credentials never appear in generated values or manifests.
 - Helm values are constrained by the generated JSON Schema before rendering or
   deployment.
 - Offline Helm validation parses values and verifies cross-field HPA, metrics
@@ -94,6 +99,8 @@ crate, generator, or runtime module is broadly production-stable.
 - Rolling updates guarantee zero configured unavailability, define surge and
   rollout deadlines, spread replicas across hosts, and allow readiness draining
   during the generated pre-stop window.
+- Kubernetes resource references satisfy DNS-1123 constraints and PDB
+  availability cannot exceed the initial replica capacity.
 - SIGINT/SIGTERM graceful shutdown is verified.
 
 ## Observability

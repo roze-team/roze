@@ -9,16 +9,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransactionKind {
     Saga,
+    #[default]
     Tcc,
-}
-
-impl Default for TransactionKind {
-    fn default() -> Self {
-        Self::Tcc
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
