@@ -10008,9 +10008,7 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
                 continue;
             }
             if inner.starts_with("edge ") && inner.ends_with('{') {
-                if let Some(edge) = parse_ent_edge(inner, &lines, &mut i, inner_line_no + 1)? {
-                    edges.push(edge);
-                }
+                edges.extend(parse_ent_edge(inner, &lines, &mut i, inner_line_no + 1)?);
                 continue;
             }
 
@@ -11242,7 +11240,7 @@ fn parse_ent_edge(
     lines: &[(usize, &str)],
     i: &mut usize,
     line_no: usize,
-) -> anyhow::Result<Option<ModelEdge>> {
+) -> anyhow::Result<Vec<ModelEdge>> {
     let header_value = header
         .trim_start_matches("edge ")
         .trim_end_matches('{')
@@ -11260,7 +11258,10 @@ fn parse_ent_edge(
     let mut immutable = false;
     let mut storage_column = None;
     let mut storage_columns = false;
-    let mut unsupported_from = false;
+    let mut chained_inverse = None;
+    let mut parsing_inverse = false;
+    let mut inverse_unique = false;
+    let mut inverse_required = false;
     let mut through = None;
     let mut comment = None;
 
@@ -11283,7 +11284,7 @@ fn parse_ent_edge(
                     let Some(target) = target else {
                         bail!("line {line_no}: through edge `{name}` must declare a target");
                     };
-                    return Ok(Some(ModelEdge {
+                    return Ok(vec![ModelEdge {
                         name,
                         target,
                         field: String::new(),
@@ -11297,7 +11298,7 @@ fn parse_ent_edge(
                         storage_column: None,
                         comment,
                         implicit_field: false,
-                    }));
+                    }]);
                 }
             }
             if inverse && field.is_none() {
@@ -11307,7 +11308,7 @@ fn parse_ent_edge(
                 let Some(inverse_ref) = ref_field else {
                     bail!("line {line_no}: inverse edge `{name}` must declare `ref`");
                 };
-                return Ok(Some(ModelEdge {
+                return Ok(vec![ModelEdge {
                     name,
                     target,
                     field: String::new(),
@@ -11321,19 +11322,32 @@ fn parse_ent_edge(
                     storage_column: None,
                     comment,
                     implicit_field: false,
-                }));
+                }]);
             }
             if field.is_none() && ref_field.is_none() {
-                if unsupported_from {
-                    return Ok(None);
-                }
                 if !unique {
-                    return Ok(None);
+                    if let Some(inverse_name) = chained_inverse {
+                        if inverse_unique {
+                            let Some(target) = target else {
+                                bail!("line {line_no}: edge `{name}` must declare `to`");
+                            };
+                            return Ok(expand_chained_inverse_to_many(
+                                name,
+                                target,
+                                inverse_name,
+                                inverse_required,
+                                immutable,
+                                storage_column,
+                                comment,
+                            ));
+                        }
+                    }
+                    return Ok(Vec::new());
                 }
                 let Some(target) = target else {
                     bail!("line {line_no}: edge `{name}` must declare `to`");
                 };
-                return Ok(Some(ModelEdge {
+                let owning = ModelEdge {
                     field: format!("{}_id", to_snake_case(&name)),
                     name,
                     target,
@@ -11347,7 +11361,13 @@ fn parse_ent_edge(
                     storage_column,
                     comment,
                     implicit_field: true,
-                }));
+                };
+                return Ok(expand_chained_inverse(
+                    owning,
+                    chained_inverse,
+                    inverse_unique,
+                    inverse_required,
+                ));
             }
             let Some(target) = target else {
                 bail!("line {line_no}: edge `{name}` must declare `to`");
@@ -11364,7 +11384,7 @@ fn parse_ent_edge(
                 );
             }
             let ref_field = ref_field.unwrap_or_else(|| "id".to_string());
-            return Ok(Some(ModelEdge {
+            let owning = ModelEdge {
                 name,
                 target,
                 field,
@@ -11378,7 +11398,13 @@ fn parse_ent_edge(
                 storage_column,
                 comment,
                 implicit_field: false,
-            }));
+            };
+            return Ok(expand_chained_inverse(
+                owning,
+                chained_inverse,
+                inverse_unique,
+                inverse_required,
+            ));
         }
         if let Some(value) = ent_field_arg(&inner, &["comment"]) {
             comment = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
@@ -11399,8 +11425,9 @@ fn parse_ent_edge(
             )?));
             continue;
         }
-        if ent_field_arg(&inner, &["from"]).is_some() {
-            unsupported_from = true;
+        if let Some(value) = ent_field_arg(&inner, &["from"]) {
+            chained_inverse = Some(parse_ent_string_or_ident(value.trim(), inner_line_no + 1)?);
+            parsing_inverse = true;
             continue;
         }
         if let Some(value) = ent_field_arg(&inner, &["field"]) {
@@ -11412,11 +11439,19 @@ fn parse_ent_edge(
             continue;
         }
         if ent_field_flag(&inner, &["unique"]) {
-            unique = true;
+            if parsing_inverse {
+                inverse_unique = true;
+            } else {
+                unique = true;
+            }
             continue;
         }
         if ent_field_flag(&inner, &["required"]) {
-            required = true;
+            if parsing_inverse {
+                inverse_required = true;
+            } else {
+                required = true;
+            }
             continue;
         }
         if ent_field_flag(&inner, &["immutable"]) {
@@ -11459,6 +11494,75 @@ fn parse_ent_edge(
     }
 
     bail!("line {line_no}: unclosed edge block")
+}
+
+fn expand_chained_inverse(
+    owning: ModelEdge,
+    inverse_name: Option<String>,
+    inverse_unique: bool,
+    inverse_required: bool,
+) -> Vec<ModelEdge> {
+    let Some(inverse_name) = inverse_name else {
+        return vec![owning];
+    };
+    let inverse = ModelEdge {
+        name: inverse_name,
+        target: owning.target.clone(),
+        field: String::new(),
+        ref_field: String::new(),
+        inverse_ref: Some(owning.name.clone()),
+        inverse_field_optional: false,
+        through: None,
+        unique: inverse_unique,
+        required: inverse_required,
+        immutable: false,
+        storage_column: None,
+        comment: None,
+        implicit_field: false,
+    };
+    vec![owning, inverse]
+}
+
+fn expand_chained_inverse_to_many(
+    inverse_name: String,
+    target: String,
+    owning_name: String,
+    owning_required: bool,
+    owning_immutable: bool,
+    storage_column: Option<String>,
+    inverse_comment: Option<String>,
+) -> Vec<ModelEdge> {
+    let owning = ModelEdge {
+        field: format!("{}_id", to_snake_case(&owning_name)),
+        name: owning_name.clone(),
+        target: target.clone(),
+        ref_field: "id".to_string(),
+        inverse_ref: None,
+        inverse_field_optional: false,
+        through: None,
+        unique: true,
+        required: owning_required,
+        immutable: owning_immutable,
+        storage_column,
+        comment: None,
+        implicit_field: true,
+    };
+    let inverse = ModelEdge {
+        name: inverse_name,
+        target,
+        field: String::new(),
+        ref_field: String::new(),
+        inverse_ref: Some(owning_name),
+        inverse_field_optional: false,
+        through: None,
+        unique: false,
+        required: false,
+        immutable: false,
+        storage_column: None,
+        comment: inverse_comment,
+        implicit_field: false,
+    };
+    vec![owning, inverse]
 }
 
 fn parse_ent_edge_header(
@@ -17729,6 +17833,10 @@ mod tests {
                 }
                 edge To("friends", User.Type).Through("friendships", Friendship.Type) {
                 }
+                edge To("next", User.Type).Unique().From("prev").Unique() {
+                }
+                edge To("children", User.Type).From("parent").Unique() {
+                }
             }
             entity Friendship {
                 field Int64("id").Primary() {
@@ -17802,7 +17910,29 @@ mod tests {
         assert_eq!(manager_id.ty, "i64");
         assert!(manager_id.immutable);
         assert_eq!(manager_id.source_name.as_deref(), Some("manager_fk"));
-        assert!(!user.edges.iter().any(|edge| edge.name == "children"));
+        let parent = user
+            .edges
+            .iter()
+            .find(|edge| edge.name == "parent")
+            .expect("implicit parent edge");
+        assert!(parent.implicit_field);
+        assert_eq!(parent.field, "parent_id");
+        assert!(parent.unique);
+        let children = user
+            .edges
+            .iter()
+            .find(|edge| edge.name == "children")
+            .expect("children inverse edge");
+        assert_eq!(children.inverse_ref.as_deref(), Some("parent"));
+        assert!(!children.unique);
+        assert_eq!(
+            user.fields
+                .iter()
+                .find(|field| field.name == "parent_id")
+                .expect("implicit parent field")
+                .ty,
+            "Option<i64>"
+        );
 
         let ent = render_ent_schema(&models);
         assert!(ent.contains("edge group {\n    to Group\n    unique"));
@@ -17810,7 +17940,8 @@ mod tests {
         assert!(ent.contains("    storage_key Column(\"manager_fk\")"));
         assert!(ent.contains("    unique\n    required\n    immutable"));
         assert!(!ent.contains("field group_id"));
-        assert!(!ent.contains("edge children"));
+        assert!(ent.contains("edge parent {\n    to User\n    unique"));
+        assert!(ent.contains("edge From(\"children\", User.Type).Ref(\"parent\") {"));
 
         let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
         assert_eq!(reparsed, models);
@@ -17821,6 +17952,8 @@ mod tests {
         assert!(sea_orm
             .contains("pub fn set_group(mut self, target: &crate::model::GroupModel) -> Self"));
         assert!(sea_orm.contains("pub fn clear_group(mut self) -> Self"));
+        assert!(sea_orm.contains("pub async fn query_parent(&self"));
+        assert!(sea_orm.contains("pub async fn query_children(&self"));
 
         let toasty_models = models_for_orm(&models, ModelOrm::Toasty);
         let toasty_user = toasty_models
@@ -17831,6 +17964,63 @@ mod tests {
         assert!(toasty.contains("pub group_id: Option<String>"));
         assert!(toasty.contains("pub manager_id: i64"));
         assert!(toasty.contains("pub fn set_group(mut self, target: &crate::model::Group) -> Self"));
+        assert!(toasty.contains("pub async fn query_parent(&self"));
+        assert!(toasty.contains("pub async fn query_children(&self"));
+    }
+
+    #[test]
+    fn ent_chained_self_o2o_edges_generate_owning_and_inverse_queries() {
+        let source = r#"
+        entity Node {
+            table "nodes"
+            field Int64("id").Primary() {
+            }
+            edge To("next", Node.Type).Unique().From("prev").Unique() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let node = &models[0];
+        let next = node
+            .edges
+            .iter()
+            .find(|edge| edge.name == "next")
+            .expect("next edge");
+        assert!(next.implicit_field);
+        assert_eq!(next.field, "next_id");
+        assert_eq!(next.ref_field, "id");
+        assert!(next.unique);
+        let prev = node
+            .edges
+            .iter()
+            .find(|edge| edge.name == "prev")
+            .expect("prev edge");
+        assert_eq!(prev.inverse_ref.as_deref(), Some("next"));
+        assert_eq!(prev.field, "next_id");
+        assert!(prev.unique);
+        assert_eq!(
+            node.fields
+                .iter()
+                .find(|field| field.name == "next_id")
+                .expect("implicit next field")
+                .ty,
+            "Option<i64>"
+        );
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge next {\n    to Node\n    unique"));
+        assert!(ent.contains("edge From(\"prev\", Node.Type).Ref(\"next\") {"));
+        let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
+        assert_eq!(reparsed, models);
+
+        let sea_orm = render_model_module(node);
+        assert!(sea_orm.contains("pub async fn query_next(&self"));
+        assert!(sea_orm.contains("pub async fn query_prev(&self"));
+
+        let toasty = render_toasty_model_module(node);
+        assert!(toasty.contains("pub async fn query_next(&self"));
+        assert!(toasty.contains("pub async fn query_prev(&self"));
     }
 
     #[test]
@@ -20130,6 +20320,10 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
                 edge To("groups", Group.Type).Through("memberships", Membership.Type) {
                 }
                 edge To("friends", User.Type).Through("friendships", Friendship.Type) {
+                }
+                edge To("next", User.Type).Unique().From("prev").Unique() {
+                }
+                edge To("children", User.Type).From("parent").Unique() {
                 }
             }
 
