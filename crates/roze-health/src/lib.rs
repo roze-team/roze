@@ -1,6 +1,7 @@
 use std::{
     fmt::{self, Display},
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -9,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use futures_util::future::join_all;
+use futures_util::{future::join_all, FutureExt};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -231,13 +232,15 @@ impl HealthRegistry {
         let timeout = self.check_timeout;
         join_all(checks.into_iter().map(|registered| async move {
             let name = registered.name;
-            match tokio::time::timeout(timeout, (registered.check)()).await {
-                Ok(mut check) => {
+            let check = AssertUnwindSafe((registered.check)()).catch_unwind();
+            match tokio::time::timeout(timeout, check).await {
+                Ok(Ok(mut check)) => {
                     if check.name.is_empty() {
                         check.name = name;
                     }
                     check
                 }
+                Ok(Err(_)) => HealthCheck::unhealthy(name, "health check panicked"),
                 Err(_) => HealthCheck::unhealthy(
                     name,
                     format!("health check timed out after {}ms", timeout.as_millis()),
@@ -474,6 +477,28 @@ mod tests {
             report.checks[1].message.as_deref(),
             Some("health check timed out after 20ms")
         );
+    }
+
+    #[tokio::test]
+    async fn dependency_panic_is_isolated_as_unhealthy() {
+        let registry = HealthRegistry::new();
+        registry.mark_ready();
+        registry.register_dependency("broken", || async {
+            panic!("dependency check failed");
+            #[allow(unreachable_code)]
+            Ok(())
+        });
+        registry.register_dependency("healthy", || async { Ok(()) });
+
+        let report = registry.readiness_report().await;
+
+        assert!(!report.is_ready());
+        assert_eq!(report.checks[1].name, "broken");
+        assert_eq!(
+            report.checks[1].message.as_deref(),
+            Some("health check panicked")
+        );
+        assert_eq!(report.checks[2].status, HealthStatus::Healthy);
     }
 
     #[test]

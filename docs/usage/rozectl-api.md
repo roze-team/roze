@@ -463,6 +463,8 @@ Registered checks execute concurrently and retain registration order in the
 report. Each check has a two-second default timeout; a timeout is returned as
 an unhealthy result instead of stalling the probe. Services can set a stricter
 budget with `HealthRegistry::with_check_timeout(Duration)`.
+Panics from application-provided checks are isolated into an unhealthy check,
+so one faulty dependency probe cannot abort the complete readiness response.
 Generated report and chart endpoints are framework-owned production interface
 scaffolds: they publish stable HTTP/OpenAPI boundaries for export jobs and
 chart data lookup, while application teams replace the default accepted/empty
