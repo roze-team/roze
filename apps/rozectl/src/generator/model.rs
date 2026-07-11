@@ -364,15 +364,28 @@ fn render_ent_schema(models: &[ModelSpec]) -> String {
 
         for edge in &model.edges {
             if let Some(through) = &edge.through {
-                writeln!(
-                    out,
-                    "  edge To({}, {}.Type).Through({}, {}.Type) {{",
-                    quote_ent_string(&edge.name),
-                    to_pascal_case(&edge.target),
-                    quote_ent_string(&through.name),
-                    to_pascal_case(&through.model)
-                )
-                .unwrap();
+                if let Some(inverse_ref) = &edge.inverse_ref {
+                    writeln!(
+                        out,
+                        "  edge From({}, {}.Type).Ref({}).Through({}, {}.Type) {{",
+                        quote_ent_string(&edge.name),
+                        to_pascal_case(&edge.target),
+                        quote_ent_string(inverse_ref),
+                        quote_ent_string(&through.name),
+                        to_pascal_case(&through.model)
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        out,
+                        "  edge To({}, {}.Type).Through({}, {}.Type) {{",
+                        quote_ent_string(&edge.name),
+                        to_pascal_case(&edge.target),
+                        quote_ent_string(&through.name),
+                        to_pascal_case(&through.model)
+                    )
+                    .unwrap();
+                }
             } else if let Some(inverse_ref) = &edge.inverse_ref {
                 writeln!(
                     out,
@@ -8971,6 +8984,7 @@ fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>
 
     for model in &models {
         validate_model_generated_names(model)?;
+        validate_ent_field_invariants(model)?;
         validate_model_field_validations(model)?;
 
         let module = to_snake_case(&model.name);
@@ -9000,8 +9014,58 @@ fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>
 
 fn validate_model_spec(model: ModelSpec) -> anyhow::Result<ModelSpec> {
     validate_model_generated_names(&model)?;
+    validate_ent_field_invariants(&model)?;
     validate_model_field_validations(&model)?;
     Ok(model)
+}
+
+fn validate_ent_field_invariants(model: &ModelSpec) -> anyhow::Result<()> {
+    let primary = model
+        .fields
+        .iter()
+        .find(|field| field.name == model.primary)
+        .expect("primary field validated during parsing");
+    if is_optional_type(&primary.ty) {
+        bail!(
+            "model `{}` primary field `{}` cannot be optional",
+            model.name,
+            model_field_source_label(primary)
+        );
+    }
+
+    for field in &model.fields {
+        if field.sensitive && (field.json_name.is_some() || field.json_omit_empty) {
+            bail!(
+                "model `{}` sensitive field `{}` cannot have JSON struct-tag metadata",
+                model.name,
+                model_field_source_label(field)
+            );
+        }
+        let is_unique = model
+            .indexes
+            .iter()
+            .any(|index| is_default_field_unique_index(index, &field.name));
+        if is_unique
+            && field
+                .default_value
+                .as_deref()
+                .is_some_and(|value| !is_dynamic_ent_default(value))
+        {
+            bail!(
+                "model `{}` unique field `{}` cannot have a static default value",
+                model.name,
+                model_field_source_label(field)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_dynamic_ent_default(value: &str) -> bool {
+    matches!(
+        value,
+        "now_millis" | "now_secs" | "now_micros" | "now_nanos" | "uuid_new_string"
+    )
 }
 
 fn validate_model_field_validations(model: &ModelSpec) -> anyhow::Result<()> {
@@ -9511,6 +9575,40 @@ fn validate_edges(
             .iter()
             .find(|field| field.name == edge.field)
             .expect("edge field validated");
+        let field_optional_on_create = is_optional_type(&field.ty) && !field.required_on_create;
+        let edge_optional_on_create = !edge.required;
+        if field_optional_on_create != edge_optional_on_create {
+            if field_optional_on_create {
+                bail!(
+                    "model `{}` edge field `{}` is optional, but edge `{}` is required",
+                    model.name,
+                    model_field_source_label(field),
+                    edge.name
+                );
+            }
+            bail!(
+                "model `{}` edge `{}` is optional, but edge field `{}` is required",
+                model.name,
+                edge.name,
+                model_field_source_label(field)
+            );
+        }
+        if field.immutable != edge.immutable {
+            if field.immutable {
+                bail!(
+                    "model `{}` edge field `{}` is immutable, but edge `{}` is not",
+                    model.name,
+                    model_field_source_label(field),
+                    edge.name
+                );
+            }
+            bail!(
+                "model `{}` edge `{}` is immutable, but edge field `{}` is not",
+                model.name,
+                edge.name,
+                model_field_source_label(field)
+            );
+        }
         validate_model_field(&target.name, "edge ref", &edge.ref_field, &target.fields)?;
         let ref_field = target
             .fields
@@ -9921,6 +10019,13 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         if !fields.iter().any(|field| field.name == primary) {
             bail!("entity `{name}` primary field `{primary}` not found in fields");
         }
+        let primary_field = fields
+            .iter()
+            .find(|field| field.name == primary)
+            .expect("primary field present");
+        if is_optional_type(&primary_field.ty) {
+            bail!("model `{name}` primary field `{primary}` cannot be optional");
+        }
         if cache_keys.is_empty() {
             cache_keys.push(primary.clone());
         }
@@ -10009,14 +10114,39 @@ fn parse_ent_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         bail!("no entity declarations found");
     }
 
+    validate_through_edge_schema_owners(&models)?;
     resolve_through_edges(&mut models)?;
     resolve_inverse_edges(&mut models)?;
     validate_model_specs(models)
 }
 
+fn validate_through_edge_schema_owners(models: &[ModelSpec]) -> anyhow::Result<()> {
+    let mut owners = HashMap::<String, (&str, &str)>::new();
+    for model in models {
+        for edge in model.edges.iter().filter(|edge| edge.inverse_ref.is_none()) {
+            let Some(through) = edge.through.as_ref() else {
+                continue;
+            };
+            let join = to_pascal_case(&through.model);
+            if let Some((owner_model, owner_edge)) =
+                owners.insert(join.clone(), (model.name.as_str(), edge.name.as_str()))
+            {
+                bail!(
+                    "through join model `{join}` is used by multiple owning relationships: `{}.{}` and `{}.{}`",
+                    owner_model,
+                    owner_edge,
+                    model.name,
+                    edge.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_through_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
     let snapshot = models.to_vec();
-    for model in models {
+    for model in models.iter_mut() {
         for edge in &mut model.edges {
             let Some(through) = edge.through.as_mut() else {
                 continue;
@@ -10025,13 +10155,6 @@ fn resolve_through_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
                 continue;
             }
             let target_name = to_pascal_case(&edge.target);
-            if target_name == model.name {
-                bail!(
-                    "model `{}` through edge `{}` self-reference is ambiguous; model the two join directions as explicit edges",
-                    model.name,
-                    edge.name
-                );
-            }
             let through_name = to_pascal_case(&through.model);
             let join = snapshot
                 .iter()
@@ -10044,16 +10167,18 @@ fn resolve_through_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
                         through.model
                     )
                 })?;
-            let find_join_edge = |target: &str| {
-                let matches = join
-                    .edges
+            let matching_join_edges = |target: &str| {
+                join.edges
                     .iter()
                     .filter(|candidate| {
                         candidate.inverse_ref.is_none()
                             && candidate.through.is_none()
                             && to_pascal_case(&candidate.target) == target
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Vec<_>>()
+            };
+            let find_join_edge = |target: &str| {
+                let matches = matching_join_edges(target);
                 match matches.as_slice() {
                     [candidate] => Ok(*candidate),
                     [] => bail!(
@@ -10070,8 +10195,22 @@ fn resolve_through_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
                     ),
                 }
             };
-            let source_edge = find_join_edge(&model.name)?;
-            let target_edge = find_join_edge(&target_name)?;
+            let (source_edge, target_edge) = if target_name == model.name {
+                let matches = matching_join_edges(&model.name);
+                match matches.as_slice() {
+                    [source, target] => (*source, *target),
+                    _ => bail!(
+                        "join model `{}` must have exactly two owning edges to `{}` for self-referential through edge `{}.{}`, found {}",
+                        join.name,
+                        model.name,
+                        model.name,
+                        edge.name,
+                        matches.len()
+                    ),
+                }
+            } else {
+                (find_join_edge(&model.name)?, find_join_edge(&target_name)?)
+            };
             let source_field = join
                 .fields
                 .iter()
@@ -10090,6 +10229,75 @@ fn resolve_through_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
             through.target_field_optional = is_optional_type(&target_field.ty);
         }
     }
+
+    let resolved = models.to_vec();
+    for model in models.iter_mut() {
+        for edge in &mut model.edges {
+            let (Some(inverse_ref), Some(through)) =
+                (edge.inverse_ref.as_deref(), edge.through.as_mut())
+            else {
+                continue;
+            };
+            if !through.source_field.is_empty() {
+                continue;
+            }
+            let target_name = to_pascal_case(&edge.target);
+            let target = resolved
+                .iter()
+                .find(|candidate| candidate.name == target_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model `{}` inverse through edge `{}` target `{}` not found",
+                        model.name,
+                        edge.name,
+                        edge.target
+                    )
+                })?;
+            let owning = target
+                .edges
+                .iter()
+                .find(|candidate| {
+                    candidate.inverse_ref.is_none()
+                        && candidate.name == inverse_ref
+                        && to_pascal_case(&candidate.target) == model.name
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model `{}` inverse through edge `{}` ref `{}` does not match an owning edge on `{}`",
+                        model.name,
+                        edge.name,
+                        inverse_ref,
+                        target.name
+                    )
+                })?;
+            let owning_through = owning.through.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{}` inverse through edge `{}` ref `{}` is not a Through edge on `{}`",
+                    model.name,
+                    edge.name,
+                    inverse_ref,
+                    target.name
+                )
+            })?;
+            if to_pascal_case(&owning_through.model) != to_pascal_case(&through.model) {
+                bail!(
+                    "model `{}` inverse through edge `{}` join model `{}` does not match owning edge `{}.{}` join model `{}`",
+                    model.name,
+                    edge.name,
+                    through.model,
+                    target.name,
+                    owning.name,
+                    owning_through.model
+                );
+            }
+            through.source_field = owning_through.target_field.clone();
+            through.source_ref_field = owning_through.target_ref_field.clone();
+            through.source_field_optional = owning_through.target_field_optional;
+            through.target_field = owning_through.source_field.clone();
+            through.target_ref_field = owning_through.source_ref_field.clone();
+            through.target_field_optional = owning_through.source_field_optional;
+        }
+    }
     Ok(())
 }
 
@@ -10100,6 +10308,9 @@ fn resolve_inverse_edges(models: &mut [ModelSpec]) -> anyhow::Result<()> {
             let Some(inverse_ref) = edge.inverse_ref.as_deref() else {
                 continue;
             };
+            if edge.through.is_some() {
+                continue;
+            }
             let target_name = to_pascal_case(&edge.target);
             let target = snapshot
                 .iter()
@@ -11041,7 +11252,6 @@ fn parse_ent_edge(
         if inverse
             && (ent_field_arg(&inner, &["to"]).is_some()
                 || ent_field_arg(&inner, &["from"]).is_some()
-                || ent_field_arg(&inner, &["through"]).is_some()
                 || ent_field_flag(&inner, &["immutable"])
                 || is_ent_ignored_metadata_directive(&inner))
         {
@@ -13365,7 +13575,7 @@ mod tests {
             }
             field Int64("region_id") {
             }
-            field Int64("user_id") {
+            field Int64("user_id").Optional() {
             }
             edge To("user", User.Type).Field("user_id") {
             }
@@ -13391,7 +13601,7 @@ mod tests {
         }));
 
         let ent = render_ent_schema(&models);
-        assert!(ent.contains("field user_id: i64 {\n    unique\n  }"));
+        assert!(ent.contains("field user_id: i64? {\n    unique\n  }"));
         assert!(ent.contains("index idx_tenant_id_region_id_user_id {"));
         assert!(ent.contains("    fields tenant_id, region_id, user_id"));
     }
@@ -13942,6 +14152,160 @@ mod tests {
         assert!(toasty.contains("#[serde(skip)]\n    pub password: String"));
         assert!(!toasty
             .contains("#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, toasty::Model)]"));
+    }
+
+    #[test]
+    fn ent_field_invariants_fail_fast_like_ent() {
+        let optional_id = r#"
+        entity User {
+            field id: i64? {
+                primary
+            }
+        }
+        "#;
+        let err = parse_models_with_format(optional_id, ModelFormat::Ent)
+            .expect_err("optional primary field should fail");
+        assert!(err
+            .to_string()
+            .contains("primary field `id` cannot be optional"));
+
+        let unique_static_default = r#"
+        entity User {
+            field id: i64 {
+                primary
+            }
+            field String("email").Unique().Default("unknown@example.com") {
+            }
+        }
+        "#;
+        let err = parse_models_with_format(unique_static_default, ModelFormat::Ent)
+            .expect_err("unique static default should fail");
+        assert!(err
+            .to_string()
+            .contains("unique field `email` cannot have a static default value"));
+
+        let sensitive_tag = r#"
+        entity User {
+            field id: i64 {
+                primary
+            }
+            field String("secret").Sensitive().StructTag(`json:"secretValue,omitempty"`) {
+            }
+        }
+        "#;
+        let err = parse_models_with_format(sensitive_tag, ModelFormat::Ent)
+            .expect_err("sensitive struct tag should fail");
+        assert!(err
+            .to_string()
+            .contains("sensitive field `secret` cannot have JSON struct-tag metadata"));
+
+        let unique_dynamic_default = r#"
+        entity User {
+            field UUID("id", uuid.UUID{}).Primary().Unique().DefaultFunc(uuid.NewString) {
+            }
+        }
+        "#;
+        parse_models_with_format(unique_dynamic_default, ModelFormat::Ent)
+            .expect("unique function default should remain valid");
+    }
+
+    #[test]
+    fn ent_edge_field_invariants_fail_fast_like_ent() {
+        let invalid = [
+            (
+                r#"
+                entity User {
+                    field Int64("id").Primary() {
+                    }
+                }
+                entity Profile {
+                    field Int64("id").Primary() {
+                    }
+                    field Int64("user_id").Optional() {
+                    }
+                    edge To("user", User.Type).Field("user_id").Required() {
+                    }
+                }
+                "#,
+                "edge field `user_id` is optional, but edge `user` is required",
+            ),
+            (
+                r#"
+                entity User {
+                    field Int64("id").Primary() {
+                    }
+                }
+                entity Profile {
+                    field Int64("id").Primary() {
+                    }
+                    field Int64("user_id") {
+                    }
+                    edge To("user", User.Type).Field("user_id") {
+                    }
+                }
+                "#,
+                "edge `user` is optional, but edge field `user_id` is required",
+            ),
+            (
+                r#"
+                entity User {
+                    field Int64("id").Primary() {
+                    }
+                }
+                entity Profile {
+                    field Int64("id").Primary() {
+                    }
+                    field Int64("user_id").Optional().Immutable() {
+                    }
+                    edge To("user", User.Type).Field("user_id") {
+                    }
+                }
+                "#,
+                "edge field `user_id` is immutable, but edge `user` is not",
+            ),
+            (
+                r#"
+                entity User {
+                    field Int64("id").Primary() {
+                    }
+                }
+                entity Profile {
+                    field Int64("id").Primary() {
+                    }
+                    field Int64("user_id").Optional() {
+                    }
+                    edge To("user", User.Type).Field("user_id").Immutable() {
+                    }
+                }
+                "#,
+                "edge `user` is immutable, but edge field `user_id` is not",
+            ),
+        ];
+
+        for (source, expected) in invalid {
+            let err = parse_models_with_format(source, ModelFormat::Ent)
+                .expect_err("edge and explicit field metadata should agree");
+            assert!(err.to_string().contains(expected), "{err:#}");
+        }
+
+        parse_models_with_format(
+            r#"
+            entity User {
+                field Int64("id").Primary() {
+                }
+            }
+            entity Profile {
+                field Int64("id").Primary() {
+                }
+                field Int64("user_id").Nillable().Immutable() {
+                }
+                edge To("user", User.Type).Field("user_id").Required().Immutable() {
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect("required Nillable fields retain Ent create semantics");
     }
 
     #[test]
@@ -15912,7 +16276,7 @@ mod tests {
             table "profiles"
             field Int64("id").Primary() {
             }
-            field Int64("user_id") {
+            field Int64("user_id").Optional().Immutable() {
             }
             field String("tenant_id") {
             }
@@ -15991,7 +16355,7 @@ mod tests {
             sea_orm
                 .matches("pub fn set_user_id(mut self, value: i64)")
                 .count(),
-            1
+            0
         );
 
         let toasty = render_toasty_model_module(profile);
@@ -16005,7 +16369,7 @@ mod tests {
             toasty
                 .matches("pub fn set_user_id(mut self, value: i64)")
                 .count(),
-            1
+            0
         );
     }
 
@@ -16466,7 +16830,7 @@ mod tests {
             table "profiles"
             field Int64("id").Primary() {
             }
-            field Int64("user_id") {
+            field Int64("user_id").Optional() {
             }
             edge To("user", User.Type).Field("user_id").Ref("id").Unique() {
             }
@@ -16494,7 +16858,7 @@ mod tests {
             field: "user_id".to_string(),
             ref_field: "id".to_string(),
             inverse_ref: Some("user".to_string()),
-            inverse_field_optional: false,
+            inverse_field_optional: true,
             through: None,
             unique: true,
             required: false,
@@ -16588,7 +16952,7 @@ mod tests {
             table "posts"
             field Int64("id").Primary() {
             }
-            field Int64("author_id").Optional() {
+            field Int64("author_id").Nillable() {
             }
             edge From("author", User.Type).Field("author_id").Unique().Required().StorageKey(edge.Column("post_author")) {
             }
@@ -16746,7 +17110,7 @@ mod tests {
             table "profiles"
             field Int64("id").Primary() {
             }
-            field Int64("user_id") {
+            field Int64("user_id").Optional() {
             }
             edge To("user", User.Type).Field("user_id").Ref("id").Unique() {
             }
@@ -16834,6 +17198,218 @@ mod tests {
     }
 
     #[test]
+    fn ent_inverse_through_edges_generate_reverse_queries_and_filters() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            edge To("liked_tweets", Tweet.Type).Through("reactions", Reaction.Type) {
+            }
+        }
+
+        entity Tweet {
+            table "tweets"
+            field Int64("id").Primary() {
+            }
+            edge From("liked_users", User.Type).Ref("liked_tweets").Through("reactions", Reaction.Type) {
+            }
+        }
+
+        entity Reaction {
+            table "reactions"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            field Int64("tweet_id") {
+            }
+            edge To("user", User.Type).Field("user_id").Unique().Required() {
+            }
+            edge To("tweet", Tweet.Type).Field("tweet_id").Unique().Required() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let tweet = models
+            .iter()
+            .find(|model| model.name == "Tweet")
+            .expect("tweet");
+        let liked_users = tweet
+            .edges
+            .iter()
+            .find(|edge| edge.name == "liked_users")
+            .expect("liked users edge");
+        assert_eq!(liked_users.inverse_ref.as_deref(), Some("liked_tweets"));
+        assert_eq!(
+            liked_users.through.as_ref(),
+            Some(&ModelThroughEdge {
+                name: "reactions".to_string(),
+                model: "Reaction".to_string(),
+                source_field: "tweet_id".to_string(),
+                source_ref_field: "id".to_string(),
+                source_field_optional: false,
+                target_field: "user_id".to_string(),
+                target_ref_field: "id".to_string(),
+                target_field_optional: false,
+            })
+        );
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("edge From(\"liked_users\", User.Type).Ref(\"liked_tweets\").Through(\"reactions\", Reaction.Type) {"));
+        let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
+        let reparsed_tweet = reparsed
+            .iter()
+            .find(|model| model.name == "Tweet")
+            .expect("reparsed tweet");
+        assert_eq!(reparsed_tweet.edges, tweet.edges);
+
+        let sea_orm = render_model_module(tweet);
+        assert!(sea_orm.contains("pub async fn query_liked_users(&self, through_repo: &crate::model::ReactionRepository<'_>, repo: &crate::model::UserRepository<'_>) -> anyhow::Result<Vec<crate::model::UserModel>>"));
+        assert!(sea_orm.contains("tweet_id_eq(value)).pluck_user_id().await?;"));
+        assert!(sea_orm.contains("user_id_in(target_values)"));
+        assert!(sea_orm.contains("pluck_tweet_id().await?;"));
+
+        let toasty = render_toasty_model_module(tweet);
+        assert!(toasty.contains("pub async fn query_liked_users(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Vec<crate::model::User>>"));
+        assert!(toasty.contains("tweet_id_eq(value)).pluck_user_id().await?;"));
+        assert!(toasty.contains("user_id_in(target_values)"));
+        assert!(toasty.contains("pluck_tweet_id().await?;"));
+    }
+
+    #[test]
+    fn ent_through_join_models_have_one_owning_relationship() {
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                field Int64("id").Primary() {
+                }
+                edge To("groups", Group.Type).Through("memberships", Membership.Type) {
+                }
+                edge To("teams", Team.Type).Through("team_memberships", Membership.Type) {
+                }
+            }
+            entity Group {
+                field Int64("id").Primary() {
+                }
+            }
+            entity Team {
+                field Int64("id").Primary() {
+                }
+            }
+            entity Membership {
+                field Int64("id").Primary() {
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("an edge schema cannot own multiple relationships");
+        assert!(err.to_string().contains(
+            "through join model `Membership` is used by multiple owning relationships: `User.groups` and `User.teams`"
+        ));
+    }
+
+    #[test]
+    fn ent_self_through_edges_follow_join_edge_order() {
+        let source = r#"
+        entity User {
+            table "users"
+            field Int64("id").Primary() {
+            }
+            edge To("friends", User.Type).Through("friendships", Friendship.Type) {
+            }
+        }
+
+        entity Friendship {
+            table "friendships"
+            field Int64("id").Primary() {
+            }
+            field Int64("user_id") {
+            }
+            field Int64("friend_id") {
+            }
+            edge To("user", User.Type).Field("user_id").Unique().Required() {
+            }
+            edge To("friend", User.Type).Field("friend_id").Unique().Required() {
+            }
+        }
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Ent).expect("parse ent");
+        let user = models
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("user");
+        let friends = user
+            .edges
+            .iter()
+            .find(|edge| edge.name == "friends")
+            .expect("friends edge");
+        assert_eq!(
+            friends.through.as_ref(),
+            Some(&ModelThroughEdge {
+                name: "friendships".to_string(),
+                model: "Friendship".to_string(),
+                source_field: "user_id".to_string(),
+                source_ref_field: "id".to_string(),
+                source_field_optional: false,
+                target_field: "friend_id".to_string(),
+                target_ref_field: "id".to_string(),
+                target_field_optional: false,
+            })
+        );
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains(
+            "edge To(\"friends\", User.Type).Through(\"friendships\", Friendship.Type) {"
+        ));
+        let reparsed = parse_models_with_format(&ent, ModelFormat::Ent).expect("round trip ent");
+        let reparsed_user = reparsed
+            .iter()
+            .find(|model| model.name == "User")
+            .expect("reparsed user");
+        assert_eq!(reparsed_user.edges, user.edges);
+
+        let sea_orm = render_model_module(user);
+        assert!(sea_orm.contains("pub async fn query_friends(&self, through_repo: &crate::model::FriendshipRepository<'_>, repo: &crate::model::UserRepository<'_>) -> anyhow::Result<Vec<crate::model::UserModel>>"));
+        assert!(sea_orm.contains("friendship::user_id_eq(value)).pluck_friend_id().await?;"));
+        assert!(sea_orm.contains("friendship::friend_id_in(target_values)"));
+        assert!(sea_orm.contains("pluck_user_id().await?;"));
+
+        let toasty = render_toasty_model_module(user);
+        assert!(toasty.contains("pub async fn query_friends(&self, db: &mut dyn toasty::Executor) -> toasty::Result<Vec<crate::model::User>>"));
+        assert!(toasty.contains("friendship::user_id_eq(value)).pluck_friend_id().await?;"));
+        assert!(toasty.contains("friendship::friend_id_in(target_values)"));
+        assert!(toasty.contains("pluck_user_id().await?;"));
+
+        let err = parse_models_with_format(
+            r#"
+            entity User {
+                field Int64("id").Primary() {
+                }
+                edge To("friends", User.Type).Through("friendships", Friendship.Type) {
+                }
+            }
+            entity Friendship {
+                field Int64("id").Primary() {
+                }
+                field Int64("user_id") {
+                }
+                edge To("user", User.Type).Field("user_id").Unique().Required() {
+                }
+            }
+            "#,
+            ModelFormat::Ent,
+        )
+        .expect_err("self through needs two join directions");
+        assert!(err
+            .to_string()
+            .contains("join model `Friendship` must have exactly two owning edges to `User`"));
+    }
+
+    #[test]
     fn ent_to_edges_without_local_fk_are_parse_compatible_noops() {
         let source = r#"
         entity User {
@@ -16880,7 +17456,7 @@ mod tests {
                 table "profiles"
                 field Int64("id").Primary() {
                 }
-                field Int64("user_id") {
+                field Int64("user_id").Optional() {
                 }
                 edge To("user", User.Type).Field("user_id") {
                 }
@@ -19135,6 +19711,8 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
                 }
                 edge To("groups", Group.Type).Through("memberships", Membership.Type) {
                 }
+                edge To("friends", User.Type).Through("friendships", Friendship.Type) {
+                }
             }
 
             entity Order {
@@ -19159,6 +19737,8 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
                 field id: i64 {
                     primary
                 }
+                edge From("users", User.Type).Ref("groups").Through("memberships", Membership.Type) {
+                }
             }
 
             entity Membership {
@@ -19180,6 +19760,30 @@ toasty = { version = "0.7", default-features = false, features = ["postgresql", 
                 edge group {
                     to Group
                     field group_id
+                    ref id
+                    required
+                }
+            }
+
+            entity Friendship {
+                table "friendships"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field user_id: i64 {
+                }
+                field friend_id: i64 {
+                }
+                edge user {
+                    to User
+                    field user_id
+                    ref id
+                    required
+                }
+                edge friend {
+                    to User
+                    field friend_id
                     ref id
                     required
                 }
@@ -19263,6 +19867,8 @@ impl ServiceContext {
                 }
                 edge To("groups", Group.Type).Through("memberships", Membership.Type) {
                 }
+                edge To("friends", User.Type).Through("friendships", Friendship.Type) {
+                }
             }
 
             entity Order {
@@ -19286,6 +19892,8 @@ impl ServiceContext {
                 field id: i64 {
                     primary
                 }
+                edge From("users", User.Type).Ref("groups").Through("memberships", Membership.Type) {
+                }
             }
 
             entity Membership {
@@ -19307,6 +19915,29 @@ impl ServiceContext {
                 edge group {
                     to Group
                     field group_id
+                    ref id
+                    required
+                }
+            }
+            entity Friendship {
+                table "friendships"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field user_id: i64 {
+                }
+                field friend_id: i64 {
+                }
+                edge user {
+                    to User
+                    field user_id
+                    ref id
+                    required
+                }
+                edge friend {
+                    to User
+                    field friend_id
                     ref id
                     required
                 }

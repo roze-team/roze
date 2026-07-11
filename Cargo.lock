@@ -3744,6 +3744,8 @@ name = "roze-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -3760,12 +3762,17 @@ dependencies = [
  "roze-resilience",
  "roze-rpc",
  "roze-trace",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http 0.7.0",
  "tracing",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]

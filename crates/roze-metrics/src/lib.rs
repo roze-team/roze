@@ -275,6 +275,11 @@ pub fn record_gateway_stream_connection_duration(
     );
 }
 
+pub fn record_gateway_config_reload(outcome: impl Into<String>) {
+    let labels = MetricLabels::new().insert("outcome", outcome.into());
+    gateway_metrics_registry().inc_counter("roze_gateway_config_reloads_total", labels, 1);
+}
+
 pub fn record_queue_event(
     system: impl Into<String>,
     topic: impl Into<String>,
@@ -482,11 +487,13 @@ mod tests {
         );
         record_gateway_retry("gateway", "/api", "status_503");
         record_gateway_upstream("gateway", "http://127.0.0.1:8080", "ejected");
+        record_gateway_config_reload("applied");
 
         let metrics = http_metrics();
         assert!(metrics.contains("roze_gateway_route_requests_total"));
         assert!(metrics.contains("roze_gateway_route_retries_total"));
         assert!(metrics.contains("roze_gateway_upstream_events_total"));
+        assert!(metrics.contains("roze_gateway_config_reloads_total"));
         assert!(metrics.contains(r#"outcome="ok""#));
     }
 

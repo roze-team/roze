@@ -71,6 +71,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1"
+arc-swap = "1"
 async-trait = "0.1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
@@ -90,12 +91,17 @@ rust_decimal = { version = "1", features = ["serde"] }
 thiserror = "2.0.18"
 validator = { version = "0.20", features = ["derive"] }
 base64 = "0.22"
+sha1 = "0.10"
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 mongodb = "3.7.0"
 moka = { version = "0.12", features = ["future"] }
 redis = { version = "0.27", features = ["aio", "tokio-comp"] }
 regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+tokio-rustls = "0.26"
+webpki-roots = "1"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1.10.1", features = ["server", "http1"] }

@@ -1426,7 +1426,15 @@ directives to lowercase `.ent` directives and preserves edge `Comment("...")`
 as `comment "..."`. Immutable local-FK edges remain available on create
 builders, but their relationship setter, clear method, and underlying FK field
 setter are omitted from SeaORM and Toasty update/update-many builders.
-For nullable local FK fields, `Required()` is enforced in generated mutation
+An explicit local FK field and its owning edge must agree on Ent's create
+optionality and immutability. An `Optional()` field pairs with an optional edge;
+a `Required()` edge pairs with a non-nullable field or a `Nillable()` field,
+which keeps an `Option<T>` representation while remaining required on create.
+`Immutable()` must be declared on both the field and edge. Roze rejects these
+metadata mismatches before generating code. Inverse `From(...).Ref(...)` and
+`Through(...)` edges reuse the owning edge's storage contract rather than
+revalidating a second local field.
+For `Nillable()` local FK fields, `Required()` is enforced in generated mutation
 builders: create rejects a missing or null relation, while update-one and
 update-many allow the relation to remain untouched but reject explicitly
 clearing it to null.
@@ -1458,10 +1466,23 @@ an explicit join entity when it has exactly one owning local-FK edge to the
 source model and one to the target model. Generated `query_<edge>` methods
 traverse through the join repository, and `where_<edge>_with(...)` projects
 matching target keys through the join model before filtering source rows.
+Inverse declarations such as
+`edge From("liked_users", User.Type).Ref("liked_tweets").Through("likes", Like.Type)`
+reuse the owning Through edge, reverse the join fields, survive canonical
+round-trip rendering, and generate traversal and relation filters from the
+opposite endpoint.
+Self-referential edge schemas are also supported, matching Ent's friendship
+pattern: the join entity must declare exactly two owning local-FK edges to the
+same model, with the first edge treated as the source direction and the second
+as the target direction.
 The join entity remains a normal generated model, so additional edge fields are
 available through its own CRUD API. Direct many-to-many setters are not
-generated; create/delete join rows explicitly. Ambiguous self-referential
-Through schemas fail with guidance to model both join directions explicitly.
+generated; create/delete join rows explicitly. A self-referential join entity
+with any number of matching owning edges other than two fails validation.
+Matching Ent's edge-schema ownership rule, one join entity may belong to only
+one owning Through relationship. Its resolved inverse Through endpoint is part
+of the same relationship and does not count as a second owner; reuse by another
+owning edge fails with both conflicting edge names.
 Plain ent-style `edge To("groups", Group.Type)` declarations without local
 `Field(...)`/`Ref(...)` are treated the same way; if either `Field(...)` or
 `Ref(...)` is present, both must be present so Roze can generate a concrete
@@ -1511,6 +1532,11 @@ is rejected by create and update builders, and no `clear_*` method is emitted.
 Roze preserves this distinction in canonical `.ent` output with
 `required_on_create`. Combining `Optional().Nillable()` keeps the field
 optional and allows explicit null.
+Roze applies Ent-compatible field invariants before writing generated code:
+primary/ID fields cannot be optional, fields with a static `Default(...)`
+cannot also be `Unique()`, and `Sensitive()` fields cannot carry JSON
+`StructTag(...)` metadata. Function defaults such as
+`DefaultFunc(uuid.NewString)` remain valid on unique fields.
 Enum field builders such as `field Enum("state").Values("active", "disabled")`
 map to a Roze `string` field with generated enum-value validation.
 `NamedValues("Active", "active", "Disabled", "disabled")` is also accepted and

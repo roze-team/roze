@@ -1018,6 +1018,7 @@ async fn watch_loop<T>(
         .clone()
         .unwrap_or_else(|| "config-center".to_string());
     let mut last_hash = snapshot_hash(&last_snapshot);
+    let mut last_failed_hash: Option<String> = None;
     let mut pending: Option<(String, Instant)> = None;
     let mut watch_rx = if subscriber.supports_watch() {
         match subscriber.watch().await {
@@ -1056,7 +1057,17 @@ async fn watch_loop<T>(
         };
 
         let snapshot_hash = snapshot_hash(&snapshot);
+        if last_failed_hash
+            .as_ref()
+            .is_some_and(|failed_hash| failed_hash != &snapshot_hash)
+        {
+            last_failed_hash = None;
+        }
         if snapshot_hash == last_hash {
+            pending = None;
+            continue;
+        }
+        if last_failed_hash.as_ref() == Some(&snapshot_hash) {
             pending = None;
             continue;
         }
@@ -1082,7 +1093,7 @@ async fn watch_loop<T>(
                     ReloadMetadata {
                         version: old_version + 1,
                         old_version,
-                        hash: snapshot_hash,
+                        hash: snapshot_hash.clone(),
                         old_hash: last_hash.clone(),
                         namespace: options.namespace.clone(),
                         app: options.app.clone(),
@@ -1107,9 +1118,11 @@ async fn watch_loop<T>(
                 );
 
                 pending = None;
+                last_failed_hash = Some(snapshot_hash);
                 continue;
             }
         };
+        last_failed_hash = None;
 
         let next_version = inner.version.fetch_add(1, Ordering::SeqCst) + 1;
         let old_version = next_version - 1;

@@ -81,7 +81,8 @@ let app = Router::new()
   `without`, `complement`, and bitwise union/intersection/difference/not
   operators make the same
   standard-method set reusable in gateway policy, middleware, tests, and
-  generated route inspection
+  generated route inspection; method-set representation and conversion live in
+  the dedicated `router/method_filter.rs` module instead of the route graph
 - `MethodRouter` implements Tower `Service` directly and exposes
   `into_make_service` / `into_make_service_with_connect_info::<T>` for
   standalone method-only services that do not need path routing
@@ -94,9 +95,14 @@ let app = Router::new()
 - the Hyper/Tower server boundary uses a concrete `BoxError` newtype and a
   dedicated `TowerToHyperService` adapter, keeping body-error lifetimes and
   spawned connection futures explicit instead of relying on closure inference
+- both native `RestServer` connection loops enable Hyper upgrades, allowing
+  Tower services such as `roze-gateway` to take ownership of WebSocket and
+  other HTTP/1.1 upgraded connections without exposing Hyper bodies publicly
 - connect-info make services wrap Router, MethodRouter, or Handler services in
   `ConnectInfoService` and inject connection metadata at request entry; they do
-  not apply a state layer to every route or copy the route graph per connection
+  not apply a state layer to every route or copy the route graph per connection;
+  Router make-service construction lives behind the dedicated
+  `router/into_make_service.rs` boundary
 - handler, routed service, and layer values are `Clone + Send + Sync + 'static`
   and are erased through Tower `BoxCloneSyncService`, keeping the shared router
   graph safely usable across runtime worker threads
@@ -149,11 +155,17 @@ let app = Router::new()
 - nested routers and services expose a composable `NestedPath` extractor with
   the complete mount prefix; this keeps redirect and mount-aware URL building
   independent from both the stripped current URI and the external
-  `OriginalUri`
+  `OriginalUri`; URI rewriting and nested-path accumulation are isolated in the
+  internal `router/strip_prefix.rs` service boundary; captured nest prefixes
+  such as `/{tenant}` are matched segment-by-segment and strip the corresponding
+  concrete request segment while preserving query parameters
 - router fallbacks clear stale `MatchedPath` and route parameters inherited
   from an outer router while preserving `OriginalUri` and `NestedPath`
-- nesting prefixes must be concrete path prefixes and cannot contain
-  catch-all wildcard captures
+- the default 404 policy is a zero-sized internal Tower `NotFound` service in
+  `router/not_found.rs`; router construction and `reset_fallback` share the
+  same explicit fallback implementation
+- nesting prefixes may contain named captures but cannot contain catch-all
+  wildcard captures
 - root nesting is rejected: compose routers with `Router::merge`, and use
   `Router::fallback_service` for root-level service fallback
 - router composition with `Router::merge(router)`
@@ -199,6 +211,9 @@ let app = Router::new()
   consumed by handlers without becoming global application state
 - `Router::layer` and `MethodRouter::layer` for Tower layers that preserve the
   current infallible route error model
+- Router and MethodRouter state injection share the internal Tower services in
+  `router/state.rs`; top-level state and explicit `FromRef` substates are added
+  at request entry without coupling state storage to path or method matching
 - `handle_error(layer, handler)` and `HandleErrorLayer`, also available under
   `roze_http::error_handling`, adapt fallible Tower layers back into Roze's
   infallible HTTP service boundary by mapping handler, route, and router layer

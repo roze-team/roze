@@ -18,6 +18,11 @@ Configuration is loaded in this order:
 
 A lower-priority source must not override a successfully loaded higher-priority source during the same reload cycle.
 
+An unchanged invalid snapshot is reported once and then suppressed by its
+content hash. It is retried only after the source content changes, preventing
+polling sources from producing repeated parse-error logs and alerts while the
+last valid configuration remains active.
+
 ## Etcd Behavior
 
 Required environment variables:

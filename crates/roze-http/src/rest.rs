@@ -164,7 +164,11 @@ async fn serve_router_service(
                 let io = TokioIo::new(stream);
                 let service = TowerToHyperService::new(router.clone());
                 connections.spawn(async move {
-                    if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+                    if let Err(error) = http1::Builder::new()
+                        .serve_connection(io, service)
+                        .with_upgrades()
+                        .await
+                    {
                         tracing::debug!(error = %error, "HTTP connection closed with error");
                     }
                 });
@@ -288,7 +292,11 @@ where
                         .expect("infallible make service");
                     let service = TowerToHyperService::new(service);
                     connections.spawn(async move {
-                        if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+                        if let Err(error) = http1::Builder::new()
+                            .serve_connection(io, service)
+                            .with_upgrades()
+                            .await
+                        {
                             tracing::debug!(error = %error, "HTTP connection closed with error");
                         }
                     });
