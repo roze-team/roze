@@ -1202,6 +1202,13 @@ src/
     <method>.rs
 ```
 
+Generated RPC servers register the standard `grpc.health.v1.Health` service.
+The overall server name and generated protobuf service name are driven by the
+same `HealthRegistry` used by framework readiness: starting, failed dependency,
+and draining states report `NOT_SERVING`; ready reports `SERVING`. A generated
+`grpc-health-sync` lifecycle task refreshes status every second and publishes
+`NOT_SERVING` before shutdown.
+
 Framework-owned files can be regenerated with `--update`. Business code should
 live in REST `src/logic/<group>/<method>.rs` or RPC
 `src/logic/<method>.rs`. Service config extensions live in
@@ -1521,8 +1528,11 @@ chain into equivalent owning `To` and inverse `From(...).Ref(...)` declarations.
 Chained self O2M declarations such as
 `edge To("children", Node.Type).From("parent").Unique()` place an implicit
 `parent_id` FK on the single-value `parent` direction and generate a to-many
-`children` inverse query. Cross-entity fieldless to-many/M2M storage still
-requires an explicit edge field or `Through(...)` join model.
+`children` inverse query. Cross-entity fieldless O2M pairs such as
+`User.To("pets", Pet.Type)` with
+`Pet.From("owner", User.Type).Ref("pets").Unique()` similarly synthesize
+`owner_id` on the target entity. Fieldless M2M storage still requires an
+explicit `Through(...)` join model.
 Owning ent-style edges with `Field("user_id")` but no `Ref(...)` default the
 reference field to `id`, matching the common entgo convention of pointing to
 the target primary key.

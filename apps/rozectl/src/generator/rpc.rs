@@ -44,12 +44,19 @@ async fn main() -> anyhow::Result<()> {{
     let rpc_addr = rpc.addr;
     let ctx = svc::ServiceContext::new(config).await?;
     let health = ctx.health.clone();
+    let (rpc_health, grpc_health_service) =
+        roze_rpc::health::RpcHealthReporter::new_for::<{service}Server<server::RpcService>>(
+            health,
+        );
+    rpc_health.refresh().await;
     let mut group = ServiceGroup::new();
     group.add_fn(service_name, move |shutdown| {{
         let ctx = ctx.clone();
+        let grpc_health_service = grpc_health_service.clone();
         async move {{
             let mut builder = RpcServer::new(rpc_addr).builder();
             builder
+                .add_service(grpc_health_service)
                 .add_service({service}Server::new(server::RpcService::new(ctx)))
                 .serve_with_shutdown(rpc_addr, async move {{
                     shutdown.wait().await;
@@ -58,11 +65,12 @@ async fn main() -> anyhow::Result<()> {{
                 .map_err(|error| anyhow::anyhow!("RPC service failed: {{error}}"))
         }}
     }});
-    group.add_fn("health-drain", move |shutdown| {{
-        let health = health.clone();
+    group.add_fn("grpc-health-sync", move |shutdown| {{
+        let rpc_health = rpc_health.clone();
         async move {{
-            shutdown.wait().await;
-            health.mark_draining();
+            rpc_health
+                .run_until(std::time::Duration::from_secs(1), shutdown.wait())
+                .await;
             Ok(())
         }}
     }});
@@ -1384,11 +1392,14 @@ mod tests {
         let rendered = render_main(&spec);
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
         assert!(rendered.contains("let health = ctx.health.clone();"));
+        assert!(rendered.contains("RpcHealthReporter::new_for"));
+        assert!(rendered.contains("rpc_health.refresh().await;"));
         assert!(rendered.contains("group.add_fn(service_name"));
         assert!(rendered.contains("let mut builder = RpcServer::new(rpc_addr).builder();"));
-        assert!(rendered.contains("builder\n                .add_service"));
+        assert!(rendered.contains(".add_service(grpc_health_service)"));
         assert!(rendered.contains(".serve_with_shutdown(rpc_addr"));
-        assert!(rendered.contains("health.mark_draining();"));
+        assert!(rendered.contains("group.add_fn(\"grpc-health-sync\""));
+        assert!(rendered.contains("run_until(std::time::Duration::from_secs(1)"));
         assert!(rendered.contains("let result = group.start().await;"));
         assert!(rendered.contains("result?;"));
     }

@@ -11,6 +11,7 @@ use roze_trace::generate_trace_id;
 
 pub mod transport {
     pub use tonic::metadata::{Ascii, KeyAndValueRef, MetadataKey, MetadataMap, MetadataValue};
+    pub use tonic::server::NamedService;
     pub use tonic::transport::{Channel, Endpoint, Server};
     pub use tonic::{Code, Request, Response, Status};
 }
