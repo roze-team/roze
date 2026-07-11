@@ -586,12 +586,16 @@ enum KubeCommands {
         max_replicas: u32,
         #[arg(long, default_value_t = 70)]
         target_cpu: u32,
+        #[arg(long, default_value_t = 80)]
+        target_memory: u32,
         #[arg(long)]
         env: Vec<String>,
         #[arg(long)]
         env_file: Option<PathBuf>,
         #[arg(long)]
         config_map: Option<String>,
+        #[arg(long)]
+        tls_secret: Option<String>,
         #[arg(long, default_value = "1")]
         min_available: String,
         #[arg(long, default_value = "deploy/kubernetes.yaml")]
@@ -629,10 +633,14 @@ enum HelmCommands {
         max_replicas: u32,
         #[arg(long, default_value_t = 70)]
         target_cpu: u32,
+        #[arg(long, default_value_t = 80)]
+        target_memory: u32,
         #[arg(long)]
         env: Vec<String>,
         #[arg(long)]
         config_map: Option<String>,
+        #[arg(long)]
+        tls_secret: Option<String>,
         #[arg(long, default_value = "1")]
         min_available: String,
         #[arg(long, default_value = "0.1.0")]
@@ -1614,9 +1622,11 @@ fn run() -> anyhow::Result<()> {
                 min_replicas,
                 max_replicas,
                 target_cpu,
+                target_memory,
                 env,
                 env_file,
                 config_map,
+                tls_secret,
                 min_available,
                 out,
             } => {
@@ -1634,9 +1644,11 @@ fn run() -> anyhow::Result<()> {
                     min_replicas,
                     max_replicas,
                     target_cpu,
+                    target_memory,
                     env,
                     env_file,
                     config_map,
+                    tls_secret,
                     min_available,
                     out,
                 })?;
@@ -1657,8 +1669,10 @@ fn run() -> anyhow::Result<()> {
                 min_replicas,
                 max_replicas,
                 target_cpu,
+                target_memory,
                 env,
                 config_map,
+                tls_secret,
                 min_available,
                 chart_version,
                 app_version,
@@ -1679,9 +1693,11 @@ fn run() -> anyhow::Result<()> {
                         min_replicas,
                         max_replicas,
                         target_cpu,
+                        target_memory,
                         env,
                         env_file: None,
                         config_map,
+                        tls_secret,
                         min_available,
                         out,
                     },
@@ -3656,6 +3672,13 @@ fn validate_kube_manifest_content(content: &str) -> Vec<String> {
             &mut issues,
             "Deployment",
             deployment,
+            "automountServiceAccountToken: false",
+        );
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "@sha256:");
+        require_manifest_fragment(
+            &mut issues,
+            "Deployment",
+            deployment,
             "terminationGracePeriodSeconds:",
         );
         require_manifest_fragment(&mut issues, "Deployment", deployment, "resources:");
@@ -3667,8 +3690,56 @@ fn validate_kube_manifest_content(content: &str) -> Vec<String> {
         require_manifest_fragment(&mut issues, "Deployment", deployment, "path: /readyz");
         require_manifest_fragment(&mut issues, "Deployment", deployment, "startupProbe:");
         require_manifest_fragment(&mut issues, "Deployment", deployment, "path: /startupz");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "runAsNonRoot: true");
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "runAsUser: 10001");
+        require_manifest_fragment(
+            &mut issues,
+            "Deployment",
+            deployment,
+            "allowPrivilegeEscalation: false",
+        );
+        require_manifest_fragment(
+            &mut issues,
+            "Deployment",
+            deployment,
+            "readOnlyRootFilesystem: true",
+        );
+        require_manifest_fragment(
+            &mut issues,
+            "Deployment",
+            deployment,
+            "type: RuntimeDefault",
+        );
+        require_manifest_fragment(&mut issues, "Deployment", deployment, "- ALL");
+        for fragment in [
+            "prometheus.io/scrape: \"true\"",
+            "prometheus.io/path: \"/metrics\"",
+            "prometheus.io/port:",
+        ] {
+            require_manifest_fragment(&mut issues, "Deployment", deployment, fragment);
+        }
+        for fragment in [
+            "type: RollingUpdate",
+            "maxUnavailable: 0",
+            "maxSurge: 1",
+            "minReadySeconds: 10",
+            "progressDeadlineSeconds: 600",
+            "topologySpreadConstraints:",
+            "topologyKey: kubernetes.io/hostname",
+            "whenUnsatisfiable: ScheduleAnyway",
+            "preStop:",
+            "sleep 5",
+        ] {
+            require_manifest_fragment(&mut issues, "Deployment", deployment, fragment);
+        }
+        if deployment.contains("secretName:") {
+            require_manifest_fragment(&mut issues, "Deployment", deployment, "volumeMounts:");
+            require_manifest_fragment(&mut issues, "Deployment", deployment, "readOnly: true");
+            require_manifest_fragment(&mut issues, "Deployment", deployment, "defaultMode: 0400");
+        }
     }
     if let Some(service) = documents.get("Service") {
+        require_manifest_fragment(&mut issues, "Service", service, "name: http");
         require_manifest_fragment(&mut issues, "Service", service, "targetPort:");
     }
     if let Some(hpa) = documents.get("HorizontalPodAutoscaler") {
@@ -3680,6 +3751,19 @@ fn validate_kube_manifest_content(content: &str) -> Vec<String> {
             hpa,
             "averageUtilization:",
         );
+        for fragment in [
+            "name: cpu",
+            "name: memory",
+            "behavior:",
+            "scaleUp:",
+            "scaleDown:",
+            "stabilizationWindowSeconds: 300",
+            "value: 100",
+            "value: 25",
+            "periodSeconds: 60",
+        ] {
+            require_manifest_fragment(&mut issues, "HorizontalPodAutoscaler", hpa, fragment);
+        }
     }
     if let Some(pdb) = documents.get("PodDisruptionBudget") {
         require_manifest_fragment(&mut issues, "PodDisruptionBudget", pdb, "minAvailable:");
@@ -3688,6 +3772,10 @@ fn validate_kube_manifest_content(content: &str) -> Vec<String> {
     if let Some(policy) = documents.get("NetworkPolicy") {
         require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "policyTypes:");
         require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "- Ingress");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "- Egress");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "egress:");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "port: 53");
+        require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "port: 443");
         require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "podSelector:");
         require_manifest_fragment(&mut issues, "NetworkPolicy", policy, "port:");
     }
@@ -3746,8 +3834,10 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
     let required_files = [
         "Chart.yaml",
         "values.yaml",
+        "values.schema.json",
         "templates/deployment.yaml",
         "templates/service.yaml",
+        "templates/servicemonitor.yaml",
         "templates/hpa.yaml",
         "templates/serviceaccount.yaml",
         "templates/pdb.yaml",
@@ -3772,10 +3862,21 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
         "values.yaml",
         &[
             "image:",
+            "digest: \"sha256:",
             "service:",
+            "observability:",
+            "prometheusScrape: true",
+            "metricsPath: /metrics",
+            "metricsPort:",
+            "serviceMonitor:",
+            "enabled: false",
+            "interval: 30s",
+            "scrapeTimeout: 10s",
             "resources:",
             "autoscaling:",
+            "targetMemoryUtilizationPercentage:",
             "serviceAccount:",
+            "tlsSecret:",
             "podDisruptionBudget:",
             "envFrom:",
         ],
@@ -3783,27 +3884,92 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
     check_helm_file(
         &mut issues,
         chart,
+        "values.schema.json",
+        &[
+            "https://json-schema.org/draft/2020-12/schema",
+            "\"additionalProperties\": false",
+            "^sha256:[0-9a-fA-F]{64}$",
+            "targetMemoryUtilizationPercentage",
+            "scrapeTimeout",
+        ],
+    );
+    let schema_path = chart.join("values.schema.json");
+    if let Ok(schema) = fs::read_to_string(&schema_path) {
+        if let Err(error) = serde_json::from_str::<serde_json::Value>(&schema) {
+            issues.push(format!("`values.schema.json` is not valid JSON: {error}"));
+        }
+    }
+    validate_helm_values(chart, &mut issues);
+    check_helm_file(
+        &mut issues,
+        chart,
         "templates/deployment.yaml",
         &[
             "kind: Deployment",
             "serviceAccountName:",
+            "automountServiceAccountToken: false",
+            "@{{ .Values.image.digest }}",
             "terminationGracePeriodSeconds:",
+            "runAsNonRoot: true",
+            "runAsUser: 10001",
+            "allowPrivilegeEscalation: false",
+            "readOnlyRootFilesystem: true",
+            "type: RuntimeDefault",
+            "- ALL",
+            "type: RollingUpdate",
+            "maxUnavailable: 0",
+            "maxSurge: 1",
+            "minReadySeconds: 10",
+            "progressDeadlineSeconds: 600",
+            "topologySpreadConstraints:",
+            "topologyKey: kubernetes.io/hostname",
+            "whenUnsatisfiable: ScheduleAnyway",
+            "preStop:",
+            "sleep 5",
             "livenessProbe:",
             "readinessProbe:",
             "startupProbe:",
+            "volumeMounts:",
+            "readOnly: true",
+            "defaultMode: 0400",
+            "prometheus.io/scrape:",
+            "prometheus.io/path:",
+            "prometheus.io/port:",
         ],
     );
     check_helm_file(
         &mut issues,
         chart,
         "templates/service.yaml",
-        &["kind: Service", "targetPort:"],
+        &["kind: Service", "name: http", "targetPort:"],
+    );
+    check_helm_file(
+        &mut issues,
+        chart,
+        "templates/servicemonitor.yaml",
+        &[
+            "monitoring.coreos.com/v1",
+            "kind: ServiceMonitor",
+            "serviceMonitor.enabled",
+            "port: http",
+            "metricsPath",
+            "interval:",
+            "scrapeTimeout:",
+        ],
     );
     check_helm_file(
         &mut issues,
         chart,
         "templates/hpa.yaml",
-        &["kind: HorizontalPodAutoscaler", "averageUtilization:"],
+        &[
+            "kind: HorizontalPodAutoscaler",
+            "averageUtilization:",
+            "name: memory",
+            "behavior:",
+            "scaleUp:",
+            "scaleDown:",
+            "stabilizationWindowSeconds: 300",
+        ],
     );
     check_helm_file(
         &mut issues,
@@ -3821,7 +3987,14 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
         &mut issues,
         chart,
         "templates/networkpolicy.yaml",
-        &["kind: NetworkPolicy", "policyTypes:", "Ingress"],
+        &[
+            "kind: NetworkPolicy",
+            "policyTypes:",
+            "Ingress",
+            "Egress",
+            "port: 53",
+            "port: 443",
+        ],
     );
     check_helm_file(
         &mut issues,
@@ -3843,6 +4016,148 @@ fn check_helm_file(issues: &mut Vec<String>, chart: &Path, file: &str, fragments
             issues.push(format!("`{file}` is missing `{fragment}`"));
         }
     }
+}
+
+fn validate_helm_values(chart: &Path, issues: &mut Vec<String>) {
+    let path = chart.join("values.yaml");
+    let values = match config::Config::builder()
+        .add_source(config::File::from(path.clone()))
+        .build()
+        .and_then(|config| config.try_deserialize::<serde_json::Value>())
+    {
+        Ok(values) => values,
+        Err(error) => {
+            issues.push(format!("`values.yaml` is not valid YAML: {error}"));
+            return;
+        }
+    };
+
+    let Some(root) = values.as_object() else {
+        issues.push("`values.yaml` must contain a top-level mapping".to_string());
+        return;
+    };
+    let allowed = [
+        "replicaCount",
+        "image",
+        "service",
+        "observability",
+        "resources",
+        "autoscaling",
+        "serviceAccount",
+        "tlsSecret",
+        "podDisruptionBudget",
+        "probes",
+        "env",
+        "envFrom",
+    ];
+    for key in root.keys() {
+        if !allowed.contains(&key.as_str()) {
+            issues.push(format!(
+                "`values.yaml` contains unsupported top-level key `{key}`"
+            ));
+        }
+    }
+    for key in [
+        "replicaCount",
+        "image",
+        "service",
+        "observability",
+        "resources",
+        "autoscaling",
+    ] {
+        if !root.contains_key(key) {
+            issues.push(format!("`values.yaml` is missing required key `{key}`"));
+        }
+    }
+
+    let digest = values
+        .pointer("/image/digest")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let digest_pattern = regex::Regex::new(r"^sha256:[0-9a-fA-F]{64}$").expect("digest regex");
+    if !digest_pattern.is_match(digest) {
+        issues.push("`values.yaml` image.digest must be sha256 followed by 64 hex digits".into());
+    }
+
+    validate_values_percentage(&values, "/service/port", 1, 65_535, issues);
+    validate_values_percentage(&values, "/replicaCount", 1, u64::MAX, issues);
+    validate_values_percentage(&values, "/autoscaling/minReplicas", 1, u64::MAX, issues);
+    validate_values_percentage(&values, "/autoscaling/maxReplicas", 1, u64::MAX, issues);
+    validate_values_percentage(
+        &values,
+        "/autoscaling/targetCPUUtilizationPercentage",
+        1,
+        100,
+        issues,
+    );
+    validate_values_percentage(
+        &values,
+        "/autoscaling/targetMemoryUtilizationPercentage",
+        1,
+        100,
+        issues,
+    );
+
+    let min_replicas = values
+        .pointer("/autoscaling/minReplicas")
+        .and_then(serde_json::Value::as_u64);
+    let max_replicas = values
+        .pointer("/autoscaling/maxReplicas")
+        .and_then(serde_json::Value::as_u64);
+    if matches!((min_replicas, max_replicas), (Some(min), Some(max)) if min > max) {
+        issues.push("`values.yaml` autoscaling.minReplicas cannot exceed maxReplicas".into());
+    }
+    if values.pointer("/service/port") != values.pointer("/observability/metricsPort") {
+        issues.push("`values.yaml` observability.metricsPort must match service.port".into());
+    }
+
+    let interval = values
+        .pointer("/observability/serviceMonitor/interval")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_helm_duration_ms);
+    let timeout = values
+        .pointer("/observability/serviceMonitor/scrapeTimeout")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_helm_duration_ms);
+    match (interval, timeout) {
+        (Some(interval), Some(timeout)) if timeout < interval => {}
+        (Some(_), Some(_)) => issues
+            .push("`values.yaml` serviceMonitor.scrapeTimeout must be less than interval".into()),
+        _ => issues.push(
+            "`values.yaml` ServiceMonitor durations must use positive ms/s/m/h values".into(),
+        ),
+    }
+}
+
+fn validate_values_percentage(
+    values: &serde_json::Value,
+    pointer: &str,
+    minimum: u64,
+    maximum: u64,
+    issues: &mut Vec<String>,
+) {
+    if !matches!(values.pointer(pointer).and_then(serde_json::Value::as_u64), Some(value) if (minimum..=maximum).contains(&value))
+    {
+        issues.push(format!(
+            "`values.yaml` {pointer} must be an integer between {minimum} and {maximum}"
+        ));
+    }
+}
+
+fn parse_helm_duration_ms(value: &str) -> Option<u64> {
+    let split = value.find(|ch: char| !ch.is_ascii_digit())?;
+    let amount = value[..split].parse::<u64>().ok()?;
+    if amount == 0 {
+        return None;
+    }
+    let multiplier = match &value[split..] {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return None,
+    };
+    amount.checked_mul(multiplier)
 }
 
 fn run_dev(command: DevCommands) -> anyhow::Result<()> {
@@ -4452,12 +4767,44 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 spec:
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "3000"
     spec:
       serviceAccountName: user
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
       containers:
       - name: user
+        image: registry.example.com/user@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 5"]
         resources:
           requests:
             cpu: 100m
@@ -4477,7 +4824,8 @@ apiVersion: v1
 kind: Service
 spec:
   ports:
-  - targetPort: 3000
+  - name: http
+    targetPort: 3000
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -4486,8 +4834,24 @@ spec:
   maxReplicas: 5
   metrics:
   - resource:
+      name: cpu
       target:
         averageUtilization: 70
+  - resource:
+      name: memory
+      target:
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - value: 100
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - value: 25
+        periodSeconds: 60
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -4501,9 +4865,14 @@ spec:
   podSelector: {}
   policyTypes:
   - Ingress
+  - Egress
   ingress:
   - ports:
     - port: 3000
+  egress:
+  - ports:
+    - port: 53
+    - port: 443
 "#;
         assert!(validate_kube_manifest_content(manifest).is_empty());
     }
@@ -4544,22 +4913,61 @@ spec:
         .expect("write chart");
         fs::write(
             root.join("values.yaml"),
-            "image:\nservice:\nresources:\nautoscaling:\nserviceAccount:\npodDisruptionBudget:\nenvFrom:\n",
+            r#"replicaCount: 2
+image:
+  repository: registry.example.com/user
+  tag: ""
+  digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  pullPolicy: IfNotPresent
+service:
+  port: 3000
+observability:
+  prometheusScrape: true
+  metricsPath: /metrics
+  metricsPort: 3000
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+resources: {}
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+serviceAccount: {}
+tlsSecret: {}
+podDisruptionBudget: {}
+probes: {}
+env: {}
+envFrom: []
+"#,
         )
         .expect("write values");
         fs::write(
+            root.join("values.schema.json"),
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema", "additionalProperties": false, "digest":"^sha256:[0-9a-fA-F]{64}$", "targetMemoryUtilizationPercentage":{}, "scrapeTimeout":{}}"#,
+        )
+        .expect("write values schema");
+        fs::write(
             templates.join("deployment.yaml"),
-            "kind: Deployment\nserviceAccountName:\nterminationGracePeriodSeconds:\nlivenessProbe:\nreadinessProbe:\nstartupProbe:\n",
+            "kind: Deployment\nserviceAccountName:\nautomountServiceAccountToken: false\n@{{ .Values.image.digest }}\nterminationGracePeriodSeconds:\nrunAsNonRoot: true\nrunAsUser: 10001\nallowPrivilegeEscalation: false\nreadOnlyRootFilesystem: true\ntype: RuntimeDefault\n- ALL\ntype: RollingUpdate\nmaxUnavailable: 0\nmaxSurge: 1\nminReadySeconds: 10\nprogressDeadlineSeconds: 600\ntopologySpreadConstraints:\ntopologyKey: kubernetes.io/hostname\nwhenUnsatisfiable: ScheduleAnyway\npreStop:\nsleep 5\nvolumeMounts:\nreadOnly: true\ndefaultMode: 0400\nprometheus.io/scrape:\nprometheus.io/path:\nprometheus.io/port:\nlivenessProbe:\nreadinessProbe:\nstartupProbe:\n",
         )
         .expect("write deployment");
         fs::write(
             templates.join("service.yaml"),
-            "kind: Service\ntargetPort:\n",
+            "kind: Service\nname: http\ntargetPort:\n",
         )
         .expect("write service");
         fs::write(
+            templates.join("servicemonitor.yaml"),
+            "monitoring.coreos.com/v1\nkind: ServiceMonitor\nserviceMonitor.enabled\nport: http\nmetricsPath\ninterval:\nscrapeTimeout:\n",
+        )
+        .expect("write service monitor");
+        fs::write(
             templates.join("hpa.yaml"),
-            "kind: HorizontalPodAutoscaler\naverageUtilization:\n",
+            "kind: HorizontalPodAutoscaler\naverageUtilization:\nname: memory\nbehavior:\nscaleUp:\nscaleDown:\nstabilizationWindowSeconds: 300\n",
         )
         .expect("write hpa");
         fs::write(
@@ -4574,7 +4982,7 @@ spec:
         .expect("write pdb");
         fs::write(
             templates.join("networkpolicy.yaml"),
-            "kind: NetworkPolicy\npolicyTypes:\nIngress\n",
+            "kind: NetworkPolicy\npolicyTypes:\nIngress\nEgress\nport: 53\nport: 443\n",
         )
         .expect("write network policy");
         fs::write(
@@ -4583,7 +4991,11 @@ spec:
         )
         .expect("write helpers");
 
-        assert!(validate_helm_chart_dir(&root).is_empty());
+        let issues = validate_helm_chart_dir(&root);
+        assert!(
+            issues.is_empty(),
+            "unexpected Helm validation issues: {issues:#?}"
+        );
 
         fs::remove_dir_all(root).expect("remove helm validate chart");
     }

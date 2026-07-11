@@ -153,9 +153,14 @@ exit 0
 EOF_DOCKER
 chmod +x "$OUT/fake-bin/docker"
 
+DOCKER_ARGS_LOG="$OUT/docker-args.log"
+if [[ "${OS:-}" == "Windows_NT" ]] && command -v cygpath >/dev/null 2>&1; then
+  DOCKER_ARGS_LOG="$(cygpath -w "$DOCKER_ARGS_LOG")"
+fi
+
 cat >"$OUT/fake-bin/docker.cmd" <<EOF_DOCKER_CMD
 @echo off
-echo %*>>"$OUT/docker-args.log"
+echo %*>>"$DOCKER_ARGS_LOG"
 exit /b 0
 EOF_DOCKER_CMD
 
@@ -421,12 +426,12 @@ pass "openapi generate"
 test -f "$OUT/Dockerfile"
 pass "docker"
 
-"$BIN" kube deploy --name smoke-api --image smoke-api:latest --out "$OUT/kubernetes.yaml" >/dev/null
+"$BIN" kube deploy --name smoke-api --image smoke-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --out "$OUT/kubernetes.yaml" >/dev/null
 "$BIN" kube validate --file "$OUT/kubernetes.yaml" >/dev/null
 test -f "$OUT/kubernetes.yaml"
 pass "kube deploy/validate"
 
-"$BIN" helm chart --name smoke-api --image smoke-api:latest --out "$OUT/chart" >/dev/null
+"$BIN" helm chart --name smoke-api --image smoke-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --out "$OUT/chart" >/dev/null
 "$BIN" helm validate --chart "$OUT/chart" >/dev/null
 test -f "$OUT/chart/Chart.yaml"
 pass "helm chart/validate"

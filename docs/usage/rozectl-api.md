@@ -735,7 +735,7 @@ Generate deployment files:
 
 ```bash
 rozectl docker --port 8080 --binary user-api
-rozectl kube deploy --name user-api --image registry.example.com/user-api:latest --port 8080
+rozectl kube deploy --name user-api --image registry.example.com/user-api@sha256:<64-hex-digest> --port 8080
 ```
 
 ## Supported `.api` syntax
@@ -1327,17 +1327,23 @@ Builder headers may include entgo's extra Go type sample argument, such as
 `field JSON("metadata", map[string]any{})`,
 `field JSON("metadata", map[string]interface{}{})`, or
 `field UUID("public_id", uuid.UUID{})`; Roze uses the first argument as the
-field name and maps JSON/UUID to its string-backed model representation.
-Ent `field Any("payload")` is also accepted and maps to the same string-backed
-JSON representation, including optional fields and static map/slice defaults.
+field name. JSON maps to `serde_json::Value` in generated SeaORM models, while
+UUID remains string-backed. Ent `field Any("payload")` is accepted as the same
+structured JSON type, including optional fields and static map/slice defaults.
+Toasty 0.7 does not expose a JSON storage field, so Toasty output uses a
+JSON-string compatibility representation while normalized `schema.ent` keeps
+the field type as `json`.
 Go map defaults such as `Default(map[string]any{})` and simple static literals
 like `Default(map[string]any{"theme": "dark", "beta": true})` or
-`Default(map[string]interface{}{"theme": "dark"})` on string-backed JSON fields
-normalize to JSON object strings for generated create builders.
+`Default(map[string]interface{}{"theme": "dark"})` normalize to JSON objects
+for generated create builders.
 Simple Go slice defaults such as `Default([]string{"new", "hot"})` and
-`Default([]interface{}{true, 3, "ok", nil})` on string-backed JSON fields
-normalize to JSON array strings. Simple custom Go slice defaults such as
+`Default([]interface{}{true, 3, "ok", nil})` normalize to JSON arrays. Simple
+custom Go slice defaults such as
 `Default([]http.Dir{"/tmp"})` normalize the literal items the same way.
+JSON defaults are recursive: nested typed maps, typed slices, elided inner
+composite literals such as `[][]int{{1, 2}, {3, 4}}`, and `nil` values
+normalize to nested JSON objects, arrays, and `null`.
 Custom entgo `Other(...)` field builders are accepted with the same first-arg
 name parsing and map to string-backed fields so generated repositories stay
 compilable; keep domain-specific typed conversion in application extensions.
@@ -1417,8 +1423,13 @@ SQL `FOREIGN KEY (...) REFERENCES ...` constraints and inline `REFERENCES`
 column attributes are imported as `.ent` edges. Single-column foreign keys are
 supported; composite foreign keys are rejected with a clear error until the
 relation generator grows composite edge semantics.
-`.ent` edges can declare `unique`; Roze normalizes that into a single-field
-unique index on the local edge field and generates unique lookup helpers.
+`.ent` edge `Unique()` follows Ent relationship cardinality: an edge bound to a
+scalar local FK with `Field(...)` must be unique because each source row points
+to at most one target. It does not make the FK column database-unique and does
+not add cache-key or unique-lookup helpers. Declare `Unique()` on the field, or
+use `index.Edges("edge").Unique()`, when the database column itself must be
+unique. SQL foreign-key imports use unique edge cardinality while preserving a
+database unique index only when it exists in the source DDL.
 Edge blocks also accept ent-style builder calls such as `To("User")`,
 `Field("user_id")`, `Ref("id")`, `Unique()`, `Required()`, and edge-level
 `Immutable()`; round-trip rendering normalizes generated relationship
@@ -1466,6 +1477,16 @@ an explicit join entity when it has exactly one owning local-FK edge to the
 source model and one to the target model. Generated `query_<edge>` methods
 traverse through the join repository, and `where_<edge>_with(...)` projects
 matching target keys through the join model before filtering source rows.
+Both join-model owning edges that compose the relationship must declare
+`Unique().Required()`: `Unique()` expresses their scalar to-one cardinality,
+and `Required()` prevents incomplete edge-schema rows with a missing endpoint.
+Roze reports the source or target join edge before generating code when this
+contract is violated.
+A single-field unique index on the join model's source FK narrows that Through
+direction to to-one cardinality. Roze infers this after resolving owning or
+inverse join directions, so generated `query_<edge>` returns `Option<T>` and
+uses `first()` instead of returning a list. Compound unique indexes do not
+trigger this inference because they still permit multiple rows for one source.
 Inverse declarations such as
 `edge From("liked_users", User.Type).Ref("liked_tweets").Through("likes", Like.Type)`
 reuse the owning Through edge, reverse the join fields, survive canonical
@@ -1518,6 +1539,13 @@ Index builders with `Edges("user")` map to the owning edge's local FK field
 when that edge declares one, such as `user_id`; unresolved edge-only indexes
 are accepted as parse-compatible no-ops because Roze cannot generate a concrete
 database index without a local field.
+An owning `edge.To("group", Group.Type).Unique()` without `Field(...)`
+generates an implicit `group_id` storage field typed from the target primary
+key. It is nullable by default; `Required()` makes it required, `Immutable()`
+makes the storage field create-only, and `StorageKey(edge.Column("..."))`
+controls the physical column. Canonical `.ent` output keeps the implicit edge
+form and does not expose the synthesized field. Non-unique fieldless to-many
+edges still require an explicit `Through(...)` join model.
 `.ent` fields can declare `source <column>` or `storage_key <column>` when the
 logical schema field name differs from the physical database column; SeaORM
 models emit a matching field-level `column_name` attribute.
@@ -1635,8 +1663,10 @@ than relying on a database default.
 `update_default now_secs`, `update_default now_millis`,
 `update_default now_micros`, or `update_default now_nanos`; generated update
 builders fill the field when the caller did not set it explicitly.
-SQL `JSON`/`JSONB` columns generate `String` so default Toasty models remain
-compilable; ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
+SQL `JSON`/`JSONB` columns normalize to `.ent` `json`; PostgreSQL static defaults
+such as `'{}'::jsonb` and `'[]'::json` become structured JSON defaults. SeaORM
+output uses `serde_json::Value`, while Toasty uses its JSON-string compatibility
+representation. Ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
 `BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.
 Model names and field names must generate valid, non-conflicting Rust module,
 type, field, and field-enum identifiers. Names that normalize to a single `_`
@@ -2007,7 +2037,7 @@ standard liveness/readiness/startup probes. The default output path is
 rozectl kube deploy \
   --name user-api \
   --namespace default \
-  --image registry.example.com/user-api:latest \
+  --image registry.example.com/user-api@sha256:<64-hex-digest> \
   --replicas 2 \
   --port 8080 \
   --cpu-request 100m \
@@ -2017,18 +2047,48 @@ rozectl kube deploy \
   --min-replicas 2 \
   --max-replicas 5 \
   --target-cpu 70 \
+  --target-memory 80 \
   --env-file .env \
   --config-map user-api-config \
+  --tls-secret user-api-upstream-tls \
   --min-available 1
 ```
 
 `--env KEY=VALUE` entries are validated before writing the manifest.
+`--image` must use immutable `repository@sha256:<64 hex>` syntax; mutable tags
+and `latest` are rejected before any deployment file is written.
 `--config-map` adds an `envFrom.configMapRef` reference. `--env-file` reads a
 dotenv-style file, validates each `KEY=VALUE` line, emits a generated
 `<name>-env` ConfigMap, and wires it through `envFrom`.
+`--tls-secret` mounts an existing Kubernetes Secret read-only at
+`/var/run/secrets/roze/tls` with mode `0400`; the generator never writes CA,
+certificate, or private-key material into the manifest.
 The manifest always includes a ServiceAccount, PodDisruptionBudget, and
-namespace-wide ingress NetworkPolicy for the service port. `--min-available`
-controls the PodDisruptionBudget `minAvailable` value.
+NetworkPolicy. The policy allows ingress to the service port and limits egress
+to same-namespace workloads, kube-system DNS on TCP/UDP 53, and external TLS on
+TCP 443. `--min-available` controls the PodDisruptionBudget `minAvailable`
+value.
+
+HPA uses both CPU and memory utilization. `--target-cpu` defaults to 70% and
+`--target-memory` defaults to 80%. Scale-up can double capacity or add four
+Pods per minute, whichever is larger. Scale-down waits through a 300-second
+stabilization window and removes at most 25% of replicas per minute.
+
+Pod metadata includes Prometheus discovery annotations for `/metrics` on the
+service port, connecting the generated runtime endpoint to cluster scraping
+without a separate hand-written patch.
+
+The generated Pod runs as UID/GID `10001` with `runAsNonRoot`, `RuntimeDefault`
+Seccomp, and an `fsGroup` of `10001`. The service container disables privilege
+escalation, uses a read-only root filesystem, and drops every Linux capability.
+ServiceAccount token auto-mounting is disabled because generated services do
+not require Kubernetes API access by default.
+
+Deployments use a zero-unavailable rolling update (`maxUnavailable: 0`,
+`maxSurge: 1`), wait 10 seconds before considering a Pod ready, fail a stalled
+rollout after 600 seconds, and spread replicas across hostnames when capacity
+allows. A five-second `preStop` window lets readiness draining and graceful
+shutdown stop new work before Kubernetes terminates the process.
 
 Generated probes target the standard service endpoints:
 
@@ -2047,11 +2107,17 @@ rozectl kube validate --file deploy/kubernetes.yaml
 The validator checks for Deployment, Service, HPA, ServiceAccount,
 PodDisruptionBudget, NetworkPolicy, standard probes, resource requests/limits,
 service account wiring, and service/HPA/PDB/NetworkPolicy key fields.
+When a TLS Secret is present it also requires a read-only mount and `0400`
+default mode; NetworkPolicy validation requires the DNS and TLS egress rules.
+The validator also rejects manifests that omit the generated non-root,
+Seccomp, no-privilege-escalation, read-only-root, or capability-drop controls.
+Rolling-update limits, rollout deadlines, topology spreading, and the pre-stop
+drain window are validated as required production fields.
 
 ## Helm chart generation
 
 `rozectl helm chart` writes a production-oriented application chart with
-`Chart.yaml`, `values.yaml`, and Deployment, Service, HPA, ServiceAccount,
+`Chart.yaml`, `values.yaml`, `values.schema.json`, and Deployment, Service, HPA, ServiceAccount,
 PodDisruptionBudget, and NetworkPolicy templates. It uses the same resource,
 probe, autoscaling, image, env, and ConfigMap settings as `kube deploy`.
 Review the generated chart against the production checklist before using it in
@@ -2060,14 +2126,16 @@ a real environment.
 ```bash
 rozectl helm chart \
   --name user-api \
-  --image registry.example.com/user-api:1.2.3 \
+  --image registry.example.com/user-api@sha256:<64-hex-digest> \
   --replicas 2 \
   --port 8080 \
   --min-replicas 2 \
   --max-replicas 5 \
   --target-cpu 70 \
+  --target-memory 80 \
   --env RUST_LOG=info \
   --config-map user-api-config \
+  --tls-secret user-api-upstream-tls \
   --min-available 1 \
   --chart-version 0.1.0 \
   --app-version 1.2.3 \
@@ -2076,7 +2144,27 @@ rozectl helm chart \
 
 The Helm chart always includes ServiceAccount, PodDisruptionBudget, and
 NetworkPolicy templates. `values.yaml` exposes `serviceAccount.name` and
-`podDisruptionBudget.minAvailable` for chart-level customization.
+`podDisruptionBudget.minAvailable` for chart-level customization. It also
+exposes `tlsSecret.name` and `tlsSecret.mountPath`; an empty name disables the
+mount, while a configured Secret is mounted read-only with mode `0400`.
+The Deployment template always applies the same Pod and container security
+contexts as `kube deploy`.
+`values.yaml` exposes `observability.prometheusScrape`, `metricsPath`, and
+`metricsPort`; scraping is enabled for `/metrics` by default.
+The image repository and SHA-256 digest are stored separately in values and
+recombined as an immutable digest reference by the Deployment template.
+`values.schema.json` uses JSON Schema Draft 2020-12 and rejects malformed image
+digests, out-of-range ports or HPA targets, invalid ServiceMonitor durations,
+and unknown top-level values before Helm renders the chart.
+`rozectl helm validate` also parses `values.yaml` offline and enforces the
+critical schema semantics without requiring Helm: required and unknown keys,
+numeric ranges, HPA min/max ordering, metrics/service port consistency, and a
+scrape timeout shorter than the scrape interval.
+It also exposes an optional `observability.serviceMonitor` block with
+`enabled`, `interval`, `scrapeTimeout`, and additional labels. The generated
+`ServiceMonitor` template is disabled by default so charts remain installable
+without the Prometheus Operator CRDs; enabling it selects the generated Service
+through its named `http` port.
 
 `rozectl helm chart` validates the chart directory before returning success.
 Re-run the same offline validation, then optionally render with Helm:
@@ -2087,8 +2175,10 @@ helm template user-api deploy/user-api-chart
 ```
 
 `rozectl helm validate` checks the chart structure without requiring Helm. It
-verifies `Chart.yaml`, `values.yaml`, Deployment, Service, HPA, ServiceAccount,
-PodDisruptionBudget, NetworkPolicy, and helper templates.
+verifies `Chart.yaml`, `values.yaml`, parsed `values.schema.json`, Deployment,
+Service, HPA, ServiceAccount,
+PodDisruptionBudget, NetworkPolicy, optional ServiceMonitor wiring, and helper
+templates.
 
 ## Plugin contract
 

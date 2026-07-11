@@ -37,9 +37,11 @@ pub struct KubeDeployOptions {
     pub min_replicas: u32,
     pub max_replicas: u32,
     pub target_cpu: u32,
+    pub target_memory: u32,
     pub env: Vec<String>,
     pub env_file: Option<PathBuf>,
     pub config_map: Option<String>,
+    pub tls_secret: Option<String>,
     pub min_available: String,
     pub out: PathBuf,
 }
@@ -143,6 +145,12 @@ pub fn write_helm_chart(options: HelmOptions) -> anyhow::Result<()> {
         render_helm_values_yaml(&options.deploy),
     )
     .with_context(|| format!("failed to write {}", out.join("values.yaml").display()))?;
+    fs::write(out.join("values.schema.json"), render_helm_values_schema()).with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("values.schema.json").display()
+        )
+    })?;
     fs::write(
         out.join("templates/deployment.yaml"),
         render_helm_deployment(),
@@ -157,6 +165,16 @@ pub fn write_helm_chart(options: HelmOptions) -> anyhow::Result<()> {
         format!(
             "failed to write {}",
             out.join("templates/service.yaml").display()
+        )
+    })?;
+    fs::write(
+        out.join("templates/servicemonitor.yaml"),
+        render_helm_service_monitor(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            out.join("templates/servicemonitor.yaml").display()
         )
     })?;
     fs::write(out.join("templates/hpa.yaml"), render_helm_hpa()).with_context(|| {
@@ -263,6 +281,8 @@ fn render_kube_deploy(
     let service_account_name = render_kube_service_account_name(options);
     let pdb = render_kube_pdb(options);
     let network_policy = render_kube_network_policy(options);
+    let tls_volume_mount = render_kube_tls_volume_mount(options);
+    let tls_volume = render_kube_tls_volume(options);
     let env_config_map = env_file_entries
         .map(|entries| render_kube_config_map(&format!("{}-env", options.name), options, entries))
         .unwrap_or_default();
@@ -274,6 +294,13 @@ metadata:
   namespace: {namespace}
 spec:
   replicas: {replicas}
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: {name}
@@ -281,14 +308,43 @@ spec:
     metadata:
       labels:
         app: {name}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "{port}"
     spec:
 {service_account_name}      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: {name}
       containers:
       - name: {name}
         image: {image}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         ports:
         - containerPort: {port}
-{env}{env_from}        resources:
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 5"]
+{tls_volume_mount}{env}{env_from}        resources:
           requests:
             cpu: {cpu_request}
             memory: {memory_request}
@@ -318,6 +374,7 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 2
           failureThreshold: 12
+{tls_volume}
 ---
 apiVersion: v1
 kind: Service
@@ -328,7 +385,8 @@ spec:
   selector:
     app: {name}
   ports:
-  - port: {port}
+  - name: http
+    port: {port}
     targetPort: {port}
 ---
 apiVersion: autoscaling/v2
@@ -350,6 +408,30 @@ spec:
       target:
         type: Utilization
         averageUtilization: {target_cpu}
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: {target_memory}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 60
+      - type: Pods
+        value: 4
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      selectPolicy: Max
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
 {pdb}{network_policy}
 "#,
         name = options.name,
@@ -362,6 +444,8 @@ spec:
         service_account_name = service_account_name,
         env = env,
         env_from = env_from,
+        tls_volume_mount = tls_volume_mount,
+        tls_volume = tls_volume,
         cpu_request = options.cpu_request,
         memory_request = options.memory_request,
         cpu_limit = options.cpu_limit,
@@ -369,6 +453,7 @@ spec:
         min_replicas = options.min_replicas,
         max_replicas = options.max_replicas,
         target_cpu = options.target_cpu,
+        target_memory = options.target_memory,
         pdb = pdb,
         network_policy = network_policy
     )
@@ -407,11 +492,22 @@ fn render_helm_values_yaml(options: &KubeDeployOptions) -> String {
 image:
   repository: {image_repository:?}
   tag: {image_tag:?}
+  digest: {image_digest:?}
   pullPolicy: IfNotPresent
 
 service:
   type: ClusterIP
   port: {port}
+
+observability:
+  prometheusScrape: true
+  metricsPath: /metrics
+  metricsPort: {port}
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {{}}
 
 resources:
   requests:
@@ -426,9 +522,14 @@ autoscaling:
   minReplicas: {min_replicas}
   maxReplicas: {max_replicas}
   targetCPUUtilizationPercentage: {target_cpu}
+  targetMemoryUtilizationPercentage: {target_memory}
 
 serviceAccount:
   name: ""
+
+tlsSecret:
+  name: {tls_secret:?}
+  mountPath: /var/run/secrets/roze/tls
 
 podDisruptionBudget:
   minAvailable: {min_available}
@@ -447,6 +548,7 @@ env:
         replicas = options.replicas,
         image_repository = helm_image_repository(&options.image),
         image_tag = helm_image_tag(&options.image),
+        image_digest = helm_image_digest(&options.image),
         port = options.port,
         cpu_request = options.cpu_request,
         memory_request = options.memory_request,
@@ -455,7 +557,9 @@ env:
         min_replicas = options.min_replicas,
         max_replicas = options.max_replicas,
         target_cpu = options.target_cpu,
+        target_memory = options.target_memory,
         min_available = options.min_available,
+        tls_secret = options.tls_secret.as_deref().unwrap_or(""),
         env = if env.is_empty() {
             "  {}\n".to_string()
         } else {
@@ -469,6 +573,79 @@ env:
     )
 }
 
+fn render_helm_values_schema() -> &'static str {
+    r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "service", "resources", "autoscaling", "observability"],
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port"],
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prometheusScrape", "metricsPath", "metricsPort", "serviceMonitor"],
+      "properties": {
+        "prometheusScrape": { "type": "boolean" },
+        "metricsPath": { "type": "string", "pattern": "^/" },
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "interval", "scrapeTimeout", "labels"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$" },
+            "scrapeTimeout": { "type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "resources": { "type": "object" },
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "minReplicas", "maxReplicas", "targetCPUUtilizationPercentage", "targetMemoryUtilizationPercentage"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "targetMemoryUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "serviceAccount": { "type": "object" },
+    "tlsSecret": { "type": "object" },
+    "podDisruptionBudget": { "type": "object" },
+    "probes": { "type": "object" },
+    "env": { "type": "object" },
+    "envFrom": { "type": "array" }
+  }
+}
+"#
+}
+
 fn render_helm_deployment() -> &'static str {
     r#"apiVersion: apps/v1
 kind: Deployment
@@ -478,6 +655,13 @@ metadata:
     {{- include "roze.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "roze.selectorLabels" . | nindent 6 }}
@@ -485,15 +669,52 @@ spec:
     metadata:
       labels:
         {{- include "roze.selectorLabels" . | nindent 8 }}
+      {{- if .Values.observability.prometheusScrape }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: {{ .Values.observability.metricsPath | quote }}
+        prometheus.io/port: {{ .Values.observability.metricsPort | quote }}
+      {{- end }}
     spec:
       serviceAccountName: {{ default (include "roze.fullname" .) .Values.serviceAccount.name }}
       terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "roze.selectorLabels" . | nindent 14 }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: {{ .Values.service.port }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          {{- if .Values.tlsSecret.name }}
+          volumeMounts:
+            - name: upstream-tls
+              mountPath: {{ .Values.tlsSecret.mountPath | quote }}
+              readOnly: true
+          {{- end }}
           {{- with .Values.env }}
           env:
             {{- range $name, $value := . }}
@@ -519,6 +740,13 @@ spec:
             httpGet:
               path: {{ .Values.probes.startup.path }}
               port: {{ .Values.service.port }}
+      {{- if .Values.tlsSecret.name }}
+      volumes:
+        - name: upstream-tls
+          secret:
+            secretName: {{ .Values.tlsSecret.name | quote }}
+            defaultMode: 0400
+      {{- end }}
 "#
 }
 
@@ -534,8 +762,33 @@ spec:
   selector:
     {{- include "roze.selectorLabels" . | nindent 4 }}
   ports:
-    - port: {{ .Values.service.port }}
+    - name: http
+      port: {{ .Values.service.port }}
       targetPort: {{ .Values.service.port }}
+"#
+}
+
+fn render_helm_service_monitor() -> &'static str {
+    r#"{{- if .Values.observability.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "roze.fullname" . }}
+  labels:
+    {{- include "roze.labels" . | nindent 4 }}
+    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "roze.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.observability.metricsPath | quote }}
+      interval: {{ .Values.observability.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
+{{- end }}
 "#
 }
 
@@ -561,6 +814,30 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
 {{- end }}
 "#
 }
@@ -603,12 +880,31 @@ spec:
       {{- include "roze.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - from:
         - namespaceSelector: {}
       ports:
         - protocol: TCP
           port: {{ .Values.service.port }}
+  egress:
+    - to:
+        - namespaceSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
 "#
 }
 
@@ -632,15 +928,28 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 }
 
 fn helm_image_repository(image: &str) -> String {
+    if let Some((repository, _)) = image.split_once('@') {
+        return repository.to_string();
+    }
     helm_image_parts(image)
         .map(|(repo, _)| repo.to_string())
         .unwrap_or_else(|| image.to_string())
 }
 
 fn helm_image_tag(image: &str) -> String {
+    if image.contains('@') {
+        return String::new();
+    }
     helm_image_parts(image)
         .map(|(_, tag)| tag.to_string())
         .unwrap_or_else(|| "latest".to_string())
+}
+
+fn helm_image_digest(image: &str) -> String {
+    image
+        .split_once('@')
+        .map(|(_, digest)| digest.to_string())
+        .unwrap_or_default()
 }
 
 fn helm_image_parts(image: &str) -> Option<(&str, &str)> {
@@ -653,20 +962,44 @@ fn helm_image_parts(image: &str) -> Option<(&str, &str)> {
 }
 
 fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
+    validate_image_digest(&options.image)?;
     if options.min_replicas > options.max_replicas {
         bail!("--min-replicas must be less than or equal to --max-replicas");
     }
     if options.target_cpu == 0 || options.target_cpu > 100 {
         bail!("--target-cpu must be between 1 and 100");
     }
+    if options.target_memory == 0 || options.target_memory > 100 {
+        bail!("--target-memory must be between 1 and 100");
+    }
     if options.min_available.trim().is_empty() {
         bail!("--min-available cannot be empty");
+    }
+    if options
+        .tls_secret
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        bail!("--tls-secret cannot be empty");
     }
     for entry in &options.env {
         let Some((name, _)) = entry.split_once('=') else {
             bail!("--env entries must use KEY=VALUE format: {entry}");
         };
         validate_env_name(name)?;
+    }
+    Ok(())
+}
+
+fn validate_image_digest(image: &str) -> anyhow::Result<()> {
+    let Some((repository, digest)) = image.split_once("@sha256:") else {
+        bail!("--image must use immutable repository@sha256:<64 hex> form");
+    };
+    if repository.trim().is_empty()
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("--image must use immutable repository@sha256:<64 hex> form");
     }
     Ok(())
 }
@@ -723,17 +1056,58 @@ spec:
       app: {name}
   policyTypes:
   - Ingress
+  - Egress
   ingress:
   - from:
     - namespaceSelector: {{}}
     ports:
     - protocol: TCP
       port: {port}
+  egress:
+  - to:
+    - podSelector: {{}}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
 "#,
         name = options.name,
         namespace = options.namespace,
         port = options.port
     )
+}
+
+fn render_kube_tls_volume_mount(options: &KubeDeployOptions) -> String {
+    options
+        .tls_secret
+        .as_ref()
+        .map(|_| {
+            "        volumeMounts:\n        - name: upstream-tls\n          mountPath: /var/run/secrets/roze/tls\n          readOnly: true\n".to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn render_kube_tls_volume(options: &KubeDeployOptions) -> String {
+    options
+        .tls_secret
+        .as_ref()
+        .map(|secret| {
+            format!(
+                "      volumes:\n      - name: upstream-tls\n        secret:\n          secretName: {secret}\n          defaultMode: 0400\n"
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn read_env_file(path: &Path) -> anyhow::Result<Vec<(String, String)>> {
@@ -1261,6 +1635,10 @@ fn normalize_proto_rpc_type(ty: &str) -> String {
 mod tests {
     use super::*;
 
+    fn immutable_image(repository: &str) -> String {
+        format!("{repository}@sha256:{}", "a".repeat(64))
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "rozectl-native-{name}-{}-{}",
@@ -1431,7 +1809,7 @@ mod tests {
         let rendered = render_kube_deploy(
             &KubeDeployOptions {
                 name: "user".to_string(),
-                image: "user:latest".to_string(),
+                image: immutable_image("user"),
                 namespace: "default".to_string(),
                 replicas: 2,
                 port: 3000,
@@ -1442,15 +1820,37 @@ mod tests {
                 min_replicas: 1,
                 max_replicas: 5,
                 target_cpu: 70,
+                target_memory: 80,
                 env: vec!["RUST_LOG=info".to_string()],
                 env_file: Some(PathBuf::from(".env")),
                 config_map: Some("user-config".to_string()),
+                tls_secret: Some("user-upstream-tls".to_string()),
                 min_available: "1".to_string(),
                 out: PathBuf::from("deploy/kubernetes.yaml"),
             },
             Some(&entries),
         );
         assert!(rendered.contains("kind: Deployment"));
+        assert!(rendered.contains("automountServiceAccountToken: false"));
+        assert!(rendered.contains("user@sha256:"));
+        assert!(rendered.contains("prometheus.io/scrape: \"true\""));
+        assert!(rendered.contains("prometheus.io/path: \"/metrics\""));
+        assert!(rendered.contains("prometheus.io/port: \"3000\""));
+        assert!(rendered.contains("runAsNonRoot: true"));
+        assert!(rendered.contains("runAsUser: 10001"));
+        assert!(rendered.contains("allowPrivilegeEscalation: false"));
+        assert!(rendered.contains("readOnlyRootFilesystem: true"));
+        assert!(rendered.contains("type: RuntimeDefault"));
+        assert!(rendered.contains("- ALL"));
+        assert!(rendered.contains("type: RollingUpdate"));
+        assert!(rendered.contains("maxUnavailable: 0"));
+        assert!(rendered.contains("maxSurge: 1"));
+        assert!(rendered.contains("minReadySeconds: 10"));
+        assert!(rendered.contains("progressDeadlineSeconds: 600"));
+        assert!(rendered.contains("topologyKey: kubernetes.io/hostname"));
+        assert!(rendered.contains("whenUnsatisfiable: ScheduleAnyway"));
+        assert!(rendered.contains("preStop:"));
+        assert!(rendered.contains("sleep 5"));
         assert!(rendered.contains("kind: Service"));
         assert!(rendered.contains("kind: HorizontalPodAutoscaler"));
         assert!(rendered.contains("kind: ConfigMap"));
@@ -1470,6 +1870,17 @@ mod tests {
         assert!(rendered.contains("kind: PodDisruptionBudget"));
         assert!(rendered.contains("minAvailable: 1"));
         assert!(rendered.contains("kind: NetworkPolicy"));
+        assert!(rendered.contains("secretName: user-upstream-tls"));
+        assert!(rendered.contains("mountPath: /var/run/secrets/roze/tls"));
+        assert!(rendered.contains("readOnly: true"));
+        assert!(rendered.contains("defaultMode: 0400"));
+        assert!(rendered.contains("- Egress"));
+        assert!(rendered.contains("port: 53"));
+        assert!(rendered.contains("port: 443"));
+        assert!(rendered.contains("name: memory"));
+        assert!(rendered.contains("averageUtilization: 80"));
+        assert!(rendered.contains("stabilizationWindowSeconds: 300"));
+        assert!(rendered.contains("value: 25"));
         assert!(rendered.contains("port: 3000"));
     }
 
@@ -1480,7 +1891,7 @@ mod tests {
         let options = HelmOptions {
             deploy: KubeDeployOptions {
                 name: "user".to_string(),
-                image: "registry.example.com/user:1.2.3".to_string(),
+                image: immutable_image("registry.example.com/user"),
                 namespace: "default".to_string(),
                 replicas: 2,
                 port: 3000,
@@ -1491,9 +1902,11 @@ mod tests {
                 min_replicas: 1,
                 max_replicas: 5,
                 target_cpu: 70,
+                target_memory: 80,
                 env: vec!["RUST_LOG=info".to_string()],
                 env_file: None,
                 config_map: Some("user-config".to_string()),
+                tls_secret: Some("user-upstream-tls".to_string()),
                 min_available: "1".to_string(),
                 out: out.clone(),
             },
@@ -1503,22 +1916,67 @@ mod tests {
 
         let values = render_helm_values_yaml(&options.deploy);
         assert!(values.contains(r#"repository: "registry.example.com/user""#));
-        assert!(values.contains(r#"tag: "1.2.3""#));
+        assert!(values.contains("tag: \"\""));
+        assert!(values.contains("digest: \"sha256:"));
+        assert!(render_helm_deployment().contains("automountServiceAccountToken: false"));
         assert!(values.contains("RUST_LOG: \"info\""));
         assert!(values.contains("name: user-config"));
         assert!(values.contains("serviceAccount:\n  name: \"\""));
+        assert!(values.contains("tlsSecret:\n  name: \"user-upstream-tls\""));
+        assert!(render_helm_deployment().contains("readOnly: true"));
+        assert!(render_helm_deployment().contains("defaultMode: 0400"));
+        assert!(render_helm_deployment().contains("runAsNonRoot: true"));
+        assert!(render_helm_deployment().contains("allowPrivilegeEscalation: false"));
+        assert!(render_helm_deployment().contains("readOnlyRootFilesystem: true"));
+        assert!(render_helm_deployment().contains("type: RuntimeDefault"));
+        assert!(render_helm_deployment().contains("- ALL"));
+        assert!(render_helm_deployment().contains("type: RollingUpdate"));
+        assert!(render_helm_deployment().contains("maxUnavailable: 0"));
+        assert!(render_helm_deployment().contains("topologySpreadConstraints:"));
+        assert!(render_helm_deployment().contains("preStop:"));
+        assert!(render_helm_deployment().contains("sleep 5"));
+        assert!(render_helm_network_policy().contains("- Egress"));
+        assert!(render_helm_network_policy().contains("port: 443"));
         assert!(values.contains("podDisruptionBudget:\n  minAvailable: 1"));
+        assert!(values.contains("targetMemoryUtilizationPercentage: 80"));
+        assert!(values.contains("prometheusScrape: true"));
+        assert!(values.contains("metricsPath: /metrics"));
+        assert!(values.contains("metricsPort: 3000"));
+        assert!(values.contains("serviceMonitor:\n    enabled: false"));
+        assert!(values.contains("scrapeTimeout: 10s"));
+        assert!(render_helm_deployment().contains("prometheus.io/scrape:"));
+        assert!(render_helm_service().contains("name: http"));
+        assert!(render_helm_service_monitor().contains("kind: ServiceMonitor"));
+        assert!(render_helm_service_monitor().contains("port: http"));
+        assert!(render_helm_hpa().contains("name: memory"));
+        assert!(render_helm_hpa().contains("stabilizationWindowSeconds: 300"));
+        let schema: serde_json::Value =
+            serde_json::from_str(render_helm_values_schema()).expect("valid values schema");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["image"]["properties"]["digest"]["pattern"],
+            "^sha256:[0-9a-fA-F]{64}$"
+        );
 
         write_helm_chart(options).expect("write helm chart");
         assert!(fs::read_to_string(out.join("Chart.yaml"))
             .expect("read chart")
             .contains("name: user"));
+        serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(out.join("values.schema.json")).expect("read values schema"),
+        )
+        .expect("parse values schema");
         assert!(fs::read_to_string(out.join("templates/deployment.yaml"))
             .expect("read deployment")
             .contains("kind: Deployment"));
         assert!(fs::read_to_string(out.join("templates/service.yaml"))
             .expect("read service")
             .contains("kind: Service"));
+        assert!(
+            fs::read_to_string(out.join("templates/servicemonitor.yaml"))
+                .expect("read service monitor")
+                .contains("monitoring.coreos.com/v1")
+        );
         assert!(fs::read_to_string(out.join("templates/hpa.yaml"))
             .expect("read hpa")
             .contains("kind: HorizontalPodAutoscaler"));
@@ -1552,13 +2010,20 @@ mod tests {
             "localhost:5000/user-api"
         );
         assert_eq!(helm_image_tag("localhost:5000/user-api:1.2.3"), "1.2.3");
+        let digest_image = immutable_image("localhost:5000/user-api");
+        assert_eq!(
+            helm_image_repository(&digest_image),
+            "localhost:5000/user-api"
+        );
+        assert_eq!(helm_image_tag(&digest_image), "");
+        assert!(helm_image_digest(&digest_image).starts_with("sha256:"));
     }
 
     #[test]
     fn rejects_invalid_kubernetes_env() {
-        let err = validate_kube_options(&KubeDeployOptions {
+        let mut options = KubeDeployOptions {
             name: "user".to_string(),
-            image: "user:latest".to_string(),
+            image: immutable_image("user"),
             namespace: "default".to_string(),
             replicas: 2,
             port: 3000,
@@ -1569,14 +2034,33 @@ mod tests {
             min_replicas: 5,
             max_replicas: 1,
             target_cpu: 70,
+            target_memory: 80,
             env: vec!["bad-entry".to_string()],
             env_file: None,
             config_map: None,
+            tls_secret: None,
             min_available: "1".to_string(),
             out: PathBuf::from("deploy/kubernetes.yaml"),
-        })
-        .expect_err("reject invalid kube options");
+        };
+        let err = validate_kube_options(&options).expect_err("reject invalid replica range");
         assert!(err.to_string().contains("--min-replicas"));
+
+        options.min_replicas = 1;
+        options.max_replicas = 5;
+        options.env = vec!["RUST_LOG=info".to_string()];
+        options.target_memory = 0;
+        let err = validate_kube_options(&options).expect_err("reject invalid memory target");
+        assert!(err.to_string().contains("--target-memory"));
+
+        options.target_memory = 80;
+        options.env = vec!["bad-entry".to_string()];
+        let err = validate_kube_options(&options).expect_err("reject invalid environment");
+        assert!(err.to_string().contains("KEY=VALUE"));
+
+        options.env = vec!["RUST_LOG=info".to_string()];
+        options.image = "user:latest".to_string();
+        let err = validate_kube_options(&options).expect_err("reject mutable image");
+        assert!(err.to_string().contains("@sha256:"));
     }
 
     #[test]

@@ -4629,6 +4629,11 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "$VerifyReportPath = Join-Path $ProjectRoot 'ops/production-verify-report.json'"
     )
     .unwrap();
+    writeln!(
+        &mut out,
+        "$DependencyGovernancePath = Join-Path $ProjectRoot 'ops/dependency-governance.yaml'"
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "if (-not $SkipEvidenceInventory) {{").unwrap();
     writeln!(
@@ -4715,6 +4720,42 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
     )
     .unwrap();
     writeln!(&mut out, "            }}").unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "Invoke-Step 'dependency transport security contract' {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    $dependencyGovernance = Get-Content -LiteralPath $DependencyGovernancePath -Raw"
+    )
+    .unwrap();
+    writeln!(&mut out, "    foreach ($requiredEntry in @(").unwrap();
+    for entry in [
+        "transport_security:",
+        "hostname_or_server_name_validation_required: true",
+        "client_certificate_and_private_key_must_be_paired: true",
+        "invalid_tls_update_keeps_last_valid_snapshot: true",
+        "plaintext_fallback_forbidden: true",
+        "transport_security_test_passed: true",
+    ] {
+        writeln!(&mut out, "        '{}'", ps_single_quoted(entry)).unwrap();
+    }
+    writeln!(&mut out, "    )) {{").unwrap();
+    writeln!(
+        &mut out,
+        "        if (-not $dependencyGovernance.Contains($requiredEntry)) {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            throw \"Dependency transport security contract is missing: $requiredEntry\""
+    )
+    .unwrap();
     writeln!(&mut out, "        }}").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out, "}}").unwrap();
@@ -4834,6 +4875,7 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
         "generated_ops_asset_inventory",
         "evidence_manifest_coverage",
         "ci_evidence_policy_coverage",
+        "dependency_transport_security_contract",
         "cargo_fmt_check",
         "cargo_check",
         "cargo_test_unless_skipped",
@@ -4899,6 +4941,11 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(
         &mut out,
         "    if (-not ($report.gates -contains 'production_verification_report_schema')) {{ throw 'Verification report schema gate is missing.' }}"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    if (-not ($report.gates -contains 'dependency_transport_security_contract')) {{ throw 'Verification report dependency transport security gate is missing.' }}"
     )
     .unwrap();
     writeln!(
@@ -4971,6 +5018,11 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
         "VERIFY_REPORT_PATH=\"$PROJECT_ROOT/ops/production-verify-report.json\""
     )
     .unwrap();
+    writeln!(
+        &mut out,
+        "DEPENDENCY_GOVERNANCE_PATH=\"$PROJECT_ROOT/ops/dependency-governance.yaml\""
+    )
+    .unwrap();
     writeln!(&mut out, "SKIP_TESTS=\"${{SKIP_TESTS:-0}}\"").unwrap();
     writeln!(
         &mut out,
@@ -4985,6 +5037,35 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(&mut out, "  shift").unwrap();
     writeln!(&mut out, "  echo \"==> $name\"").unwrap();
     writeln!(&mut out, "  \"$@\"").unwrap();
+    writeln!(&mut out, "}}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "check_dependency_transport_security() {{").unwrap();
+    writeln!(&mut out, "  local required_entry").unwrap();
+    writeln!(&mut out, "  for required_entry in \\").unwrap();
+    for entry in [
+        "transport_security:",
+        "hostname_or_server_name_validation_required: true",
+        "client_certificate_and_private_key_must_be_paired: true",
+        "invalid_tls_update_keeps_last_valid_snapshot: true",
+        "plaintext_fallback_forbidden: true",
+        "transport_security_test_passed: true",
+    ] {
+        writeln!(&mut out, "    {} \\", sh_single_quoted(entry)).unwrap();
+    }
+    writeln!(&mut out, "  ; do").unwrap();
+    writeln!(
+        &mut out,
+        "    if ! grep -Fq -- \"$required_entry\" \"$DEPENDENCY_GOVERNANCE_PATH\"; then"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "      echo \"Dependency transport security contract is missing: $required_entry\" >&2"
+    )
+    .unwrap();
+    writeln!(&mut out, "      return 1").unwrap();
+    writeln!(&mut out, "    fi").unwrap();
+    writeln!(&mut out, "  done").unwrap();
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "json_escape() {{").unwrap();
@@ -5124,6 +5205,12 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
+        "run_step \"dependency transport security contract\" check_dependency_transport_security"
+    )
+    .unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
         "run_step \"cargo fmt generated service\" cargo fmt --manifest-path \"$MANIFEST_PATH\" -- --check"
     )
     .unwrap();
@@ -5246,7 +5333,7 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "  \"gates\": [\"generated_ops_asset_inventory\", \"evidence_manifest_coverage\", \"ci_evidence_policy_coverage\", \"cargo_fmt_check\", \"cargo_check\", \"cargo_test_unless_skipped\", \"smoke_surface_declared\", \"production_verification_report_schema\"],"
+        "  \"gates\": [\"generated_ops_asset_inventory\", \"evidence_manifest_coverage\", \"ci_evidence_policy_coverage\", \"dependency_transport_security_contract\", \"cargo_fmt_check\", \"cargo_check\", \"cargo_test_unless_skipped\", \"smoke_surface_declared\", \"production_verification_report_schema\"],"
     )
     .unwrap();
     writeln!(
@@ -5271,6 +5358,7 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
         "\"generated_by\": \"rozectl\"",
         "\"verdict\": \"pass_ci_precondition\"",
         "\"broad_production\": \"requires_long_run_evidence\"",
+        "\"dependency_transport_security_contract\"",
         "\"production_verification_report_schema\"",
         "\"24h_or_72h_soak_report\"",
     ] {
@@ -5450,6 +5538,7 @@ required_gates:
   - generated_ops_asset_inventory
   - evidence_manifest_coverage
   - ci_evidence_policy_coverage
+  - dependency_transport_security_contract
   - cargo_fmt_check
   - cargo_check
   - cargo_test_unless_explicitly_skipped
@@ -5464,6 +5553,7 @@ blocking_conditions:
   - compile_failure
   - test_failure_without_approved_skip
   - invalid_production_verification_report
+  - invalid_dependency_transport_security_contract
   - artifact_upload_missing
 promotion:
   ci_success_is: precondition
@@ -8153,6 +8243,35 @@ principles:
   no_downstream_without_owner: true
   no_dependency_without_metrics: true
   fallback_or_explicit_fail_closed_required: true
+  plaintext_downgrade_forbidden: true
+transport_security:
+  required_for_network_downstreams: true
+  trust:
+    public_roots_allowed: true
+    private_ca_files_supported: true
+    hostname_or_server_name_validation_required: true
+    certificate_validation_bypass_forbidden: true
+  mutual_tls:
+    required_for_internal_sensitive_or_privileged_dependencies: true
+    client_certificate_and_private_key_must_be_paired: true
+    private_key_must_come_from_secret_store_or_mounted_secret: true
+    generated_config_must_not_contain_private_key_material: true
+  lifecycle:
+    parse_and_validate_before_runtime_snapshot_swap: true
+    invalid_tls_update_keeps_last_valid_snapshot: true
+    inflight_calls_keep_their_original_snapshot: true
+    certificate_rotation_without_process_restart_required: true
+  websocket_and_streaming:
+    wss_uses_same_strict_tls_profile: true
+    handshake_deadline_uses_remaining_request_budget: true
+    plaintext_fallback_forbidden: true
+  evidence:
+    - private_ca_handshake
+    - client_certificate_authentication
+    - server_name_mismatch_rejection
+    - expired_or_untrusted_certificate_rejection
+    - certificate_rotation_snapshot_test
+    - invalid_tls_reload_retains_last_valid_runtime
 discovery:
   required_for_dynamic_downstreams: true
   checks:
@@ -8263,12 +8382,29 @@ tests:
       - inflight_metric_sample
       - unrelated_dependency_latency_sample
       - readiness_timeline
+
+  - test: transport_security
+    pass:
+      - every_network_dependency_declares_plaintext_or_tls_policy
+      - sensitive_or_privileged_internal_dependency_uses_mutual_tls
+      - server_identity_is_cryptographically_validated
+      - invalid_certificate_or_key_fails_before_runtime_swap
+      - invalid_reload_keeps_last_valid_runtime
+      - certificate_rotation_does_not_interrupt_inflight_calls
+      - wss_or_streaming_transport_never_downgrades_to_plaintext
+    evidence:
+      - tls_dependency_inventory
+      - private_ca_mutual_tls_handshake_result
+      - server_name_and_untrusted_ca_negative_tests
+      - certificate_rotation_test_result
+      - invalid_reload_snapshot_test_result
 promotion_required:
   downstream_inventory_passed: true
   endpoint_change_test_passed: true
   slow_downstream_test_passed: true
   failing_downstream_test_passed: true
   dependency_saturation_test_passed: true
+  transport_security_test_passed: true
   fallback_policy_reviewed: true
   owner_signoff: required
 blocking_findings:
@@ -8278,6 +8414,13 @@ blocking_findings:
   - dependency_without_circuit_breaker
   - dependency_without_metrics_or_traces
   - unbounded_connection_pool
+  - network_dependency_without_transport_security_policy
+  - private_key_material_in_generated_config
+  - tls_server_identity_validation_disabled
+  - sensitive_internal_dependency_without_mutual_tls
+  - certificate_rotation_requires_unbounded_downtime
+  - invalid_tls_reload_replaces_last_valid_runtime
+  - wss_or_streaming_transport_allows_plaintext_downgrade
   - fallback_claim_without_test_evidence
 "#,
         name = spec.service,
@@ -12440,6 +12583,12 @@ mod tests {
         assert!(rest_production_verify.contains("requires_long_run_evidence"));
         assert!(rest_production_verify.contains("required_followup_evidence"));
         assert!(rest_production_verify.contains("production verification report schema"));
+        assert!(rest_production_verify.contains("dependency transport security contract"));
+        assert!(rest_production_verify.contains("$DependencyGovernancePath"));
+        assert!(
+            rest_production_verify.contains("invalid_tls_update_keeps_last_valid_snapshot: true")
+        );
+        assert!(rest_production_verify.contains("dependency_transport_security_contract"));
         assert!(rest_production_verify.contains("ConvertFrom-Json"));
         assert!(rest_production_verify.contains("production_verification_report_schema"));
         assert!(rest_production_verify.contains("Production verification report"));
@@ -12475,6 +12624,10 @@ mod tests {
         assert!(rest_production_verify_sh.contains("required_followup_evidence"));
         assert!(rest_production_verify_sh.contains("check_verify_report_schema()"));
         assert!(rest_production_verify_sh.contains("production verification report schema"));
+        assert!(rest_production_verify_sh.contains("check_dependency_transport_security()"));
+        assert!(rest_production_verify_sh.contains("DEPENDENCY_GOVERNANCE_PATH"));
+        assert!(rest_production_verify_sh.contains("dependency transport security contract"));
+        assert!(rest_production_verify_sh.contains("dependency_transport_security_contract"));
         assert!(rest_production_verify_sh.contains("production_verification_report_schema"));
         assert!(rest_production_verify_sh.contains("Production verification report"));
         assert!(rest_production_verify_sh.contains("GET /reports/export"));
@@ -12510,7 +12663,9 @@ mod tests {
         assert!(rest_ci_evidence_policy.contains("    - ops/production-verify-report.json"));
         assert!(rest_ci_evidence_policy.contains("  - evidence_manifest_coverage"));
         assert!(rest_ci_evidence_policy.contains("  - ci_evidence_policy_coverage"));
+        assert!(rest_ci_evidence_policy.contains("  - dependency_transport_security_contract"));
         assert!(rest_ci_evidence_policy.contains("  - production_verification_report_schema"));
+        assert!(rest_ci_evidence_policy.contains("invalid_dependency_transport_security_contract"));
         assert!(rest_ci_evidence_policy.contains("invalid_production_verification_report"));
         assert!(rest_ci_evidence_policy
             .contains("framework_probes_report_export_chart_query_and_business_routes"));
@@ -12688,6 +12843,14 @@ mod tests {
             .contains("representative_http_handler_calls_declared_downstream_or_declares_none"));
         assert!(rest_dependency_governance.contains("load_balancing:"));
         assert!(rest_dependency_governance.contains("circuit_breaker:"));
+        assert!(rest_dependency_governance.contains("transport_security:"));
+        assert!(rest_dependency_governance.contains("private_ca_files_supported: true"));
+        assert!(rest_dependency_governance
+            .contains("invalid_tls_update_keeps_last_valid_snapshot: true"));
+        assert!(rest_dependency_governance.contains("test: transport_security"));
+        assert!(rest_dependency_governance.contains("transport_security_test_passed: true"));
+        assert!(rest_dependency_governance
+            .contains("wss_or_streaming_transport_allows_plaintext_downgrade"));
         assert!(rest_dependency_governance.contains("dependency_without_timeout"));
         assert!(rest_data_consistency.contains("boundary: rest"));
         assert!(rest_data_consistency
@@ -12857,6 +13020,10 @@ mod tests {
         assert!(rpc_production_verify_sh.contains("required_followup_evidence"));
         assert!(rpc_production_verify_sh.contains("check_verify_report_schema()"));
         assert!(rpc_production_verify_sh.contains("production verification report schema"));
+        assert!(rpc_production_verify.contains("dependency transport security contract"));
+        assert!(rpc_production_verify.contains("dependency_transport_security_contract"));
+        assert!(rpc_production_verify_sh.contains("check_dependency_transport_security()"));
+        assert!(rpc_production_verify_sh.contains("dependency_transport_security_contract"));
         assert!(rpc_production_verify_sh.contains("production_verification_report_schema"));
         assert!(rpc_production_verify_sh.contains("Production verification report"));
         assert!(rpc_production_verify_sh.contains("RPC smoke methods required"));
@@ -12888,7 +13055,9 @@ mod tests {
         assert!(rpc_ci_evidence_policy.contains("    - ops/production-verify-report.json"));
         assert!(rpc_ci_evidence_policy.contains("  - evidence_manifest_coverage"));
         assert!(rpc_ci_evidence_policy.contains("  - ci_evidence_policy_coverage"));
+        assert!(rpc_ci_evidence_policy.contains("  - dependency_transport_security_contract"));
         assert!(rpc_ci_evidence_policy.contains("  - production_verification_report_schema"));
+        assert!(rpc_ci_evidence_policy.contains("invalid_dependency_transport_security_contract"));
         assert!(rpc_ci_evidence_policy.contains("invalid_production_verification_report"));
         assert!(rpc_evidence_manifest.contains("service: user"));
         assert!(rpc_evidence_manifest.contains("boundary: rpc"));
@@ -12932,6 +13101,15 @@ mod tests {
         assert!(rpc_dependency_governance
             .contains("representative_rpc_method_calls_declared_downstream_or_declares_none"));
         assert!(rpc_dependency_governance.contains("endpoint_change_test_passed: true"));
+        assert!(rpc_dependency_governance.contains("transport_security:"));
+        assert!(rpc_dependency_governance
+            .contains("client_certificate_and_private_key_must_be_paired: true"));
+        assert!(rpc_dependency_governance
+            .contains("certificate_rotation_without_process_restart_required: true"));
+        assert!(rpc_dependency_governance.contains("private_ca_mutual_tls_handshake_result"));
+        assert!(
+            rpc_dependency_governance.contains("invalid_tls_reload_replaces_last_valid_runtime")
+        );
         assert!(rpc_dependency_governance.contains("fallback_claim_without_test_evidence"));
         assert!(rpc_data_consistency.contains("boundary: rpc"));
         assert!(rpc_data_consistency
