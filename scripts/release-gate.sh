@@ -10,9 +10,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 bash -n scripts/production-evidence.sh
 bash -n scripts/production-evidence-smoke.sh
 bash -n scripts/production-soak-mq.sh
+bash -n scripts/production-soak-gateway.sh
 bash -n scripts/production-soak-config-center.sh
 bash -n scripts/production-soak-lifecycle.sh
+bash -n scripts/production-evidence-gate.sh
 bash scripts/production-evidence-smoke.sh
+bash scripts/production-evidence-gate.sh
 
 cargo test -p roze-gateway
 bash scripts/gateway-smoke.sh

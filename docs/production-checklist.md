@@ -26,6 +26,8 @@ crate, generator, or runtime module is broadly production-stable.
 - Rollback command and previous binary/image are available.
 - Runtime-critical modules marked `stable` have a production evidence report
   that follows [Production Evidence](production-evidence.md).
+- `bash scripts/production-evidence-gate.sh` passes and no stable runtime area
+  relies on an incomplete or inconclusive report.
 - Public production-readiness wording follows
   [Stability Commitment](stability-commitment.md).
 

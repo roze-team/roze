@@ -93,6 +93,9 @@ The repository includes short-run defaults for validating the soak harnesses.
 Set the duration to 24h/72h when producing real evidence:
 
 ```bash
+ROZE_GATEWAY_SOAK_SECONDS=86400 \
+  bash scripts/production-soak-gateway.sh
+
 ROZE_MQ_SOAK_SECONDS=86400 ROZE_MQ_SOAK_MESSAGES=100000000 \
   bash scripts/production-soak-mq.sh
 
@@ -116,12 +119,19 @@ summary must include all six fields as unsigned integers, with
 These commands are evidence inputs. The final report still needs the measured
 latency/throughput/resource trends and artifacts described above.
 
+The Gateway harness repeatedly exercises its retry, fallback, breaker,
+shedding, hot-reload, SSE, WebSocket, and TLS scenarios for the requested
+duration. Its cycle summary proves scenario repetition, but external resource
+and latency measurements are still required for a passing report.
+
 ## Release Gate Relationship
 
 `scripts/release-gate.sh` proves that high-signal automated checks pass. It is
 not a replacement for long-run production evidence.
 It also runs `scripts/production-evidence-smoke.sh` to verify report scaffold
 generation and lifecycle summary validation.
+It runs `scripts/production-evidence-gate.sh` so a runtime-critical maturity
+entry cannot be changed to `stable` without a complete passing 24h/72h report.
 
 A release can be cut without long-run reports only when the release notes say
 the affected modules are `beta`, `scaffold`, or `planned`.

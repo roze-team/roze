@@ -32,12 +32,13 @@ filled in.
 Current soak harnesses:
 
 ```bash
+bash scripts/production-soak-gateway.sh 300
 bash scripts/production-soak-mq.sh 300
 bash scripts/production-soak-config-center.sh 300
 bash scripts/production-soak-lifecycle.sh 300
 ```
 
-Use `ROZE_MQ_SOAK_SECONDS`, `ROZE_MQ_SOAK_MESSAGES`,
+Use `ROZE_GATEWAY_SOAK_SECONDS`, `ROZE_MQ_SOAK_SECONDS`, `ROZE_MQ_SOAK_MESSAGES`,
 `ROZE_CONFIG_CENTER_SOAK_SECONDS`, `ROZE_CONFIG_CENTER_SOAK_UPDATES`,
 `ROZE_LIFECYCLE_SOAK_SECONDS`, and `ROZE_LIFECYCLE_SOAK_CYCLES` for 24h/72h
 runs.
