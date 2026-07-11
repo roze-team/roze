@@ -596,6 +596,8 @@ enum KubeCommands {
         config_map: Option<String>,
         #[arg(long)]
         tls_secret: Option<String>,
+        #[arg(long)]
+        image_pull_secret: Option<String>,
         #[arg(long, default_value = "1")]
         min_available: String,
         #[arg(long, default_value = "deploy/kubernetes.yaml")]
@@ -641,6 +643,8 @@ enum HelmCommands {
         config_map: Option<String>,
         #[arg(long)]
         tls_secret: Option<String>,
+        #[arg(long)]
+        image_pull_secret: Option<String>,
         #[arg(long, default_value = "1")]
         min_available: String,
         #[arg(long, default_value = "0.1.0")]
@@ -1627,6 +1631,7 @@ fn run() -> anyhow::Result<()> {
                 env_file,
                 config_map,
                 tls_secret,
+                image_pull_secret,
                 min_available,
                 out,
             } => {
@@ -1649,6 +1654,7 @@ fn run() -> anyhow::Result<()> {
                     env_file,
                     config_map,
                     tls_secret,
+                    image_pull_secret,
                     min_available,
                     out,
                 })?;
@@ -1673,6 +1679,7 @@ fn run() -> anyhow::Result<()> {
                 env,
                 config_map,
                 tls_secret,
+                image_pull_secret,
                 min_available,
                 chart_version,
                 app_version,
@@ -1698,6 +1705,7 @@ fn run() -> anyhow::Result<()> {
                         env_file: None,
                         config_map,
                         tls_secret,
+                        image_pull_secret,
                         min_available,
                         out,
                     },
@@ -3675,6 +3683,9 @@ fn validate_kube_manifest_content(content: &str) -> Vec<String> {
             "automountServiceAccountToken: false",
         );
         require_manifest_fragment(&mut issues, "Deployment", deployment, "@sha256:");
+        if deployment.contains("imagePullSecrets:") {
+            require_manifest_fragment(&mut issues, "Deployment", deployment, "- name:");
+        }
         require_manifest_fragment(
             &mut issues,
             "Deployment",
@@ -3863,6 +3874,7 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
         &[
             "image:",
             "digest: \"sha256:",
+            "pullSecrets:",
             "service:",
             "observability:",
             "prometheusScrape: true",
@@ -3889,6 +3901,7 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
             "https://json-schema.org/draft/2020-12/schema",
             "\"additionalProperties\": false",
             "^sha256:[0-9a-fA-F]{64}$",
+            "pullSecrets",
             "targetMemoryUtilizationPercentage",
             "scrapeTimeout",
         ],
@@ -3909,6 +3922,7 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
             "serviceAccountName:",
             "automountServiceAccountToken: false",
             "@{{ .Values.image.digest }}",
+            "imagePullSecrets:",
             "terminationGracePeriodSeconds:",
             "runAsNonRoot: true",
             "runAsUser: 10001",
@@ -4077,6 +4091,23 @@ fn validate_helm_values(chart: &Path, issues: &mut Vec<String>) {
     let digest_pattern = regex::Regex::new(r"^sha256:[0-9a-fA-F]{64}$").expect("digest regex");
     if !digest_pattern.is_match(digest) {
         issues.push("`values.yaml` image.digest must be sha256 followed by 64 hex digits".into());
+    }
+    let pull_secret_pattern =
+        regex::Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").expect("pull secret regex");
+    match values
+        .pointer("/image/pullSecrets")
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(secrets)
+            if secrets.iter().all(|secret| {
+                secret
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| pull_secret_pattern.is_match(name))
+            }) => {}
+        _ => {
+            issues.push("`values.yaml` image.pullSecrets must be an array of DNS-1123 names".into())
+        }
     }
 
     validate_values_percentage(&values, "/service/port", 1, 65_535, issues);
@@ -4919,6 +4950,7 @@ image:
   tag: ""
   digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   pullPolicy: IfNotPresent
+  pullSecrets: []
 service:
   port: 3000
 observability:
@@ -4947,12 +4979,12 @@ envFrom: []
         .expect("write values");
         fs::write(
             root.join("values.schema.json"),
-            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema", "additionalProperties": false, "digest":"^sha256:[0-9a-fA-F]{64}$", "targetMemoryUtilizationPercentage":{}, "scrapeTimeout":{}}"#,
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema", "additionalProperties": false, "digest":"^sha256:[0-9a-fA-F]{64}$", "pullSecrets":[], "targetMemoryUtilizationPercentage":{}, "scrapeTimeout":{}}"#,
         )
         .expect("write values schema");
         fs::write(
             templates.join("deployment.yaml"),
-            "kind: Deployment\nserviceAccountName:\nautomountServiceAccountToken: false\n@{{ .Values.image.digest }}\nterminationGracePeriodSeconds:\nrunAsNonRoot: true\nrunAsUser: 10001\nallowPrivilegeEscalation: false\nreadOnlyRootFilesystem: true\ntype: RuntimeDefault\n- ALL\ntype: RollingUpdate\nmaxUnavailable: 0\nmaxSurge: 1\nminReadySeconds: 10\nprogressDeadlineSeconds: 600\ntopologySpreadConstraints:\ntopologyKey: kubernetes.io/hostname\nwhenUnsatisfiable: ScheduleAnyway\npreStop:\nsleep 5\nvolumeMounts:\nreadOnly: true\ndefaultMode: 0400\nprometheus.io/scrape:\nprometheus.io/path:\nprometheus.io/port:\nlivenessProbe:\nreadinessProbe:\nstartupProbe:\n",
+            "kind: Deployment\nserviceAccountName:\nautomountServiceAccountToken: false\n@{{ .Values.image.digest }}\nimagePullSecrets:\nterminationGracePeriodSeconds:\nrunAsNonRoot: true\nrunAsUser: 10001\nallowPrivilegeEscalation: false\nreadOnlyRootFilesystem: true\ntype: RuntimeDefault\n- ALL\ntype: RollingUpdate\nmaxUnavailable: 0\nmaxSurge: 1\nminReadySeconds: 10\nprogressDeadlineSeconds: 600\ntopologySpreadConstraints:\ntopologyKey: kubernetes.io/hostname\nwhenUnsatisfiable: ScheduleAnyway\npreStop:\nsleep 5\nvolumeMounts:\nreadOnly: true\ndefaultMode: 0400\nprometheus.io/scrape:\nprometheus.io/path:\nprometheus.io/port:\nlivenessProbe:\nreadinessProbe:\nstartupProbe:\n",
         )
         .expect("write deployment");
         fs::write(

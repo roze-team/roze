@@ -1508,9 +1508,15 @@ Plain ent-style `edge To("groups", Group.Type)` declarations without local
 `Field(...)`/`Ref(...)` are treated the same way; if either `Field(...)` or
 `Ref(...)` is present, both must be present so Roze can generate a concrete
 local-FK relationship.
-Chained inverse declarations such as
-`edge To("children", User.Type).From("parent")` are also accepted as
-parse-compatible no-ops when they do not declare a local FK field.
+Chained self O2O declarations such as
+`edge To("next", Node.Type).Unique().From("prev").Unique()` generate an
+implicit owning FK plus the inverse query edge. Canonical output may expand the
+chain into equivalent owning `To` and inverse `From(...).Ref(...)` declarations.
+Chained self O2M declarations such as
+`edge To("children", Node.Type).From("parent").Unique()` place an implicit
+`parent_id` FK on the single-value `parent` direction and generate a to-many
+`children` inverse query. Cross-entity fieldless to-many/M2M storage still
+requires an explicit edge field or `Through(...)` join model.
 Owning ent-style edges with `Field("user_id")` but no `Ref(...)` default the
 reference field to `id`, matching the common entgo convention of pointing to
 the target primary key.
@@ -2051,18 +2057,25 @@ rozectl kube deploy \
   --env-file .env \
   --config-map user-api-config \
   --tls-secret user-api-upstream-tls \
+  --image-pull-secret registry-credentials \
   --min-available 1
 ```
 
 `--env KEY=VALUE` entries are validated before writing the manifest.
 `--image` must use immutable `repository@sha256:<64 hex>` syntax; mutable tags
 and `latest` are rejected before any deployment file is written.
+`--name`, `--namespace`, `--config-map`, and `--tls-secret` are validated as
+lowercase DNS-1123 labels before rendering. `--min-available` must be a positive
+count no greater than the initial replica count, or a percentage from 1% to
+100%; zero-replica deployments are rejected.
 `--config-map` adds an `envFrom.configMapRef` reference. `--env-file` reads a
 dotenv-style file, validates each `KEY=VALUE` line, emits a generated
 `<name>-env` ConfigMap, and wires it through `envFrom`.
 `--tls-secret` mounts an existing Kubernetes Secret read-only at
 `/var/run/secrets/roze/tls` with mode `0400`; the generator never writes CA,
 certificate, or private-key material into the manifest.
+`--image-pull-secret` references an existing registry credential Secret and
+generates `imagePullSecrets`; its name is validated as DNS-1123 before output.
 The manifest always includes a ServiceAccount, PodDisruptionBudget, and
 NetworkPolicy. The policy allows ingress to the service port and limits egress
 to same-namespace workloads, kube-system DNS on TCP/UDP 53, and external TLS on
@@ -2136,6 +2149,7 @@ rozectl helm chart \
   --env RUST_LOG=info \
   --config-map user-api-config \
   --tls-secret user-api-upstream-tls \
+  --image-pull-secret registry-credentials \
   --min-available 1 \
   --chart-version 0.1.0 \
   --app-version 1.2.3 \
@@ -2153,6 +2167,8 @@ contexts as `kube deploy`.
 `metricsPort`; scraping is enabled for `/metrics` by default.
 The image repository and SHA-256 digest are stored separately in values and
 recombined as an immutable digest reference by the Deployment template.
+Private registry credentials are exposed as `image.pullSecrets`, allowing
+platform owners to append multiple pull secrets without editing the template.
 `values.schema.json` uses JSON Schema Draft 2020-12 and rejects malformed image
 digests, out-of-range ports or HPA targets, invalid ServiceMonitor durations,
 and unknown top-level values before Helm renders the chart.

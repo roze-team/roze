@@ -42,6 +42,7 @@ pub struct KubeDeployOptions {
     pub env_file: Option<PathBuf>,
     pub config_map: Option<String>,
     pub tls_secret: Option<String>,
+    pub image_pull_secret: Option<String>,
     pub min_available: String,
     pub out: PathBuf,
 }
@@ -283,6 +284,7 @@ fn render_kube_deploy(
     let network_policy = render_kube_network_policy(options);
     let tls_volume_mount = render_kube_tls_volume_mount(options);
     let tls_volume = render_kube_tls_volume(options);
+    let image_pull_secrets = render_kube_image_pull_secrets(options);
     let env_config_map = env_file_entries
         .map(|entries| render_kube_config_map(&format!("{}-env", options.name), options, entries))
         .unwrap_or_default();
@@ -315,6 +317,7 @@ spec:
     spec:
 {service_account_name}      terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
+{image_pull_secrets}      securityContext:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -446,6 +449,7 @@ spec:
         env_from = env_from,
         tls_volume_mount = tls_volume_mount,
         tls_volume = tls_volume,
+        image_pull_secrets = image_pull_secrets,
         cpu_request = options.cpu_request,
         memory_request = options.memory_request,
         cpu_limit = options.cpu_limit,
@@ -494,6 +498,7 @@ image:
   tag: {image_tag:?}
   digest: {image_digest:?}
   pullPolicy: IfNotPresent
+  pullSecrets:{image_pull_secrets}
 
 service:
   type: ClusterIP
@@ -549,6 +554,11 @@ env:
         image_repository = helm_image_repository(&options.image),
         image_tag = helm_image_tag(&options.image),
         image_digest = helm_image_digest(&options.image),
+        image_pull_secrets = options
+            .image_pull_secret
+            .as_deref()
+            .map(|name| format!("\n    - name: {name}"))
+            .unwrap_or_else(|| " []".to_string()),
         port = options.port,
         cpu_request = options.cpu_request,
         memory_request = options.memory_request,
@@ -584,12 +594,21 @@ fn render_helm_values_schema() -> &'static str {
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "digest", "pullPolicy"],
+      "required": ["repository", "digest", "pullPolicy", "pullSecrets"],
       "properties": {
         "repository": { "type": "string", "minLength": 1 },
         "tag": { "type": "string" },
         "digest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
-        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": { "name": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" } }
+          }
+        }
       }
     },
     "service": {
@@ -679,6 +698,10 @@ spec:
       serviceAccountName: {{ default (include "roze.fullname" .) .Values.serviceAccount.name }}
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -963,6 +986,23 @@ fn helm_image_parts(image: &str) -> Option<(&str, &str)> {
 
 fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
     validate_image_digest(&options.image)?;
+    validate_kube_dns_label("--name", &options.name)?;
+    validate_kube_dns_label("--namespace", &options.namespace)?;
+    if let Some(name) = options.config_map.as_deref() {
+        validate_kube_dns_label("--config-map", name)?;
+    }
+    if let Some(name) = options.tls_secret.as_deref() {
+        validate_kube_dns_label("--tls-secret", name)?;
+    }
+    if let Some(name) = options.image_pull_secret.as_deref() {
+        validate_kube_dns_label("--image-pull-secret", name)?;
+    }
+    if options.env_file.is_some() {
+        validate_kube_dns_label("generated env ConfigMap", &format!("{}-env", options.name))?;
+    }
+    if options.replicas == 0 {
+        bail!("--replicas must be at least 1");
+    }
     if options.min_replicas > options.max_replicas {
         bail!("--min-replicas must be less than or equal to --max-replicas");
     }
@@ -972,16 +1012,7 @@ fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
     if options.target_memory == 0 || options.target_memory > 100 {
         bail!("--target-memory must be between 1 and 100");
     }
-    if options.min_available.trim().is_empty() {
-        bail!("--min-available cannot be empty");
-    }
-    if options
-        .tls_secret
-        .as_deref()
-        .is_some_and(|name| name.trim().is_empty())
-    {
-        bail!("--tls-secret cannot be empty");
-    }
+    validate_min_available(&options.min_available, options.replicas)?;
     for entry in &options.env {
         let Some((name, _)) = entry.split_once('=') else {
             bail!("--env entries must use KEY=VALUE format: {entry}");
@@ -989,6 +1020,34 @@ fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
         validate_env_name(name)?;
     }
     Ok(())
+}
+
+fn validate_kube_dns_label(flag: &str, value: &str) -> anyhow::Result<()> {
+    let bytes = value.as_bytes();
+    let is_lowercase_or_digit = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    let valid = !bytes.is_empty()
+        && bytes.len() <= 63
+        && is_lowercase_or_digit(bytes[0])
+        && is_lowercase_or_digit(bytes[bytes.len() - 1])
+        && bytes
+            .iter()
+            .all(|byte| is_lowercase_or_digit(*byte) || *byte == b'-');
+    if !valid {
+        bail!("{flag} must be a lowercase DNS-1123 label with at most 63 characters");
+    }
+    Ok(())
+}
+
+fn validate_min_available(value: &str, replicas: u32) -> anyhow::Result<()> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let percent = percent.parse::<u32>().ok();
+        if matches!(percent, Some(1..=100)) {
+            return Ok(());
+        }
+    } else if matches!(value.parse::<u32>(), Ok(count) if count > 0 && count <= replicas) {
+        return Ok(());
+    }
+    bail!("--min-available must be 1..=replicas or a percentage from 1% to 100%");
 }
 
 fn validate_image_digest(image: &str) -> anyhow::Result<()> {
@@ -1107,6 +1166,14 @@ fn render_kube_tls_volume(options: &KubeDeployOptions) -> String {
                 "      volumes:\n      - name: upstream-tls\n        secret:\n          secretName: {secret}\n          defaultMode: 0400\n"
             )
         })
+        .unwrap_or_default()
+}
+
+fn render_kube_image_pull_secrets(options: &KubeDeployOptions) -> String {
+    options
+        .image_pull_secret
+        .as_ref()
+        .map(|name| format!("      imagePullSecrets:\n      - name: {name}\n"))
         .unwrap_or_default()
 }
 
@@ -1825,6 +1892,7 @@ mod tests {
                 env_file: Some(PathBuf::from(".env")),
                 config_map: Some("user-config".to_string()),
                 tls_secret: Some("user-upstream-tls".to_string()),
+                image_pull_secret: Some("registry-credentials".to_string()),
                 min_available: "1".to_string(),
                 out: PathBuf::from("deploy/kubernetes.yaml"),
             },
@@ -1833,6 +1901,8 @@ mod tests {
         assert!(rendered.contains("kind: Deployment"));
         assert!(rendered.contains("automountServiceAccountToken: false"));
         assert!(rendered.contains("user@sha256:"));
+        assert!(rendered.contains("imagePullSecrets:"));
+        assert!(rendered.contains("name: registry-credentials"));
         assert!(rendered.contains("prometheus.io/scrape: \"true\""));
         assert!(rendered.contains("prometheus.io/path: \"/metrics\""));
         assert!(rendered.contains("prometheus.io/port: \"3000\""));
@@ -1907,6 +1977,7 @@ mod tests {
                 env_file: None,
                 config_map: Some("user-config".to_string()),
                 tls_secret: Some("user-upstream-tls".to_string()),
+                image_pull_secret: Some("registry-credentials".to_string()),
                 min_available: "1".to_string(),
                 out: out.clone(),
             },
@@ -1918,6 +1989,8 @@ mod tests {
         assert!(values.contains(r#"repository: "registry.example.com/user""#));
         assert!(values.contains("tag: \"\""));
         assert!(values.contains("digest: \"sha256:"));
+        assert!(values.contains("pullSecrets:\n    - name: registry-credentials"));
+        assert!(render_helm_deployment().contains("imagePullSecrets:"));
         assert!(render_helm_deployment().contains("automountServiceAccountToken: false"));
         assert!(values.contains("RUST_LOG: \"info\""));
         assert!(values.contains("name: user-config"));
@@ -2039,6 +2112,7 @@ mod tests {
             env_file: None,
             config_map: None,
             tls_secret: None,
+            image_pull_secret: None,
             min_available: "1".to_string(),
             out: PathBuf::from("deploy/kubernetes.yaml"),
         };
@@ -2061,6 +2135,25 @@ mod tests {
         options.image = "user:latest".to_string();
         let err = validate_kube_options(&options).expect_err("reject mutable image");
         assert!(err.to_string().contains("@sha256:"));
+
+        options.image = immutable_image("user");
+        options.name = "Invalid_Name".to_string();
+        let err = validate_kube_options(&options).expect_err("reject invalid resource name");
+        assert!(err.to_string().contains("DNS-1123"));
+
+        options.name = "user".to_string();
+        options.min_available = "3".to_string();
+        let err = validate_kube_options(&options).expect_err("reject unavailable replica count");
+        assert!(err.to_string().contains("--min-available"));
+
+        options.min_available = "101%".to_string();
+        let err = validate_kube_options(&options).expect_err("reject unavailable percentage");
+        assert!(err.to_string().contains("--min-available"));
+
+        options.min_available = "1".to_string();
+        options.image_pull_secret = Some("Invalid_Registry".to_string());
+        let err = validate_kube_options(&options).expect_err("reject invalid pull secret name");
+        assert!(err.to_string().contains("--image-pull-secret"));
     }
 
     #[test]
