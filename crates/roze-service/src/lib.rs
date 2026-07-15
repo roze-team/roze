@@ -146,15 +146,28 @@ impl LifecycleState {
     }
 
     pub fn phase(&self) -> LifecyclePhase {
-        match self.phase.load(Ordering::SeqCst) {
-            PHASE_RUNNING => LifecyclePhase::Running,
-            PHASE_DRAINING => LifecyclePhase::Draining,
-            PHASE_STOPPED => LifecyclePhase::Stopped,
-            PHASE_FAILED => LifecyclePhase::Failed,
-            _ => LifecyclePhase::Starting,
-        }
+        phase_from_code(self.phase.load(Ordering::SeqCst))
     }
 
+    fn mark(&self, phase: LifecyclePhase) {
+        let previous = phase_from_code(self.phase.swap(phase_code(phase), Ordering::SeqCst));
+        if previous != phase {
+            tracing::debug!(from = ?previous, to = ?phase, "service group lifecycle changed");
+        }
+    }
+}
+
+fn phase_from_code(code: u8) -> LifecyclePhase {
+    match code {
+        PHASE_RUNNING => LifecyclePhase::Running,
+        PHASE_DRAINING => LifecyclePhase::Draining,
+        PHASE_STOPPED => LifecyclePhase::Stopped,
+        PHASE_FAILED => LifecyclePhase::Failed,
+        _ => LifecyclePhase::Starting,
+    }
+}
+
+impl LifecycleState {
     pub fn is_running(&self) -> bool {
         matches!(self.phase(), LifecyclePhase::Running)
     }
@@ -178,10 +191,6 @@ impl LifecycleState {
         })
         .await
         .is_ok()
-    }
-
-    fn mark(&self, phase: LifecyclePhase) {
-        self.phase.store(phase_code(phase), Ordering::SeqCst);
     }
 }
 
@@ -256,6 +265,10 @@ pub struct ServiceGroupHandle {
 
 impl ServiceGroupHandle {
     pub fn shutdown(&self) {
+        tracing::debug!(
+            service_count = self.service_count.load(Ordering::SeqCst),
+            "service group shutdown requested"
+        );
         self.lifecycle.mark(LifecyclePhase::Draining);
         self.shutdown.trigger();
     }
@@ -371,6 +384,18 @@ impl ServiceGroup {
     where
         F: Future<Output = ()> + Send,
     {
+        let service_names = self
+            .services
+            .iter()
+            .map(|service| service.name())
+            .collect::<Vec<_>>();
+        tracing::debug!(
+            service_count = service_names.len(),
+            services = ?service_names,
+            shutdown_timeout_ms = self.config.shutdown_timeout.as_millis(),
+            stop_on_first_error = self.config.stop_on_first_error,
+            "service group starting"
+        );
         if self.services.is_empty() {
             self.lifecycle.mark(LifecyclePhase::Stopped);
             return Ok(());
@@ -385,11 +410,13 @@ impl ServiceGroup {
         while active > 0 {
             tokio::select! {
                 _ = &mut shutdown => {
+                    tracing::debug!(source = "external_signal", "service group draining");
                     self.lifecycle.mark(LifecyclePhase::Draining);
                     self.shutdown.trigger();
                     break;
                 }
                 _ = self.listener.clone().wait() => {
+                    tracing::debug!(source = "shutdown_handle", "service group draining");
                     self.lifecycle.mark(LifecyclePhase::Draining);
                     break;
                 }
@@ -399,6 +426,7 @@ impl ServiceGroup {
                     };
                     active -= 1;
                     if handle_service_exit(joined, &mut errors) && self.config.stop_on_first_error {
+                        tracing::debug!(source = "service_error", "service group draining");
                         self.lifecycle.mark(LifecyclePhase::Draining);
                         self.shutdown.trigger();
                         break;
@@ -443,6 +471,7 @@ fn spawn_services(
         let service = Arc::clone(service);
         let listener = shutdown.clone();
         let name = service.name().to_string();
+        tracing::debug!(service = %name, "service task spawning");
         tasks.spawn(async move {
             let result = service.start(listener).await;
             ServiceTaskExit { name, result }
@@ -457,13 +486,18 @@ fn handle_service_exit(
 ) -> bool {
     match joined {
         Ok(exit) => match exit.result {
-            Ok(()) => false,
+            Ok(()) => {
+                tracing::debug!(service = %exit.name, outcome = "completed", "service task exited");
+                false
+            }
             Err(error) => {
+                tracing::debug!(service = %exit.name, outcome = "failed", "service task exited");
                 errors.push(format!("service {} failed: {error:#}", exit.name));
                 true
             }
         },
         Err(error) => {
+            tracing::debug!(outcome = "join_failed", "service task exited");
             errors.push(format!("service task failed: {error}"));
             true
         }
@@ -488,6 +522,7 @@ async fn run_stop_hooks(services: &[Arc<dyn RuntimeService>]) -> Vec<String> {
     for service in services.iter().rev() {
         let service = Arc::clone(service);
         let name = service.name().to_string();
+        tracing::debug!(service = %name, "service stop hook spawning");
         tasks.spawn(async move {
             service
                 .stop()

@@ -1203,6 +1203,14 @@ fn update_model_dependencies(
         };
         dependencies.insert("serde_json", item);
     }
+    if !dependencies.contains_key("tracing") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            r#""0.1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
+        };
+        dependencies.insert("tracing", item);
+    }
     if needs_uuid && !dependencies.contains_key("uuid") {
         let item = if uses_workspace {
             workspace_dependency_item()
@@ -3211,6 +3219,13 @@ fn render_sea_orm_nested_edge_api(
         writeln!(out, "impl<'repo, 'ctx> {pascal}Query<'repo, 'ctx> {{").unwrap();
         writeln!(out, "    pub async fn {method}(self, target_repo: &crate::model::{target_pascal}Repository<'_>, nested_repo: &crate::model::{nested_target}Repository<'_>) -> anyhow::Result<Vec<{loaded}>> {{").unwrap();
         writeln!(out, "        let nodes = self.all().await?;").unwrap();
+        writeln!(
+            out,
+            "        tracing::debug!(model = {:?}, backend = \"sea_orm\", edge_path = {:?}, node_count = nodes.len(), \"model eager edge loading\");",
+            model.name,
+            format!("{}.{}", edge.name, nested.name)
+        )
+        .unwrap();
         render_loaded_edge_key_collection_named(out, model, edge, "values");
         let target_field = if edge.inverse_ref.is_some() {
             &edge.field
@@ -3294,7 +3309,12 @@ fn render_sea_orm_transaction_method(out: &mut String) {
         "        let db = self.write_db().map_err(|err| DbErr::Custom(err.to_string()))?;"
     )
     .unwrap();
-    writeln!(out, "        db.transaction::<_, T, DbErr>(func)").unwrap();
+    writeln!(out, "        tracing::debug!(backend = \"sea_orm\", phase = \"begin\", \"model transaction phase\");").unwrap();
+    writeln!(
+        out,
+        "        let result = db.transaction::<_, T, DbErr>(func)"
+    )
+    .unwrap();
     writeln!(out, "            .await").unwrap();
     writeln!(out, "            .map_err(|err| match err {{").unwrap();
     writeln!(
@@ -3302,7 +3322,9 @@ fn render_sea_orm_transaction_method(out: &mut String) {
         "                TransactionError::Connection(err) | TransactionError::Transaction(err) => err,"
     )
     .unwrap();
-    writeln!(out, "            }})").unwrap();
+    writeln!(out, "            }});").unwrap();
+    writeln!(out, "        tracing::debug!(backend = \"sea_orm\", phase = if result.is_ok() {{ \"commit\" }} else {{ \"rollback\" }}, \"model transaction phase\");").unwrap();
+    writeln!(out, "        result").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 }
@@ -4342,11 +4364,17 @@ fn render_composite_update_one_atomic_methods(
         .map(|field| format!("self.{}.is_some()", model_field_ident(field)))
         .collect::<Vec<_>>()
         .join(" || ");
-    for field in updatable_model_fields(model, primary)
+    for (field, delta_ty) in updatable_model_fields(model, primary)
         .into_iter()
-        .filter(|field| atomic_numeric_delta_type(field, true).is_some())
+        .filter_map(|field| {
+            let delta_ty = if sea_orm {
+                atomic_numeric_delta_type(field, true)
+            } else {
+                toasty_atomic_numeric_delta_type(field, true)
+            };
+            delta_ty.map(|delta_ty| (field, delta_ty))
+        })
     {
-        let delta_ty = atomic_numeric_delta_type(field, true).expect("atomic numeric field");
         for prefix in ["add", "subtract"] {
             let method = rust_identifier(&format!("{prefix}_{}", field.name));
             let unhooked = format!("{method}_unhooked");
@@ -7043,6 +7071,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "    async fn all_unintercepted(self) -> anyhow::Result<Vec<Model>> {{"
     )
     .unwrap();
+    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", query_type = \"all\", predicate_count = self.predicates.len(), order_count = self.orders.len(), limit = ?self.limit, offset = ?self.offset, \"model query executing\");", model.name).unwrap();
     writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
     writeln!(out, "        Ok(self.build_select().all(db).await?)").unwrap();
     writeln!(out, "    }}").unwrap();
@@ -7392,6 +7421,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "        let page_size = if page_size == 0 {{ 20 }} else {{ page_size.min(500) }};"
     )
     .unwrap();
+    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", query_type = \"page\", page, page_size, predicate_count = self.predicates.len(), order_count = self.orders.len(), \"model query executing\");", model.name).unwrap();
     writeln!(
         out,
         "        let total = self.build_filter_select().count(db).await?;"
@@ -9646,9 +9676,10 @@ fn render_toasty_update_builder(
             .join(" || ");
         for field in updatable_model_fields(model, primary)
             .into_iter()
-            .filter(|field| atomic_numeric_delta_type(field, true).is_some())
+            .filter(|field| toasty_atomic_numeric_delta_type(field, true).is_some())
         {
-            let delta_ty = atomic_numeric_delta_type(field, true).expect("atomic numeric field");
+            let delta_ty =
+                toasty_atomic_numeric_delta_type(field, true).expect("atomic numeric field");
             for prefix in ["add", "subtract"] {
                 let method = rust_identifier(&format!("{prefix}_{}", field.name));
                 let unhooked = format!("{method}_unhooked");
@@ -9889,9 +9920,9 @@ fn render_toasty_update_many_builder(
 
     for field in updatable_model_fields(model, primary)
         .into_iter()
-        .filter(|field| atomic_numeric_delta_type(field, true).is_some())
+        .filter(|field| toasty_atomic_numeric_delta_type(field, true).is_some())
     {
-        let delta_ty = atomic_numeric_delta_type(field, true).expect("atomic numeric field");
+        let delta_ty = toasty_atomic_numeric_delta_type(field, true).expect("atomic numeric field");
         for prefix in ["add", "subtract"] {
             let method = rust_identifier(&format!("{prefix}_{}", field.name));
             let unhooked = format!("{method}_unhooked");
@@ -11267,10 +11298,10 @@ fn render_toasty_atomic_query_methods(out: &mut String, model: &ModelSpec, pasca
 
     for field in updatable_model_fields(model, &model.primary)
         .into_iter()
-        .filter(|field| atomic_numeric_delta_type(field, true).is_some())
+        .filter(|field| toasty_atomic_numeric_delta_type(field, true).is_some())
     {
         let field_ident = model_field_ident(field);
-        let delta_ty = atomic_numeric_delta_type(field, true).expect("atomic numeric field");
+        let delta_ty = toasty_atomic_numeric_delta_type(field, true).expect("atomic numeric field");
         for (prefix, assignment) in [("add", "add"), ("subtract", "subtract")] {
             let method = rust_identifier(&format!("{prefix}_{}", field.name));
             let unhooked = format!("{method}_unintercepted");
@@ -11393,6 +11424,7 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
         "    async fn all_unintercepted(self) -> toasty::Result<Vec<{pascal}>> {{"
     )
     .unwrap();
+    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"toasty\", query_type = \"all\", predicate_count = self.predicates.len(), order_count = self.orders.len(), limit = ?self.limit, offset = ?self.offset, \"model query executing\");", model.name).unwrap();
     writeln!(out, "        let query = self.build_query();").unwrap();
     writeln!(out, "        query.exec(self.db).await").unwrap();
     writeln!(out, "    }}").unwrap();
@@ -11673,6 +11705,7 @@ fn render_toasty_query_execute_methods(out: &mut String, model: &ModelSpec, pasc
         "        let page_size = if page_size == 0 {{ 20 }} else {{ page_size.min(500) }};"
     )
     .unwrap();
+    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"toasty\", query_type = \"page\", page, page_size, predicate_count = self.predicates.len(), order_count = self.orders.len(), \"model query executing\");", model.name).unwrap();
     writeln!(
         out,
         "        let total = self.build_filter_query().count().exec(self.db).await?;"
@@ -12099,6 +12132,13 @@ fn render_toasty_nested_edge_api(
             "        let nodes = self.build_query().exec(&mut *self.db).await?;"
         )
         .unwrap();
+        writeln!(
+            out,
+            "        tracing::debug!(model = {:?}, backend = \"toasty\", edge_path = {:?}, node_count = nodes.len(), \"model eager edge loading\");",
+            model.name,
+            format!("{}.{}", edge.name, nested.name)
+        )
+        .unwrap();
         render_loaded_edge_key_collection_named(out, model, edge, "values");
         let target_field = if edge.inverse_ref.is_some() {
             &edge.field
@@ -12177,9 +12217,18 @@ fn render_toasty_transaction_method(out: &mut String) {
     .unwrap();
     writeln!(out, "        T: Send,").unwrap();
     writeln!(out, "    {{").unwrap();
+    writeln!(out, "        tracing::debug!(backend = \"toasty\", phase = \"begin\", \"model transaction phase\");").unwrap();
     writeln!(out, "        let mut tx = db.transaction().await?;").unwrap();
-    writeln!(out, "        let output = func(&mut tx).await?;").unwrap();
+    writeln!(out, "        let output = match func(&mut tx).await {{").unwrap();
+    writeln!(out, "            Ok(output) => output,").unwrap();
+    writeln!(out, "            Err(error) => {{").unwrap();
+    writeln!(out, "                tracing::debug!(backend = \"toasty\", phase = \"rollback\", \"model transaction phase\");").unwrap();
+    writeln!(out, "                return Err(error);").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        }};").unwrap();
+    writeln!(out, "        tracing::debug!(backend = \"toasty\", phase = \"commit\", \"model transaction phase\");").unwrap();
     writeln!(out, "        tx.commit().await?;").unwrap();
+    writeln!(out, "        tracing::debug!(backend = \"toasty\", phase = \"committed\", \"model transaction phase\");").unwrap();
     writeln!(out, "        Ok(output)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
@@ -12468,6 +12517,10 @@ fn atomic_numeric_delta_type(field: &ModelField, nullable: bool) -> Option<&str>
         None if is_numeric_type(&field.ty) => Some(&field.ty),
         None => None,
     }
+}
+
+fn toasty_atomic_numeric_delta_type(field: &ModelField, nullable: bool) -> Option<&str> {
+    atomic_numeric_delta_type(field, nullable).filter(|ty| *ty != "rust_decimal::Decimal")
 }
 
 fn render_model_fixture_impl(out: &mut String, model: &ModelSpec, type_name: &str) {
@@ -24673,6 +24726,12 @@ mod tests {
             "Option<rust_decimal::Decimal>"
         );
 
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub async fn add_discount_amount"));
+        assert!(sea_orm.contains("pub async fn subtract_discount_amount"));
+        assert!(sea_orm.contains("pub async fn add_min_order_amount"));
+        assert!(sea_orm.contains("pub async fn subtract_min_order_amount"));
+
         let rendered = render_toasty_model_module(model);
         assert!(rendered.contains("pub status: i16"));
         assert!(rendered.contains("pub discount_amount: rust_decimal::Decimal"));
@@ -24682,6 +24741,12 @@ mod tests {
         assert!(rendered.contains("DiscountAmountGte(rust_decimal::Decimal)"));
         assert!(rendered.contains("Coupon::fields().status().eq(*value)"));
         assert!(rendered.contains("Coupon::fields().discount_amount().ge(value.clone())"));
+        assert!(rendered.contains("pub async fn add_status"));
+        assert!(rendered.contains("pub async fn subtract_status"));
+        assert!(!rendered.contains("fn add_discount_amount"));
+        assert!(!rendered.contains("fn subtract_discount_amount"));
+        assert!(!rendered.contains("fn add_min_order_amount"));
+        assert!(!rendered.contains("fn subtract_min_order_amount"));
         assert!(rendered.contains(
             "pub async fn sum_discount_amount(self) -> toasty::Result<rust_decimal::Decimal>"
         ));
@@ -25981,6 +26046,7 @@ version = "0.0.0"
 rust_decimal = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde", "rust_decimal"] }
+tracing = "0.1"
 "#,
         );
         add_local_roze_orm_dependency(&out);
@@ -26240,6 +26306,57 @@ pub async fn grouping_and_nullable_atomic_compile_smoke(
 
         cargo_check_generated_crate(&out);
         cargo_clippy_generated_crate(&out);
+    }
+
+    #[test]
+    #[ignore = "runs cargo check against a generated Toasty crate with Decimal fields"]
+    fn generated_toasty_decimal_model_crate_compiles() {
+        let out = temp_model_output("toasty-decimal-compile-smoke");
+        write_generated_crate_manifest(
+            &out,
+            r#"[package]
+name = "generated-toasty-decimal-smoke"
+edition = "2021"
+version = "0.0.0"
+
+[dependencies]
+rust_decimal = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde", "rust_decimal"] }
+tracing = "0.1"
+"#,
+        );
+        add_local_roze_orm_dependency(&out);
+        fs::write(out.join("src/lib.rs"), "pub mod model;\n").expect("lib");
+
+        generate_model_project(
+            r#"
+            entity Account {
+                table "accounts"
+                cache false
+                field id: i64 {
+                    primary
+                }
+                field balance: decimal {
+                }
+                field credit: decimal? {
+                }
+            }
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+            ModelFormat::Ent,
+            ModelOrm::Toasty,
+        )
+        .expect("generate");
+
+        let generated =
+            fs::read_to_string(out.join("src/model/account.rs")).expect("generated model");
+        assert!(!generated.contains("fn add_balance"));
+        assert!(!generated.contains("fn subtract_balance"));
+        assert!(!generated.contains("fn add_credit"));
+        assert!(!generated.contains("fn subtract_credit"));
+        cargo_check_generated_crate(&out);
     }
 
     #[tokio::test]

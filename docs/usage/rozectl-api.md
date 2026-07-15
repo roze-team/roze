@@ -981,6 +981,16 @@ method, code, latency, request ID, and trace ID. Generated logging never prints
 request or message payloads; application logic remains responsible for
 domain-specific events and must redact secrets and personal data.
 
+With `RUST_LOG=debug`, Roze also reports safe framework decisions: REST router
+construction, middleware plans, and route-match outcomes; RPC endpoint labels,
+retry attempts, deadlines, and governance flags; Stream topic bindings,
+message IDs, attempts, and ack/nack decisions; Model query kinds, pagination,
+eager-load edge paths, and transaction phases; and ServiceGroup membership and
+health phase changes. These events deliberately omit request/message bodies,
+authorization values, SQL arguments, fallback payloads, and dependency error
+messages. Endpoint labels are reduced to scheme and authority without userinfo,
+path, query, or fragment.
+
 Generated REST services pass their Router through
 `roze_middleware::apply_common_with_config`. Its request-context layer restores
 or creates `roze_context::Context` from incoming propagation headers, including

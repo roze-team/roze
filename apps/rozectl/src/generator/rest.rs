@@ -52,8 +52,22 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
     let health = ctx.health.clone();
     let middleware_config = roze_middleware::CommonMiddlewareConfig::from(&rest.middlewares);
-    let app = middleware::app::apply(route::router(ctx));
+    tracing::debug!(
+        protocol = "rest",
+        request_context = middleware_config.request_context,
+        request_tracing = middleware_config.tracing,
+        auth_enabled = middleware_config.auth.is_some(),
+        cors_enabled = middleware_config.cors,
+        timeout_ms = ?middleware_config.timeout_ms,
+        body_limit_bytes = ?middleware_config.body_limit_bytes,
+        "REST middleware plan resolved"
+    );
+    let app = route::router(ctx);
+    tracing::debug!(protocol = "rest", "REST router constructed");
+    let app = middleware::app::apply(app);
+    tracing::debug!(protocol = "rest", "application middleware hook applied");
     let app = roze_middleware::apply_common_with_config(app, middleware_config);
+    tracing::debug!(protocol = "rest", "Roze common middleware applied");
     let mut group = ServiceGroup::new();
     group.add(RestService::new(
         service_name.clone(),
@@ -2474,8 +2488,11 @@ mod tests {
         .expect("valid api");
 
         let main = render_rest_main(&spec);
-        assert!(main.contains("middleware::app::apply(route::router(ctx))"));
+        assert!(main.contains("let app = route::router(ctx);"));
+        assert!(main.contains("middleware::app::apply(app)"));
         assert!(main.contains("apply_common_with_config(app, middleware_config)"));
+        assert!(main.contains("\"REST middleware plan resolved\""));
+        assert!(main.contains("\"REST router constructed\""));
 
         let middleware_mod = render_middleware_mod(&spec);
         assert!(middleware_mod.contains("pub mod app;"));

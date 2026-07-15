@@ -730,7 +730,17 @@ where
 
     pub async fn pick(&self, name: &str) -> anyhow::Result<Option<ServiceInstance>> {
         let instances = self.registry.discover(name).await?;
-        Ok(self.balancer.pick(&instances))
+        let picked = self.balancer.pick(&instances);
+        tracing::debug!(
+            protocol = "rpc",
+            service = name,
+            candidate_count = instances.len(),
+            selected_endpoint = picked
+                .as_ref()
+                .map(|instance| safe_endpoint_label(&instance.addr)),
+            "RPC registry endpoint selected"
+        );
+        Ok(picked)
     }
 
     pub async fn discover(&self, name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
@@ -800,7 +810,18 @@ where
 
     pub async fn pick(&self, name: &str) -> anyhow::Result<Option<ServiceInstance>> {
         let instances = self.discover(name).await?;
-        Ok(self.balancer.pick(&instances))
+        let picked = self.balancer.pick(&instances);
+        tracing::debug!(
+            protocol = "rpc",
+            service = name,
+            candidate_count = instances.len(),
+            selected_endpoint = picked
+                .as_ref()
+                .map(|instance| safe_endpoint_label(&instance.addr)),
+            source = "cache",
+            "RPC registry endpoint selected"
+        );
+        Ok(picked)
     }
 
     pub fn invalidate(&self, name: &str) {
@@ -929,6 +950,27 @@ where
     }
 }
 
+fn safe_endpoint_label(endpoint: &str) -> String {
+    let endpoint = endpoint
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(endpoint)
+        .trim_end_matches('/');
+    if let Some((scheme, rest)) = endpoint.split_once("://") {
+        let authority = rest.split('/').next().unwrap_or_default();
+        let authority = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        format!("{scheme}://{authority}")
+    } else {
+        let authority = endpoint.split('/').next().unwrap_or_default();
+        authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host)
+            .to_string()
+    }
+}
+
 pub fn weighted_instances(instances: &[ServiceInstance]) -> Vec<ServiceInstance> {
     let mut out = Vec::new();
     for instance in instances {
@@ -979,6 +1021,14 @@ mod tests {
     use std::sync::RwLock;
 
     use super::*;
+
+    #[test]
+    fn debug_endpoint_label_redacts_credentials_and_url_details() {
+        assert_eq!(
+            safe_endpoint_label("http://user:secret@registry.local:8080/rpc?token=secret"),
+            "http://registry.local:8080"
+        );
+    }
 
     #[tokio::test]
     async fn memory_registry_registers_and_discovers() {

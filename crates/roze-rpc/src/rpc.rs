@@ -228,13 +228,42 @@ pub async fn connect_channel_with_options(
     options: RpcClientOptions,
 ) -> anyhow::Result<Channel> {
     let url = normalize_endpoint(addr.as_ref())?;
+    tracing::debug!(
+        protocol = "rpc",
+        endpoint = %safe_endpoint_label(&url),
+        connect_timeout_ms = options.connect_timeout.as_millis(),
+        request_timeout_ms = options.request_timeout.as_millis(),
+        "RPC channel connection starting"
+    );
     let channel = Endpoint::from_shared(url)?
         .connect_timeout(options.connect_timeout)
         .timeout(options.request_timeout)
         .http2_keep_alive_interval(options.keepalive_time)
         .connect()
         .await?;
+    tracing::debug!(protocol = "rpc", "RPC channel connected");
     Ok(channel)
+}
+
+fn safe_endpoint_label(endpoint: &str) -> String {
+    let endpoint = endpoint
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(endpoint)
+        .trim_end_matches('/');
+    if let Some((scheme, rest)) = endpoint.split_once("://") {
+        let authority = rest.split('/').next().unwrap_or_default();
+        let authority = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        format!("{scheme}://{authority}")
+    } else {
+        let authority = endpoint.split('/').next().unwrap_or_default();
+        authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host)
+            .to_string()
+    }
 }
 
 pub async fn connect_channel_from_config(
@@ -339,12 +368,27 @@ pub fn rpc_client_pick_static_endpoint(
     cursor: &AtomicUsize,
 ) -> anyhow::Result<String> {
     if config.balancer == roze_config::RpcClientBalancerKind::RoundRobin {
-        return rpc_client_round_robin_endpoint(config, cursor).map(str::to_string);
+        let picked = rpc_client_round_robin_endpoint(config, cursor)?.to_string();
+        tracing::debug!(
+            protocol = "rpc",
+            balancer = ?config.balancer,
+            candidate_count = config.endpoints.iter().filter(|endpoint| !endpoint.is_empty()).count(),
+            selected_endpoint = %safe_endpoint_label(&picked),
+            "RPC static endpoint selected"
+        );
+        return Ok(picked);
     }
     let instances = rpc_client_static_instances(config)?;
     let picked = build_balancer(rpc_client_balancer_kind(config))
         .pick(&instances)
         .ok_or_else(|| anyhow::anyhow!("rpc client config must set at least one endpoint"))?;
+    tracing::debug!(
+        protocol = "rpc",
+        balancer = ?config.balancer,
+        candidate_count = instances.len(),
+        selected_endpoint = %safe_endpoint_label(&picked.addr),
+        "RPC static endpoint selected"
+    );
     Ok(picked.addr)
 }
 
@@ -948,6 +992,17 @@ pub fn begin_method(
     let service = service.into();
     let method = method.into();
     let policy = method_policy(governance, &method);
+    tracing::debug!(
+        protocol = "rpc",
+        service = %service,
+        method = %method,
+        timeout_ms = policy.timeout.map(|value| value.as_millis()),
+        rate_limit = policy.rate_limit.is_some(),
+        breaker = policy.breaker.is_some(),
+        shedding = policy.shedding.is_some(),
+        fallback = policy.fallback.as_ref().is_some_and(|value| value.enabled),
+        "RPC governance policy resolved"
+    );
     let key = format!("{service}:{method}");
     if let Some(config) = &policy.rate_limit {
         match enforce_method_rate_limit(&key, config) {
@@ -1107,25 +1162,72 @@ where
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
     let budget_key = format!("{service}:{method}");
+    tracing::debug!(
+        protocol = "rpc",
+        service,
+        method,
+        max_retries = policy.max_retries,
+        backoff_ms = policy.backoff.as_millis(),
+        max_backoff_ms = policy.max_backoff.as_millis(),
+        budget_percent = policy.budget_percent,
+        remaining_deadline_ms = context.remaining_timeout().map(|value| value.as_millis()),
+        "RPC retry policy resolved"
+    );
     CLIENT_RETRY_BUDGETS
         .get_or_init(RetryBudgetRegistry::default)
         .record_call(&budget_key);
     let mut attempt = 0usize;
     loop {
+        tracing::debug!(
+            protocol = "rpc",
+            service,
+            method,
+            attempt = attempt + 1,
+            "RPC attempt starting"
+        );
         let response = call().await;
         match response {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                tracing::debug!(
+                    protocol = "rpc",
+                    service,
+                    method,
+                    attempt = attempt + 1,
+                    outcome = "success",
+                    "RPC attempt completed"
+                );
+                return Ok(value);
+            }
             Err(status) if attempt < policy.max_retries && should_retry_status(&status) => {
+                tracing::debug!(protocol = "rpc", service, method, attempt = attempt + 1, code = ?status.code(), outcome = "retryable", "RPC attempt completed");
                 if !CLIENT_RETRY_BUDGETS
                     .get_or_init(RetryBudgetRegistry::default)
                     .allow_retry(&budget_key, policy.budget_percent)
                 {
+                    tracing::debug!(
+                        protocol = "rpc",
+                        service,
+                        method,
+                        decision = "budget_exhausted",
+                        "RPC retry stopped"
+                    );
                     record_resilience_decision(service, "rpc", "retry", "budget_exhausted");
                     return Err(status);
                 }
                 let next_attempt = attempt + 1;
                 let delay = full_jitter_delay(policy.backoff, policy.max_backoff, next_attempt);
+                tracing::debug!(
+                    protocol = "rpc",
+                    service,
+                    method,
+                    next_attempt = next_attempt + 1,
+                    delay_ms = delay.as_millis(),
+                    remaining_deadline_ms =
+                        context.remaining_timeout().map(|value| value.as_millis()),
+                    "RPC retry scheduled"
+                );
                 if let Some(status) = retry_context_status(context, delay) {
+                    tracing::debug!(protocol = "rpc", service, method, decision = ?status.code(), "RPC retry stopped by context");
                     record_resilience_decision(
                         service,
                         "rpc",
@@ -1142,6 +1244,7 @@ where
                     sleep(delay).await;
                 }
                 if let Some(status) = retry_context_status(context, Duration::ZERO) {
+                    tracing::debug!(protocol = "rpc", service, method, decision = ?status.code(), "RPC retry stopped after backoff");
                     record_resilience_decision(
                         service,
                         "rpc",
@@ -1157,7 +1260,10 @@ where
                 attempt = next_attempt;
                 record_resilience_decision(service, "rpc", "retry", "attempt");
             }
-            Err(status) => return Err(status),
+            Err(status) => {
+                tracing::debug!(protocol = "rpc", service, method, attempt = attempt + 1, code = ?status.code(), outcome = "failed", "RPC attempt completed without retry");
+                return Err(status);
+            }
         }
     }
 }
@@ -1284,6 +1390,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn debug_endpoint_label_redacts_credentials_and_url_details() {
+        assert_eq!(
+            safe_endpoint_label("https://user:secret@example.com:443/private?token=secret#part"),
+            "https://example.com:443"
+        );
+        assert_eq!(
+            safe_endpoint_label("user:secret@example.com:50051/private"),
+            "example.com:50051"
+        );
+    }
 
     #[test]
     fn retry_status_targets_transient_errors() {

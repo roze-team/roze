@@ -186,6 +186,13 @@ impl PathRouter {
         parts: &mut Parts,
     ) -> Option<BoxCloneSyncService<IncomingRequest, HttpResponse, Infallible>> {
         let Some(matched) = self.routes.at(parts.uri.path()).ok() else {
+            tracing::debug!(
+                protocol = "http",
+                method = %parts.method,
+                path = %parts.uri.path(),
+                outcome = "not_found",
+                "REST route match completed"
+            );
             parts.extensions.remove::<MatchedPath>();
             parts.extensions.remove::<RouteParams>();
             return None;
@@ -216,6 +223,15 @@ impl PathRouter {
                 })?
             })
             .or_else(|| group.routes.iter().find(|route| route.method.is_none()));
+
+        tracing::debug!(
+            protocol = "http",
+            method = %parts.method,
+            path = %parts.uri.path(),
+            matched_path = %group.path,
+            outcome = if route.is_some() { "matched" } else { "method_not_allowed" },
+            "REST route match completed"
+        );
 
         Some(route.map(|route| route.service.clone()).unwrap_or_else(|| {
             group

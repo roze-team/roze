@@ -173,6 +173,19 @@ impl Message {
         self.available_at_millis = Some(current_millis().saturating_add(delay.as_millis() as u64));
         self
     }
+
+    /// Returns a payload-free identifier suitable for diagnostics.
+    pub fn debug_id(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.topic,
+            self.partition
+                .map_or_else(|| "-".to_string(), |value| value.to_string()),
+            self.offset
+                .map_or_else(|| "-".to_string(), |value| value.to_string()),
+            self.timestamp_millis
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -218,7 +231,7 @@ impl Delivery {
     }
 
     pub async fn ack(&self) -> anyhow::Result<()> {
-        if self
+        let transitioned = self
             .state
             .state
             .compare_exchange(
@@ -227,15 +240,23 @@ impl Delivery {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             )
-            .is_ok()
-        {
+            .is_ok();
+        tracing::debug!(
+            protocol = "stream",
+            topic = %self.message.topic,
+            message_id = %self.message.debug_id(),
+            attempt = self.message.attempt,
+            decision = if transitioned { "ack" } else { "ack_ignored_already_settled" },
+            "stream delivery settlement decided"
+        );
+        if transitioned {
             (self.ack_fn)().await?;
         }
         Ok(())
     }
 
     pub async fn nack(&self) -> anyhow::Result<()> {
-        if self
+        let transitioned = self
             .state
             .state
             .compare_exchange(
@@ -244,8 +265,16 @@ impl Delivery {
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             )
-            .is_ok()
-        {
+            .is_ok();
+        tracing::debug!(
+            protocol = "stream",
+            topic = %self.message.topic,
+            message_id = %self.message.debug_id(),
+            attempt = self.message.attempt,
+            decision = if transitioned { "nack" } else { "nack_ignored_already_settled" },
+            "stream delivery settlement decided"
+        );
+        if transitioned {
             (self.nack_fn)().await?;
         }
         Ok(())

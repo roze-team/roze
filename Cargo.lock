@@ -3701,6 +3701,7 @@ dependencies = [
  "futures-util",
  "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4054,6 +4055,7 @@ dependencies = [
  "anyhow",
  "roze-shutdown",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

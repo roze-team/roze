@@ -126,16 +126,22 @@ impl HealthRegistry {
     }
 
     pub fn mark_started(&self) {
+        let previous = self.phase();
         self.startup_complete.store(true, Ordering::SeqCst);
+        self.log_phase_change(previous);
     }
 
     pub fn mark_draining(&self) {
+        let previous = self.phase();
         self.draining.store(true, Ordering::SeqCst);
+        self.log_phase_change(previous);
     }
 
     pub fn mark_ready(&self) {
+        let previous = self.phase();
         self.startup_complete.store(true, Ordering::SeqCst);
         self.draining.store(false, Ordering::SeqCst);
+        self.log_phase_change(previous);
     }
 
     pub fn phase(&self) -> ServicePhase {
@@ -179,14 +185,14 @@ impl HealthRegistry {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = HealthCheck> + Send + 'static,
     {
+        let name = name.into();
         let registered = RegisteredCheck {
-            name: name.into(),
+            name: name.clone(),
             check: Arc::new(move || Box::pin(check())),
         };
-        self.checks
-            .write()
-            .expect("health registry lock poisoned")
-            .push(registered);
+        let mut checks = self.checks.write().expect("health registry lock poisoned");
+        checks.push(registered);
+        tracing::debug!(check = %name, check_count = checks.len(), "health check registered");
     }
 
     pub async fn liveness_report(&self) -> HealthReport {
@@ -204,7 +210,14 @@ impl HealthRegistry {
     pub async fn readiness_report(&self) -> HealthReport {
         let mut checks = self.phase_checks();
         checks.extend(self.run_registered_checks().await);
-        HealthReport::new(checks)
+        let report = HealthReport::new(checks);
+        tracing::debug!(
+            phase = ?self.phase(),
+            status = %report.overall_status(),
+            check_count = report.checks.len(),
+            "readiness evaluated"
+        );
+        report
     }
 
     pub async fn startup_report(&self) -> HealthReport {
@@ -261,6 +274,13 @@ impl HealthRegistry {
                 "phase",
                 ServicePhase::Draining.to_string(),
             )],
+        }
+    }
+
+    fn log_phase_change(&self, previous: ServicePhase) {
+        let current = self.phase();
+        if previous != current {
+            tracing::debug!(from = ?previous, to = ?current, "health phase changed");
         }
     }
 }
