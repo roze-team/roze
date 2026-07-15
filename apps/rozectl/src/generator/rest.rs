@@ -42,7 +42,8 @@ async fn main() -> anyhow::Result<()> {
     let ctx = svc::ServiceContext::new(config).await?;
     let health = ctx.health.clone();
     let middleware_config = roze_middleware::CommonMiddlewareConfig::from(&rest.middlewares);
-    let app = roze_middleware::apply_common_with_config(route::router(ctx), middleware_config);
+    let app = middleware::app::apply(route::router(ctx));
+    let app = roze_middleware::apply_common_with_config(app, middleware_config);
     let mut group = ServiceGroup::new();
     group.add(RestService::new(
         service_name,
@@ -469,10 +470,11 @@ pub fn render_middleware(spec: &ApiSpec) -> String {
 
 pub fn render_middleware_mod(spec: &ApiSpec) -> String {
     let custom = custom_middlewares(spec);
-    let mut out = String::from("#![allow(dead_code, unused_imports, unused_variables)]\n\n");
+    let mut out =
+        String::from("#![allow(dead_code, unused_imports, unused_variables)]\n\npub mod app;\n");
     if custom.is_empty() {
         out.push_str(
-            "// Add custom middleware hooks here when `.api` declares non-built-in middleware.\n",
+            "\n// Route middleware hooks are added here for non-built-in `.api` middleware.\n",
         );
         return out;
     }
@@ -481,6 +483,21 @@ pub fn render_middleware_mod(spec: &ApiSpec) -> String {
         out.push_str(&format!("pub use {name}::{name};\n"));
     }
     out
+}
+
+pub fn render_application_middleware() -> String {
+    r#"use roze_http::Router;
+
+/// Stable application-owned hook for service-wide middleware.
+///
+/// This file is preserved by `rozectl api generate --update`. Add custom
+/// Tower/Roze HTTP layers here; Roze common middleware wraps the returned
+/// router so request context and CORS preflight run before application layers.
+pub fn apply(router: Router) -> Router {
+    router
+}
+"#
+    .to_string()
 }
 
 pub fn render_middleware_files(spec: &ApiSpec) -> Vec<(String, String)> {
@@ -2422,6 +2439,30 @@ mod tests {
         assert!(openapi.contains("builder.add_operation(\"/ping-head\", HttpMethod::Head"));
         assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
+    }
+
+    #[test]
+    fn rest_main_mounts_stable_application_middleware_hook() {
+        let spec = parse_api(
+            r#"
+            service health-api {
+                get /health returns (HealthResp)
+            }
+
+            type HealthResp {
+                ok bool
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let main = render_rest_main(&spec);
+        assert!(main.contains("middleware::app::apply(route::router(ctx))"));
+        assert!(main.contains("apply_common_with_config(app, middleware_config)"));
+
+        let middleware_mod = render_middleware_mod(&spec);
+        assert!(middleware_mod.contains("pub mod app;"));
+        assert!(render_application_middleware().contains("pub fn apply(router: Router) -> Router"));
     }
 
     #[test]

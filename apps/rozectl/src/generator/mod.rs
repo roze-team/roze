@@ -1162,6 +1162,11 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
+        "| `src/middleware/app.rs` | application | service-wide Router hook preserved during `--update` |"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
         "| `src/middleware/<custom>.rs` | application | preserved during `--update` |"
     )
     .unwrap();
@@ -1231,6 +1236,7 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     writeln!(&mut out, "## Editable Paths").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "- `src/logic/**`").unwrap();
+    writeln!(&mut out, "- `src/middleware/app.rs`").unwrap();
     writeln!(&mut out, "- `src/middleware/<custom>.rs`").unwrap();
     writeln!(&mut out, "- `src/model/*_ext.rs`").unwrap();
     writeln!(
@@ -3306,6 +3312,11 @@ fn generate_rest_project_with_rpc_clients(
     fs::write(
         out.join("src/middleware/mod.rs"),
         rest::render_middleware_mod(spec),
+    )?;
+    write_preserved(
+        &out.join("src/middleware/app.rs"),
+        rest::render_application_middleware(),
+        options.mode,
     )?;
     for (name, content) in rest::render_middleware_files(spec) {
         write_preserved(
@@ -13777,6 +13788,11 @@ mod tests {
         )
         .expect("write custom middleware");
         fs::write(
+            out.join("src/middleware/app.rs"),
+            "use roze_http::Router;\n\npub fn apply(router: Router) -> Router {\n    // application context/session layer\n    router\n}\n",
+        )
+        .expect("write application middleware hook");
+        fs::write(
             out.join("src/logic/users/mod.rs"),
             "mod get_user;\npub use get_user::{get_user, AdminTokenReq};\nmod catalog_map;\n",
         )
@@ -13819,6 +13835,12 @@ mod tests {
                 .expect("read middleware"),
             "// custom middleware\n"
         );
+        assert!(fs::read_to_string(out.join("src/middleware/app.rs"))
+            .expect("read application middleware hook")
+            .contains("application context/session layer"));
+        assert!(fs::read_to_string(out.join("src/main.rs"))
+            .expect("read generated main")
+            .contains("middleware::app::apply(route::router(ctx))"));
         assert_eq!(
             fs::read_to_string(out.join("config.yaml")).expect("read config"),
             "name: custom\n"

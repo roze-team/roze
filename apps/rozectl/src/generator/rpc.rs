@@ -308,7 +308,9 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     if uses_idempotency {
         out.push_str("        let idempotency_key = match request.metadata().get(\"idempotency-key\").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty()) {\n            Some(value) => value.to_string(),\n            None => {\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing idempotency-key metadata\"), &request_ctx));\n            }\n        };\n");
     }
-    out.push_str("        let req = request.into_inner();\n");
+    if request_uses_proto_fields(spec, req_ty) {
+        out.push_str("        let req = request.into_inner();\n");
+    }
     out.push_str(&format!(
         "        let req = {};\n",
         proto_to_app(spec, req_ty, "req")
@@ -389,7 +391,9 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     if uses_idempotency {
         out.push_str("        let idempotency_key = match request.metadata().get(\"idempotency-key\").and_then(|value| value.to_str().ok()).filter(|value| !value.trim().is_empty()) {\n            Some(value) => value.to_string(),\n            None => {\n                roze_rpc::rpc::finish_method(method_guard, \"invalid_argument\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing idempotency-key metadata\"), &request_ctx));\n            }\n        };\n");
     }
-    out.push_str("        let req = request.into_inner();\n");
+    if request_uses_proto_fields(spec, req_ty) {
+        out.push_str("        let req = request.into_inner();\n");
+    }
     out.push_str(&format!(
         "        let req = {};\n",
         proto_to_app(spec, req_ty, "req")
@@ -559,6 +563,10 @@ fn proto_to_app(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
         .join(", ");
 
     format!("{ty_name} {{ {fields} }}")
+}
+
+fn request_uses_proto_fields(spec: &ApiSpec, ty_name: &str) -> bool {
+    find_type(spec, ty_name).is_some_and(|ty| !ty.fields.is_empty())
 }
 
 fn app_to_proto(spec: &ApiSpec, ty_name: &str, var: &str) -> String {
@@ -1657,5 +1665,52 @@ mod tests {
         let logic = &files[0].1;
         assert!(logic.contains("Ok(ListPermissionsResponse::default())"));
         assert!(!logic.contains("Ok(ListPermissionsResponse {"));
+    }
+
+    #[test]
+    fn rpc_empty_request_skips_unused_protobuf_binding() {
+        let spec = parse_api(
+            r#"
+            service access {
+                rpc ListRoles (ListRolesRequest) returns (ListRolesResponse)
+            }
+
+            type ListRolesRequest {
+            }
+
+            type ListRolesResponse {
+                roles: []string
+            }
+            "#,
+        )
+        .expect("api");
+
+        let rendered = render_rpc(&spec);
+        assert!(rendered.contains("let req = ListRolesRequest {  };"));
+        assert!(!rendered.contains("let req = request.into_inner();"));
+    }
+
+    #[test]
+    fn rpc_non_empty_request_still_consumes_protobuf_request() {
+        let spec = parse_api(
+            r#"
+            service access {
+                rpc GetRole (GetRoleRequest) returns (GetRoleResponse)
+            }
+
+            type GetRoleRequest {
+                id: u64
+            }
+
+            type GetRoleResponse {
+                name: string
+            }
+            "#,
+        )
+        .expect("api");
+
+        let rendered = render_rpc(&spec);
+        assert!(rendered.contains("let req = request.into_inner();"));
+        assert!(rendered.contains("let req = GetRoleRequest { id: req.id };"));
     }
 }

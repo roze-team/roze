@@ -136,6 +136,7 @@ cargo run -p rozectl -- api generate example/user.api \
 - REST `src/config/mod.rs`
 - REST `src/handler/<group>/<method>.rs`
 - REST/RPC `src/svc/mod.rs`
+- REST service-wide middleware hook `src/middleware/app.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
 - RPC `src/config/mod.rs`
 - RPC `src/logic/<method>.rs`
@@ -919,7 +920,13 @@ not generate custom files.
 Unknown middleware names are application-owned hooks. For example,
 `middleware: auth, audit` uses built-in auth and generates
 `src/middleware/audit.rs`. Custom middleware files are preserved during
-`--update`.
+`--update`. The name `app` is reserved for the service-wide application hook.
+
+Generated REST entrypoints call `middleware::app::apply` before installing
+Roze common middleware. Edit `src/middleware/app.rs` to attach service-wide
+application middleware; the file is preserved during `--update`. Roze common
+middleware wraps this hook so request context restoration and CORS preflight
+run before application authentication or other route processing.
 
 See [Middleware Contract](../contracts/middleware.md) for the complete alias
 table and adaptive shedding behavior.
@@ -1239,7 +1246,8 @@ live in REST `src/logic/<group>/<method>.rs` or RPC
 `src/logic/<method>.rs`. Service config extensions live in
 `src/config/mod.rs`, REST custom handler adapter code lives in
 `src/handler/<group>/<method>.rs`, and REST custom middleware lives in
-`src/middleware/<custom>.rs`. These application-owned files and `config.yaml`
+`src/middleware/<custom>.rs`. Service-wide REST layers belong in
+`src/middleware/app.rs`. These application-owned files and `config.yaml`
 are preserved on `--update`, while generated boundary files keep route indexes,
 HTTP/RPC parsing, validation, context extraction, errors, tracing, and response
 contracts consistent across services.

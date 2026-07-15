@@ -2760,6 +2760,12 @@ fn validate_generated_middleware_identifiers(
                 continue;
             }
             let generated = generator::to_snake_case(&middleware);
+            if generated == "app" {
+                issues.push(api_validation_issue(format!(
+                    "REST route {} custom middleware {middleware} conflicts with the reserved application middleware module `app`",
+                    rest_route_key(spec, route)
+                )));
+            }
             if !is_valid_generated_rust_ident(&generated) {
                 issues.push(api_validation_issue(format!(
                     "REST route {} custom middleware {} generates invalid Rust identifier `{generated}`",
@@ -6486,6 +6492,8 @@ envFrom: []
                 @handler middlewareCollision
                 @middleware(audit-log, audit_log)
                 get /middleware-collision (PingReq) returns (PingResp)
+                @middleware(app)
+                get /reserved-middleware (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc Ping (PingReq) returns (PingResp)
                 rpc GetUser (PingReq) returns (PingResp)
@@ -6569,6 +6577,9 @@ envFrom: []
         ));
         assert!(report.contains(
             "duplicate generated custom middleware `audit_log`: audit-log and audit_log"
+        ));
+        assert!(report.contains(
+            "custom middleware app conflicts with the reserved application middleware module `app`"
         ));
         assert!(report.contains("RPC method type generates invalid Rust method `type`"));
         assert!(report.contains(
