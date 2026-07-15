@@ -1816,13 +1816,16 @@ SQL repositories additionally generate:
   `unique_<field>`, `count_by_<field>`, `first_<field>`, `only_<field>`,
   `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`, `first`,
   `only`, and `page`
-- Ent-style grouped aggregates are generated for every orderable grouping
-  field and numeric value field as `sum_<value>_by_<group>()`,
+- Ent-style grouped aggregates are generated in schema declaration order for
+  at most eight grouping-field/numeric-value pairs per model as
+  `sum_<value>_by_<group>()`,
   `avg_<value>_by_<group>()`, `min_<value>_by_<group>()`, and
   `max_<value>_by_<group>()`; they preserve the source query's predicates,
   ordering, pagination, and soft-delete scope and return typed tuples. Average,
   minimum, and maximum values are optional so groups containing only null
-  values remain visible
+  values remain visible. This fixed budget keeps generated modules linear in
+  schema size; use `into_select()` or `into_query()` for additional
+  application-owned aggregate combinations
 - SeaORM `count_by_<field>()`, `sum_<value>_by_<group>()`,
   `avg_<value>_by_<group>()`, `min_<value>_by_<group>()`, and
   `max_<value>_by_<group>()` execute as database `GROUP BY` queries and do not
@@ -1833,12 +1836,17 @@ SQL repositories additionally generate:
   `count_by_<field>_having_at_most`, and
   `count_by_<field>_having_between` using SQL `HAVING COUNT(...)`, plus the
   corresponding `sum_<value>_by_<group>_having_*` range helpers using SQL
-  `HAVING SUM(...)`; pairwise
-  `count_by_<left>_and_<right>()` helpers using a two-column `GROUP BY`
+  `HAVING SUM(...)`; at most eight pairwise
+  `count_by_<left>_and_<right>()` helpers are emitted in schema declaration
+  order using a two-column `GROUP BY`
 - typed queries expose backend escape hatches for application-owned custom
   projections and aggregate scans: SeaORM `into_select()` and Toasty
   `into_query()`. Both preserve generated predicates, soft-delete scope,
   ordering, limit, and offset before returning the native query object
+- create and `--update` generation run rustfmt only over framework-owned Rust
+  files. Model extension files, logic, config, custom middleware, and service
+  context extensions remain untouched; rustfmt child-module traversal is
+  disabled so formatting cost is bounded by the explicitly generated files
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - filtered SeaORM queries over numeric fields, including nullable numeric
@@ -1846,8 +1854,11 @@ SQL repositories additionally generate:
   `add_<field>(delta)` and `subtract_<field>(delta)` mutations. SeaORM emits a
   column expression and returns the affected-row count; SQL null propagation
   means a null value remains null. Toasty uses its typed
-  `stmt::add`/`stmt::subtract` assignments for non-null numeric fields because
-  Toasty 0.7 does not implement its `Numeric` assignment trait for `Option<T>`.
+  `stmt::add`/`stmt::subtract` assignments for supported non-null numeric
+  fields. Toasty 0.7 does not implement its `Numeric` assignment trait for
+  `Option<T>` or `rust_decimal::Decimal`, so generated Toasty models use the
+  parameterized nullable SQL path where applicable and omit Decimal atomic
+  helpers.
   Supported methods execute arithmetic in the database, so callers can target
   one row with a primary-key predicate or many rows with any generated
   predicate group

@@ -23,10 +23,10 @@ semantics, regeneration behavior, and supported backends are tested.
 | `HasX`, `HasXWith` and negation | aligned | Ordinary, inverse, composite and Through edges |
 | Ordering, pagination, projection and uniqueness | aligned | Typed, nullability-preserving results |
 | Scalar Count/Sum/Avg/Min/Max | aligned | Predicates apply before aggregation |
-| Typed grouped aggregate helpers | aligned | SeaORM and Toasty execute Count/Sum/Avg/Min/Max grouping in the database while preserving typed predicates, soft-delete scope, ordering, limit/offset and nullable results; Toasty uses one parameterized derived-table statement rather than preloading keys |
-| Database-side `GroupBy` and custom aggregate scan | compatible | SeaORM provides HAVING/two-key grouping and `into_select`; Toasty uses single-statement parameterized backend-aware SQL for typed grouping and `into_query` for native custom scans; arbitrary generated aggregate expressions remain an extension concern |
+| Typed grouped aggregate helpers | aligned | SeaORM and Toasty execute Count/Sum/Avg/Min/Max grouping in the database while preserving typed predicates, soft-delete scope, ordering, limit/offset and nullable results; generated value/group combinations have a fixed per-model budget and Toasty uses one parameterized derived-table statement rather than preloading keys |
+| Database-side `GroupBy` and custom aggregate scan | compatible | SeaORM provides bounded HAVING/two-key grouping and `into_select`; Toasty uses bounded single-statement parameterized backend-aware SQL for typed grouping and `into_query` for native custom scans; combinations beyond the generated budget remain an application extension concern |
 | Create/update/delete one and many | aligned | Validation and transaction-compatible executors |
-| Arithmetic mutations (`Add<Field>`) | compatible | Atomic filtered/update-many and single/composite-key update-one add/subtract supports nullable and non-null numeric fields on both backends; Toasty nullable query/update-many operations compile the typed predicate scope into one parameterized `UPDATE` because `Option<T>` is not `Numeric`, and mixed set/add chains fail explicitly |
+| Arithmetic mutations (`Add<Field>`) | compatible | SeaORM atomic filtered/update-many and single/composite-key update-one add/subtract supports nullable and non-null numeric fields. Toasty 0.7 omits Decimal helpers because `rust_decimal::Decimal` does not implement `toasty::stmt::Numeric`; nullable non-Decimal query/update-many operations use one parameterized `UPDATE` because `Option<T>` is not `Numeric`, and mixed set/add chains fail explicitly |
 | Upsert | compatible | SeaORM atomic; Toasty requires transaction protection |
 | One-edge eager loading | aligned | Ordinary and composite-key edges are bounded to two queries; Through edges are bounded to three |
 | Multiple and nested eager loading | aligned | SeaORM and Toasty expose composable `all_with_<edge>_nested` loaders for arbitrary-depth recursion; ordinary, Through and composite-key edges participate in bounded pairwise loading, with generated three-level and composite-plus-ordinary compile/clippy evidence plus generated SeaORM/SQLite runtime assertions |
@@ -56,10 +56,10 @@ Parity requires:
 ## Implementation order
 
 1. Database grouped aggregation and atomic arithmetic mutations.
-   - SeaORM SQL Count/Sum/Avg/Min/Max, count HAVING and two-key grouping: done.
+   - SeaORM SQL Count/Sum/Avg/Min/Max, count HAVING and two-key grouping: done with fixed per-model combination budgets.
    - SeaORM filtered atomic add/subtract for nullable and non-null numeric fields: done.
-   - Toasty filtered/update-many/update-one nullable and non-null atomic add/subtract: done; query/update-many nullable scope is a single parameterized statement.
-   - Toasty database-side Count/Sum/Avg/Min/Max grouping: done; typed scope is aggregated in one derived-table statement.
+   - Toasty filtered/update-many/update-one nullable and non-null atomic add/subtract: done for supported non-Decimal numeric types; Decimal helpers are omitted on Toasty 0.7, and query/update-many nullable scope is a single parameterized statement.
+   - Toasty database-side Count/Sum/Avg/Min/Max grouping: done with a fixed per-model combination budget; typed scope is aggregated in one derived-table statement.
 2. Multiple/nested eager loading with bounded query counts.
    - Pairwise ordinary, Through and composite-key combinations on SeaORM and Toasty: done.
    - Arbitrary-depth recursive paths through typed loaded-node wrappers: done; generated
