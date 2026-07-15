@@ -1010,8 +1010,6 @@ fn write_model_project(
             options.mode,
         )?;
     }
-    super::format_generated_rust_files(out, &generated_rust_files)?;
-
     update_model_dependencies(
         out,
         orm,
@@ -1025,6 +1023,10 @@ fn write_model_project(
     if orm == ModelOrm::Toasty {
         update_toasty_service_context(out, models)?;
     }
+    if include_client {
+        generated_rust_files.push(out.join("src/svc/mod.rs"));
+    }
+    super::format_generated_rust_files(out, &generated_rust_files)?;
     update_main_rs(out)?;
     Ok(())
 }
@@ -24934,6 +24936,15 @@ impl ServiceContext {
         assert!(ext.contains("This file is created by rozectl but preserved during `--update`."));
         assert!(ext.contains("impl UserRepository"));
         assert!(!ext.contains(MODEL_GENERATED_MARKER));
+        let svc_path = out.join("src/svc/mod.rs");
+        let svc = fs::read_to_string(&svc_path).expect("svc before update");
+        fs::write(
+            &svc_path,
+            format!(
+                "{svc}\nimpl ServiceContext{{pub fn custom_dependency(&self)->bool{{true}}}}\n"
+            ),
+        )
+        .expect("write custom service context extension");
 
         generate_model_project(
             r#"
@@ -24954,8 +24965,19 @@ impl ServiceContext {
         )
         .expect("update generate");
 
-        let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("updated svc read");
-        assert!(svc.contains("toasty::models!(crate::model::User, crate::model::AdminToken)"));
+        let svc = fs::read_to_string(&svc_path).expect("updated svc read");
+        assert!(svc.contains("crate::model::User"));
+        assert!(svc.contains("crate::model::AdminToken"));
+        assert!(svc.contains("pub fn custom_dependency(&self) -> bool"));
+        let status = Command::new("rustfmt")
+            .args(["--edition", "2021", "--check"])
+            .arg(&svc_path)
+            .status()
+            .expect("check model-updated service context formatting");
+        assert!(
+            status.success(),
+            "model-updated service context must pass rustfmt"
+        );
     }
 
     #[test]

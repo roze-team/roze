@@ -1844,9 +1844,11 @@ SQL repositories additionally generate:
   `into_query()`. Both preserve generated predicates, soft-delete scope,
   ordering, limit, and offset before returning the native query object
 - create and `--update` generation run rustfmt only over framework-owned Rust
-  files. Model extension files, logic, config, custom middleware, and service
-  context extensions remain untouched; rustfmt child-module traversal is
-  disabled so formatting cost is bounded by the explicitly generated files
+  files. Model extension files, logic, config, and custom middleware remain
+  untouched. When generated model registries or managed RPC-client sections
+  update `src/svc/mod.rs`, rozectl formats that mixed-ownership file while
+  preserving application-owned declarations. Rustfmt child-module traversal
+  is disabled so formatting cost is bounded by the explicitly touched files
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - filtered SeaORM queries over numeric fields, including nullable numeric

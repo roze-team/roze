@@ -3624,6 +3624,9 @@ fn is_framework_owned_rust_file(out: &Path, path: &Path) -> bool {
     if normalized == "src/middleware/mod.rs" {
         return true;
     }
+    if normalized == "src/svc/mod.rs" {
+        return true;
+    }
     false
 }
 
@@ -11609,12 +11612,20 @@ mod tests {
     fn update_formats_framework_owned_rust_without_touching_business_files() {
         let out = temp_test_root("rozectl-update-rustfmt");
         let client = out.join("src/client/mod.rs");
+        let service_context = out.join("src/svc/mod.rs");
         let logic = out.join("src/logic/custom.rs");
         let model = out.join("src/model/large.rs");
         fs::create_dir_all(client.parent().expect("client parent")).expect("client dir");
+        fs::create_dir_all(service_context.parent().expect("service context parent"))
+            .expect("service context dir");
         fs::create_dir_all(logic.parent().expect("logic parent")).expect("logic dir");
         fs::create_dir_all(model.parent().expect("model parent")).expect("model dir");
         fs::write(&client, "pub fn generated( )->u64{1}\n").expect("generated source");
+        fs::write(
+            &service_context,
+            "pub struct ServiceContext;\nimpl ServiceContext{pub fn generated( &self)->u64{1}}\n",
+        )
+        .expect("service context source");
         let business_source = "pub fn custom( )->u64{2}\n";
         fs::write(&logic, business_source).expect("business source");
         let stale_model_source =
@@ -11626,6 +11637,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&client).expect("formatted client"),
             "pub fn generated() -> u64 {\n    1\n}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&service_context).expect("formatted service context"),
+            "pub struct ServiceContext;\nimpl ServiceContext {\n    pub fn generated(&self) -> u64 {\n        1\n    }\n}\n"
         );
         assert_eq!(
             fs::read_to_string(&logic).expect("preserved business source"),
@@ -14238,6 +14253,15 @@ mod tests {
         assert!(svc.contains("pub fn catalog(&self) -> shop_catalog_rpc::client::RpcClient"));
         assert!(svc.contains("pub fn custom_dependency(&self)"));
         assert_eq!(svc.matches("<roze:generated-rpc-client-fields>").count(), 1);
+        let status = Command::new("rustfmt")
+            .args(["--edition", "2021", "--check"])
+            .arg(&svc_path)
+            .status()
+            .expect("check managed RPC service context formatting");
+        assert!(
+            status.success(),
+            "managed RPC service context must pass rustfmt"
+        );
 
         fs::remove_dir_all(root).expect("remove test output");
     }
