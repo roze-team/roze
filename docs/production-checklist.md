@@ -1,6 +1,8 @@
 # Production Checklist
 
 This checklist is the baseline for considering a Roze service production-ready.
+The implementation sequence and completion rules are defined in
+[Roze Production Generation Plan](go-zero-surpass-plan.md).
 Roze itself is currently pre-release, so passing this checklist means a
 specific service has a controlled production path. It does not mean every Roze
 crate, generator, or runtime module is broadly production-stable.
@@ -39,6 +41,10 @@ crate, generator, or runtime module is broadly production-stable.
   permission checks, and snapshot backup/restore or external control-plane
   integration are verified before treating it as stable.
 - Secret values are not stored in generated config files.
+- Application credentials are injected through validated Secret references;
+  generated manifests contain names only, never secret payloads.
+- Generated ConfigMap content is represented in the Pod template revision so
+  configuration updates trigger a controlled rollout.
 - JWT keys and external credentials have rotation procedures.
 - Config hot reload failure keeps the last valid config.
 

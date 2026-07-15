@@ -6,3 +6,4 @@ version.workspace = true
 
 [dependencies]
 dashmap.workspace = true
+serde_json.workspace = true

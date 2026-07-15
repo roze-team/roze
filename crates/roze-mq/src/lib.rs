@@ -4,15 +4,21 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, AtomicU8, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
+
+use roze_metrics::record_resilience_decision;
+use roze_resilience::{
+    full_jitter_delay, BreakerDecision, BreakerRegistry, GovernancePolicy, RateLimitRegistry,
+    RetryBudgetRegistry, SheddingRegistry,
+};
 
 type DeliveryActionFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 type DeliveryAction = Arc<dyn Fn() -> DeliveryActionFuture + Send + Sync + 'static>;
@@ -623,14 +629,31 @@ where
     F: Fn(Delivery) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
+    spawn_consumer_with_governance(subscriber, topic, None, handler).await
+}
+
+pub async fn spawn_consumer_with_governance<S, F, Fut>(
+    subscriber: &S,
+    topic: impl Into<String>,
+    governance: Option<GovernancePolicy>,
+    handler: F,
+) -> anyhow::Result<JoinHandle<()>>
+where
+    S: Subscriber,
+    F: Fn(Delivery) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
     let topic = topic.into();
     let mut receiver = subscriber.subscribe(&topic).await?;
     let handler = Arc::new(handler);
+    let policy = governance.unwrap_or_default();
     let handle = tokio::spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(delivery) => {
-                    let result = handler(delivery.clone()).await;
+                    let result =
+                        execute_governed_delivery(&topic, &policy, handler.as_ref(), &delivery)
+                            .await;
                     match result {
                         Ok(()) => {
                             if !delivery.is_acked() && !delivery.is_nacked() {
@@ -652,6 +675,126 @@ where
     });
 
     Ok(handle)
+}
+
+async fn execute_governed_delivery<F, Fut>(
+    topic: &str,
+    policy: &GovernancePolicy,
+    handler: &F,
+    delivery: &Delivery,
+) -> anyhow::Result<()>
+where
+    F: Fn(Delivery) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    static RATE_LIMITERS: OnceLock<RateLimitRegistry> = OnceLock::new();
+    static BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
+    static SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
+    static RETRY_BUDGETS: OnceLock<RetryBudgetRegistry> = OnceLock::new();
+
+    let key = format!("mq:{topic}");
+    if let Some(config) = policy.rate_limit {
+        let allowed = RATE_LIMITERS
+            .get_or_init(RateLimitRegistry::new)
+            .allow(key.clone(), config);
+        record_resilience_decision(
+            topic,
+            "mq",
+            "rate_limit",
+            if allowed { "allowed" } else { "rejected" },
+        );
+        if !allowed {
+            anyhow::bail!("message rejected by rate limit");
+        }
+    }
+
+    let breaker = policy.breaker;
+    let breaker_permit = if breaker.is_some() {
+        match BREAKERS
+            .get_or_init(BreakerRegistry::new)
+            .allow(key.clone())
+        {
+            BreakerDecision::Allow(permit) => {
+                record_resilience_decision(topic, "mq", "breaker", "allowed");
+                Some(permit)
+            }
+            BreakerDecision::Reject => {
+                record_resilience_decision(topic, "mq", "breaker", "open");
+                anyhow::bail!("message rejected by open circuit breaker");
+            }
+        }
+    } else {
+        None
+    };
+
+    let shedding = policy.shedding;
+    if let Some(config) = shedding {
+        let allowed = SHEDDERS
+            .get_or_init(SheddingRegistry::new)
+            .allow(key.clone(), config);
+        record_resilience_decision(
+            topic,
+            "mq",
+            "load_shedding",
+            if allowed { "allowed" } else { "shed" },
+        );
+        if !allowed {
+            if let (Some(config), Some(permit)) = (breaker, breaker_permit) {
+                BREAKERS
+                    .get_or_init(BreakerRegistry::new)
+                    .cancel(&key, permit, config);
+            }
+            anyhow::bail!("message rejected by load shedding");
+        }
+    }
+
+    let started = Instant::now();
+    let retry = policy.retry.unwrap_or_default();
+    let max_attempts = retry.max_attempts.max(1);
+    let budgets = RETRY_BUDGETS.get_or_init(RetryBudgetRegistry::default);
+    budgets.record_call(&key);
+    let mut attempt = 1;
+    let result = loop {
+        let future = handler(delivery.clone());
+        let result = match policy.timeout {
+            Some(timeout) => tokio::time::timeout(timeout.max(Duration::from_millis(1)), future)
+                .await
+                .map_err(|_| anyhow::anyhow!("message handler timed out"))
+                .and_then(|result| result),
+            None => future.await,
+        };
+        if result.is_ok() || attempt >= max_attempts {
+            break result;
+        }
+        if !budgets.allow_retry(&key, retry.budget_percent) {
+            record_resilience_decision(topic, "mq", "retry_budget", "exhausted");
+            break result;
+        }
+        record_resilience_decision(topic, "mq", "retry", "scheduled");
+        tokio::time::sleep(full_jitter_delay(
+            retry.backoff,
+            retry.max_backoff,
+            attempt as usize,
+        ))
+        .await;
+        attempt += 1;
+    };
+
+    let success = result.is_ok();
+    if let (Some(config), Some(permit)) = (breaker, breaker_permit) {
+        let breakers = BREAKERS.get_or_init(BreakerRegistry::new);
+        if success {
+            breakers.record_success(key.clone(), permit);
+        } else {
+            breakers.record_failure(key.clone(), permit, config);
+        }
+    }
+    if let Some(config) = shedding {
+        SHEDDERS
+            .get_or_init(SheddingRegistry::new)
+            .record(key, success, started.elapsed(), config);
+    }
+    result
 }
 
 pub fn runtime_name() -> &'static str {
@@ -678,6 +821,72 @@ fn delivery_delay(message: &Message) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn test_delivery(topic: &str) -> Delivery {
+        let action: DeliveryAction = Arc::new(|| Box::pin(async { Ok(()) }));
+        Delivery::external(
+            Message::new(topic, serde_json::json!({"id": 1})),
+            action.clone(),
+            action,
+        )
+    }
+
+    #[tokio::test]
+    async fn governed_delivery_retries_within_budget() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler = {
+            let attempts = attempts.clone();
+            move |_delivery: Delivery| {
+                let attempts = attempts.clone();
+                async move {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt == 1 {
+                        anyhow::bail!("transient failure");
+                    }
+                    Ok(())
+                }
+            }
+        };
+        let policy = GovernancePolicy {
+            retry: Some(roze_resilience::RetryPolicy {
+                max_attempts: 2,
+                budget_percent: Some(100),
+                ..roze_resilience::RetryPolicy::default()
+            }),
+            ..GovernancePolicy::default()
+        };
+
+        execute_governed_delivery(
+            "governed-retry-test",
+            &policy,
+            &handler,
+            &test_delivery("governed-retry-test"),
+        )
+        .await
+        .expect("second attempt succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn governed_delivery_enforces_timeout() {
+        let policy = GovernancePolicy {
+            timeout: Some(Duration::from_millis(1)),
+            ..GovernancePolicy::default()
+        };
+        let error = execute_governed_delivery(
+            "governed-timeout-test",
+            &policy,
+            &|_delivery| async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(())
+            },
+            &test_delivery("governed-timeout-test"),
+        )
+        .await
+        .expect_err("handler must time out");
+        assert!(error.to_string().contains("timed out"));
+    }
 
     #[tokio::test]
     async fn in_memory_broker_round_trips() {

@@ -15,10 +15,12 @@ use futures_util::Stream;
 use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
+#[cfg(test)]
+use roze_config::RouteGovernanceConfig;
 use roze_config::{
     BreakerConfig, GatewayConfig, GatewayCorsConfig, GatewayFallbackResponse,
     GatewayHealthCheckConfig, GatewayOutlierConfig, GatewayRoute, GatewayService, GovernanceConfig,
-    GovernanceFallbackConfig, RateLimitConfig, RouteGovernanceConfig, SheddingConfig,
+    GovernanceFallbackConfig, RateLimitConfig, SheddingConfig,
 };
 use roze_context::Context;
 use roze_http::rest::{self, HttpResponse, IncomingRequest};
@@ -1940,18 +1942,22 @@ fn compile_routes(
         .into_iter()
         .map(|route| {
             let path = normalize_path_prefix(&route.path);
-            let route_governance = gateway_route_governance(governance, &path, &route.service);
-            let retry = route_governance
-                .and_then(|route| route.retry)
-                .or_else(|| governance.and_then(|governance| governance.retry));
+            let policy = governance.map(|governance| {
+                governance.resolve_policy_for([
+                    path.as_str(),
+                    path.trim_start_matches('/'),
+                    route.service.as_str(),
+                ])
+            });
+            let retry = policy.as_ref().and_then(|policy| policy.retry);
             CompiledRoute {
                 path,
                 service: route.service,
                 methods: parse_methods(&route.methods),
                 timeout: route
                     .timeout_ms
-                    .or_else(|| route_governance.and_then(|route| route.timeout_ms))
-                    .map(Duration::from_millis),
+                    .map(Duration::from_millis)
+                    .or_else(|| policy.as_ref().and_then(|policy| policy.timeout)),
                 retries: route
                     .retries
                     .map(|retries| retries as usize)
@@ -1960,35 +1966,69 @@ fn compile_routes(
                             .map(|retry| retry.max_attempts.saturating_sub(1) as usize)
                             .unwrap_or_default()
                     }),
-                retry_backoff: Duration::from_millis(
+                retry_backoff: route
+                    .retry_backoff_ms
+                    .map(Duration::from_millis)
+                    .or_else(|| retry.map(|retry| retry.backoff))
+                    .unwrap_or_default(),
+                retry_max_backoff: retry.map(|retry| retry.max_backoff).unwrap_or_else(|| {
                     route
                         .retry_backoff_ms
-                        .or_else(|| retry.map(|retry| retry.backoff_ms))
-                        .unwrap_or_default(),
-                ),
-                retry_max_backoff: Duration::from_millis(
-                    retry
-                        .map(|retry| retry.max_backoff_ms)
-                        .unwrap_or_else(|| route.retry_backoff_ms.unwrap_or_default()),
-                ),
+                        .map(Duration::from_millis)
+                        .unwrap_or_default()
+                }),
                 retry_budget_percent: retry.and_then(|retry| retry.budget_percent),
                 rewrite: route.rewrite,
-                fallback: route
-                    .fallback
-                    .or_else(|| route_governance.and_then(route_governance_fallback))
-                    .or_else(|| governance.and_then(governance_fallback)),
-                rate_limit: route
-                    .rate_limit
-                    .or_else(|| route_governance.and_then(|route| route.rate_limit))
-                    .or_else(|| governance.and_then(|governance| governance.rate_limit)),
-                breaker: route
-                    .breaker
-                    .or_else(|| route_governance.and_then(|route| route.breaker))
-                    .or_else(|| governance.and_then(|governance| governance.breaker)),
-                shedding: route
-                    .shedding
-                    .or_else(|| route_governance.and_then(|route| route.shedding))
-                    .or_else(|| governance.and_then(|governance| governance.shedding)),
+                fallback: route.fallback.or_else(|| {
+                    policy
+                        .as_ref()
+                        .and_then(|policy| policy.fallback.as_ref())
+                        .map(|fallback| GatewayFallbackResponse {
+                            status: fallback.status,
+                            body: fallback.body.clone(),
+                            headers: fallback.headers.clone(),
+                        })
+                }),
+                rate_limit: route.rate_limit.or_else(|| {
+                    policy
+                        .as_ref()
+                        .and_then(|policy| policy.rate_limit)
+                        .map(|config| RateLimitConfig {
+                            burst: config.burst,
+                            refill_ms: config.refill.as_millis().min(u128::from(u64::MAX)) as u64,
+                        })
+                }),
+                breaker: route.breaker.or_else(|| {
+                    policy
+                        .as_ref()
+                        .and_then(|policy| policy.breaker)
+                        .map(|config| BreakerConfig {
+                            failure_threshold: config.failure_threshold,
+                            reset_timeout_ms: config
+                                .reset_timeout
+                                .as_millis()
+                                .min(u128::from(u64::MAX))
+                                as u64,
+                        })
+                }),
+                shedding: route.shedding.or_else(|| {
+                    policy
+                        .as_ref()
+                        .and_then(|policy| policy.shedding)
+                        .map(|config| SheddingConfig {
+                            concurrency: config.concurrency,
+                            window_ms: config.window.as_millis().min(u128::from(u64::MAX)) as u64,
+                            min_samples: config.min_samples,
+                            max_avg_latency_ms: config
+                                .max_avg_latency
+                                .as_millis()
+                                .min(u128::from(u64::MAX))
+                                as u64,
+                            max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
+                            cool_down_ms: config.cool_down.as_millis().min(u128::from(u64::MAX))
+                                as u64,
+                        })
+                }),
                 middlewares: normalize_middlewares(route.middlewares),
                 instance_tags: route.instance_tags,
                 stream_idle_timeout: route.stream_idle_timeout_ms.map(Duration::from_millis),
@@ -1998,24 +2038,7 @@ fn compile_routes(
         .collect()
 }
 
-fn gateway_route_governance<'a>(
-    governance: Option<&'a GovernanceConfig>,
-    path: &str,
-    service: &str,
-) -> Option<&'a RouteGovernanceConfig> {
-    let governance = governance?;
-    governance
-        .routes
-        .get(path)
-        .or_else(|| governance.routes.get(path.trim_start_matches('/')))
-        .or_else(|| governance.routes.get(service))
-}
-
 fn governance_fallback(config: &GovernanceConfig) -> Option<GatewayFallbackResponse> {
-    config.fallback.as_ref().and_then(convert_fallback)
-}
-
-fn route_governance_fallback(config: &RouteGovernanceConfig) -> Option<GatewayFallbackResponse> {
     config.fallback.as_ref().and_then(convert_fallback)
 }
 

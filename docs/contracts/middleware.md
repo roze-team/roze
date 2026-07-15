@@ -11,6 +11,12 @@ Generated REST services call
 `src/main.rs`. The generated `config.yaml` exposes the service-wide knobs under
 `rest.middlewares`.
 
+The common stack always installs request-context propagation when
+`CommonMiddlewareConfig.request_context` is enabled (the default). It restores
+or creates a `roze_context::Context` from incoming headers and inserts it before
+handler extraction, so generated `Extension<Context>` parameters are available
+on public routes as well as authenticated routes.
+
 ## Service-wide Middleware
 
 ```yaml
@@ -51,11 +57,11 @@ rest:
 | `prometheus` | `true` | Keeps metrics collection enabled for `/metrics` output. |
 | `cors` | `true` | Applies CORS. Without `cors_config`, the policy is permissive. |
 | `cors_config` | unset | Optional allow origins, methods, headers, exposed headers, credentials, and max age. |
-| `timeout` | `true` | Enables framework-level timeout enforcement. Generated routes apply the service-wide `governance.timeout_ms` as a Tower HTTP timeout layer; generated handler adapters still enforce route-specific effective timeouts from `governance.routes`. |
+| `timeout` | `true` | Enables framework-level timeout enforcement. Generated routes apply the service-wide `governance.timeout_ms` as a Roze HTTP timeout layer; an expired request cancels the handler future and returns `504 request timeout`. Generated handler adapters still enforce route-specific effective timeouts from `governance.routes`. |
 | `max_conns` | unset | Hard concurrent request cap. Exceeded requests return `503`. |
 | `shedding` | unset | Adaptive load shedding. Exceeded concurrency or unhealthy recent windows return `503`. |
 | `gunzip` | `false` | Decompresses gzip request bodies before extraction. |
-| `request_body_limit_bytes` | unset | Rejects oversized request bodies with `413`. |
+| `request_body_limit_bytes` | unset | Reads and enforces the actual request-body size before extraction, including requests without `Content-Length`; oversized bodies return `413 request body too large`, while accepted bodies are rebuilt unchanged for JSON/Form/custom extractors. |
 
 `trace`, `stat`, and `prometheus` share the same request observation path today:
 `trace` creates spans/logs, and the same layer records HTTP metrics. `/metrics`
@@ -79,6 +85,12 @@ rest:
       allow_credentials: true
       max_age_seconds: 3600
 ```
+
+The common middleware handles preflight `OPTIONS` before route method
+rejection, adds allow/expose/credentials headers to normal responses, and omits
+authorization headers for disallowed origins. When `allow_origins` contains
+`"*"` together with `allow_credentials: true`, Roze mirrors the validated
+request origin because browsers reject wildcard credential responses.
 
 Use `["*"]` for wildcard origins, methods, or headers. Do not combine wildcard
 origins with credentialed browser requests in production; browsers reject that
@@ -224,6 +236,11 @@ metadata while preserving an unavailable status for typed clients, and
 `RozeError::Fallback` for application code that wants structured degradation
 handling. `retry`, `shedding`, and `fallback` are part of the shared governance
 schema so Gateway/RPC/MQ can use the same configuration model where applicable.
+`GovernanceConfig::resolve_policy` and `resolve_policy_for` are the authoritative
+global-plus-scoped merge operations. REST, RPC, Gateway, MQ, and Job consume the
+resulting `GovernancePolicy`; runtime implementations must not independently
+reinterpret missing fields or disabled fallback entries. The complete shared
+contract is documented in `docs/contracts/governance.md`.
 
 Timeout is intentionally a framework concern:
 

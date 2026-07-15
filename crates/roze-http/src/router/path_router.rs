@@ -173,10 +173,10 @@ impl PathRouter {
                 route.service = layer_service(layer.clone(), route.service.clone());
             }
             if include_method_fallbacks {
-                if let Some(fallback) = group.method_not_allowed_fallback.take() {
-                    group.method_not_allowed_fallback =
-                        Some(layer_service(layer.clone(), fallback));
-                }
+                let fallback = group.method_not_allowed_fallback.take().unwrap_or_else(|| {
+                    boxed_service(MethodNotAllowed::new(group.allow_header.clone()))
+                });
+                group.method_not_allowed_fallback = Some(layer_service(layer.clone(), fallback));
             }
         }
     }

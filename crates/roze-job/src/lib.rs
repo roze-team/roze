@@ -1,10 +1,14 @@
 use std::{
     future::Future,
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
+use roze_resilience::{
+    full_jitter_delay, BreakerDecision, BreakerRegistry, GovernancePolicy, RateLimitRegistry,
+    RetryBudgetRegistry, SheddingRegistry,
+};
 use roze_service::{RuntimeService, ServiceFuture};
 use tokio::{sync::Mutex, task::JoinHandle};
 
@@ -40,6 +44,7 @@ pub enum Schedule {
 struct ScheduledJob {
     job: Arc<dyn Job>,
     schedule: Schedule,
+    policy: Option<GovernancePolicy>,
 }
 
 pub struct JobService {
@@ -69,6 +74,29 @@ impl JobService {
             .push(ScheduledJob {
                 job: Arc::new(job),
                 schedule,
+                policy: None,
+            });
+        self
+    }
+
+    pub fn add_governed<J>(
+        &mut self,
+        job: J,
+        schedule: Schedule,
+        policy: GovernancePolicy,
+    ) -> &mut Self
+    where
+        J: Job,
+    {
+        self.jobs
+            .get_mut()
+            .expect("job service mutex")
+            .as_mut()
+            .expect("job service already started")
+            .push(ScheduledJob {
+                job: Arc::new(job),
+                schedule,
+                policy: Some(policy),
             });
         self
     }
@@ -82,7 +110,11 @@ impl JobService {
             .expect("job service mutex")
             .as_mut()
             .expect("job service already started")
-            .push(ScheduledJob { job, schedule });
+            .push(ScheduledJob {
+                job,
+                schedule,
+                policy: None,
+            });
         self
     }
 }
@@ -102,7 +134,7 @@ impl RuntimeService for JobService {
                 .ok_or_else(|| anyhow::anyhow!("job service {} already started", self.name))?;
             for scheduled in jobs {
                 self.scheduler
-                    .spawn(scheduled.job, scheduled.schedule)
+                    .spawn_with_governance(scheduled.job, scheduled.schedule, scheduled.policy)
                     .await?;
             }
             shutdown.wait().await;
@@ -133,20 +165,43 @@ impl JobScheduler {
     where
         J: Job,
     {
-        job.run().await
+        self.spawn_once_with_governance(job, None).await
+    }
+
+    pub async fn spawn_once_with_governance<J>(
+        &self,
+        job: J,
+        policy: Option<GovernancePolicy>,
+    ) -> anyhow::Result<()>
+    where
+        J: Job,
+    {
+        execute_governed_job(&job, policy.as_ref()).await
     }
 
     pub async fn spawn<J>(&self, job: J, schedule: Schedule) -> anyhow::Result<()>
     where
         J: Job,
     {
+        self.spawn_with_governance(job, schedule, None).await
+    }
+
+    pub async fn spawn_with_governance<J>(
+        &self,
+        job: J,
+        schedule: Schedule,
+        policy: Option<GovernancePolicy>,
+    ) -> anyhow::Result<()>
+    where
+        J: Job,
+    {
         match schedule {
-            Schedule::Once => self.spawn_once(job).await,
+            Schedule::Once => self.spawn_once_with_governance(job, policy).await,
             Schedule::After(delay) => {
                 let job = Arc::new(job);
                 let handle = tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    if let Err(err) = job.run().await {
+                    if let Err(err) = execute_governed_job(job.as_ref(), policy.as_ref()).await {
                         tracing::warn!(job = job.name(), error = %err, "job execution failed");
                     }
                 });
@@ -160,7 +215,8 @@ impl JobScheduler {
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         ticker.tick().await;
-                        if let Err(err) = job.run().await {
+                        if let Err(err) = execute_governed_job(job.as_ref(), policy.as_ref()).await
+                        {
                             tracing::warn!(job = job.name(), error = %err, "job execution failed");
                         }
                     }
@@ -177,6 +233,111 @@ impl JobScheduler {
             handle.abort();
         }
     }
+}
+
+async fn execute_governed_job(
+    job: &dyn Job,
+    policy: Option<&GovernancePolicy>,
+) -> anyhow::Result<()> {
+    static RATE_LIMITERS: OnceLock<RateLimitRegistry> = OnceLock::new();
+    static BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
+    static SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
+    static RETRY_BUDGETS: OnceLock<RetryBudgetRegistry> = OnceLock::new();
+
+    let empty = GovernancePolicy::default();
+    let policy = policy.unwrap_or(&empty);
+    let name = job.name();
+    let key = format!("job:{name}");
+    if let Some(config) = policy.rate_limit {
+        let allowed = RATE_LIMITERS
+            .get_or_init(RateLimitRegistry::new)
+            .allow(key.clone(), config);
+        roze_metrics::record_resilience_decision(
+            name,
+            "job",
+            "rate_limit",
+            if allowed { "allowed" } else { "rejected" },
+        );
+        if !allowed {
+            anyhow::bail!("job rejected by rate limit");
+        }
+    }
+
+    let breaker_permit = if policy.breaker.is_some() {
+        match BREAKERS
+            .get_or_init(BreakerRegistry::new)
+            .allow(key.clone())
+        {
+            BreakerDecision::Allow(permit) => Some(permit),
+            BreakerDecision::Reject => {
+                roze_metrics::record_resilience_decision(name, "job", "breaker", "open");
+                anyhow::bail!("job rejected by open circuit breaker");
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(config) = policy.shedding {
+        if !SHEDDERS
+            .get_or_init(SheddingRegistry::new)
+            .allow(key.clone(), config)
+        {
+            if let (Some(config), Some(permit)) = (policy.breaker, breaker_permit) {
+                BREAKERS
+                    .get_or_init(BreakerRegistry::new)
+                    .cancel(&key, permit, config);
+            }
+            roze_metrics::record_resilience_decision(name, "job", "load_shedding", "shed");
+            anyhow::bail!("job rejected by load shedding");
+        }
+    }
+
+    let started = Instant::now();
+    let retry = policy.retry.unwrap_or_default();
+    let budgets = RETRY_BUDGETS.get_or_init(RetryBudgetRegistry::default);
+    budgets.record_call(&key);
+    let mut attempt = 1;
+    let result = loop {
+        let result = match policy.timeout {
+            Some(timeout) => tokio::time::timeout(timeout.max(Duration::from_millis(1)), job.run())
+                .await
+                .map_err(|_| anyhow::anyhow!("job timed out"))
+                .and_then(|result| result),
+            None => job.run().await,
+        };
+        if result.is_ok() || attempt >= retry.max_attempts.max(1) {
+            break result;
+        }
+        if !budgets.allow_retry(&key, retry.budget_percent) {
+            roze_metrics::record_resilience_decision(name, "job", "retry_budget", "exhausted");
+            break result;
+        }
+        roze_metrics::record_resilience_decision(name, "job", "retry", "scheduled");
+        tokio::time::sleep(full_jitter_delay(
+            retry.backoff,
+            retry.max_backoff,
+            attempt as usize,
+        ))
+        .await;
+        attempt += 1;
+    };
+
+    let success = result.is_ok();
+    if let (Some(config), Some(permit)) = (policy.breaker, breaker_permit) {
+        let breakers = BREAKERS.get_or_init(BreakerRegistry::new);
+        if success {
+            breakers.record_success(key.clone(), permit);
+        } else {
+            breakers.record_failure(key.clone(), permit, config);
+        }
+    }
+    if let Some(config) = policy.shedding {
+        SHEDDERS
+            .get_or_init(SheddingRegistry::new)
+            .record(key, success, started.elapsed(), config);
+    }
+    result
 }
 
 pub async fn run_once<J: Job>(job: &J) -> anyhow::Result<()> {
@@ -233,6 +394,25 @@ mod tests {
         }
     }
 
+    struct FlakyJob {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Job for FlakyJob {
+        fn name(&self) -> &str {
+            "flaky-governed-job"
+        }
+
+        async fn run(&self) -> anyhow::Result<()> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt == 1 {
+                anyhow::bail!("transient failure");
+            }
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn runs_once() {
         let scheduler = JobScheduler::new();
@@ -243,6 +423,46 @@ mod tests {
     async fn boxed_job_executes() {
         let job = boxed_job("boxed", || async { Ok(()) });
         run_once(&job).await.expect("run");
+    }
+
+    #[tokio::test]
+    async fn governed_job_retries_within_budget() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let policy = GovernancePolicy {
+            retry: Some(roze_resilience::RetryPolicy {
+                max_attempts: 2,
+                budget_percent: Some(100),
+                ..roze_resilience::RetryPolicy::default()
+            }),
+            ..GovernancePolicy::default()
+        };
+        JobScheduler::new()
+            .spawn_once_with_governance(
+                FlakyJob {
+                    attempts: attempts.clone(),
+                },
+                Some(policy),
+            )
+            .await
+            .expect("second attempt succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn governed_job_enforces_timeout() {
+        let job = boxed_job("governed-timeout-job", || async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(())
+        });
+        let policy = GovernancePolicy {
+            timeout: Some(Duration::from_millis(1)),
+            ..GovernancePolicy::default()
+        };
+        let error = JobScheduler::new()
+            .spawn_once_with_governance(job, Some(policy))
+            .await
+            .expect_err("job must time out");
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[tokio::test]

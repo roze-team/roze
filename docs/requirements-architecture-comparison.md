@@ -59,7 +59,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 | # | 需求能�?| Roze 当前覆盖 | 主要入口 | 缺口/风险 |
 | --- | --- | --- | --- | --- |
-| 1 | API/RPC 契约优先 | �?| `apps/rozectl`, `.api`, proto, REST/RPC generator, OpenAPI, TS/JS/Dart SDK | 已实�?REST/RPC/OpenAPI/TS/JS/Dart SDK、`rozectl contract check`、`rozectl mock gen`、`rozectl test gen`；增强方向是 OpenAPI validator 完整投影、SDK error/interceptor/retry/timeout�?|
+| 1 | API/RPC 契约优先 | �?| `apps/rozectl`, `.api`, proto, REST/RPC generator, OpenAPI, TS/JS SDK | 已实�?REST/RPC/OpenAPI/TS/JS SDK、`rozectl contract check`、`rozectl mock gen`、`rozectl test gen`；增强方向是 OpenAPI validator 完整投影、SDK error/interceptor/retry/timeout�?|
 | 2 | Gateway 网关 | 中高 | `crates/roze-gateway`, `apps/roze-gateway`, `docs/contracts/gateway.md` | 已有路由、rewrite、auth、rate/breaker、retry、fallback、registry upstream、canary、health/outlier、hot reload、WebSocket upgrade 代理、SSE 流式代理；缺更完�?app 级示例、deploy smoke test、A/B、流量镜像�?|
 | 3 | 服务注册与发�?| 中高 | `roze-rpc::registry`, cached resolver, etcd/consul/dns/memory | memory registry、DNS、etcd、Consul、watch、cached resolver 已具备；memory registry 已使�?DashMap 优化并发注册/发现路径；etcd/Consul 注册、发现、注销已有真实服务 ignored integration test，并纳入 `roze-example external_verify` 项目级验收；增强方向�?watch 断线/续约失败故障注入、Gateway/RPC/Job/MQ consumer 复用边界文档化�?|
 | 4 | 统一治理模型 | �?| `roze-config`, `roze-middleware`, `roze-rpc`, `roze-gateway` | Gateway 已继�?timeout/retry/rate/breaker；HTTP route �?RPC method �?rate-limit/breaker 状态已使用 DashMap 优化热路径并发；MQ/Job 还需要同一 schema、同一指标标签、可选持久化 breaker/rate limiter�?|
@@ -83,7 +83,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | `.api` REST 生成 | route/handler/logic/types/config/openapi/svc 固定结构 | 更完�?Roze `.api` 语法、注释、import、validator tag | `apps/rozectl` | 生成项目可编译，`--update` 不覆�?`logic`�?|
 | proto/RPC 生成 | server/client/pb/logic/config/svc 固定结构 | streaming、metadata 策略、proto fixture 覆盖 | `apps/rozectl`, `roze-rpc` | RPC 生成项目可编译，Context metadata 可透传�?|
 | OpenAPI 生成 | paths、schemas、parameters、request/response、security | validator 约束完整投影、examples、error schema | `apps/rozectl`, `roze-openapi` | Swagger UI/主流 client generator 可消费�?|
-| SDK 生成 | TS/JS/Dart baseUrl、headers、path/query/body | typed error、interceptor、retry、timeout、auth injection | `apps/rozectl/src/generator/client.rs` | SDK 能调�?mock server 并处理错误响应�?|
+| SDK 生成 | TS/JS baseUrl、headers、path/query/body | typed error、interceptor、retry、timeout、auth injection | `apps/rozectl/src/generator/client.rs` | SDK 能调�?mock server 并处理错误响应�?|
 | mock 生成 | 已实现：�?`.api` 生成独立 Roze native HTTP mock server，并�?response type 返回默认 JSON | 示例数据、延�?错误注入、OpenAPI example 驱动 | `rozectl mock gen` | 本地无需业务实现即可返回契约响应�?|
 | 接口测试生成 | 已实现：�?`.api` 生成 HTTP smoke contract tests，支�?base URL 配置 | 契约回归、鉴权场景、错误码场景、RPC smoke tests | `rozectl test gen` | 生成测试能在空逻辑�?mock 上运行�?|
 | 生成预览 | 已实现：文件�?`A/M/D` diff，覆�?API、RPC、model 生成结果 | ownership-aware diff、语�?diff | `rozectl diff` | 默认不写盘，输出清晰�?|
@@ -210,7 +210,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 | new/generate/update | api/rpc/model/search 主路�?| template customization、plugin hooks | `apps/rozectl` | 重复生成稳定、可预测�?|
 | diff | 已实现：文件�?diff，覆�?API、RPC、model | ownership-aware diff、breaking change report | `rozectl diff` | 默认不写盘，输出清晰�?|
 | doctor/dev | 已实现：`doctor` 本机工具、端口、配置和 TCP live probe；`dev` 通过 docker compose up/down/status 管理本地依赖 | 自动修复建议、协议级 probe、日志聚�?| `rozectl doctor`, `rozectl dev` | 本地 onboarding 时间可控�?|
-| doc/sdk/test/mock | 已实现：文档、TS/JS/Dart SDK、HTTP smoke tests、mock 生成 | 更多 SDK 语言、RPC contract tests | `apps/rozectl` | 从契约能生成可运行辅助资产�?|
+| doc/sdk/test/mock | 已实现：文档、TS/JS      SDK、HTTP smoke tests、mock 生成 | 更多 SDK 语言、RPC contract tests | `apps/rozectl` | 从契约能生成可运行辅助资产�?|
 | AI_CONTEXT | 已实现：`rozectl doc service` 生成 `SERVICE.md`；`rozectl doc ai-context` 生成 `AI_CONTEXT.md` | ARCHITECTURE/DEPENDENCIES、依赖图、topic/cache key 提取 | `rozectl doc service`, `rozectl doc ai-context` | AI 能知道哪些文件能改、哪些不能改�?|
 | upgrade | update/diff/breaking-change check | migration guide automation | `rozectl update` | 框架升级能预览影响并保护业务代码�?|
 
@@ -244,7 +244,7 @@ Roze 的方向与需求高度一致：已经采用 IDL first、生成器维护�
 
 Roze 现状�?
 
-- REST/RPC/OpenAPI/TS/JS/Dart SDK 主链路已具备�?
+- REST/RPC/OpenAPI/TS/JS SDK 主链路已具备�?
 - `--update` 已保留业务逻辑和自定义 middleware�?
 - 已实现文件级 `rozectl diff`、`rozectl mock gen`、`rozectl test gen` �?`rozectl contract check`；语�?diff 继续作为增强项�?
 

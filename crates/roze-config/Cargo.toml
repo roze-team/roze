@@ -16,4 +16,5 @@ tokio.workspace = true
 tracing.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-nats = { path = "../roze-nats" }
+roze-resilience = { path = "../roze-resilience" }
 roze-storage = { path = "../roze-storage" }

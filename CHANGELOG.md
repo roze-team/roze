@@ -26,7 +26,7 @@ Semantic Versioning once releases begin.
   limits.
 - Service-wide HTTP timeout is applied through Tower HTTP middleware; route
   timeout overrides are enforced by generated handler adapters.
-- `rozectl api client` can generate TypeScript, JavaScript, and Dart clients.
+- `rozectl api client` generates governed TypeScript and JavaScript Web clients.
 - `rozectl openapi generate` emits OpenAPI 3 documents from `.api` contracts.
 - `apps/roze-gateway` supports registry-backed upstreams, weighted canary
   routing, route retries, health/outlier handling, unified governance defaults,
@@ -40,6 +40,9 @@ Semantic Versioning once releases begin.
   in-memory admin dead-letter replay, and rdkafka feature checks.
 - `roze-admin` provides registry, config reload, and MQ/DLQ control-plane
   endpoints with optional token/API key protection.
+- `roze-config` resolves one authoritative `GovernancePolicy` for REST, RPC,
+  Gateway, MQ, and Job. Governed MQ consumers and jobs enforce timeout,
+  full-jitter retry budgets, rate limits, breakers, and adaptive shedding.
 
 ### Changed
 
@@ -53,6 +56,8 @@ Semantic Versioning once releases begin.
   fields are not set.
 - Config reload listeners keep the last valid config when parsing a new value
   fails.
+- Removed Dart, Java, Kotlin, Swift, iOS, and Android SDK generators to keep the
+  product focused on Rust services and TypeScript/JavaScript Web clients.
 
 ### Known Gaps
 
@@ -61,4 +66,3 @@ Semantic Versioning once releases begin.
   examples still need hardening.
 - Validator/OpenAPI projection does not yet cover every go-playground validator
   edge case.
-- Java/Kotlin SDK generation is not implemented.

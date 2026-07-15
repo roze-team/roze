@@ -3,10 +3,13 @@ use std::{
     net::IpAddr,
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+pub use roze_resilience::GovernancePolicy;
 
 pub mod config_center;
 
@@ -606,6 +609,62 @@ pub struct GovernanceConfig {
     pub routes: BTreeMap<String, RouteGovernanceConfig>,
 }
 
+impl GovernanceConfig {
+    pub fn resolve_policy(&self, key: &str) -> GovernancePolicy {
+        self.resolve_policy_for([key])
+    }
+
+    pub fn resolve_policy_for<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a str>,
+    ) -> GovernancePolicy {
+        let scoped = keys.into_iter().find_map(|key| self.routes.get(key));
+        let timeout_ms = scoped
+            .and_then(|policy| policy.timeout_ms)
+            .or(self.timeout_ms);
+        let retry = scoped.and_then(|policy| policy.retry).or(self.retry);
+        let rate_limit = scoped
+            .and_then(|policy| policy.rate_limit)
+            .or(self.rate_limit);
+        let breaker = scoped.and_then(|policy| policy.breaker).or(self.breaker);
+        let shedding = scoped.and_then(|policy| policy.shedding).or(self.shedding);
+        GovernancePolicy {
+            timeout: timeout_ms.map(Duration::from_millis),
+            retry: retry.map(|config| roze_resilience::RetryPolicy {
+                max_attempts: config.max_attempts,
+                backoff: Duration::from_millis(config.backoff_ms),
+                max_backoff: Duration::from_millis(config.max_backoff_ms),
+                budget_percent: config.budget_percent,
+            }),
+            rate_limit: rate_limit.map(|config| roze_resilience::RateLimitConfig {
+                burst: config.burst,
+                refill: Duration::from_millis(config.refill_ms),
+            }),
+            breaker: breaker.map(|config| roze_resilience::BreakerConfig {
+                failure_threshold: config.failure_threshold,
+                reset_timeout: Duration::from_millis(config.reset_timeout_ms),
+            }),
+            shedding: shedding.map(|config| roze_resilience::SheddingConfig {
+                concurrency: config.concurrency,
+                window: Duration::from_millis(config.window_ms),
+                min_samples: config.min_samples,
+                max_avg_latency: Duration::from_millis(config.max_avg_latency_ms),
+                max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
+                cool_down: Duration::from_millis(config.cool_down_ms),
+            }),
+            fallback: scoped
+                .and_then(|policy| policy.fallback.clone())
+                .or_else(|| self.fallback.clone())
+                .filter(|fallback| fallback.enabled)
+                .map(|fallback| roze_resilience::GovernanceFallback {
+                    status: fallback.status,
+                    body: fallback.body,
+                    headers: fallback.headers,
+                }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouteGovernanceConfig {
     #[serde(default)]
@@ -1087,6 +1146,57 @@ backoff_ms = 5
                 .backoff_ms,
             5
         );
+    }
+
+    #[test]
+    fn resolves_governance_policy_with_scoped_precedence() {
+        let mut governance = GovernanceConfig {
+            timeout_ms: Some(1_000),
+            retry: Some(RetryConfig {
+                max_attempts: 3,
+                ..RetryConfig::default()
+            }),
+            rate_limit: Some(RateLimitConfig {
+                burst: 100,
+                refill_ms: 1_000,
+            }),
+            fallback: Some(GovernanceFallbackConfig {
+                enabled: true,
+                status: 503,
+                ..GovernanceFallbackConfig::default()
+            }),
+            ..GovernanceConfig::default()
+        };
+        governance.routes.insert(
+            "users".to_string(),
+            RouteGovernanceConfig {
+                timeout_ms: Some(250),
+                retry: Some(RetryConfig {
+                    max_attempts: 2,
+                    ..RetryConfig::default()
+                }),
+                ..RouteGovernanceConfig::default()
+            },
+        );
+
+        let policy = governance.resolve_policy_for(["/users", "users", "user-service"]);
+        assert_eq!(policy.timeout, Some(Duration::from_millis(250)));
+        assert_eq!(policy.retry.expect("retry").max_attempts, 2);
+        assert_eq!(policy.rate_limit.expect("rate limit").burst, 100);
+        assert_eq!(policy.fallback.expect("fallback").status, 503);
+
+        governance
+            .routes
+            .get_mut("users")
+            .expect("users policy")
+            .fallback = Some(GovernanceFallbackConfig {
+            enabled: false,
+            ..GovernanceFallbackConfig::default()
+        });
+        assert!(governance.resolve_policy("users").fallback.is_none());
+
+        governance.fallback.as_mut().expect("fallback").enabled = false;
+        assert!(governance.resolve_policy("missing").fallback.is_none());
     }
 
     #[test]

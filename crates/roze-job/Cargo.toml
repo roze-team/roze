@@ -9,5 +9,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 roze-service = { path = "../roze-service" }
 roze-shutdown = { path = "../roze-shutdown" }
+roze-metrics = { path = "../roze-metrics" }
+roze-resilience = { path = "../roze-resilience" }
 tokio.workspace = true
 tracing.workspace = true

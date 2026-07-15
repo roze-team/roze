@@ -858,41 +858,33 @@ pub fn method_policy(
             fallback: None,
         };
     };
-    let method_config = governance.routes.get(method);
+    let policy = governance.resolve_policy(method);
     MethodPolicy {
-        timeout: method_config
-            .and_then(|route| route.timeout_ms)
-            .or(governance.timeout_ms)
-            .map(Duration::from_millis),
-        rate_limit: method_config
-            .and_then(|route| route.rate_limit)
-            .or(governance.rate_limit)
-            .map(|config| MethodRateLimitConfig {
-                burst: config.burst,
-                refill: Duration::from_millis(config.refill_ms),
+        timeout: policy.timeout,
+        rate_limit: policy.rate_limit.map(|config| MethodRateLimitConfig {
+            burst: config.burst,
+            refill: config.refill,
+        }),
+        breaker: policy.breaker.map(|config| MethodBreakerConfig {
+            failure_threshold: config.failure_threshold,
+            reset_timeout: config.reset_timeout,
+        }),
+        shedding: policy.shedding.map(|config| MethodSheddingConfig {
+            concurrency: config.concurrency,
+            window: config.window,
+            min_samples: config.min_samples,
+            max_avg_latency: config.max_avg_latency,
+            max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
+            cool_down: config.cool_down,
+        }),
+        fallback: policy
+            .fallback
+            .map(|fallback| roze_config::GovernanceFallbackConfig {
+                enabled: true,
+                status: fallback.status,
+                body: fallback.body,
+                headers: fallback.headers,
             }),
-        breaker: method_config
-            .and_then(|route| route.breaker)
-            .or(governance.breaker)
-            .map(|config| MethodBreakerConfig {
-                failure_threshold: config.failure_threshold,
-                reset_timeout: Duration::from_millis(config.reset_timeout_ms),
-            }),
-        shedding: method_config
-            .and_then(|route| route.shedding)
-            .or(governance.shedding)
-            .map(|config| MethodSheddingConfig {
-                concurrency: config.concurrency,
-                window: Duration::from_millis(config.window_ms),
-                min_samples: config.min_samples,
-                max_avg_latency: Duration::from_millis(config.max_avg_latency_ms),
-                max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
-                cool_down: Duration::from_millis(config.cool_down_ms),
-            }),
-        fallback: method_config
-            .and_then(|method| method.fallback.clone())
-            .or_else(|| governance.fallback.clone())
-            .filter(|fallback| fallback.enabled),
     }
 }
 
@@ -911,16 +903,12 @@ pub fn retry_policy_for_method(
     let Some(governance) = governance else {
         return MethodRetryPolicy::from_options(options);
     };
-    let retry = governance
-        .routes
-        .get(method)
-        .and_then(|route| route.retry)
-        .or(governance.retry);
+    let retry = governance.resolve_policy(method).retry;
     match retry {
         Some(retry) => MethodRetryPolicy {
             max_retries: retry.max_attempts.saturating_sub(1) as usize,
-            backoff: Duration::from_millis(retry.backoff_ms),
-            max_backoff: Duration::from_millis(retry.max_backoff_ms),
+            backoff: retry.backoff,
+            max_backoff: retry.max_backoff,
             budget_percent: retry.budget_percent,
         },
         None => MethodRetryPolicy::from_options(options),

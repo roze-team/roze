@@ -22,6 +22,7 @@ pub struct CommonMiddlewareConfig {
     pub request_context: bool,
     pub tracing: bool,
     pub auth: Option<AuthConfig>,
+    pub cors: bool,
     pub cors_config: Option<CorsConfig>,
     pub timeout_ms: Option<u64>,
     pub body_limit_bytes: Option<usize>,
@@ -33,6 +34,7 @@ impl Default for CommonMiddlewareConfig {
             request_context: true,
             tracing: true,
             auth: None,
+            cors: true,
             cors_config: None,
             timeout_ms: None,
             body_limit_bytes: None,
@@ -46,6 +48,7 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
             request_context: true,
             tracing: true,
             auth: None,
+            cors: config.cors,
             cors_config: config.cors_config.as_ref().map(CorsConfig::from),
             timeout_ms: config.timeout.then_some(30_000),
             body_limit_bytes: config.request_body_limit_bytes,
@@ -71,6 +74,8 @@ pub struct CorsConfig {
     pub allow_origins: Vec<String>,
     pub allow_methods: Vec<String>,
     pub allow_headers: Vec<String>,
+    pub expose_headers: Vec<String>,
+    pub allow_credentials: bool,
     pub max_age_seconds: Option<u64>,
 }
 
@@ -80,21 +85,176 @@ impl From<&roze_config::HttpCorsConfig> for CorsConfig {
             allow_origins: config.allow_origins.clone(),
             allow_methods: config.allow_methods.clone(),
             allow_headers: config.allow_headers.clone(),
+            expose_headers: config.expose_headers.clone(),
+            allow_credentials: config.allow_credentials,
             max_age_seconds: config.max_age_seconds,
         }
     }
 }
 
-pub fn apply_common<S>(service: S) -> S {
+pub fn apply_common(service: roze_http::Router) -> roze_http::Router {
     apply_common_with_config(service, CommonMiddlewareConfig::default())
 }
 
-pub fn apply_common_with_config<S>(service: S, _config: CommonMiddlewareConfig) -> S {
+pub fn apply_common_with_config(
+    mut service: roze_http::Router,
+    config: CommonMiddlewareConfig,
+) -> roze_http::Router {
+    if config.request_context {
+        service = service.layer(roze_http::middleware::from_fn(inject_request_context));
+    }
+    if let Some(limit) = config.body_limit_bytes {
+        service = service.layer(roze_http::middleware::from_fn_with_state(
+            limit,
+            enforce_request_body_limit,
+        ));
+    }
+    if config.cors {
+        service = service.layer(cors_layer(config.cors_config.as_ref()));
+    }
     service
 }
 
-pub fn apply_timeout<S>(service: S, _timeout_ms: u64) -> S {
-    service
+fn cors_layer(config: Option<&CorsConfig>) -> tower_http::cors::CorsLayer {
+    use roze_http::http::{HeaderName, HeaderValue, Method};
+    use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+
+    let Some(config) = config else {
+        return CorsLayer::permissive();
+    };
+    let mut layer = CorsLayer::new();
+    let origins = config
+        .allow_origins
+        .iter()
+        .filter_map(|value| value.parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    if config.allow_origins.is_empty() || config.allow_origins.iter().any(|value| value == "*") {
+        layer = if config.allow_credentials {
+            layer.allow_origin(AllowOrigin::mirror_request())
+        } else {
+            layer.allow_origin(Any)
+        };
+    } else if !origins.is_empty() {
+        layer = layer.allow_origin(origins);
+    }
+    let methods = config
+        .allow_methods
+        .iter()
+        .filter_map(|value| value.parse::<Method>().ok())
+        .collect::<Vec<_>>();
+    layer = if methods.is_empty() {
+        layer.allow_methods(Any)
+    } else {
+        layer.allow_methods(methods)
+    };
+    let headers = config
+        .allow_headers
+        .iter()
+        .filter_map(|value| value.parse::<HeaderName>().ok())
+        .collect::<Vec<_>>();
+    layer = if headers.is_empty() {
+        layer.allow_headers(Any)
+    } else {
+        layer.allow_headers(headers)
+    };
+    let exposed = config
+        .expose_headers
+        .iter()
+        .filter_map(|value| value.parse::<HeaderName>().ok())
+        .collect::<Vec<_>>();
+    if !exposed.is_empty() {
+        layer = layer.expose_headers(exposed);
+    }
+    if config.allow_credentials {
+        layer = layer.allow_credentials(true);
+    }
+    if let Some(seconds) = config.max_age_seconds {
+        layer = layer.max_age(Duration::from_secs(seconds));
+    }
+    layer
+}
+
+async fn inject_request_context(
+    mut request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    let headers = request
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let context = Context::from_propagation_headers(&headers);
+    let propagation_headers = context.propagation_headers();
+    request.extensions_mut().insert(context);
+
+    let mut response = next.run(request).await;
+    for name in [
+        roze_context::REQUEST_ID_HEADER,
+        roze_context::TRACE_ID_HEADER,
+    ] {
+        let Some(value) = propagation_headers.get(name) else {
+            continue;
+        };
+        let (Ok(name), Ok(value)) = (
+            name.parse::<roze_http::http::HeaderName>(),
+            value.parse::<roze_http::http::HeaderValue>(),
+        ) else {
+            continue;
+        };
+        response.headers_mut().insert(name, value);
+    }
+    response
+}
+
+async fn enforce_request_body_limit(
+    roze_http::extract::State(limit): roze_http::extract::State<usize>,
+    request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    let (parts, body) = request.into_parts();
+    match roze_http::body::to_bytes(body, limit).await {
+        Ok(bytes) => {
+            let request = roze_http::http::Request::from_parts(parts, roze_http::body::full(bytes));
+            next.run(request).await
+        }
+        Err(roze_http::body::BodyError::LengthLimitExceeded { .. }) => {
+            roze_http::IntoResponse::into_response((
+                roze_http::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large",
+            ))
+        }
+        Err(error) => roze_http::IntoResponse::into_response((
+            roze_http::http::StatusCode::BAD_REQUEST,
+            format!("failed to read request body: {error}"),
+        )),
+    }
+}
+
+pub fn apply_timeout(service: roze_http::Router, timeout_ms: u64) -> roze_http::Router {
+    let timeout = Duration::from_millis(timeout_ms.max(1));
+    service.layer(roze_http::middleware::from_fn_with_state(
+        timeout,
+        enforce_http_timeout,
+    ))
+}
+
+async fn enforce_http_timeout(
+    roze_http::extract::State(timeout): roze_http::extract::State<Duration>,
+    request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    match tokio::time::timeout(timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => roze_http::IntoResponse::into_response((
+            roze_http::http::StatusCode::GATEWAY_TIMEOUT,
+            "request timeout",
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -238,41 +398,33 @@ pub fn route_policy(
             fallback: None,
         };
     };
-    let route_config = governance.routes.get(route);
+    let policy = governance.resolve_policy(route);
     RoutePolicy {
-        timeout: route_config
-            .and_then(|route| route.timeout_ms)
-            .or(governance.timeout_ms)
-            .map(Duration::from_millis),
-        rate_limit: route_config
-            .and_then(|route| route.rate_limit)
-            .or(governance.rate_limit)
-            .map(|config| RouteRateLimitConfig {
-                burst: config.burst,
-                refill: Duration::from_millis(config.refill_ms),
+        timeout: policy.timeout,
+        rate_limit: policy.rate_limit.map(|config| RouteRateLimitConfig {
+            burst: config.burst,
+            refill: config.refill,
+        }),
+        breaker: policy.breaker.map(|config| RouteBreakerConfig {
+            failure_threshold: config.failure_threshold,
+            reset_timeout: config.reset_timeout,
+        }),
+        shedding: policy.shedding.map(|config| RouteSheddingConfig {
+            concurrency: config.concurrency,
+            window: config.window,
+            min_samples: config.min_samples,
+            max_avg_latency: config.max_avg_latency,
+            max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
+            cool_down: config.cool_down,
+        }),
+        fallback: policy
+            .fallback
+            .map(|fallback| roze_config::GovernanceFallbackConfig {
+                enabled: true,
+                status: fallback.status,
+                body: fallback.body,
+                headers: fallback.headers,
             }),
-        breaker: route_config
-            .and_then(|route| route.breaker)
-            .or(governance.breaker)
-            .map(|config| RouteBreakerConfig {
-                failure_threshold: config.failure_threshold,
-                reset_timeout: Duration::from_millis(config.reset_timeout_ms),
-            }),
-        shedding: route_config
-            .and_then(|route| route.shedding)
-            .or(governance.shedding)
-            .map(|config| RouteSheddingConfig {
-                concurrency: config.concurrency,
-                window: Duration::from_millis(config.window_ms),
-                min_samples: config.min_samples,
-                max_avg_latency: Duration::from_millis(config.max_avg_latency_ms),
-                max_failure_ratio_per_mille: config.max_failure_ratio_per_mille,
-                cool_down: Duration::from_millis(config.cool_down_ms),
-            }),
-        fallback: route_config
-            .and_then(|route| route.fallback.clone())
-            .or_else(|| governance.fallback.clone())
-            .filter(|fallback| fallback.enabled),
     }
 }
 
@@ -751,6 +903,212 @@ pub type RateLimitConfig = roze_resilience::RateLimitConfig;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn common_middleware_injects_request_context() {
+        use roze_http::{extract::Extension, routing::get, Router};
+        use tower::ServiceExt as _;
+
+        let app = apply_common(Router::new().route(
+            "/context",
+            get(|Extension(ctx): Extension<Context>| async move { ctx.request_id().to_string() }),
+        ));
+        let request = roze_http::http::Request::builder()
+            .uri("/context")
+            .header(roze_context::REQUEST_ID_HEADER, "request-123")
+            .header(roze_context::TRACE_ID_HEADER, "trace-456")
+            .body(roze_http::body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert_eq!(response.status(), roze_http::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()[roze_context::REQUEST_ID_HEADER],
+            "request-123"
+        );
+        assert_eq!(
+            response.headers()[roze_context::TRACE_ID_HEADER],
+            "trace-456"
+        );
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"request-123");
+    }
+
+    #[tokio::test]
+    async fn timeout_middleware_returns_gateway_timeout() {
+        use roze_http::{routing::get, Router};
+        use tower::ServiceExt as _;
+
+        let app = apply_timeout(
+            Router::new().route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    "late"
+                }),
+            ),
+            5,
+        );
+        let request = roze_http::http::Request::builder()
+            .uri("/slow")
+            .body(roze_http::body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert_eq!(
+            response.status(),
+            roze_http::http::StatusCode::GATEWAY_TIMEOUT
+        );
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"request timeout");
+    }
+
+    #[tokio::test]
+    async fn common_middleware_rejects_oversized_request_body() {
+        use roze_http::{routing::post, Router};
+        use tower::ServiceExt as _;
+
+        let app = apply_common_with_config(
+            Router::new().route("/upload", post(|body: String| async move { body })),
+            CommonMiddlewareConfig {
+                body_limit_bytes: Some(4),
+                ..Default::default()
+            },
+        );
+        let request = roze_http::http::Request::builder()
+            .method(roze_http::http::Method::POST)
+            .uri("/upload")
+            .body(roze_http::body::full("12345"))
+            .expect("request");
+
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("infallible router");
+        assert_eq!(
+            response.status(),
+            roze_http::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"request body too large");
+
+        let request = roze_http::http::Request::builder()
+            .method(roze_http::http::Method::POST)
+            .uri("/upload")
+            .body(roze_http::body::full("1234"))
+            .expect("request");
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert_eq!(response.status(), roze_http::http::StatusCode::OK);
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"1234");
+    }
+
+    #[tokio::test]
+    async fn common_middleware_applies_configured_cors_policy() {
+        use roze_http::{routing::get, Router};
+        use tower::ServiceExt as _;
+
+        let app = apply_common_with_config(
+            Router::new().route("/data", get(|| async { "ok" })),
+            CommonMiddlewareConfig {
+                cors: true,
+                cors_config: Some(CorsConfig {
+                    allow_origins: vec!["https://app.example.com".into()],
+                    allow_methods: vec!["GET".into()],
+                    allow_headers: vec!["authorization".into()],
+                    expose_headers: vec!["x-request-id".into()],
+                    allow_credentials: true,
+                    max_age_seconds: Some(600),
+                }),
+                ..Default::default()
+            },
+        );
+        let preflight = roze_http::http::Request::builder()
+            .method(roze_http::http::Method::OPTIONS)
+            .uri("/data")
+            .header("origin", "https://app.example.com")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization")
+            .body(roze_http::body::empty())
+            .expect("preflight");
+        let response = app
+            .clone()
+            .oneshot(preflight)
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), roze_http::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "https://app.example.com"
+        );
+        assert_eq!(response.headers()["access-control-allow-methods"], "GET");
+        assert_eq!(
+            response.headers()["access-control-allow-headers"],
+            "authorization"
+        );
+        assert_eq!(response.headers()["access-control-max-age"], "600");
+        assert_eq!(
+            response.headers()["access-control-allow-credentials"],
+            "true"
+        );
+
+        let request = roze_http::http::Request::builder()
+            .uri("/data")
+            .header("origin", "https://app.example.com")
+            .body(roze_http::body::empty())
+            .expect("request");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("infallible router");
+        assert_eq!(
+            response.headers()["access-control-expose-headers"],
+            "x-request-id"
+        );
+
+        let request = roze_http::http::Request::builder()
+            .uri("/data")
+            .header("origin", "https://blocked.example.com")
+            .body(roze_http::body::empty())
+            .expect("request");
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert!(!response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn common_middleware_can_disable_cors() {
+        use roze_http::{routing::get, Router};
+        use tower::ServiceExt as _;
+
+        let app = apply_common_with_config(
+            Router::new().route("/data", get(|| async { "ok" })),
+            CommonMiddlewareConfig {
+                cors: false,
+                ..Default::default()
+            },
+        );
+        let request = roze_http::http::Request::builder()
+            .uri("/data")
+            .header("origin", "https://app.example.com")
+            .body(roze_http::body::empty())
+            .expect("request");
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert!(!response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+    }
 
     #[test]
     fn parses_builtin_middleware_names() {

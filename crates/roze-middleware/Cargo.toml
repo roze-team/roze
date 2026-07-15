@@ -11,6 +11,7 @@ roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
 roze-error = { path = "../roze-error" }
+roze-http = { path = "../roze-http" }
 roze-metrics = { path = "../roze-metrics" }
 roze-resilience = { path = "../roze-resilience" }
 roze-jwt = { path = "../roze-jwt" }

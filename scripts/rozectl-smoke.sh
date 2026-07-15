@@ -224,7 +224,6 @@ for help_args in \
   "api client --help" \
   "api client ts --help" \
   "api client js --help" \
-  "api client dart --help" \
   "api doc --help" \
   "api plugin --help" \
   "rpc --help" \
@@ -285,11 +284,9 @@ pass "api new"
 
 "$BIN" api client ts "$API" --out "$OUT/client.ts" >/dev/null
 "$BIN" api client js "$API" --out "$OUT/client.js" >/dev/null
-"$BIN" api client dart "$API" --out "$OUT/client.dart" >/dev/null
 test -f "$OUT/client.ts"
 test -f "$OUT/client.js"
-test -f "$OUT/client.dart"
-pass "api client ts/js/dart"
+pass "api client ts/js"
 
 "$BIN" api doc --api "$API" --dir "$OUT/api-generate" --out "$OUT/api-doc" >/dev/null
 test -d "$OUT/api-doc"

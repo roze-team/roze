@@ -4,6 +4,11 @@ Roze's near-term priority is not to add more modules. The priority is to make
 the existing framework pieces credible: tested, releasable, observable,
 upgradeable, and recoverable.
 
+The executable cross-area plan, acceptance rules, go-zero design baseline, and
+evidence boundary are tracked in
+[Roze Production Generation Plan](go-zero-surpass-plan.md). This roadmap keeps
+the concise backlog; the execution plan is the source of truth for completion.
+
 ## P0: Maturity and Trust
 
 ### Release System
@@ -62,12 +67,14 @@ upgradeable, and recoverable.
 
 ## P1: Unified Governance
 
-- Extend the shared governance schema for timeout, retry, rate limit, breaker,
-  shedding, and fallback across HTTP/RPC/Gateway/MQ where applicable; Gateway
-  currently inherits timeout, retry, rate limit, and breaker from it.
+- Keep `roze-config` as the only global/scoped policy resolver for
+  REST/RPC/Gateway/MQ/Job; Gateway explicit route fields remain highest
+  priority.
+- Complete deadline, cancellation, trace, tenant, idempotency-key, and retry
+  budget propagation across every generated downstream call.
 - Add optional persistent state for breaker and rate limiter.
-- Align metrics labels across HTTP route, RPC method, gateway route, and queue
-  consumer.
+- Align bounded metric labels across HTTP route, RPC method, gateway route,
+  queue consumer, and job.
 - Framework lifecycle: SIGINT/SIGTERM, shutdown order, shutdown timeout,
   background task cancellation, readiness, and liveness.
 - Standard `/healthz`, `/readyz`, `/metrics`, dependency details, and
@@ -75,8 +82,11 @@ upgradeable, and recoverable.
 
 ## P1: Generator and Contract Completeness
 
-- More Roze `.api` parser edge fixtures: comments, imports, nested types, duplicate
-  names, reserved words, mixed annotations, and compact syntax.
+- Put REST, RPC, stream, model, search, OpenAPI, TypeScript, and JavaScript
+  generation into one non-ignored release-gate matrix.
+- Keep deterministic second-update and generated ownership checks mandatory.
+- Block unsafe API, migration, and search contract changes through generated
+  diff gates and rollback records.
 
 ## P1: Admin API
 
@@ -88,8 +98,17 @@ upgradeable, and recoverable.
 - OpenAPI projection for validator constraints including `min`, `max`, `len`,
   `oneof`, map `additionalProperties`, nested struct validation, UUID, and
   custom validator boundaries.
-- SDK error types, interceptors, retry/timeout config, auth injection, and
-  regression tests.
+- Keep TypeScript/JavaScript SDK typed errors, interceptors, bounded retries,
+  timeout/cancellation, auth injection, and regression tests release-gated.
+
+## P1: Reporting and Charts
+
+- Generate bounded chart-query contracts for dimensions, measures, filters,
+  grouping, sorting, time buckets, pagination, and query cost.
+- Generate asynchronous CSV/XLSX export jobs with progress, cancel, expiry,
+  object-storage delivery, audit records, and tenant isolation.
+- Project report/chart contracts into OpenAPI and TypeScript/JavaScript clients.
+- Generate report/export metrics, dashboards, alerts, and failure runbooks.
 
 ## P1: Data Boundary
 
@@ -113,3 +132,5 @@ upgradeable, and recoverable.
   examples.
 - Unified security model: JWT key rotation, claims, RBAC/ABAC, tenant isolation,
   i18n error codes, and permission test templates.
+- Real 24h/72h evidence for Gateway, MQ, Config Center, Lifecycle, and generated
+  reference systems before stable promotion.

@@ -3492,6 +3492,7 @@ dependencies = [
  "reqwest 0.13.4",
  "roze-auth",
  "roze-nats",
+ "roze-resilience",
  "roze-storage",
  "serde",
  "serde_json",
@@ -3732,6 +3733,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "roze-metrics",
+ "roze-resilience",
  "roze-service",
  "roze-shutdown",
  "tokio",
@@ -3807,6 +3810,7 @@ dependencies = [
  "roze-config",
  "roze-context",
  "roze-error",
+ "roze-http",
  "roze-jwt",
  "roze-metrics",
  "roze-resilience",
@@ -3826,6 +3830,7 @@ dependencies = [
  "anyhow",
  "serde",
  "sqlx 0.9.0",
+ "thiserror",
  "tokio",
 ]
 
@@ -3848,6 +3853,8 @@ dependencies = [
  "criterion",
  "dashmap",
  "roze-context",
+ "roze-metrics",
+ "roze-resilience",
  "roze-trace",
  "serde",
  "serde_json",
@@ -3903,6 +3910,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -3959,6 +3967,7 @@ name = "roze-resilience"
 version = "0.1.0"
 dependencies = [
  "dashmap",
+ "serde_json",
 ]
 
 [[package]]

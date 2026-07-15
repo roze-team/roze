@@ -1,5 +1,8 @@
 # rozectl generator
 
+The model generator's ent capability definition and remaining release blockers
+are tracked in [Roze Model / ent Capability Parity](../model-ent-parity.md).
+
 `rozectl api generate` reads a Roze `.api` contract and generates a
 Rust-native Roze native HTTP REST service. The generated project keeps framework-owned files
 separate from application logic so repeated generation can preserve
@@ -306,6 +309,18 @@ changes, and newly added required fields. Additive optional fields with
 
 Generate one semantic regeneration report across REST, RPC, OpenAPI, and the
 TypeScript SDK surface:
+
+Generated TypeScript and JavaScript clients throw `RozeApiError` for
+non-success responses. The typed error preserves HTTP status, business error
+code, message, trace ID, structured details, and `Retry-After`; non-JSON
+upstream responses safely fall back to an `HTTP_<status>` code.
+
+TypeScript and JavaScript `RequestOptions` also support `authToken`,
+`timeoutMs`, an external `AbortSignal`, `beforeRequest`, `afterResponse`, and a
+bounded retry policy. Automatic retries are restricted to GET and HEAD,
+hard-capped at five attempts, and use `Retry-After` or full-jitter exponential
+backoff for HTTP 429/502/503/504 and transport failures. Mutating methods are
+never replayed automatically.
 
 ```bash
 rozectl contract diff \
@@ -650,27 +665,9 @@ Generate client SDKs:
 rozectl api client ts example/user.api --out sdk/user.ts
 rozectl api client ts example/user.api --o sdk/user.ts
 rozectl api client js example/user.api --out sdk/user.js
-rozectl api client dart example/user.api --out sdk/user.dart
-rozectl api client java example/user.api --out sdk/RozeApiClient.java
-rozectl api client kotlin example/user.api --out sdk/RozeApiClient.kt
-rozectl api client kt example/user.api --out sdk/RozeApiClient.kt
-rozectl api client swift example/user.api --out sdk/RozeApiClient.swift
-rozectl api client ios example/user.api --out sdk/RozeApiClient.swift
-rozectl api client android example/user.api --out sdk/RozeApiClient.kt
 rozectl api ts --api example/user.api --dir sdk
 rozectl api js --api example/user.api --dir sdk
-rozectl api dart --api example/user.api --dir sdk
-rozectl api java --api example/user.api --dir sdk
-rozectl api kotlin --api example/user.api --dir sdk
-rozectl api kt --api example/user.api --dir sdk
-rozectl api swift --api example/user.api --dir sdk
-rozectl api ios --api example/user.api --dir sdk
-rozectl api android --api example/user.api --dir sdk
 ```
-
-Java/Kotlin/Android SDKs use the JDK HTTP client and Swift/iOS SDKs use
-Foundation `URLSession`. These generated clients return raw JSON response
-strings and do not require Jackson, Gson, Moshi, or other runtime dependencies.
 
 Generate an OpenAPI 3 document:
 
@@ -681,6 +678,15 @@ rozectl openapi gen --api example/user.api --o openapi.json
 rozectl api swagger --api example/user.api --dir docs
 rozectl api swagger --api example/user.api --dir docs --yaml
 ```
+
+Validator tags project required/optional fields, string and collection lengths,
+numeric bounds, `oneof` enums, UUID/email/URI/IP formats, array element rules,
+and map value/property constraints into component and inline request schemas.
+Cross-field conditional and custom validators remain runtime validation rules
+and are not misrepresented as static OpenAPI constraints. Their source rule is
+preserved in `x-roze-validator`; map-key rules use
+`x-roze-map-key-schema` because OpenAPI 3.0 does not standardize
+`propertyNames`.
 
 `api swagger` is the goctl-compatible entry point and writes
 `swagger.json` under `--dir`; pass `--yaml` to write `swagger.yaml` instead.
@@ -959,10 +965,29 @@ Business logic should not pass or construct `trace_id` values. Use
 `trace_id`. Use `ServiceContext` for global resources and Roze native HTTP `Extension<T>`
 for per-request user/session objects injected by custom middleware.
 
+Generated REST services pass their Router through
+`roze_middleware::apply_common_with_config`. Its request-context layer restores
+or creates `roze_context::Context` from incoming propagation headers, including
+request IDs, trace IDs, metadata, and timeouts, before handler extraction.
+Handlers extract `Extension<Context>`; bypassing the common middleware causes
+requests to fail with `missing extension` before business logic runs.
+When REST timeout middleware is enabled, the generated router passes the
+service-wide `governance.timeout_ms` to `roze_middleware::apply_timeout`.
+Expired requests cancel the in-flight handler future and return HTTP `504` with
+`request timeout`; route-specific handler timeouts can still impose a shorter
+effective deadline.
+`rest.middlewares.request_body_limit_bytes` is enforced against the actual body
+before extraction, including chunked requests without `Content-Length`.
+Oversized requests return HTTP `413` with `request body too large`; accepted
+bodies remain available to JSON, form, and custom extractors.
+
 `cors: true` enables CORS. Without `cors_config`, generated services use a
 permissive development default. Add `cors_config` to restrict browser
 origins, methods, request headers, exposed response headers, credentials, and
 preflight max age.
+Preflight `OPTIONS` requests pass through the common CORS layer before default
+method rejection. Credentialed wildcard policies mirror the request origin
+instead of emitting the browser-invalid `Access-Control-Allow-Origin: *`.
 
 ## Empty request and response
 
@@ -1396,11 +1421,20 @@ matching entgo's builtin-id/override convention for declarations such as
 `field String("id").MaxLen(25).NotEmpty().Unique().Immutable()`. Because the
 primary key is already unique, a `Unique()` directive on the primary `id` field
 does not generate a redundant `uniq_id` index.
-Composite entgo IDs such as `ID("user_id", "group_id")` or edge-schema
-annotations such as `Annotations(field.ID("user_id", "tweet_id"))` are not
-generated implicitly; Roze rejects them with a clear error. Model them as
-explicit fields and indexes until Roze adds first-class composite primary-key
-generation.
+Composite entgo IDs declared with schema annotations such as
+`Annotations(field.ID("user_id", "tweet_id"))` are parsed, validated, and
+preserved by canonical schema rendering, including SeaORM/Toasty key metadata.
+Generated model modules define a typed `{Model}Key`; SeaORM key lookup/delete
+uses its native primary-key tuple, while Toasty combines equality predicates
+for every key field. The typed surface includes `find_by_key`, `update_by_key`,
+`delete_by_key`, and `delete_many_by_keys`; update replaces every model key
+field from the supplied key before persistence. Composite `update_one` and
+`delete_one` builders also accept `{Model}Key`; SeaORM ActiveModel updates set
+all key columns, and Toasty resolves the row with all key predicates.
+Project generation supports composite-key create, lookup, update, delete, and
+batch update/delete paths without falling back to unsafe first-column
+operations. Legacy single-key convenience methods are omitted for composite
+models in favor of the typed key surface.
 `.ent` schemas can declare entity relationships with edge blocks:
 
 ```text
@@ -1470,9 +1504,14 @@ maps that column name onto the local field's `source`/SeaORM `column_name`
 metadata. If a field-level `StorageKey(...)` declares a different column, model
 generation fails fast with a conflict error. Ent many-to-many storage metadata
 such as `StorageKey(edge.Table("memberships"), edge.Columns("user_id",
-"group_id"))` remains parse-compatible for no-local-FK/`Through(...)` edges;
-using `edge.Columns(...)` on a concrete local-FK edge fails fast because Roze
-does not yet generate composite edge storage columns.
+"group_id"))` is preserved as ordered edge metadata for
+no-local-FK/`Through(...)` edges and survives canonical schema round trips.
+On a concrete local-FK edge, Roze maps the listed local fields by position to
+the target composite primary-key fields. Local and target names may differ.
+Roze validates field presence, arity, order, and types, then generates
+multi-predicate relationship queries and setters that write every FK component.
+Inverse `From(...).Ref(...)` traversal reuses the owning mapping and filters the
+target repository by every component.
 Inverse ent-style edges such as `edge From("profile", Profile.Type).Ref("user")`
 resolve their named owning edge after all entities are parsed. Roze preserves
 them during canonical round-trip and generates reverse `query_<edge>` methods:
@@ -1510,9 +1549,10 @@ pattern: the join entity must declare exactly two owning local-FK edges to the
 same model, with the first edge treated as the source direction and the second
 as the target direction.
 The join entity remains a normal generated model, so additional edge fields are
-available through its own CRUD API. Direct many-to-many setters are not
-generated; create/delete join rows explicitly. A self-referential join entity
-with any number of matching owning edges other than two fails validation.
+available through its own CRUD API. Both SeaORM and Toasty endpoint models also
+generate `add_<edge>`, `remove_<edge>`, and `clear_<edge>` methods backed by the
+join repository. A self-referential join entity with any number of matching
+owning edges other than two fails validation.
 Matching Ent's edge-schema ownership rule, one join entity may belong to only
 one owning Through relationship. Its resolved inverse Through endpoint is part
 of the same relationship and does not count as a second owner; reuse by another
@@ -1531,8 +1571,11 @@ Chained self O2M declarations such as
 `children` inverse query. Cross-entity fieldless O2M pairs such as
 `User.To("pets", Pet.Type)` with
 `Pet.From("owner", User.Type).Ref("pets").Unique()` similarly synthesize
-`owner_id` on the target entity. Fieldless M2M storage still requires an
-explicit `Through(...)` join model.
+`owner_id` on the target entity. Paired fieldless M2M edges synthesize a
+managed join model with endpoint fields typed from the real primary keys and a
+compound unique index. This covers cross-entity `To`/`From(...).Ref(...)`
+pairs and chained self-referential `To(...).From(...)` declarations. Use an
+explicit `Through(...)` model when the join carries payload fields.
 Owning ent-style edges with `Field("user_id")` but no `Ref(...)` default the
 reference field to `id`, matching the common entgo convention of pointing to
 the target primary key.
@@ -1567,7 +1610,8 @@ key. It is nullable by default; `Required()` makes it required, `Immutable()`
 makes the storage field create-only, and `StorageKey(edge.Column("..."))`
 controls the physical column. Canonical `.ent` output keeps the implicit edge
 form and does not expose the synthesized field. Non-unique fieldless to-many
-edges still require an explicit `Through(...)` join model.
+edges are retained when paired as M2M and normalize to a generated
+`Through(...)` join model; unmatched declarations are ignored.
 `.ent` fields can declare `source <column>` or `storage_key <column>` when the
 logical schema field name differs from the physical database column; SeaORM
 models emit a matching field-level `column_name` attribute.
@@ -1701,7 +1745,12 @@ affect Mongo output.
 
 Generated SQL repositories include single-table CRUD helpers. Toasty and SeaORM
 outputs both generate primary-key lookup, cache-key lookup, `list`, `insert`,
-`update`, `delete_by_<primary>`, and `count` methods.
+`upsert`, `update`, `delete_by_<primary>`, and `count` methods. SeaORM `upsert`
+uses a database `ON CONFLICT` statement over every primary-key column and is
+atomic. Toasty 0.7 does not expose an equivalent conflict API, so its generated
+compatibility method queries by every primary-key field and then inserts or
+updates; callers that require concurrent atomicity must wrap the operation in
+an appropriate transaction or use a database-specific implementation.
 
 SQL repositories additionally generate:
 
@@ -1740,16 +1789,91 @@ SQL repositories additionally generate:
   `unique_<field>`, `count_by_<field>`, `first_<field>`, `only_<field>`,
   `sum_<field>`, `avg_<field>`, `min_<field>`, `max_<field>`, `first`,
   `only`, and `page`
+- Ent-style grouped aggregates are generated for every orderable grouping
+  field and numeric value field as `sum_<value>_by_<group>()`,
+  `avg_<value>_by_<group>()`, `min_<value>_by_<group>()`, and
+  `max_<value>_by_<group>()`; they preserve the source query's predicates,
+  ordering, pagination, and soft-delete scope and return typed tuples. Average,
+  minimum, and maximum values are optional so groups containing only null
+  values remain visible
+- SeaORM `count_by_<field>()`, `sum_<value>_by_<group>()`,
+  `avg_<value>_by_<group>()`, `min_<value>_by_<group>()`, and
+  `max_<value>_by_<group>()` execute as database `GROUP BY` queries and do not
+  hydrate matching model rows. Toasty's grouped helpers remain on the
+  compatibility path until its generated predicate compiler is connected to
+  typed raw-SQL grouping
+- SeaORM also generates `count_by_<field>_having_at_least`,
+  `count_by_<field>_having_at_most`, and
+  `count_by_<field>_having_between` using SQL `HAVING COUNT(...)`, plus the
+  corresponding `sum_<value>_by_<group>_having_*` range helpers using SQL
+  `HAVING SUM(...)`; pairwise
+  `count_by_<left>_and_<right>()` helpers using a two-column `GROUP BY`
+- typed queries expose backend escape hatches for application-owned custom
+  projections and aggregate scans: SeaORM `into_select()` and Toasty
+  `into_query()`. Both preserve generated predicates, soft-delete scope,
+  ordering, limit, and offset before returning the native query object
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
+- filtered SeaORM queries over numeric fields, including nullable numeric
+  columns, expose atomic
+  `add_<field>(delta)` and `subtract_<field>(delta)` mutations. SeaORM emits a
+  column expression and returns the affected-row count; SQL null propagation
+  means a null value remains null. Toasty uses its typed
+  `stmt::add`/`stmt::subtract` assignments for non-null numeric fields because
+  Toasty 0.7 does not implement its `Numeric` assignment trait for `Option<T>`.
+  Supported methods execute arithmetic in the database, so callers can target
+  one row with a primary-key predicate or many rows with any generated
+  predicate group
+- update-many builders expose the same atomic operations as terminal methods,
+  for example `update_many().where_(active_eq(true)).add_score(1).await`; these
+  delegate to the filtered query mutation, including soft-delete scope and
+  SeaORM cache invalidation, without hydrating rows
+- single-primary-key update-one builders expose terminal atomic operations that
+  return the reloaded model, for example `update_one(id).add_score(1).await`.
+  Mixing pending `set_*`/`clear_*` changes with an atomic terminal operation is
+  rejected explicitly so no mutation is silently discarded
+- composite-primary-key update-one builders expose the same terminal atomic
+  operations. Every key component is applied as an equality predicate and the
+  updated row is reloaded through the generated typed key
 - entity relation methods for `.ent` edges, such as
   `order.query_user(&ctx.model().user()).await?` on SeaORM and
   `order.query_user(&mut db).await?` on Toasty; nullable foreign-key edges
   return `Ok(None)` when the local edge field is `None`
+- explicit relation-loading result types such as `OrderWithUser`, plus
+  `all_with_user` and `first_with_user` query methods. These methods preserve
+  the source query's predicates, ordering, pagination, and soft-delete scope,
+  and support owning, inverse, composite-key, and through edges. The current
+  implementation batches ordinary single-column owning and inverse edges into
+  one source query plus one target `IN` query. Composite-key and through edges
+  currently resolve each returned node through the normal generated edge query
+- SeaORM and Toasty generate pairwise multi-edge loaders for ordinary single-column
+  edges, such as `all_with_user_and_profile`. They return a typed
+  `OrderWithUserAndProfile`, execute the source query once, and add one batched
+  target `IN` query per requested edge. Through and composite-key edge pairs
+  stay on their explicit loaders until they can meet the same bounded-query
+  contract. Matching `first_with_<edge1>_and_<edge2>` helpers apply a source
+  limit of one and reuse the same bounded loader
+- two-level ordinary single-column paths generate nested loaders such as
+  `all_with_profile_then_avatar`. The returned root wrapper contains the
+  target model's typed `ProfileWithAvatar` wrapper, preserving target-to-edge
+  association. SeaORM and Toasty execute exactly one query for roots, one for
+  first-level targets, and one for nested targets
+- single Through edge loaders execute one root query, one join-model query and
+  one target query on SeaORM and Toasty. Composite-key edge loaders build an
+  OR-of-AND typed predicate set and execute one root plus one target query;
+  neither path performs per-root traversal queries
 - relation-filter query methods provide Ent-style `HasXWith` behavior through
   `where_<edge>_with(...)`: target predicates are combined with AND, projected
   to the configured ref key, and applied to the source query as a typed local
   foreign-key `IN` predicate before ordering, counting, or pagination
+- every generated ordinary, inverse, composite-key, and Through relationship
+  also exposes an Ent-style `HasX` query method named `has_<edge>(...)`. It
+  selects source rows that resolve to at least one target row and composes with
+  the query's existing predicates, ordering, pagination, and soft-delete scope
+- the same relationship set exposes `not_has_<edge>(...)` and
+  `where_<edge>_without(...)`, matching Ent's `Not(HasX())` and
+  `Not(HasXWith(...))` semantics. Nullable owning foreign keys are included in
+  the negative result instead of being lost to SQL `NOT IN` null semantics
 - nullable foreign-key edges also get `has_<edge>()` and `not_has_<edge>()`
   predicate helpers backed by the local edge field
 - create and update builders also get ent-style edge setters such as
@@ -2072,6 +2196,7 @@ rozectl kube deploy \
   --target-memory 80 \
   --env-file .env \
   --config-map user-api-config \
+  --secret user-api-secrets \
   --tls-secret user-api-upstream-tls \
   --image-pull-secret registry-credentials \
   --min-available 1
@@ -2086,7 +2211,12 @@ count no greater than the initial replica count, or a percentage from 1% to
 100%; zero-replica deployments are rejected.
 `--config-map` adds an `envFrom.configMapRef` reference. `--env-file` reads a
 dotenv-style file, validates each `KEY=VALUE` line, emits a generated
-`<name>-env` ConfigMap, and wires it through `envFrom`.
+`<name>-env` ConfigMap, and wires it through `envFrom`. The Pod template also
+receives a stable `checksum/roze-env` annotation, so changing the generated
+ConfigMap content creates a new Deployment revision and rolls the Pods.
+`--secret` adds an `envFrom.secretRef` to an existing application Secret. The
+generator stores only the Secret name and validates it as DNS-1123; secret data
+never enters generated YAML.
 `--tls-secret` mounts an existing Kubernetes Secret read-only at
 `/var/run/secrets/roze/tls` with mode `0400`; the generator never writes CA,
 certificate, or private-key material into the manifest.
@@ -2164,6 +2294,7 @@ rozectl helm chart \
   --target-memory 80 \
   --env RUST_LOG=info \
   --config-map user-api-config \
+  --secret user-api-secrets \
   --tls-secret user-api-upstream-tls \
   --image-pull-secret registry-credentials \
   --min-available 1 \
@@ -2185,6 +2316,8 @@ The image repository and SHA-256 digest are stored separately in values and
 recombined as an immutable digest reference by the Deployment template.
 Private registry credentials are exposed as `image.pullSecrets`, allowing
 platform owners to append multiple pull secrets without editing the template.
+Application Secret and ConfigMap references are exposed together through
+`envFrom`; schema and offline validation reject malformed or ambiguous entries.
 `values.schema.json` uses JSON Schema Draft 2020-12 and rejects malformed image
 digests, out-of-range ports or HPA targets, invalid ServiceMonitor durations,
 and unknown top-level values before Helm renders the chart.

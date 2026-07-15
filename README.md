@@ -98,6 +98,7 @@ authorization, permission checks, and search ranking rules.
 - [Project standards](docs/project-standards.md)
 - [Requirements vs current architecture](docs/requirements-architecture-comparison.md)
 - [Roadmap](docs/roadmap.md)
+- [Production generation plan](docs/go-zero-surpass-plan.md)
 - [Module maturity matrix](docs/maturity.md)
 - [Stability commitment](docs/stability-commitment.md)
 - [Production evidence](docs/production-evidence.md)
@@ -198,9 +199,6 @@ generated SDK supports `baseUrl`, per-call headers, injected `fetch`, path
 parameters, query parameters, headers, and JSON bodies.
 Use `rozectl api client js example/user.api --out sdk/user.js` for a plain ESM
 JavaScript client with JSDoc typedefs and the same request-building behavior.
-Use `rozectl api client dart example/user.api --out sdk/user.dart` for a Dart
-client that uses `package:http`, typed models, JSON serialization, route path
-parameters, query parameters, headers, and JSON bodies.
 
 `rozectl openapi generate example/user.api --out openapi.json` writes an
 OpenAPI 3 document with component schemas, route parameters, JSON/form request

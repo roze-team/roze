@@ -1,10 +1,46 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub backoff: Duration,
+    pub max_backoff: Duration,
+    pub budget_percent: Option<u32>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            budget_percent: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GovernanceFallback {
+    pub status: u16,
+    pub body: Option<serde_json::Value>,
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GovernancePolicy {
+    pub timeout: Option<Duration>,
+    pub retry: Option<RetryPolicy>,
+    pub rate_limit: Option<RateLimitConfig>,
+    pub breaker: Option<BreakerConfig>,
+    pub shedding: Option<SheddingConfig>,
+    pub fallback: Option<GovernanceFallback>,
+}
 
 const SHEDDING_BUCKETS: usize = 50;
 static RETRY_JITTER_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
