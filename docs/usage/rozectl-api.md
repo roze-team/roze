@@ -972,6 +972,15 @@ Business logic should not pass or construct `trace_id` values. Use
 `trace_id`. Use `ServiceContext` for global resources and Roze native HTTP `Extension<T>`
 for per-request user/session objects injected by custom middleware.
 
+Generated REST, RPC, and Stream entrypoints emit structured lifecycle logs for
+configuration readiness, dependency context initialization, registry changes,
+listener/subscription readiness, shutdown, stop, and failure. Native HTTP logs
+request start/completion with method, path, status, latency, request ID, and
+trace ID. RPC governance logs method start/completion/cancellation with service,
+method, code, latency, request ID, and trace ID. Generated logging never prints
+request or message payloads; application logic remains responsible for
+domain-specific events and must redact secrets and personal data.
+
 Generated REST services pass their Router through
 `roze_middleware::apply_common_with_config`. Its request-context layer restores
 or creates `roze_context::Context` from incoming propagation headers, including

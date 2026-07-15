@@ -31,6 +31,13 @@ async fn main() -> anyhow::Result<()> {{
         .rpc
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rpc config"))?;
+    tracing::info!(
+        service = %config.name,
+        protocol = "rpc",
+        listen_addr = %rpc.addr,
+        advertise_addr = %rpc.advertise_addr.unwrap_or(rpc.addr),
+        "service configuration loaded"
+    );
     let registry = roze_rpc::registry::build_service_registry(&config)?
         .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
     let mut registration = roze_rpc::rpc::ServiceRegistrationGuard::start_with_advertise_addr(
@@ -40,9 +47,11 @@ async fn main() -> anyhow::Result<()> {{
         rpc.advertise_addr.unwrap_or(rpc.addr),
     )
     .await?;
+    tracing::info!(service = %config.name, protocol = "rpc", addr = %rpc.advertise_addr.unwrap_or(rpc.addr), "service registered");
     let service_name = config.name.clone();
     let rpc_addr = rpc.addr;
     let ctx = svc::ServiceContext::new(config).await?;
+    tracing::info!(service = %service_name, protocol = "rpc", "service context initialized");
     let health = ctx.health.clone();
     let (rpc_health, grpc_health_service) =
         roze_rpc::health::RpcHealthReporter::new_for::<{service}Server<server::RpcService>>(
@@ -50,21 +59,24 @@ async fn main() -> anyhow::Result<()> {{
         );
     rpc_health.refresh().await;
     let mut group = ServiceGroup::new();
-    group.add_fn(service_name, move |shutdown| {{
+    group.add_fn(service_name.clone(), move |shutdown| {{
         let ctx = ctx.clone();
         let grpc_health_service = grpc_health_service.clone();
         async move {{
+            tracing::info!(protocol = "rpc", listen_addr = %rpc_addr, "RPC server listening");
             let mut builder = RpcServer::new(rpc_addr).builder();
             builder
                 .add_service(grpc_health_service)
                 .add_service({service}Server::new(server::RpcService::new(ctx)))
                 .serve_with_shutdown(rpc_addr, async move {{
                     shutdown.wait().await;
+                    tracing::info!(protocol = "rpc", "RPC shutdown requested");
                 }})
                 .await
                 .map_err(|error| anyhow::anyhow!("RPC service failed: {{error}}"))
         }}
     }});
+    tracing::info!(service = %service_name, protocol = "rpc", listen_addr = %rpc_addr, "service starting");
     group.add_fn("grpc-health-sync", move |shutdown| {{
         let rpc_health = rpc_health.clone();
         async move {{
@@ -76,6 +88,11 @@ async fn main() -> anyhow::Result<()> {{
     }});
     let result = group.start().await;
     registration.shutdown().await?;
+    tracing::info!(service = %service_name, protocol = "rpc", "service unregistered");
+    match &result {{
+        Ok(()) => tracing::info!(service = %service_name, protocol = "rpc", "service stopped"),
+        Err(error) => tracing::error!(service = %service_name, protocol = "rpc", error = %error, "service failed"),
+    }}
     result?;
 
     Ok(())
@@ -1408,6 +1425,12 @@ mod tests {
         assert!(rendered.contains(".serve_with_shutdown(rpc_addr"));
         assert!(rendered.contains("group.add_fn(\"grpc-health-sync\""));
         assert!(rendered.contains("run_until(std::time::Duration::from_secs(1)"));
+        assert!(rendered.contains("\"service configuration loaded\""));
+        assert!(rendered.contains("\"service registered\""));
+        assert!(rendered.contains("\"RPC server listening\""));
+        assert!(rendered.contains("\"RPC shutdown requested\""));
+        assert!(rendered.contains("\"service stopped\""));
+        assert!(rendered.contains("\"service failed\""));
         assert!(rendered.contains("let result = group.start().await;"));
         assert!(rendered.contains("result?;"));
     }

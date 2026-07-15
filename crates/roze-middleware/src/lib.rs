@@ -100,6 +100,9 @@ pub fn apply_common_with_config(
     mut service: roze_http::Router,
     config: CommonMiddlewareConfig,
 ) -> roze_http::Router {
+    if config.tracing {
+        service = service.layer(roze_http::middleware::from_fn(trace_http_request));
+    }
     if config.request_context {
         service = service.layer(roze_http::middleware::from_fn(inject_request_context));
     }
@@ -113,6 +116,41 @@ pub fn apply_common_with_config(
         service = service.layer(cors_layer(config.cors_config.as_ref()));
     }
     service
+}
+
+async fn trace_http_request(
+    request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let (request_id, trace_id) = request
+        .extensions()
+        .get::<Context>()
+        .map(|context| (context.request_id(), context.trace_id()))
+        .unwrap_or_else(|| (String::new(), String::new()));
+    let started = Instant::now();
+    tracing::info!(
+        protocol = "http",
+        method = %method,
+        path = %path,
+        request_id = %request_id,
+        trace_id = %trace_id,
+        "HTTP request started"
+    );
+
+    let response = next.run(request).await;
+    tracing::info!(
+        protocol = "http",
+        method = %method,
+        path = %path,
+        status = response.status().as_u16(),
+        elapsed_ms = started.elapsed().as_millis(),
+        request_id = %request_id,
+        trace_id = %trace_id,
+        "HTTP request completed"
+    );
+    response
 }
 
 fn cors_layer(config: Option<&CorsConfig>) -> tower_http::cors::CorsLayer {

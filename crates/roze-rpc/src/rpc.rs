@@ -807,6 +807,8 @@ pub struct MethodGuard {
     key: String,
     service: String,
     method: String,
+    request_id: String,
+    trace_id: String,
     started_at: Instant,
     breaker: Option<MethodBreakerConfig>,
     breaker_permit: Option<BreakerPermit>,
@@ -819,6 +821,16 @@ impl Drop for MethodGuard {
         if self.finished {
             return;
         }
+
+        tracing::warn!(
+            protocol = "rpc",
+            service = %self.service,
+            method = %self.method,
+            elapsed_ms = self.started_at.elapsed().as_millis(),
+            request_id = %self.request_id,
+            trace_id = %self.trace_id,
+            "RPC method cancelled"
+        );
 
         let elapsed = self.started_at.elapsed();
         if let (Some(config), Some(permit)) = (self.breaker, self.breaker_permit) {
@@ -983,12 +995,24 @@ pub fn begin_method(
         Some(timeout) => request_ctx.with_timeout(timeout),
         None => request_ctx,
     };
+    let request_id = request_ctx.request_id();
+    let trace_id = request_ctx.trace_id();
+    tracing::info!(
+        protocol = "rpc",
+        service = %service,
+        method = %method,
+        request_id = %request_id,
+        trace_id = %trace_id,
+        "RPC method started"
+    );
     Ok((
         request_ctx,
         MethodGuard {
             key,
             service,
             method,
+            request_id,
+            trace_id,
             started_at: Instant::now(),
             breaker: policy.breaker,
             breaker_permit,
@@ -1015,6 +1039,17 @@ pub fn finish_method(mut guard: MethodGuard, code: impl Into<String>) {
         method_shedding_record(&guard.key, success, elapsed, &config);
     }
     guard.finished = true;
+    tracing::info!(
+        protocol = "rpc",
+        service = %guard.service,
+        method = %guard.method,
+        code = %code,
+        success,
+        elapsed_ms = elapsed.as_millis(),
+        request_id = %guard.request_id,
+        trace_id = %guard.trace_id,
+        "RPC method completed"
+    );
     record_rpc_method(guard.service.as_str(), guard.method.as_str(), code, elapsed);
 }
 

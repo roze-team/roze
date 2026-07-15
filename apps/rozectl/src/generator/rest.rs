@@ -26,40 +26,57 @@ async fn main() -> anyhow::Result<()> {
         .rest
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
+    tracing::info!(
+        service = %config.name,
+        protocol = "rest",
+        listen_addr = %rest.addr,
+        register = rest.register,
+        "service configuration loaded"
+    );
     let mut registration = if rest.register {
         let registry = roze_rpc::registry::build_service_registry(&config)?
             .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
-        Some(roze_rpc::rpc::ServiceRegistrationGuard::start(
+        let registration = roze_rpc::rpc::ServiceRegistrationGuard::start(
             registry,
             config.name.clone(),
             rest.addr,
         )
-        .await?)
+        .await?;
+        tracing::info!(service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
+        Some(registration)
     } else {
         None
     };
     let service_name = config.name.clone();
     let ctx = svc::ServiceContext::new(config).await?;
+    tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
     let health = ctx.health.clone();
     let middleware_config = roze_middleware::CommonMiddlewareConfig::from(&rest.middlewares);
     let app = middleware::app::apply(route::router(ctx));
     let app = roze_middleware::apply_common_with_config(app, middleware_config);
     let mut group = ServiceGroup::new();
     group.add(RestService::new(
-        service_name,
+        service_name.clone(),
         RestServer::new(rest.addr, app),
     ));
     group.add_fn("health-drain", move |shutdown| {
         let health = health.clone();
         async move {
             shutdown.wait().await;
+            tracing::info!(protocol = "rest", "shutdown requested; marking service draining");
             health.mark_draining();
             Ok(())
         }
     });
+    tracing::info!(service = %service_name, protocol = "rest", listen_addr = %rest.addr, "service starting");
     let result = group.start().await;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
+        tracing::info!(service = %service_name, protocol = "rest", "service unregistered");
+    }
+    match &result {
+        Ok(()) => tracing::info!(service = %service_name, protocol = "rest", "service stopped"),
+        Err(error) => tracing::error!(service = %service_name, protocol = "rest", error = %error, "service failed"),
     }
     result?;
 
@@ -2600,6 +2617,11 @@ mod tests {
         assert!(rendered.contains("let health = ctx.health.clone();"));
         assert!(rendered.contains("RestService::new("));
         assert!(rendered.contains("health.mark_draining();"));
+        assert!(rendered.contains("\"service configuration loaded\""));
+        assert!(rendered.contains("\"service context initialized\""));
+        assert!(rendered.contains("\"service starting\""));
+        assert!(rendered.contains("\"service stopped\""));
+        assert!(rendered.contains("\"service failed\""));
         assert!(rendered.contains("let result = group.start().await;"));
         assert!(rendered.contains("result?;"));
     }

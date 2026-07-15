@@ -925,18 +925,24 @@ async fn main() -> anyhow::Result<()> {
 
     let config = config::load(config_path())?;
     let broker = InMemoryBroker::new();
-    tracing::info!(service = %config.name, group = %config.stream.consumer_group, "stream worker starting");
+    tracing::info!(service = %config.name, protocol = "stream", group = %config.stream.consumer_group, topics = config.stream.topics.len(), "service configuration loaded");
     let service_name = config.name.clone();
     let stream_config = config.stream.clone();
     let mut group = ServiceGroup::new();
-    group.add_fn(service_name, move |shutdown| {
+    group.add_fn(service_name.clone(), move |shutdown| {
         let broker = broker.clone();
         let stream_config = stream_config.clone();
         async move {
             stream::consumer::run(&broker, &stream_config, shutdown).await
         }
     });
-    group.start().await
+    tracing::info!(service = %service_name, protocol = "stream", "service starting");
+    let result = group.start().await;
+    match &result {
+        Ok(()) => tracing::info!(service = %service_name, protocol = "stream", "service stopped"),
+        Err(error) => tracing::error!(service = %service_name, protocol = "stream", error = %error, "service failed"),
+    }
+    result
 }
 
 fn config_path() -> PathBuf {
@@ -1021,7 +1027,7 @@ fn render_stream_producer(spec: &ApiSpec) -> String {
 fn render_stream_consumer(spec: &ApiSpec) -> String {
     use std::fmt::Write as _;
     let mut out = String::from(
-        "use roze_mq::{Delivery, Subscriber};\nuse roze_shutdown::ShutdownListener;\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig, shutdown: ShutdownListener) -> anyhow::Result<()>\nwhere\n    S: Subscriber,\n{\n    tracing::info!(group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        let worker_shutdown = shutdown.clone();\n        workers.push(tokio::spawn(async move {\n            loop {\n                tokio::select! {\n                    _ = worker_shutdown.clone().wait() => break,\n                    received = rx.recv() => {\n                        match received {\n                            Ok(delivery) => {\n                                if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(topic = %topic, ?error, \"stream message failed\");\n                                    if let Err(error) = delivery.nack().await {\n                                        tracing::error!(topic = %topic, ?error, \"failed to nack stream message\");\n                                    }\n                                } else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(topic = %topic, ?error, \"failed to ack stream message\");\n                                }\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                                tracing::warn!(topic = %topic, skipped, \"stream receiver lagged\");\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                        }\n                    }\n                }\n            }\n        }));\n    }\n\n    shutdown.wait().await;\n    for worker in workers {\n        worker.await?;\n    }\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
+        "use roze_mq::{Delivery, Subscriber};\nuse roze_shutdown::ShutdownListener;\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig, shutdown: ShutdownListener) -> anyhow::Result<()>\nwhere\n    S: Subscriber,\n{\n    tracing::info!(protocol = \"stream\", group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        tracing::info!(protocol = \"stream\", topic = %topic, \"stream subscription ready\");\n        let worker_shutdown = shutdown.clone();\n        workers.push(tokio::spawn(async move {\n            loop {\n                tokio::select! {\n                    _ = worker_shutdown.clone().wait() => {\n                        tracing::info!(protocol = \"stream\", topic = %topic, \"stream worker stopping\");\n                        break;\n                    },\n                    received = rx.recv() => {\n                        match received {\n                            Ok(delivery) => {\n                                if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"stream message failed\");\n                                    if let Err(error) = delivery.nack().await {\n                                        tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"failed to nack stream message\");\n                                    }\n                                } else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"failed to ack stream message\");\n                                }\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                                tracing::warn!(protocol = \"stream\", topic = %topic, skipped, \"stream receiver lagged\");\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                        }\n                    }\n                }\n            }\n        }));\n    }\n\n    shutdown.wait().await;\n    tracing::info!(protocol = \"stream\", workers = workers.len(), \"stream shutdown requested\");\n    for worker in workers {\n        worker.await?;\n    }\n    tracing::info!(protocol = \"stream\", \"stream workers stopped\");\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
     );
     for method in &spec.rpc_methods {
         writeln!(
@@ -12758,8 +12764,15 @@ mod tests {
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
         assert!(main.contains("use roze_service::ServiceGroup;"));
         assert!(main.contains("stream::consumer::run(&broker, &stream_config, shutdown).await"));
+        assert!(main.contains("\"service configuration loaded\""));
+        assert!(main.contains("\"service starting\""));
+        assert!(main.contains("\"service stopped\""));
+        assert!(main.contains("\"service failed\""));
         assert!(consumer.contains("ShutdownListener"));
         assert!(consumer.contains("tokio::select!"));
+        assert!(consumer.contains("\"stream subscription ready\""));
+        assert!(consumer.contains("\"stream shutdown requested\""));
+        assert!(consumer.contains("\"stream workers stopped\""));
         assert!(consumer.contains("handle_user_created"));
         assert!(manifest.contains("roze-service"));
         assert!(manifest.contains("roze-shutdown"));
