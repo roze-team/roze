@@ -619,9 +619,6 @@ pub fn render_logic_mod(spec: &ApiSpec) -> String {
         out.push_str(&format!("pub mod {group};\n"));
         out.push_str(&format!("pub use {group}::*;\n"));
     }
-    if !spec.rest_routes.is_empty() {
-        out.push('\n');
-    }
 
     out
 }

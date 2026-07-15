@@ -11658,6 +11658,51 @@ mod tests {
         assert!(status.success());
     }
 
+    #[test]
+    fn api_update_logic_module_passes_cargo_fmt_check() {
+        let spec = parse_api(
+            r#"
+            service app-api {
+                @handler health
+                get /app/health returns (HealthResp)
+            }
+
+            type HealthResp {
+                healthy: bool
+            }
+            "#,
+        )
+        .expect("valid api");
+        let out = temp_test_root("rozectl-api-update-logic-rustfmt");
+
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("initial generation");
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update generation");
+
+        let logic_mod =
+            fs::read_to_string(out.join("src/logic/mod.rs")).expect("read updated logic module");
+        assert!(logic_mod.ends_with("pub mod app;\npub use app::*;\n"));
+        assert!(!logic_mod.ends_with("\n\n"));
+
+        let status = Command::new("cargo")
+            .args(["fmt", "--all", "--", "--check"])
+            .current_dir(&out)
+            .status()
+            .expect("run cargo fmt check");
+        assert!(status.success(), "updated API project must pass cargo fmt");
+
+        fs::remove_dir_all(out).expect("remove test output");
+    }
+
     fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         fn visit(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
             let mut entries = fs::read_dir(dir)
