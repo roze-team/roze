@@ -11,6 +11,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -157,7 +158,7 @@ pub enum GeneratorCommand {
 }
 
 impl GeneratorCommand {
-    fn key(&self) -> &'static str {
+    pub fn key(&self) -> &'static str {
         match self {
             Self::ApiGenerate { .. } => "api.generate",
             Self::ApiNew { .. } => "api.new",
@@ -165,6 +166,18 @@ impl GeneratorCommand {
             Self::RpcNew { .. } => "rpc.new",
             Self::ModelGenerate { .. } => "model.generate",
             Self::ModelInspect { .. } => "model.inspect",
+        }
+    }
+
+    /// The application-owned project directory targeted by this command.
+    pub fn output_dir(&self) -> &Path {
+        match self {
+            Self::ApiGenerate { out, .. }
+            | Self::ApiNew { out, .. }
+            | Self::RpcGenerate { out, .. }
+            | Self::RpcNew { out, .. }
+            | Self::ModelGenerate { out, .. }
+            | Self::ModelInspect { out, .. } => out,
         }
     }
 
@@ -183,7 +196,35 @@ impl GeneratorCommand {
     }
 }
 
-type GeneratorHandler = fn(GeneratorCommand) -> anyhow::Result<()>;
+pub type GeneratorHandler = fn(GeneratorCommand) -> anyhow::Result<()>;
+
+/// Versioned, compile-time extension contract for rozectl generators.
+///
+/// Extensions receive an immutable command snapshot, run in registration
+/// order before generation and reverse order afterwards, and own only files
+/// they create outside rozectl's `@generated` artifacts.
+pub const GENERATOR_EXTENSION_API_VERSION: u32 = 1;
+
+pub struct GeneratorExtensionContext<'a> {
+    pub api_version: u32,
+    pub command: &'a GeneratorCommand,
+}
+
+pub trait GeneratorExtension: Send + Sync {
+    fn name(&self) -> &'static str;
+
+    fn before_generate(&self, _context: &GeneratorExtensionContext<'_>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn after_generate(
+        &self,
+        _context: &GeneratorExtensionContext<'_>,
+        _succeeded: bool,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 struct GeneratorEntry {
     key: &'static str,
@@ -217,9 +258,10 @@ const GENERATOR_ENTRIES: &[GeneratorEntry] = &[
     },
 ];
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct GeneratorRegistry {
     handlers: std::collections::BTreeMap<&'static str, GeneratorHandler>,
+    extensions: Vec<Arc<dyn GeneratorExtension>>,
 }
 
 impl GeneratorRegistry {
@@ -235,13 +277,44 @@ impl GeneratorRegistry {
         self.handlers.insert(key, handler);
     }
 
+    pub fn register_extension<E>(&mut self, extension: E)
+    where
+        E: GeneratorExtension + 'static,
+    {
+        self.extensions.push(Arc::new(extension));
+    }
+
     pub fn dispatch(&self, command: GeneratorCommand) -> anyhow::Result<()> {
         let key = command.key();
         let handler = self
             .handlers
             .get(key)
             .ok_or_else(|| anyhow::anyhow!("no generator registered for `{key}`"))?;
-        handler(command)
+        let context = GeneratorExtensionContext {
+            api_version: GENERATOR_EXTENSION_API_VERSION,
+            command: &command,
+        };
+        for extension in &self.extensions {
+            extension.before_generate(&context).with_context(|| {
+                format!(
+                    "generator extension `{}` failed before `{key}`",
+                    extension.name()
+                )
+            })?;
+        }
+        let result = handler(command.clone());
+        let succeeded = result.is_ok();
+        for extension in self.extensions.iter().rev() {
+            extension
+                .after_generate(&context, succeeded)
+                .with_context(|| {
+                    format!(
+                        "generator extension `{}` failed after `{key}`",
+                        extension.name()
+                    )
+                })?;
+        }
+        result
     }
 }
 
@@ -2129,7 +2202,7 @@ fn quote_yaml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-pub(super) fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
+pub fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
     let mut paths = serde_json::Map::<String, serde_json::Value>::new();
     for route in &spec.rest_routes {
         let path = openapi_path(&rest::full_route_path_for_openapi(spec, route));
@@ -2326,8 +2399,10 @@ fn openapi_type_schema_for_spec(spec: &ApiSpec, ty: &crate::parser::TypeDef) -> 
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for field in expanded_api_fields(spec, ty) {
-        properties.insert(field_wire_name(field), openapi_schema(&field.ty));
-        required.push(serde_json::Value::String(field_wire_name(field)));
+        properties.insert(field_wire_name(field), openapi_field_schema(field));
+        if !openapi_field_is_optional(field) {
+            required.push(serde_json::Value::String(field_wire_name(field)));
+        }
     }
     serde_json::json!({
         "type": "object",
@@ -2344,8 +2419,8 @@ fn openapi_parameter(
     serde_json::json!({
         "name": field_wire_name(field),
         "in": location,
-        "required": required,
-        "schema": openapi_schema(&field.ty)
+        "required": required || !openapi_field_is_optional(field),
+        "schema": openapi_field_schema(field)
     })
 }
 
@@ -2353,8 +2428,10 @@ fn openapi_request_body(content_type: &str, fields: &[&crate::parser::Field]) ->
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for field in fields {
-        properties.insert(field_wire_name(field), openapi_schema(&field.ty));
-        required.push(serde_json::Value::String(field_wire_name(field)));
+        properties.insert(field_wire_name(field), openapi_field_schema(field));
+        if !openapi_field_is_optional(field) {
+            required.push(serde_json::Value::String(field_wire_name(field)));
+        }
     }
     serde_json::json!({
         "required": true,
@@ -2429,6 +2506,217 @@ fn openapi_schema(ty: &str) -> serde_json::Value {
         "f64" | "double" => serde_json::json!({ "type": "number", "format": "double" }),
         other => serde_json::json!({ "$ref": format!("#/components/schemas/{other}") }),
     }
+}
+
+fn openapi_field_schema(field: &crate::parser::Field) -> serde_json::Value {
+    let mut schema = openapi_schema(&field.ty);
+    if let Some(rules) = field.validate.as_deref() {
+        apply_openapi_rules(&mut schema, rules);
+        if let Some(object) = schema.as_object_mut() {
+            object.insert(
+                "x-roze-validator".to_string(),
+                serde_json::Value::String(rules.to_string()),
+            );
+        }
+    }
+    schema
+}
+
+fn openapi_field_is_optional(field: &crate::parser::Field) -> bool {
+    field.validate.as_deref().is_some_and(|rules| {
+        openapi_has_rule(rules, "optional") || openapi_has_rule(rules, "omitempty")
+    })
+}
+
+fn apply_openapi_rules(schema: &mut serde_json::Value, rules: &str) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let schema_type = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let outer_rules = rules.split_once(",dive").map_or(rules, |(outer, _)| outer);
+
+    match schema_type.as_deref() {
+        Some("string") => apply_openapi_string_rules(object, outer_rules),
+        Some("integer") | Some("number") => apply_openapi_numeric_rules(object, outer_rules),
+        Some("array") => {
+            apply_openapi_size_rules(object, outer_rules, "minItems", "maxItems");
+            if let Some(inner_rules) = rules.split_once("dive,").map(|(_, inner)| inner) {
+                if let Some(items) = object.get_mut("items") {
+                    apply_openapi_rules(items, inner_rules);
+                }
+            }
+        }
+        Some("object") => {
+            apply_openapi_size_rules(object, outer_rules, "minProperties", "maxProperties");
+            if let Some(inner_rules) = rules.split_once("dive,").map(|(_, inner)| inner) {
+                let (key_rules, value_rules) = split_openapi_map_rules(inner_rules);
+                if let Some(key_rules) = key_rules {
+                    let mut key_schema = serde_json::json!({ "type": "string" });
+                    apply_openapi_rules(&mut key_schema, key_rules);
+                    object.insert("x-roze-map-key-schema".to_string(), key_schema);
+                }
+                if let Some(values) = object.get_mut("additionalProperties") {
+                    apply_openapi_rules(values, value_rules);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(values) = openapi_rule_value(outer_rules, "oneof") {
+        let values = values
+            .split_whitespace()
+            .map(|value| openapi_enum_value(value, schema_type.as_deref()))
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            object.insert("enum".to_string(), serde_json::Value::Array(values));
+        }
+    }
+}
+
+fn split_openapi_map_rules(rules: &str) -> (Option<&str>, &str) {
+    let Some(key_rules) = rules.strip_prefix("keys,") else {
+        return (None, rules);
+    };
+    if let Some((keys, values)) = key_rules.split_once(",endkeys,") {
+        return (Some(keys), values);
+    }
+    if let Some(keys) = key_rules.strip_suffix(",endkeys") {
+        return (Some(keys), "");
+    }
+    (None, rules)
+}
+
+fn apply_openapi_string_rules(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    rules: &str,
+) {
+    apply_openapi_size_rules(object, rules, "minLength", "maxLength");
+    if let Some(length) = openapi_rule_number(rules, "len") {
+        object.insert("minLength".to_string(), length.clone());
+        object.insert("maxLength".to_string(), length);
+    }
+    let format = [
+        ("uuid", "uuid"),
+        ("email", "email"),
+        ("url", "uri"),
+        ("ipv4", "ipv4"),
+        ("ipv6", "ipv6"),
+    ]
+    .into_iter()
+    .find_map(|(rule, format)| openapi_has_rule(rules, rule).then_some(format));
+    if let Some(format) = format {
+        object.insert(
+            "format".to_string(),
+            serde_json::Value::String(format.to_string()),
+        );
+    } else if openapi_has_rule(rules, "ip") {
+        object.insert(
+            "oneOf".to_string(),
+            serde_json::json!([{ "format": "ipv4" }, { "format": "ipv6" }]),
+        );
+    }
+}
+
+fn apply_openapi_numeric_rules(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    rules: &str,
+) {
+    for (rule, keyword) in [
+        ("gte", "minimum"),
+        ("min", "minimum"),
+        ("lte", "maximum"),
+        ("max", "maximum"),
+    ] {
+        if let Some(value) = openapi_rule_number(rules, rule) {
+            object.insert(keyword.to_string(), value);
+        }
+    }
+    if let Some(value) = openapi_rule_number(rules, "gt") {
+        object.insert("minimum".to_string(), value);
+        object.insert(
+            "exclusiveMinimum".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    if let Some(value) = openapi_rule_number(rules, "lt") {
+        object.insert("maximum".to_string(), value);
+        object.insert(
+            "exclusiveMaximum".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    if openapi_has_rule(rules, "nonnegative") {
+        object.insert("minimum".to_string(), serde_json::json!(0));
+    }
+    if openapi_has_rule(rules, "page") {
+        object.insert("minimum".to_string(), serde_json::json!(1));
+    }
+    if openapi_has_rule(rules, "limit") {
+        object.insert("minimum".to_string(), serde_json::json!(1));
+    }
+}
+
+fn apply_openapi_size_rules(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    rules: &str,
+    minimum: &str,
+    maximum: &str,
+) {
+    let min = openapi_rule_number(rules, "min_items")
+        .or_else(|| openapi_rule_number(rules, "min"))
+        .or_else(|| openapi_rule_number(rules, "gte"));
+    let max = openapi_rule_number(rules, "max_items")
+        .or_else(|| openapi_rule_number(rules, "max"))
+        .or_else(|| openapi_rule_number(rules, "lte"));
+    if let Some(length) = openapi_rule_number(rules, "len") {
+        object.insert(minimum.to_string(), length.clone());
+        object.insert(maximum.to_string(), length);
+    } else {
+        if let Some(min) = min {
+            object.insert(minimum.to_string(), min);
+        }
+        if let Some(max) = max {
+            object.insert(maximum.to_string(), max);
+        }
+    }
+}
+
+fn openapi_enum_value(value: &str, schema_type: Option<&str>) -> serde_json::Value {
+    match schema_type {
+        Some("integer") => value
+            .parse::<i64>()
+            .map_or_else(|_| serde_json::json!(value), serde_json::Value::from),
+        Some("number") => value
+            .parse::<f64>()
+            .map_or_else(|_| serde_json::json!(value), serde_json::Value::from),
+        Some("boolean") => value
+            .parse::<bool>()
+            .map_or_else(|_| serde_json::json!(value), serde_json::Value::from),
+        _ => serde_json::json!(value),
+    }
+}
+
+fn openapi_has_rule(rules: &str, name: &str) -> bool {
+    rules.split(',').map(str::trim).any(|rule| rule == name)
+}
+
+fn openapi_rule_value<'a>(rules: &'a str, name: &str) -> Option<&'a str> {
+    rules.split(',').map(str::trim).find_map(|rule| {
+        let (key, value) = rule.split_once('=')?;
+        (key.trim() == name).then_some(value.trim())
+    })
+}
+
+fn openapi_rule_number(rules: &str, name: &str) -> Option<serde_json::Value> {
+    let value = openapi_rule_value(rules, name)?;
+    if let Ok(value) = value.parse::<i64>() {
+        return Some(serde_json::Value::from(value));
+    }
+    value.parse::<f64>().ok().map(serde_json::Value::from)
 }
 
 fn collection_element_type(ty: &str) -> Option<String> {
@@ -2591,50 +2879,6 @@ pub fn write_js_client(api: &Path, out: &Path) -> anyhow::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(out, client::render_js_client(&spec))
-        .with_context(|| format!("failed to write {}", out.display()))
-}
-
-pub fn write_dart_client(api: &Path, out: &Path) -> anyhow::Result<()> {
-    let source = read_api_source(api)?;
-    let spec = crate::parser::parse_api(&source)?;
-    validate_project_kind(&spec, ProjectKind::Rest)?;
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(out, client::render_dart_client(&spec))
-        .with_context(|| format!("failed to write {}", out.display()))
-}
-
-pub fn write_java_client(api: &Path, out: &Path) -> anyhow::Result<()> {
-    let source = read_api_source(api)?;
-    let spec = crate::parser::parse_api(&source)?;
-    validate_project_kind(&spec, ProjectKind::Rest)?;
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(out, client::render_java_client(&spec))
-        .with_context(|| format!("failed to write {}", out.display()))
-}
-
-pub fn write_kotlin_client(api: &Path, out: &Path) -> anyhow::Result<()> {
-    let source = read_api_source(api)?;
-    let spec = crate::parser::parse_api(&source)?;
-    validate_project_kind(&spec, ProjectKind::Rest)?;
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(out, client::render_kotlin_client(&spec))
-        .with_context(|| format!("failed to write {}", out.display()))
-}
-
-pub fn write_swift_client(api: &Path, out: &Path) -> anyhow::Result<()> {
-    let source = read_api_source(api)?;
-    let spec = crate::parser::parse_api(&source)?;
-    validate_project_kind(&spec, ProjectKind::Rest)?;
-    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(out, client::render_swift_client(&spec))
         .with_context(|| format!("failed to write {}", out.display()))
 }
 
@@ -7767,7 +8011,7 @@ fn client_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         ProjectKind::Rpc => "proto/service.proto_and_generated_tonic_client",
     };
     let sdk_targets = match kind {
-        ProjectKind::Rest => "typescript_javascript_dart_and_openapi_consumers",
+        ProjectKind::Rest => "typescript_javascript_and_openapi_consumers",
         ProjectKind::Rpc => "rust_tonic_clients_and_proto_consumers",
     };
     let smoke_probe = match kind {
@@ -11178,9 +11422,93 @@ fn proto_type(ty: &str, known_types: &HashSet<&str>) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+
     use crate::parser::{parse_api, HttpMethod};
 
     use super::*;
+
+    static EXTENSION_EVENTS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+    fn extension_test_handler(command: GeneratorCommand) -> anyhow::Result<()> {
+        assert_eq!(command.key(), "model.generate");
+        EXTENSION_EVENTS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("events")
+            .push("handler".to_string());
+        Ok(())
+    }
+
+    struct RecordingExtension(&'static str);
+
+    impl GeneratorExtension for RecordingExtension {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn before_generate(&self, context: &GeneratorExtensionContext<'_>) -> anyhow::Result<()> {
+            assert_eq!(context.api_version, GENERATOR_EXTENSION_API_VERSION);
+            assert_eq!(context.command.key(), "model.generate");
+            EXTENSION_EVENTS
+                .get_or_init(Default::default)
+                .lock()
+                .expect("events")
+                .push(format!("before:{}", self.0));
+            Ok(())
+        }
+
+        fn after_generate(
+            &self,
+            context: &GeneratorExtensionContext<'_>,
+            succeeded: bool,
+        ) -> anyhow::Result<()> {
+            assert_eq!(context.command.output_dir(), Path::new("extension-out"));
+            assert!(succeeded);
+            EXTENSION_EVENTS
+                .get_or_init(Default::default)
+                .lock()
+                .expect("events")
+                .push(format!("after:{}", self.0));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn generator_extensions_wrap_handlers_in_deterministic_order() {
+        EXTENSION_EVENTS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("events")
+            .clear();
+        let mut registry = GeneratorRegistry::default();
+        registry.register("model.generate", extension_test_handler);
+        registry.register_extension(RecordingExtension("first"));
+        registry.register_extension(RecordingExtension("second"));
+        registry
+            .dispatch(GeneratorCommand::ModelGenerate {
+                schema: PathBuf::from("schema.ent"),
+                out: PathBuf::from("extension-out"),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+                format: model::ModelFormat::Ent,
+                orm: model::ModelOrm::SeaOrm,
+            })
+            .expect("dispatch");
+        assert_eq!(
+            *EXTENSION_EVENTS
+                .get_or_init(Default::default)
+                .lock()
+                .expect("events"),
+            [
+                "before:first",
+                "before:second",
+                "handler",
+                "after:second",
+                "after:first",
+            ]
+        );
+    }
 
     #[test]
     fn generated_service_context_accepts_persistent_outbox_store() {
@@ -11206,6 +11534,130 @@ mod tests {
                 .expect("system time")
                 .as_nanos()
         ))
+    }
+
+    fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let mut entries = fs::read_dir(dir)
+                .expect("read generated directory")
+                .map(|entry| entry.expect("read generated entry"))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+
+            for entry in entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, files);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("generated path is below root")
+                        .to_path_buf();
+                    files.insert(relative, fs::read(path).expect("read generated file"));
+                }
+            }
+        }
+
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+
+    #[test]
+    fn repeated_rest_and_rpc_updates_are_byte_deterministic() {
+        let root = temp_test_root("rozectl-deterministic-update-test");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        let rest = parse_api(
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+
+            type GetUserReq {
+                id: u64
+            }
+
+            type UserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid rest api");
+        let rest_out = root.join("user-api");
+        generate_rest_project(
+            &rest,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create rest project");
+        fs::write(
+            rest_out.join("src/logic/users/get_user.rs"),
+            "// application-owned rest logic\n",
+        )
+        .expect("customize rest logic");
+        generate_rest_project(
+            &rest,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("first rest update");
+        let rest_first = snapshot_tree(&rest_out);
+        generate_rest_project(
+            &rest,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("second rest update");
+        assert_eq!(rest_first, snapshot_tree(&rest_out));
+
+        let rpc = parse_api(
+            r#"
+            service catalog-rpc {
+                rpc GetProduct (GetProductReq) returns (ProductResp)
+            }
+
+            type GetProductReq {
+                id: u64
+            }
+
+            type ProductResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let rpc_out = root.join("catalog-rpc");
+        generate_rpc_project(
+            &rpc,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create rpc project");
+        fs::write(
+            rpc_out.join("src/logic/get_product.rs"),
+            "// application-owned rpc logic\n",
+        )
+        .expect("customize rpc logic");
+        generate_rpc_project(
+            &rpc,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("first rpc update");
+        let rpc_first = snapshot_tree(&rpc_out);
+        generate_rpc_project(
+            &rpc,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("second rpc update");
+        assert_eq!(rpc_first, snapshot_tree(&rpc_out));
+
+        fs::remove_dir_all(root).expect("remove test output");
     }
 
     fn repo_root() -> PathBuf {
@@ -11540,6 +11992,93 @@ mod tests {
         assert!(
             document["components"]["schemas"]["CreateUserReq"]["properties"]["baseReq"].is_null()
         );
+    }
+
+    #[test]
+    fn openapi_document_projects_validator_constraints() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @handler searchUsers
+                post /users/search (SearchReq) returns (SearchResp)
+            }
+            type (
+                SearchReq {
+                    query string `json:"query" validate:"required,min=2,max=64"`
+                    status string `json:"status" validate:"oneof=active disabled"`
+                    page int `json:"page" validate:"gte=1,lte=500"`
+                    score double `json:"score" validate:"gt=0,lt=100"`
+                    requestId string `json:"requestId" validate:"uuid"`
+                    email string `json:"email,optional" validate:"omitempty,email"`
+                    codes []string `json:"codes" validate:"min_items=1,max_items=3,dive,min=2,max=8"`
+                    weights map[string]int `json:"weights" validate:"min=1,dive,gte=1,lte=10"`
+                    labels map[string]string `json:"labels" validate:"min=1,dive,keys,min=2,max=8,endkeys,required,min=1"`
+                    resourceCode string `json:"resourceCode" validate:"required_if=status active,code"`
+                }
+                SearchResp {
+                    ok bool `json:"ok"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let document = openapi_document(&spec);
+        let schema = &document["components"]["schemas"]["SearchReq"];
+        assert_eq!(schema["properties"]["query"]["minLength"], 2);
+        assert_eq!(schema["properties"]["query"]["maxLength"], 64);
+        assert_eq!(
+            schema["properties"]["status"]["enum"],
+            serde_json::json!(["active", "disabled"])
+        );
+        assert_eq!(schema["properties"]["page"]["minimum"], 1);
+        assert_eq!(schema["properties"]["page"]["maximum"], 500);
+        assert_eq!(schema["properties"]["score"]["minimum"], 0);
+        assert_eq!(schema["properties"]["score"]["exclusiveMinimum"], true);
+        assert_eq!(schema["properties"]["score"]["maximum"], 100);
+        assert_eq!(schema["properties"]["score"]["exclusiveMaximum"], true);
+        assert_eq!(schema["properties"]["requestId"]["format"], "uuid");
+        assert_eq!(schema["properties"]["email"]["format"], "email");
+        assert_eq!(schema["properties"]["codes"]["minItems"], 1);
+        assert_eq!(schema["properties"]["codes"]["maxItems"], 3);
+        assert_eq!(schema["properties"]["codes"]["items"]["minLength"], 2);
+        assert_eq!(schema["properties"]["codes"]["items"]["maxLength"], 8);
+        assert_eq!(schema["properties"]["weights"]["minProperties"], 1);
+        assert_eq!(
+            schema["properties"]["weights"]["additionalProperties"]["minimum"],
+            1
+        );
+        assert_eq!(
+            schema["properties"]["weights"]["additionalProperties"]["maximum"],
+            10
+        );
+        assert_eq!(
+            schema["properties"]["labels"]["x-roze-map-key-schema"]["minLength"],
+            2
+        );
+        assert_eq!(
+            schema["properties"]["labels"]["x-roze-map-key-schema"]["maxLength"],
+            8
+        );
+        assert_eq!(
+            schema["properties"]["labels"]["additionalProperties"]["minLength"],
+            1
+        );
+        assert!(schema["properties"]["labels"]["propertyNames"].is_null());
+        assert_eq!(
+            schema["properties"]["resourceCode"]["x-roze-validator"],
+            "required_if=status active,code"
+        );
+        assert!(schema["required"]
+            .as_array()
+            .is_some_and(|required| !required.contains(&serde_json::json!("email"))));
+
+        let body = &document["paths"]["/users/search"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+        assert_eq!(body["properties"]["requestId"]["format"], "uuid");
+        assert!(body["required"]
+            .as_array()
+            .is_some_and(|required| !required.contains(&serde_json::json!("email"))));
     }
 
     #[test]

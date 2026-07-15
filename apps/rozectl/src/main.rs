@@ -1,6 +1,3 @@
-mod generator;
-mod parser;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
@@ -14,10 +11,12 @@ use std::{
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use generator::{
+use rozectl::generator::{
+    self,
     native::{DockerOptions, HelmOptions, KubeDeployOptions},
     DependencySource, GenerateMode, GenerateOptions, GeneratorCommand,
 };
+use rozectl::parser;
 
 #[derive(Debug, Parser)]
 #[command(name = "rozectl", version, about = "Roze service code generator")]
@@ -364,55 +363,6 @@ enum ApiCommands {
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
     },
-    Dart {
-        #[arg(short = 'a', long)]
-        api: PathBuf,
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: PathBuf,
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
-    Java {
-        #[arg(short = 'a', long)]
-        api: PathBuf,
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: PathBuf,
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
-    #[command(alias = "kt")]
-    Kotlin {
-        #[arg(short = 'a', long)]
-        api: PathBuf,
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: PathBuf,
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
-    Swift {
-        #[arg(short = 'a', long)]
-        api: PathBuf,
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: PathBuf,
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
-    Ios {
-        #[arg(short = 'a', long)]
-        api: PathBuf,
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: PathBuf,
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
-    Android {
-        #[arg(short = 'a', long)]
-        api: PathBuf,
-        #[arg(short = 'd', long, default_value = ".")]
-        dir: PathBuf,
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
     Doc {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -455,37 +405,6 @@ enum ClientCommands {
     Js {
         api: PathBuf,
         #[arg(short = 'o', long, alias = "o", default_value = "client.js")]
-        out: PathBuf,
-    },
-    Dart {
-        api: PathBuf,
-        #[arg(short = 'o', long, alias = "o", default_value = "client.dart")]
-        out: PathBuf,
-    },
-    Java {
-        api: PathBuf,
-        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.java")]
-        out: PathBuf,
-    },
-    #[command(alias = "kt")]
-    Kotlin {
-        api: PathBuf,
-        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.kt")]
-        out: PathBuf,
-    },
-    Swift {
-        api: PathBuf,
-        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.swift")]
-        out: PathBuf,
-    },
-    Ios {
-        api: PathBuf,
-        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.swift")]
-        out: PathBuf,
-    },
-    Android {
-        api: PathBuf,
-        #[arg(short = 'o', long, alias = "o", default_value = "RozeApiClient.kt")]
         out: PathBuf,
     },
 }
@@ -595,6 +514,8 @@ enum KubeCommands {
         #[arg(long)]
         config_map: Option<String>,
         #[arg(long)]
+        secret: Option<String>,
+        #[arg(long)]
         tls_secret: Option<String>,
         #[arg(long)]
         image_pull_secret: Option<String>,
@@ -641,6 +562,8 @@ enum HelmCommands {
         env: Vec<String>,
         #[arg(long)]
         config_map: Option<String>,
+        #[arg(long)]
+        secret: Option<String>,
         #[arg(long)]
         tls_secret: Option<String>,
         #[arg(long)]
@@ -1160,26 +1083,6 @@ fn run() -> anyhow::Result<()> {
                     validate_api_for_generation(&api)?;
                     generator::write_js_client(&api, &out)?;
                 }
-                ClientCommands::Dart { api, out } => {
-                    validate_api_for_generation(&api)?;
-                    generator::write_dart_client(&api, &out)?;
-                }
-                ClientCommands::Java { api, out } => {
-                    validate_api_for_generation(&api)?;
-                    generator::write_java_client(&api, &out)?;
-                }
-                ClientCommands::Kotlin { api, out } => {
-                    validate_api_for_generation(&api)?;
-                    generator::write_kotlin_client(&api, &out)?;
-                }
-                ClientCommands::Swift { api, out } | ClientCommands::Ios { api, out } => {
-                    validate_api_for_generation(&api)?;
-                    generator::write_swift_client(&api, &out)?;
-                }
-                ClientCommands::Android { api, out } => {
-                    validate_api_for_generation(&api)?;
-                    generator::write_kotlin_client(&api, &out)?;
-                }
             },
             ApiCommands::Ts { api, dir, out } => {
                 validate_api_for_generation(&api)?;
@@ -1188,38 +1091,6 @@ fn run() -> anyhow::Result<()> {
             ApiCommands::Js { api, dir, out } => {
                 validate_api_for_generation(&api)?;
                 generator::write_js_client(&api, &resolve_client_out(dir, out, "client.js"))?;
-            }
-            ApiCommands::Dart { api, dir, out } => {
-                validate_api_for_generation(&api)?;
-                generator::write_dart_client(&api, &resolve_client_out(dir, out, "client.dart"))?;
-            }
-            ApiCommands::Java { api, dir, out } => {
-                validate_api_for_generation(&api)?;
-                generator::write_java_client(
-                    &api,
-                    &resolve_client_out(dir, out, "RozeApiClient.java"),
-                )?;
-            }
-            ApiCommands::Kotlin { api, dir, out } => {
-                validate_api_for_generation(&api)?;
-                generator::write_kotlin_client(
-                    &api,
-                    &resolve_client_out(dir, out, "RozeApiClient.kt"),
-                )?;
-            }
-            ApiCommands::Swift { api, dir, out } | ApiCommands::Ios { api, dir, out } => {
-                validate_api_for_generation(&api)?;
-                generator::write_swift_client(
-                    &api,
-                    &resolve_client_out(dir, out, "RozeApiClient.swift"),
-                )?;
-            }
-            ApiCommands::Android { api, dir, out } => {
-                validate_api_for_generation(&api)?;
-                generator::write_kotlin_client(
-                    &api,
-                    &resolve_client_out(dir, out, "RozeApiClient.kt"),
-                )?;
             }
             ApiCommands::Doc { dir, out, api } => {
                 validate_optional_api_for_generation(api.as_deref())?;
@@ -1630,6 +1501,7 @@ fn run() -> anyhow::Result<()> {
                 env,
                 env_file,
                 config_map,
+                secret,
                 tls_secret,
                 image_pull_secret,
                 min_available,
@@ -1653,6 +1525,7 @@ fn run() -> anyhow::Result<()> {
                     env,
                     env_file,
                     config_map,
+                    secret,
                     tls_secret,
                     image_pull_secret,
                     min_available,
@@ -1678,6 +1551,7 @@ fn run() -> anyhow::Result<()> {
                 target_memory,
                 env,
                 config_map,
+                secret,
                 tls_secret,
                 image_pull_secret,
                 min_available,
@@ -1704,6 +1578,7 @@ fn run() -> anyhow::Result<()> {
                         env,
                         env_file: None,
                         config_map,
+                        secret,
                         tls_secret,
                         image_pull_secret,
                         min_available,
@@ -3902,6 +3777,8 @@ fn validate_helm_chart_dir(chart: &Path) -> Vec<String> {
             "\"additionalProperties\": false",
             "^sha256:[0-9a-fA-F]{64}$",
             "pullSecrets",
+            "secretRef",
+            "namedReference",
             "targetMemoryUtilizationPercentage",
             "scrapeTimeout",
         ],
@@ -4108,6 +3985,31 @@ fn validate_helm_values(chart: &Path, issues: &mut Vec<String>) {
         _ => {
             issues.push("`values.yaml` image.pullSecrets must be an array of DNS-1123 names".into())
         }
+    }
+    match values
+        .pointer("/envFrom")
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(entries)
+            if entries.iter().all(|entry| {
+                let Some(entry) = entry.as_object() else {
+                    return false;
+                };
+                if entry.len() != 1 {
+                    return false;
+                }
+                ["configMapRef", "secretRef"].iter().any(|kind| {
+                    entry
+                        .get(*kind)
+                        .and_then(|reference| reference.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| pull_secret_pattern.is_match(name))
+                })
+            }) => {}
+        _ => issues.push(
+            "`values.yaml` envFrom entries must contain one DNS-1123 configMapRef or secretRef"
+                .into(),
+        ),
     }
 
     validate_values_percentage(&values, "/service/port", 1, 65_535, issues);
@@ -4365,7 +4267,7 @@ fn render_completion(shell: CompletionShell) -> &'static str {
             return 0
             ;;
         api)
-            COMPREPLY=( $(compgen -W "generate go swagger new client ts js dart java kt kotlin swift ios android doc plugin validate format" -- "$cur") )
+            COMPREPLY=( $(compgen -W "generate go swagger new client ts js doc plugin validate format" -- "$cur") )
             return 0
             ;;
         rpc)
@@ -4431,7 +4333,7 @@ compdef _rozectl rozectl
         CompletionShell::Fish => {
             r#"complete -c rozectl -f
 complete -c rozectl -n "__fish_use_subcommand" -a "api rpc model search stream template diff contract mock test dev doctor doc openapi docker kube helm bug config migrate completion env upgrade quickstart help"
-complete -c rozectl -n "__fish_seen_subcommand_from api" -a "generate go swagger new client ts js dart java kt kotlin swift ios android doc plugin validate format"
+complete -c rozectl -n "__fish_seen_subcommand_from api" -a "generate go swagger new client ts js doc plugin validate format"
 complete -c rozectl -n "__fish_seen_subcommand_from rpc" -a "generate new protoc template"
 complete -c rozectl -n "__fish_seen_subcommand_from model" -a "generate inspect mysql pg mongo"
 complete -c rozectl -n "__fish_seen_subcommand_from config" -a "init show path"
@@ -4979,7 +4881,7 @@ envFrom: []
         .expect("write values");
         fs::write(
             root.join("values.schema.json"),
-            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema", "additionalProperties": false, "digest":"^sha256:[0-9a-fA-F]{64}$", "pullSecrets":[], "targetMemoryUtilizationPercentage":{}, "scrapeTimeout":{}}"#,
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema", "additionalProperties": false, "digest":"^sha256:[0-9a-fA-F]{64}$", "pullSecrets":[], "secretRef":{}, "namedReference":{}, "targetMemoryUtilizationPercentage":{}, "scrapeTimeout":{}}"#,
         )
         .expect("write values schema");
         fs::write(
@@ -5705,205 +5607,16 @@ envFrom: []
             }
         ));
 
-        let dart_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "dart",
-            "user.api",
-            "--out",
-            "sdk/user.dart",
-        ])
-        .expect("parse api client dart");
-        assert!(matches!(
-            dart_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Dart { .. }
-                }
-            }
-        ));
-
-        let direct_dart_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "dart",
-            "-a",
-            "user.api",
-            "-o",
-            "sdk/user.dart",
-        ])
-        .expect("parse goctl-style api dart");
-        assert!(matches!(
-            direct_dart_client.command,
-            Commands::Api {
-                command: ApiCommands::Dart { out: Some(_), .. }
-            }
-        ));
-
-        let java_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "java",
-            "user.api",
-            "--out",
-            "sdk/RozeApiClient.java",
-        ])
-        .expect("parse api client java");
-        assert!(matches!(
-            java_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Java { .. }
-                }
-            }
-        ));
-
-        let kotlin_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "kotlin",
-            "user.api",
-            "--out",
-            "sdk/RozeApiClient.kt",
-        ])
-        .expect("parse api client kotlin");
-        assert!(matches!(
-            kotlin_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Kotlin { .. }
-                }
-            }
-        ));
-
-        let kt_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "kt",
-            "user.api",
-            "--out",
-            "sdk/RozeApiClient.kt",
-        ])
-        .expect("parse api client kt alias");
-        assert!(matches!(
-            kt_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Kotlin { .. }
-                }
-            }
-        ));
-
-        let direct_java_client =
-            Cli::try_parse_from(["rozectl", "api", "java", "-a", "user.api", "-d", "sdk"])
-                .expect("parse goctl-style api java");
-        assert!(matches!(
-            direct_java_client.command,
-            Commands::Api {
-                command: ApiCommands::Java { .. }
-            }
-        ));
-
-        let direct_kotlin_client =
-            Cli::try_parse_from(["rozectl", "api", "kotlin", "-a", "user.api", "-d", "sdk"])
-                .expect("parse goctl-style api kotlin");
-        assert!(matches!(
-            direct_kotlin_client.command,
-            Commands::Api {
-                command: ApiCommands::Kotlin { .. }
-            }
-        ));
-
-        let direct_kt_client =
-            Cli::try_parse_from(["rozectl", "api", "kt", "-a", "user.api", "-d", "sdk"])
-                .expect("parse goctl-style api kt alias");
-        assert!(matches!(
-            direct_kt_client.command,
-            Commands::Api {
-                command: ApiCommands::Kotlin { .. }
-            }
-        ));
-
-        let swift_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "swift",
-            "user.api",
-            "--out",
-            "sdk/RozeApiClient.swift",
-        ])
-        .expect("parse api client swift");
-        assert!(matches!(
-            swift_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Swift { .. }
-                }
-            }
-        ));
-
-        let ios_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "ios",
-            "user.api",
-            "--out",
-            "sdk/RozeApiClient.swift",
-        ])
-        .expect("parse api client ios");
-        assert!(matches!(
-            ios_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Ios { .. }
-                }
-            }
-        ));
-
-        let android_client = Cli::try_parse_from([
-            "rozectl",
-            "api",
-            "client",
-            "android",
-            "user.api",
-            "--out",
-            "sdk/RozeApiClient.kt",
-        ])
-        .expect("parse api client android");
-        assert!(matches!(
-            android_client.command,
-            Commands::Api {
-                command: ApiCommands::Client {
-                    command: ClientCommands::Android { .. }
-                }
-            }
-        ));
-
-        let direct_ios_client =
-            Cli::try_parse_from(["rozectl", "api", "ios", "-a", "user.api", "-d", "sdk"])
-                .expect("parse goctl-style api ios");
-        assert!(matches!(
-            direct_ios_client.command,
-            Commands::Api {
-                command: ApiCommands::Ios { .. }
-            }
-        ));
-
-        let direct_android_client =
-            Cli::try_parse_from(["rozectl", "api", "android", "-a", "user.api", "-d", "sdk"])
-                .expect("parse goctl-style api android");
-        assert!(matches!(
-            direct_android_client.command,
-            Commands::Api {
-                command: ApiCommands::Android { .. }
-            }
-        ));
+        for removed in ["dart", "java", "kotlin", "kt", "swift", "ios", "android"] {
+            assert!(
+                Cli::try_parse_from(["rozectl", "api", "client", removed, "user.api"]).is_err(),
+                "removed client target `{removed}` must stay unavailable"
+            );
+            assert!(
+                Cli::try_parse_from(["rozectl", "api", removed, "-a", "user.api"]).is_err(),
+                "removed direct API target `{removed}` must stay unavailable"
+            );
+        }
 
         let mongo = Cli::try_parse_from([
             "rozectl",

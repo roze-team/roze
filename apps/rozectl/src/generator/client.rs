@@ -12,6 +12,18 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("  baseUrl?: string;\n");
     out.push_str("  headers?: Record<string, string>;\n");
     out.push_str("  fetch?: typeof fetch;\n");
+    out.push_str("  authToken?: string | (() => string | Promise<string>);\n");
+    out.push_str("  timeoutMs?: number;\n");
+    out.push_str("  signal?: AbortSignal;\n");
+    out.push_str("  maxAttempts?: number;\n");
+    out.push_str("  retryBaseDelayMs?: number;\n");
+    out.push_str("  beforeRequest?: (url: string, init: RequestInit) => RequestInit | Promise<RequestInit>;\n");
+    out.push_str(
+        "  afterResponse?: (response: Response, attempt: number) => void | Promise<void>;\n",
+    );
+    out.push_str("}\n\n");
+    out.push_str("export class RozeApiError extends Error {\n");
+    out.push_str("  constructor(public readonly status: number, public readonly code: string, message: string, public readonly traceId?: string, public readonly details?: unknown, public readonly retryAfter?: string) { super(message); this.name = 'RozeApiError'; }\n");
     out.push_str("}\n\n");
 
     for ty in &spec.types {
@@ -33,13 +45,53 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("  const qs = params.toString();\n");
     out.push_str("  const url = `${baseUrl}${path}${qs ? `?${qs}` : ''}`;\n");
     out.push_str("  const requestHeaders: Record<string, string> = { ...(options.headers ?? {}), ...headers };\n");
-    out.push_str("  const init: RequestInit = { method, headers: requestHeaders };\n");
+    out.push_str("  const token = typeof options.authToken === 'function' ? await options.authToken() : options.authToken;\n");
+    out.push_str("  if (token && !requestHeaders.authorization && !requestHeaders.Authorization) requestHeaders.authorization = `Bearer ${token}`;\n");
+    out.push_str("  let init: RequestInit = { method, headers: requestHeaders };\n");
     out.push_str("  if (body !== undefined) {\n");
     out.push_str("    requestHeaders['content-type'] = requestHeaders['content-type'] ?? 'application/json';\n");
     out.push_str("    init.body = JSON.stringify(body);\n");
     out.push_str("  }\n");
-    out.push_str("  const response = await fetchImpl(url, init);\n");
-    out.push_str("  if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);\n");
+    out.push_str("  const idempotent = method === 'GET' || method === 'HEAD';\n");
+    out.push_str("  const maxAttempts = idempotent ? Math.max(1, Math.min(options.maxAttempts ?? 1, 5)) : 1;\n");
+    out.push_str("  let response: Response | undefined;\n");
+    out.push_str("  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n");
+    out.push_str("    if (options.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError');\n");
+    out.push_str("    const controller = new AbortController();\n");
+    out.push_str("    const abort = () => controller.abort(options.signal?.reason);\n");
+    out.push_str("    options.signal?.addEventListener('abort', abort, { once: true });\n");
+    out.push_str("    const timer = options.timeoutMs && options.timeoutMs > 0 ? setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), options.timeoutMs) : undefined;\n");
+    out.push_str("    const attemptInit = options.beforeRequest ? await options.beforeRequest(url, { ...init, signal: controller.signal }) : { ...init, signal: controller.signal };\n");
+    out.push_str("    let attemptResponse: Response;\n");
+    out.push_str("    try {\n");
+    out.push_str("      attemptResponse = await fetchImpl(url, attemptInit);\n");
+    out.push_str("    } catch (error) {\n");
+    out.push_str("      if (controller.signal.aborted || attempt === maxAttempts) throw error;\n");
+    out.push_str("      await new Promise(resolve => setTimeout(resolve, Math.random() * (options.retryBaseDelayMs ?? 100) * 2 ** (attempt - 1)));\n");
+    out.push_str("      continue;\n");
+    out.push_str("    } finally {\n");
+    out.push_str("      if (timer !== undefined) clearTimeout(timer);\n");
+    out.push_str("      options.signal?.removeEventListener('abort', abort);\n");
+    out.push_str("    }\n");
+    out.push_str("    response = attemptResponse;\n");
+    out.push_str("    await options.afterResponse?.(attemptResponse, attempt);\n");
+    out.push_str("    if (attemptResponse.ok || ![429, 502, 503, 504].includes(attemptResponse.status) || attempt === maxAttempts) break;\n");
+    out.push_str("    await attemptResponse.body?.cancel();\n");
+    out.push_str("    const retryAfter = Number(attemptResponse.headers.get('retry-after'));\n");
+    out.push_str("    const cap = (options.retryBaseDelayMs ?? 100) * 2 ** (attempt - 1);\n");
+    out.push_str("    const delay = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1000 : Math.random() * cap;\n");
+    out.push_str("    await new Promise(resolve => setTimeout(resolve, delay));\n");
+    out.push_str("  }\n");
+    out.push_str("  if (!response) throw new Error('request completed without a response');\n");
+    out.push_str("  if (!response.ok) {\n");
+    out.push_str("    const text = await response.text();\n");
+    out.push_str("    let error: Record<string, unknown> = {};\n");
+    out.push_str("    try { error = JSON.parse(text) as Record<string, unknown>; } catch { /* non-JSON upstream response */ }\n");
+    out.push_str("    const code = typeof error.code === 'string' || typeof error.code === 'number' ? String(error.code) : `HTTP_${response.status}`;\n");
+    out.push_str("    const message = typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`);\n");
+    out.push_str("    const traceId = typeof error.trace_id === 'string' ? error.trace_id : (response.headers.get('x-trace-id') ?? undefined);\n");
+    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("  }\n");
     out.push_str("  if (response.status === 204) return undefined as T;\n");
     out.push_str("  return await response.json() as T;\n");
     out.push_str("}\n\n");
@@ -60,7 +112,17 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str(" * @property {string} [baseUrl]\n");
     out.push_str(" * @property {Record<string, string>} [headers]\n");
     out.push_str(" * @property {typeof fetch} [fetch]\n");
+    out.push_str(" * @property {string|(() => string|Promise<string>)} [authToken]\n");
+    out.push_str(" * @property {number} [timeoutMs]\n");
+    out.push_str(" * @property {AbortSignal} [signal]\n");
+    out.push_str(" * @property {number} [maxAttempts]\n");
+    out.push_str(" * @property {number} [retryBaseDelayMs]\n");
+    out.push_str(" * @property {(url: string, init: RequestInit) => RequestInit|Promise<RequestInit>} [beforeRequest]\n");
+    out.push_str(" * @property {(response: Response, attempt: number) => void|Promise<void>} [afterResponse]\n");
     out.push_str(" */\n\n");
+    out.push_str("export class RozeApiError extends Error {\n");
+    out.push_str("  constructor(status, code, message, traceId, details, retryAfter) { super(message); this.name = 'RozeApiError'; this.status = status; this.code = code; this.traceId = traceId; this.details = details; this.retryAfter = retryAfter; }\n");
+    out.push_str("}\n\n");
 
     for ty in &spec.types {
         out.push_str(&render_js_typedef(spec, ty));
@@ -81,13 +143,55 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str("  const qs = params.toString();\n");
     out.push_str("  const url = `${baseUrl}${path}${qs ? `?${qs}` : ''}`;\n");
     out.push_str("  const requestHeaders = { ...(options.headers ?? {}), ...headers };\n");
-    out.push_str("  const init = { method, headers: requestHeaders };\n");
+    out.push_str("  const token = typeof options.authToken === 'function' ? await options.authToken() : options.authToken;\n");
+    out.push_str("  if (token && !requestHeaders.authorization && !requestHeaders.Authorization) requestHeaders.authorization = `Bearer ${token}`;\n");
+    out.push_str("  let init = { method, headers: requestHeaders };\n");
     out.push_str("  if (body !== undefined) {\n");
     out.push_str("    requestHeaders['content-type'] = requestHeaders['content-type'] ?? 'application/json';\n");
     out.push_str("    init.body = JSON.stringify(body);\n");
     out.push_str("  }\n");
-    out.push_str("  const response = await fetchImpl(url, init);\n");
-    out.push_str("  if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);\n");
+    out.push_str("  const idempotent = method === 'GET' || method === 'HEAD';\n");
+    out.push_str("  const maxAttempts = idempotent ? Math.max(1, Math.min(options.maxAttempts ?? 1, 5)) : 1;\n");
+    out.push_str("  let response;\n");
+    out.push_str("  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n");
+    out.push_str("    if (options.signal?.aborted) throw options.signal.reason ?? new DOMException('Aborted', 'AbortError');\n");
+    out.push_str("    const controller = new AbortController();\n");
+    out.push_str("    const abort = () => controller.abort(options.signal?.reason);\n");
+    out.push_str("    options.signal?.addEventListener('abort', abort, { once: true });\n");
+    out.push_str("    const timer = options.timeoutMs && options.timeoutMs > 0 ? setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), options.timeoutMs) : undefined;\n");
+    out.push_str("    const attemptInit = options.beforeRequest ? await options.beforeRequest(url, { ...init, signal: controller.signal }) : { ...init, signal: controller.signal };\n");
+    out.push_str("    let attemptResponse;\n");
+    out.push_str("    try {\n");
+    out.push_str("      attemptResponse = await fetchImpl(url, attemptInit);\n");
+    out.push_str("    } catch (error) {\n");
+    out.push_str("      if (controller.signal.aborted || attempt === maxAttempts) throw error;\n");
+    out.push_str("      await new Promise(resolve => setTimeout(resolve, Math.random() * (options.retryBaseDelayMs ?? 100) * 2 ** (attempt - 1)));\n");
+    out.push_str("      continue;\n");
+    out.push_str("    } finally {\n");
+    out.push_str("      if (timer !== undefined) clearTimeout(timer);\n");
+    out.push_str("      options.signal?.removeEventListener('abort', abort);\n");
+    out.push_str("    }\n");
+    out.push_str("    response = attemptResponse;\n");
+    out.push_str("    await options.afterResponse?.(attemptResponse, attempt);\n");
+    out.push_str("    if (attemptResponse.ok || ![429, 502, 503, 504].includes(attemptResponse.status) || attempt === maxAttempts) break;\n");
+    out.push_str("    await attemptResponse.body?.cancel();\n");
+    out.push_str("    const retryAfter = Number(attemptResponse.headers.get('retry-after'));\n");
+    out.push_str("    const cap = (options.retryBaseDelayMs ?? 100) * 2 ** (attempt - 1);\n");
+    out.push_str("    const delay = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1000 : Math.random() * cap;\n");
+    out.push_str("    await new Promise(resolve => setTimeout(resolve, delay));\n");
+    out.push_str("  }\n");
+    out.push_str("  if (!response) throw new Error('request completed without a response');\n");
+    out.push_str("  if (!response.ok) {\n");
+    out.push_str("    const text = await response.text();\n");
+    out.push_str("    let error = {};\n");
+    out.push_str(
+        "    try { error = JSON.parse(text); } catch { /* non-JSON upstream response */ }\n",
+    );
+    out.push_str("    const code = typeof error.code === 'string' || typeof error.code === 'number' ? String(error.code) : `HTTP_${response.status}`;\n");
+    out.push_str("    const message = typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`);\n");
+    out.push_str("    const traceId = typeof error.trace_id === 'string' ? error.trace_id : (response.headers.get('x-trace-id') ?? undefined);\n");
+    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("  }\n");
     out.push_str("  if (response.status === 204) return undefined;\n");
     out.push_str("  return await response.json();\n");
     out.push_str("}\n\n");
@@ -97,477 +201,6 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
         out.push('\n');
     }
 
-    out
-}
-
-pub fn render_dart_client(spec: &ApiSpec) -> String {
-    let mut out = String::from(
-        "// Generated by rozectl. Do not edit by hand.\n\nimport 'dart:convert';\n\nimport 'package:http/http.dart' as http;\n\n",
-    );
-
-    for ty in &spec.types {
-        out.push_str(&render_dart_model(spec, ty));
-        out.push('\n');
-    }
-
-    out.push_str("class RozeApiClient {\n");
-    out.push_str("  RozeApiClient({required this.baseUrl, http.Client? httpClient, Map<String, String>? headers})\n");
-    out.push_str("      : _httpClient = httpClient ?? http.Client(),\n");
-    out.push_str("        _headers = headers ?? const {};\n\n");
-    out.push_str("  final String baseUrl;\n");
-    out.push_str("  final http.Client _httpClient;\n");
-    out.push_str("  final Map<String, String> _headers;\n\n");
-
-    for route in &spec.rest_routes {
-        out.push_str(&render_dart_route_method(spec, route));
-        out.push('\n');
-    }
-
-    out.push_str("  Uri _uri(String path, [Map<String, Object?> query = const {}]) {\n");
-    out.push_str("    final base = Uri.parse(baseUrl.replaceFirst(RegExp(r'/$'), ''));\n");
-    out.push_str("    final queryParameters = <String, String>{};\n");
-    out.push_str("    for (final entry in query.entries) {\n");
-    out.push_str("      final value = entry.value;\n");
-    out.push_str("      if (value != null) queryParameters[entry.key] = value.toString();\n");
-    out.push_str("    }\n");
-    out.push_str("    return Uri.parse('${base.toString()}$path').replace(queryParameters: queryParameters.isEmpty ? null : queryParameters);\n");
-    out.push_str("  }\n\n");
-    out.push_str("  Future<Map<String, dynamic>> _send(String method, Uri uri, {Map<String, String> headers = const {}, Object? body}) async {\n");
-    out.push_str("    final requestHeaders = <String, String>{..._headers, ...headers};\n");
-    out.push_str("    http.Response response;\n");
-    out.push_str("    switch (method) {\n");
-    out.push_str("      case 'GET':\n");
-    out.push_str("        response = await _httpClient.get(uri, headers: requestHeaders);\n");
-    out.push_str("        break;\n");
-    out.push_str("      case 'HEAD':\n");
-    out.push_str("        response = await _httpClient.head(uri, headers: requestHeaders);\n");
-    out.push_str("        break;\n");
-    out.push_str("      case 'DELETE':\n");
-    out.push_str("        response = await _httpClient.delete(uri, headers: requestHeaders);\n");
-    out.push_str("        break;\n");
-    out.push_str("      case 'POST':\n");
-    out.push_str("        requestHeaders.putIfAbsent('content-type', () => 'application/json');\n");
-    out.push_str("        response = await _httpClient.post(uri, headers: requestHeaders, body: jsonEncode(body));\n");
-    out.push_str("        break;\n");
-    out.push_str("      case 'PUT':\n");
-    out.push_str("        requestHeaders.putIfAbsent('content-type', () => 'application/json');\n");
-    out.push_str("        response = await _httpClient.put(uri, headers: requestHeaders, body: jsonEncode(body));\n");
-    out.push_str("        break;\n");
-    out.push_str("      case 'PATCH':\n");
-    out.push_str("        requestHeaders.putIfAbsent('content-type', () => 'application/json');\n");
-    out.push_str("        response = await _httpClient.patch(uri, headers: requestHeaders, body: jsonEncode(body));\n");
-    out.push_str("        break;\n");
-    out.push_str("      default:\n");
-    out.push_str("        throw ArgumentError('unsupported method: $method');\n");
-    out.push_str("    }\n");
-    out.push_str("    if (response.statusCode < 200 || response.statusCode >= 300) {\n");
-    out.push_str(
-        "      throw http.ClientException('HTTP ${response.statusCode}: ${response.body}', uri);\n",
-    );
-    out.push_str("    }\n");
-    out.push_str("    if (response.body.isEmpty) return <String, dynamic>{};\n");
-    out.push_str("    final decoded = jsonDecode(response.body);\n");
-    out.push_str("    if (decoded is Map<String, dynamic>) return decoded;\n");
-    out.push_str("    throw http.ClientException('expected JSON object response', uri);\n");
-    out.push_str("  }\n");
-    out.push_str("}\n");
-
-    out
-}
-
-pub fn render_java_client(spec: &ApiSpec) -> String {
-    let mut out = String::from(
-        "// Generated by rozectl. Do not edit by hand.\n\nimport java.io.IOException;\nimport java.net.URI;\nimport java.net.URLEncoder;\nimport java.net.http.HttpClient;\nimport java.net.http.HttpRequest;\nimport java.net.http.HttpResponse;\nimport java.nio.charset.StandardCharsets;\nimport java.util.LinkedHashMap;\nimport java.util.Map;\nimport java.util.StringJoiner;\n\npublic final class RozeApiClient {\n",
-    );
-    out.push_str("  private final String baseUrl;\n");
-    out.push_str("  private final HttpClient httpClient;\n");
-    out.push_str("  private final Map<String, String> headers;\n\n");
-    out.push_str("  public RozeApiClient(String baseUrl) {\n");
-    out.push_str("    this(baseUrl, HttpClient.newHttpClient(), Map.of());\n");
-    out.push_str("  }\n\n");
-    out.push_str("  public RozeApiClient(String baseUrl, HttpClient httpClient, Map<String, String> headers) {\n");
-    out.push_str("    this.baseUrl = trimTrailingSlash(baseUrl);\n");
-    out.push_str("    this.httpClient = httpClient;\n");
-    out.push_str("    this.headers = headers;\n");
-    out.push_str("  }\n\n");
-
-    for route in &spec.rest_routes {
-        out.push_str(&render_java_route_method(spec, route));
-        out.push('\n');
-    }
-
-    for ty in &spec.types {
-        out.push_str(&render_java_model(spec, ty));
-        out.push('\n');
-    }
-
-    out.push_str(
-        r#"  private String send(String method, String path, Map<String, Object> query, Map<String, String> headers, String body) throws IOException, InterruptedException {
-    String url = baseUrl + path + renderQuery(query);
-    HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url));
-    for (Map.Entry<String, String> entry : this.headers.entrySet()) {
-      builder.header(entry.getKey(), entry.getValue());
-    }
-    for (Map.Entry<String, String> entry : headers.entrySet()) {
-      builder.header(entry.getKey(), entry.getValue());
-    }
-    if (body == null) {
-      builder.method(method, HttpRequest.BodyPublishers.noBody());
-    } else {
-      builder.header("content-type", "application/json");
-      builder.method(method, HttpRequest.BodyPublishers.ofString(body));
-    }
-    HttpResponse<String> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-    if (response.statusCode() < 200 || response.statusCode() >= 300) {
-      throw new IOException("HTTP " + response.statusCode() + ": " + response.body());
-    }
-    return response.body();
-  }
-
-  private static String renderQuery(Map<String, Object> query) {
-    if (query.isEmpty()) return "";
-    StringJoiner joiner = new StringJoiner("&", "?", "");
-    for (Map.Entry<String, Object> entry : query.entrySet()) {
-      Object value = entry.getValue();
-      if (value != null) {
-        joiner.add(urlEncode(entry.getKey()) + "=" + urlEncode(String.valueOf(value)));
-      }
-    }
-    String rendered = joiner.toString();
-    return rendered.equals("?") ? "" : rendered;
-  }
-
-  private static String trimTrailingSlash(String value) {
-    return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
-  }
-
-  private static String urlEncode(String value) {
-    return URLEncoder.encode(value, StandardCharsets.UTF_8);
-  }
-
-  private static Map<String, Object> mapOf(Object... values) {
-    Map<String, Object> out = new LinkedHashMap<>();
-    for (int i = 0; i < values.length; i += 2) {
-      out.put(String.valueOf(values[i]), values[i + 1]);
-    }
-    return out;
-  }
-
-  private static Map<String, String> stringMapOf(Object... values) {
-    Map<String, String> out = new LinkedHashMap<>();
-    for (int i = 0; i < values.length; i += 2) {
-      out.put(String.valueOf(values[i]), String.valueOf(values[i + 1]));
-    }
-    return out;
-  }
-
-  private static String jsonObject(Object... values) {
-    if (values.length == 0) return "{}";
-    StringJoiner joiner = new StringJoiner(",", "{", "}");
-    for (int i = 0; i < values.length; i += 2) {
-      Object value = values[i + 1];
-      if (value != null) {
-        joiner.add(jsonString(String.valueOf(values[i])) + ":" + jsonValue(value));
-      }
-    }
-    return joiner.toString();
-  }
-
-  private static String jsonValue(Object value) {
-    if (value instanceof Number || value instanceof Boolean) return String.valueOf(value);
-    return jsonString(String.valueOf(value));
-  }
-
-  private static String jsonString(String value) {
-    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
-  }
-}
-"#,
-    );
-
-    out
-}
-
-pub fn render_kotlin_client(spec: &ApiSpec) -> String {
-    let mut out = String::from(
-        "// Generated by rozectl. Do not edit by hand.\n\nimport java.io.IOException\nimport java.net.URI\nimport java.net.URLEncoder\nimport java.net.http.HttpClient\nimport java.net.http.HttpRequest\nimport java.net.http.HttpResponse\nimport java.nio.charset.StandardCharsets\n\n",
-    );
-
-    for ty in &spec.types {
-        out.push_str(&render_kotlin_model(spec, ty));
-        out.push('\n');
-    }
-
-    out.push_str("class RozeApiClient(\n");
-    out.push_str("    baseUrl: String,\n");
-    out.push_str("    private val httpClient: HttpClient = HttpClient.newHttpClient(),\n");
-    out.push_str("    private val headers: Map<String, String> = emptyMap(),\n");
-    out.push_str(") {\n");
-    out.push_str("    private val baseUrl: String = baseUrl.trimEnd('/')\n\n");
-
-    for route in &spec.rest_routes {
-        out.push_str(&render_kotlin_route_method(spec, route));
-        out.push('\n');
-    }
-
-    out.push_str(
-        r#"    private fun send(method: String, path: String, query: Map<String, Any?>, headers: Map<String, String>, body: String?): String {
-        val url = baseUrl + path + renderQuery(query)
-        val builder = HttpRequest.newBuilder(URI.create(url))
-        this.headers.forEach { (key, value) -> builder.header(key, value) }
-        headers.forEach { (key, value) -> builder.header(key, value) }
-        if (body == null) {
-            builder.method(method, HttpRequest.BodyPublishers.noBody())
-        } else {
-            builder.header("content-type", "application/json")
-            builder.method(method, HttpRequest.BodyPublishers.ofString(body))
-        }
-        val response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString())
-        if (response.statusCode() !in 200..299) {
-            throw IOException("HTTP ${response.statusCode()}: ${response.body()}")
-        }
-        return response.body()
-    }
-
-    private fun renderQuery(query: Map<String, Any?>): String {
-        val rendered = query
-            .filterValues { it != null }
-            .map { (key, value) -> "${urlEncode(key)}=${urlEncode(value.toString())}" }
-            .joinToString("&")
-        return if (rendered.isEmpty()) "" else "?$rendered"
-    }
-
-    private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
-
-    private fun jsonObject(vararg values: Pair<String, Any?>): String =
-        values.filter { it.second != null }
-            .joinToString(prefix = "{", postfix = "}") { (key, value) -> "${jsonString(key)}:${jsonValue(value!!)}" }
-
-    private fun jsonValue(value: Any): String =
-        when (value) {
-            is Number, is Boolean -> value.toString()
-            else -> jsonString(value.toString())
-        }
-
-    private fun jsonString(value: String): String =
-        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-}
-"#,
-    );
-
-    out
-}
-
-pub fn render_swift_client(spec: &ApiSpec) -> String {
-    let mut out =
-        String::from("// Generated by rozectl. Do not edit by hand.\n\nimport Foundation\n\n");
-
-    for ty in &spec.types {
-        out.push_str(&render_swift_model(spec, ty));
-        out.push('\n');
-    }
-
-    out.push_str("public final class RozeApiClient {\n");
-    out.push_str("    private let baseUrl: String\n");
-    out.push_str("    private let session: URLSession\n");
-    out.push_str("    private let headers: [String: String]\n\n");
-    out.push_str("    public init(baseUrl: String, session: URLSession = .shared, headers: [String: String] = [:]) {\n");
-    out.push_str(
-        "        self.baseUrl = baseUrl.hasSuffix(\"/\") ? String(baseUrl.dropLast()) : baseUrl\n",
-    );
-    out.push_str("        self.session = session\n");
-    out.push_str("        self.headers = headers\n");
-    out.push_str("    }\n\n");
-
-    for route in &spec.rest_routes {
-        out.push_str(&render_swift_route_method(spec, route));
-        out.push('\n');
-    }
-
-    out.push_str(
-        r#"    private func send(method: String, path: String, query: [String: Any?], headers: [String: String], body: [String: Any?]?) async throws -> String {
-        var components = URLComponents(string: baseUrl + path)!
-        let queryItems = query.compactMap { key, value -> URLQueryItem? in
-            guard let value else { return nil }
-            return URLQueryItem(name: key, value: String(describing: value))
-        }
-        if !queryItems.isEmpty {
-            components.queryItems = queryItems
-        }
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = method
-        for (key, value) in self.headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-        if let body {
-            request.setValue("application/json", forHTTPHeaderField: "content-type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: body.compactMapValues { $0 })
-        }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let text = String(data: data, encoding: .utf8) ?? ""
-            throw RozeApiError.http(status: status, body: text)
-        }
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-}
-
-public enum RozeApiError: Error {
-    case http(status: Int, body: String)
-}
-"#,
-    );
-
-    out
-}
-
-fn render_java_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
-    let request_ty = spec
-        .types
-        .iter()
-        .find(|ty| ty.name == route.request)
-        .expect("route request type should exist before client generation");
-    let function_name = lower_camel(&resolved_handler_name(route));
-    let path = render_java_path_expr(spec, route, request_ty);
-    let query = render_java_map(spec, request_ty, route, FieldSource::Query);
-    let headers = render_java_headers(spec, request_ty, route);
-    let body = render_java_body(spec, request_ty, route);
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "  public String {function_name}({} req) throws IOException, InterruptedException {{\n",
-        route.request
-    ));
-    out.push_str(&format!(
-        "    return send({}, {path}, {query}, {headers}, {body});\n",
-        java_string(http_method(&route.method))
-    ));
-    out.push_str("  }\n");
-    out
-}
-
-fn render_kotlin_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
-    let request_ty = spec
-        .types
-        .iter()
-        .find(|ty| ty.name == route.request)
-        .expect("route request type should exist before client generation");
-    let function_name = lower_camel(&resolved_handler_name(route));
-    let path = render_kotlin_path_expr(spec, route, request_ty);
-    let query = render_kotlin_map(spec, request_ty, route, FieldSource::Query);
-    let headers = render_kotlin_headers(spec, request_ty, route);
-    let body = render_kotlin_body(spec, request_ty, route);
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "    fun {function_name}(req: {}): String =\n",
-        route.request
-    ));
-    out.push_str(&format!(
-        "        send({}, {path}, {query}, {headers}, {body})\n",
-        kotlin_string(http_method(&route.method))
-    ));
-    out
-}
-
-fn render_java_model(spec: &ApiSpec, ty: &TypeDef) -> String {
-    let fields = expanded_client_fields(spec, ty);
-    let mut out = String::new();
-    out.push_str(&format!("  public static final class {} {{\n", ty.name));
-    for field in &fields {
-        out.push_str(&format!(
-            "    public {} {};\n",
-            java_type(&field.ty),
-            java_field_name(field)
-        ));
-    }
-    out.push('\n');
-    out.push_str(&format!("    public {}() {{}}\n\n", ty.name));
-    out.push_str(&format!("    public {}(", ty.name));
-    let params = fields
-        .iter()
-        .map(|field| format!("{} {}", java_type(&field.ty), java_field_name(field)))
-        .collect::<Vec<_>>();
-    out.push_str(&params.join(", "));
-    out.push_str(") {\n");
-    for field in &fields {
-        let name = java_field_name(field);
-        out.push_str(&format!("      this.{name} = {name};\n"));
-    }
-    out.push_str("    }\n");
-    out.push_str("  }\n");
-    out
-}
-
-fn render_kotlin_model(spec: &ApiSpec, ty: &TypeDef) -> String {
-    let fields = expanded_client_fields(spec, ty);
-    let mut out = String::new();
-    out.push_str(&format!("data class {}(\n", ty.name));
-    for field in fields {
-        out.push_str(&format!(
-            "    val {}: {},\n",
-            kotlin_field_name(field),
-            kotlin_type(&field.ty)
-        ));
-    }
-    out.push_str(")\n");
-    out
-}
-
-fn render_swift_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
-    let request_ty = spec
-        .types
-        .iter()
-        .find(|ty| ty.name == route.request)
-        .expect("route request type should exist before client generation");
-    let function_name = lower_camel(&resolved_handler_name(route));
-    let path = render_swift_path_expr(spec, route, request_ty);
-    let query = render_swift_dict(spec, request_ty, route, FieldSource::Query);
-    let headers = render_swift_headers(spec, request_ty, route);
-    let body = render_swift_body(spec, request_ty, route);
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "    public func {function_name}(_ req: {}) async throws -> String {{\n",
-        route.request
-    ));
-    out.push_str(&format!(
-        "        try await send(method: {}, path: {path}, query: {query}, headers: {headers}, body: {body})\n",
-        swift_string(http_method(&route.method))
-    ));
-    out.push_str("    }\n");
-    out
-}
-
-fn render_swift_model(spec: &ApiSpec, ty: &TypeDef) -> String {
-    let fields = expanded_client_fields(spec, ty);
-    let mut out = String::new();
-    out.push_str(&format!("public struct {}: Codable {{\n", ty.name));
-    for field in &fields {
-        out.push_str(&format!(
-            "    public var {}: {}\n",
-            swift_field_name(field),
-            swift_type(&field.ty)
-        ));
-    }
-    out.push('\n');
-    out.push_str("    public init(");
-    let params = fields
-        .iter()
-        .map(|field| format!("{}: {}", swift_field_name(field), swift_type(&field.ty)))
-        .collect::<Vec<_>>();
-    out.push_str(&params.join(", "));
-    out.push_str(") {\n");
-    for field in &fields {
-        let name = swift_field_name(field);
-        out.push_str(&format!("        self.{name} = {name}\n"));
-    }
-    out.push_str("    }\n");
-    out.push_str("}\n");
     out
 }
 
@@ -599,48 +232,6 @@ fn render_js_typedef(spec: &ApiSpec, ty: &TypeDef) -> String {
         ));
     }
     out.push_str(" */\n");
-    out
-}
-
-fn render_dart_model(spec: &ApiSpec, ty: &TypeDef) -> String {
-    let fields = expanded_client_fields(spec, ty);
-    let mut out = String::new();
-    out.push_str(&format!("class {} {{\n", ty.name));
-    out.push_str(&format!("  const {}({{\n", ty.name));
-    for field in &fields {
-        out.push_str(&format!("    required this.{},\n", dart_field_name(field)));
-    }
-    out.push_str("  });\n\n");
-    for field in &fields {
-        out.push_str(&format!(
-            "  final {} {};\n",
-            dart_type(&field.ty),
-            dart_field_name(field)
-        ));
-    }
-    out.push('\n');
-    out.push_str(&format!(
-        "  factory {}.fromJson(Map<String, dynamic> json) => {}(\n",
-        ty.name, ty.name
-    ));
-    for field in &fields {
-        out.push_str(&format!(
-            "        {}: {},\n",
-            dart_field_name(field),
-            dart_from_json_expr(field)
-        ));
-    }
-    out.push_str("      );\n\n");
-    out.push_str("  Map<String, dynamic> toJson() => <String, dynamic>{\n");
-    for field in &fields {
-        out.push_str(&format!(
-            "        {}: {},\n",
-            dart_string(&field_wire_name(field)),
-            dart_field_name(field)
-        ));
-    }
-    out.push_str("      };\n");
-    out.push_str("}\n");
     out
 }
 
@@ -721,35 +312,6 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     out
 }
 
-fn render_dart_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
-    let request_ty = spec
-        .types
-        .iter()
-        .find(|ty| ty.name == route.request)
-        .expect("route request type should exist before client generation");
-    let function_name = lower_camel(&resolved_handler_name(route));
-    let path = render_dart_path_template(spec, route, request_ty);
-    let query = render_dart_object(spec, request_ty, route, FieldSource::Query);
-    let headers = render_dart_headers(spec, request_ty, route);
-    let body = render_dart_body(spec, request_ty, route);
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "  Future<{}> {}({} req, {{Map<String, String> headers = const {{}}}}) async {{\n",
-        route.response, function_name, route.request
-    ));
-    out.push_str(&format!("    final uri = _uri({}, {});\n", path, query));
-    out.push_str(&format!(
-        "    final json = await _send({}, uri, headers: <String, String>{{...{}, ...headers}}, body: {});\n",
-        dart_string(http_method(&route.method)),
-        headers,
-        body
-    ));
-    out.push_str(&format!("    return {}.fromJson(json);\n", route.response));
-    out.push_str("  }\n");
-    out
-}
-
 fn render_path_template(spec: &ApiSpec, route: &RestRoute, request_ty: &TypeDef) -> String {
     let mut path = rest::full_route_path_for_openapi(spec, route);
     for param in route_path_params(&path) {
@@ -769,186 +331,6 @@ fn render_path_template(spec: &ApiSpec, route: &RestRoute, request_ty: &TypeDef)
         }
     }
     format!("`{}`", path)
-}
-
-fn render_dart_path_template(spec: &ApiSpec, route: &RestRoute, request_ty: &TypeDef) -> String {
-    let mut path = rest::full_route_path_for_openapi(spec, route);
-    for param in route_path_params(&path) {
-        if let Some(field) = expanded_client_fields(spec, request_ty)
-            .into_iter()
-            .find(|field| normalize_ident(&field_wire_name(field)) == param)
-        {
-            let access = format!("req.{}", dart_field_name(field));
-            path = path.replace(
-                &format!(":{param}"),
-                &format!("${{Uri.encodeComponent({access}.toString())}}"),
-            );
-            path = path.replace(
-                &format!("{{{param}}}"),
-                &format!("${{Uri.encodeComponent({access}.toString())}}"),
-            );
-        }
-    }
-    format!("'{}'", path)
-}
-
-fn render_java_path_expr(spec: &ApiSpec, route: &RestRoute, request_ty: &TypeDef) -> String {
-    render_jvm_path_expr(
-        spec,
-        route,
-        request_ty,
-        "urlEncode(String.valueOf(req.",
-        "))",
-    )
-}
-
-fn render_kotlin_path_expr(spec: &ApiSpec, route: &RestRoute, request_ty: &TypeDef) -> String {
-    render_jvm_path_expr(spec, route, request_ty, "urlEncode(req.", ".toString())")
-}
-
-fn render_swift_path_expr(spec: &ApiSpec, route: &RestRoute, request_ty: &TypeDef) -> String {
-    let path = rest::full_route_path_for_openapi(spec, route);
-    let mut parts = Vec::new();
-    let mut cursor = 0;
-    let mut literal_start = 0;
-    while cursor < path.len() {
-        let marker = path.as_bytes()[cursor] as char;
-        if marker == ':' || marker == '{' {
-            let start = cursor;
-            let (end, raw_name) = if marker == ':' {
-                cursor += 1;
-                let name_start = cursor;
-                while cursor < path.len() && path.as_bytes()[cursor] != b'/' {
-                    cursor += 1;
-                }
-                (cursor, &path[name_start..cursor])
-            } else {
-                cursor += 1;
-                let name_start = cursor;
-                while cursor < path.len() && path.as_bytes()[cursor] != b'}' {
-                    cursor += 1;
-                }
-                let name_end = cursor;
-                if cursor < path.len() {
-                    cursor += 1;
-                }
-                (cursor, &path[name_start..name_end])
-            };
-            if let Some(field) = expanded_client_fields(spec, request_ty)
-                .into_iter()
-                .find(|field| normalize_ident(&field_wire_name(field)) == normalize_ident(raw_name))
-            {
-                if start > literal_start {
-                    parts.push(("literal", path[literal_start..start].to_string()));
-                }
-                parts.push((
-                    "expr",
-                    format!(
-                        "String(describing: req.{}).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? \"\"",
-                        swift_field_name(field)
-                    ),
-                ));
-                literal_start = end;
-            }
-        } else {
-            cursor += 1;
-        }
-    }
-    if literal_start < path.len() {
-        parts.push(("literal", path[literal_start..].to_string()));
-    }
-    if parts.is_empty() {
-        return swift_string(&path);
-    }
-    parts
-        .into_iter()
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(kind, value)| {
-            if kind == "literal" {
-                swift_string(&value)
-            } else {
-                value
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" + ")
-}
-
-fn render_jvm_path_expr(
-    spec: &ApiSpec,
-    route: &RestRoute,
-    request_ty: &TypeDef,
-    prefix: &str,
-    suffix: &str,
-) -> String {
-    let path = rest::full_route_path_for_openapi(spec, route);
-    let mut parts = Vec::new();
-    let mut cursor = 0;
-    let mut literal_start = 0;
-    while cursor < path.len() {
-        let marker = path.as_bytes()[cursor] as char;
-        if marker == ':' || marker == '{' {
-            let start = cursor;
-            let (end, raw_name) = if marker == ':' {
-                cursor += 1;
-                let name_start = cursor;
-                while cursor < path.len() && path.as_bytes()[cursor] != b'/' {
-                    cursor += 1;
-                }
-                (cursor, &path[name_start..cursor])
-            } else {
-                cursor += 1;
-                let name_start = cursor;
-                while cursor < path.len() && path.as_bytes()[cursor] != b'}' {
-                    cursor += 1;
-                }
-                let name_end = cursor;
-                if cursor < path.len() {
-                    cursor += 1;
-                }
-                (cursor, &path[name_start..name_end])
-            };
-            if let Some(field) = expanded_client_fields(spec, request_ty)
-                .into_iter()
-                .find(|field| normalize_ident(&field_wire_name(field)) == normalize_ident(raw_name))
-            {
-                if start > literal_start {
-                    parts.push(("literal", path[literal_start..start].to_string()));
-                }
-                let field_name = if prefix.contains("String.valueOf") {
-                    java_field_name(field)
-                } else {
-                    kotlin_field_name(field)
-                };
-                parts.push(("expr", format!("{prefix}{field_name}{suffix}")));
-                literal_start = end;
-            }
-        } else {
-            cursor += 1;
-        }
-    }
-    if literal_start < path.len() {
-        parts.push(("literal", path[literal_start..].to_string()));
-    }
-    if parts.is_empty() {
-        return java_string(&path);
-    }
-    join_jvm_path_parts(parts)
-}
-
-fn join_jvm_path_parts(parts: Vec<(&'static str, String)>) -> String {
-    parts
-        .into_iter()
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(kind, value)| {
-            if kind == "literal" {
-                java_string(&value)
-            } else {
-                value
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" + ")
 }
 
 fn render_object(
@@ -971,176 +353,6 @@ fn render_object(
         "{}".to_string()
     } else {
         format!("{{ {} }}", entries.join(", "))
-    }
-}
-
-fn render_dart_object(
-    spec: &ApiSpec,
-    request_ty: &TypeDef,
-    route: &RestRoute,
-    source: FieldSource,
-) -> String {
-    let mut entries = Vec::new();
-    for field in expanded_client_fields(spec, request_ty) {
-        if resolve_field_source(field, route) == source {
-            entries.push(format!(
-                "{}: req.{}",
-                dart_string(&field_wire_name(field)),
-                dart_field_name(field)
-            ));
-        }
-    }
-    if entries.is_empty() {
-        "const <String, Object?>{}".to_string()
-    } else {
-        format!("<String, Object?>{{ {} }}", entries.join(", "))
-    }
-}
-
-fn render_dart_headers(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    let mut entries = Vec::new();
-    for field in expanded_client_fields(spec, request_ty) {
-        if resolve_field_source(field, route) == FieldSource::Header {
-            entries.push(format!(
-                "{}: req.{}.toString()",
-                dart_string(&field_wire_name(field)),
-                dart_field_name(field)
-            ));
-        }
-    }
-    if entries.is_empty() {
-        "const <String, String>{}".to_string()
-    } else {
-        format!("<String, String>{{ {} }}", entries.join(", "))
-    }
-}
-
-fn render_java_map(
-    spec: &ApiSpec,
-    request_ty: &TypeDef,
-    route: &RestRoute,
-    source: FieldSource,
-) -> String {
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| resolve_field_source(field, route) == source)
-        .map(|field| {
-            format!(
-                "{} , req.{}",
-                java_string(&field_wire_name(field)),
-                java_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "Map.of()".to_string()
-    } else {
-        format!("mapOf({})", entries.join(", "))
-    }
-}
-
-fn render_java_headers(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| resolve_field_source(field, route) == FieldSource::Header)
-        .map(|field| {
-            format!(
-                "{} , String.valueOf(req.{})",
-                java_string(&field_wire_name(field)),
-                java_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "Map.of()".to_string()
-    } else {
-        format!("stringMapOf({})", entries.join(", "))
-    }
-}
-
-fn render_kotlin_map(
-    spec: &ApiSpec,
-    request_ty: &TypeDef,
-    route: &RestRoute,
-    source: FieldSource,
-) -> String {
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| resolve_field_source(field, route) == source)
-        .map(|field| {
-            format!(
-                "{} to req.{}",
-                kotlin_string(&field_wire_name(field)),
-                kotlin_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "emptyMap()".to_string()
-    } else {
-        format!("mapOf({})", entries.join(", "))
-    }
-}
-
-fn render_kotlin_headers(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| resolve_field_source(field, route) == FieldSource::Header)
-        .map(|field| {
-            format!(
-                "{} to req.{}.toString()",
-                kotlin_string(&field_wire_name(field)),
-                kotlin_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "emptyMap()".to_string()
-    } else {
-        format!("mapOf({})", entries.join(", "))
-    }
-}
-
-fn render_swift_dict(
-    spec: &ApiSpec,
-    request_ty: &TypeDef,
-    route: &RestRoute,
-    source: FieldSource,
-) -> String {
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| resolve_field_source(field, route) == source)
-        .map(|field| {
-            format!(
-                "{}: req.{}",
-                swift_string(&field_wire_name(field)),
-                swift_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "[:]".to_string()
-    } else {
-        format!("[{}]", entries.join(", "))
-    }
-}
-
-fn render_swift_headers(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| resolve_field_source(field, route) == FieldSource::Header)
-        .map(|field| {
-            format!(
-                "{}: String(describing: req.{})",
-                swift_string(&field_wire_name(field)),
-                swift_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "[:]".to_string()
-    } else {
-        format!("[{}]", entries.join(", "))
     }
 }
 
@@ -1167,125 +379,6 @@ fn render_body(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> Strin
         "undefined".to_string()
     } else {
         format!("{{ {} }}", entries.join(", "))
-    }
-}
-
-fn render_swift_body(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    if matches!(
-        route.method,
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete
-    ) {
-        return "nil".to_string();
-    }
-
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| {
-            matches!(
-                resolve_field_source(field, route),
-                FieldSource::Json | FieldSource::Form
-            )
-        })
-        .map(|field| {
-            format!(
-                "{}: req.{}",
-                swift_string(&field_wire_name(field)),
-                swift_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "nil".to_string()
-    } else {
-        format!("[{}]", entries.join(", "))
-    }
-}
-
-fn render_java_body(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    if matches!(
-        route.method,
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete
-    ) {
-        return "null".to_string();
-    }
-
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| {
-            matches!(
-                resolve_field_source(field, route),
-                FieldSource::Json | FieldSource::Form
-            )
-        })
-        .map(|field| {
-            format!(
-                "{} , req.{}",
-                java_string(&field_wire_name(field)),
-                java_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "null".to_string()
-    } else {
-        format!("jsonObject({})", entries.join(", "))
-    }
-}
-
-fn render_kotlin_body(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    if matches!(
-        route.method,
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete
-    ) {
-        return "null".to_string();
-    }
-
-    let entries = expanded_client_fields(spec, request_ty)
-        .into_iter()
-        .filter(|field| {
-            matches!(
-                resolve_field_source(field, route),
-                FieldSource::Json | FieldSource::Form
-            )
-        })
-        .map(|field| {
-            format!(
-                "{} to req.{}",
-                kotlin_string(&field_wire_name(field)),
-                kotlin_field_name(field)
-            )
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        "null".to_string()
-    } else {
-        format!("jsonObject({})", entries.join(", "))
-    }
-}
-
-fn render_dart_body(spec: &ApiSpec, request_ty: &TypeDef, route: &RestRoute) -> String {
-    if matches!(
-        route.method,
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete
-    ) {
-        return "null".to_string();
-    }
-
-    let mut entries = Vec::new();
-    for field in expanded_client_fields(spec, request_ty) {
-        let source = resolve_field_source(field, route);
-        if matches!(source, FieldSource::Json | FieldSource::Form) {
-            entries.push(format!(
-                "{}: req.{}",
-                dart_string(&field_wire_name(field)),
-                dart_field_name(field)
-            ));
-        }
-    }
-    if entries.is_empty() {
-        "null".to_string()
-    } else {
-        format!("<String, Object?>{{ {} }}", entries.join(", "))
     }
 }
 
@@ -1431,100 +524,6 @@ fn ts_type(ty: &str) -> &'static str {
     }
 }
 
-fn dart_type(ty: &str) -> &'static str {
-    match ty {
-        "String" | "string" => "String",
-        "bool" | "boolean" => "bool",
-        "int" | "uint" | "i32" | "i64" | "u32" | "u64" | "int32" | "int64" | "uint32"
-        | "uint64" => "int",
-        "float" | "double" | "f32" | "f64" => "double",
-        _ => "dynamic",
-    }
-}
-
-fn java_type(ty: &str) -> &'static str {
-    match ty {
-        "String" | "string" => "String",
-        "bool" | "boolean" => "boolean",
-        "int" | "i32" | "int32" => "int",
-        "uint" | "i64" | "u32" | "u64" | "int64" | "uint32" | "uint64" => "long",
-        "float" | "f32" => "float",
-        "double" | "f64" => "double",
-        _ => "Object",
-    }
-}
-
-fn kotlin_type(ty: &str) -> &'static str {
-    match ty {
-        "String" | "string" => "String",
-        "bool" | "boolean" => "Boolean",
-        "int" | "i32" | "int32" => "Int",
-        "uint" | "i64" | "u32" | "u64" | "int64" | "uint32" | "uint64" => "Long",
-        "float" | "f32" => "Float",
-        "double" | "f64" => "Double",
-        _ => "Any?",
-    }
-}
-
-fn swift_type(ty: &str) -> String {
-    match ty {
-        "String" | "string" => "String".to_string(),
-        "bool" | "boolean" => "Bool".to_string(),
-        "int" | "i32" | "int32" => "Int".to_string(),
-        "uint" | "i64" | "u32" | "u64" | "int64" | "uint32" | "uint64" => "Int64".to_string(),
-        "float" | "f32" => "Float".to_string(),
-        "double" | "f64" => "Double".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn dart_from_json_expr(field: &Field) -> String {
-    let key = dart_string(&field_wire_name(field));
-    match dart_type(&field.ty) {
-        "String" => format!("json[{key}] as String"),
-        "bool" => format!("json[{key}] as bool"),
-        "int" => format!("json[{key}] as int"),
-        "double" => format!("(json[{key}] as num).toDouble()"),
-        _ => format!("json[{key}]"),
-    }
-}
-
-fn dart_field_name(field: &Field) -> String {
-    let raw = field_property_name(field);
-    lower_camel(&to_snake_case(&raw))
-}
-
-fn java_field_name(field: &Field) -> String {
-    let raw = field_property_name(field);
-    lower_camel(&to_snake_case(&raw))
-}
-
-fn kotlin_field_name(field: &Field) -> String {
-    let raw = field_property_name(field);
-    lower_camel(&to_snake_case(&raw))
-}
-
-fn swift_field_name(field: &Field) -> String {
-    let raw = field_property_name(field);
-    lower_camel(&to_snake_case(&raw))
-}
-
-fn dart_string(input: &str) -> String {
-    format!("{:?}", input)
-}
-
-fn java_string(input: &str) -> String {
-    format!("{:?}", input)
-}
-
-fn kotlin_string(input: &str) -> String {
-    format!("{:?}", input)
-}
-
-fn swift_string(input: &str) -> String {
-    format!("{:?}", input)
-}
-
 fn http_method(method: &HttpMethod) -> &'static str {
     match method {
         HttpMethod::Get => "GET",
@@ -1633,6 +632,17 @@ mod tests {
         assert!(client.contains("export async function updateUser"));
         assert!(client.contains("\"PATCH\""));
         assert!(client.contains("name: req.name"));
+        assert!(client.contains("export class RozeApiError extends Error"));
+        assert!(client.contains("response.headers.get('x-trace-id')"));
+        assert!(client.contains("response.headers.get('retry-after')"));
+        assert!(client.contains("authToken?: string | (() => string | Promise<string>)"));
+        assert!(client.contains("Math.min(options.maxAttempts ?? 1, 5)"));
+        assert!(client.contains("method === 'GET' || method === 'HEAD'"));
+        assert!(client.contains("new AbortController()"));
+        assert!(client.contains("options.beforeRequest"));
+        assert!(client.contains("options.afterResponse"));
+        assert!(client.contains("await attemptResponse.body?.cancel()"));
+        assert!(client.contains("Math.random() * cap"));
     }
 
     #[test]
@@ -1702,6 +712,9 @@ mod tests {
         assert!(client.contains("`/api/v1/users/${encodeURIComponent(String(req.id))}`"));
         assert!(client.contains("Authorization: req.token"));
         assert!(!client.contains(": GetUserReq"));
+        assert!(client.contains("throw new RozeApiError"));
+        assert!(client.contains("requestHeaders.authorization = `Bearer ${token}`"));
+        assert!(client.contains("Math.min(options.maxAttempts ?? 1, 5)"));
     }
 
     #[test]
@@ -1741,220 +754,5 @@ mod tests {
         let js = render_js_client(&spec);
         assert!(js.contains("@param {EmptyReq} [req]"));
         assert!(js.contains("export async function health(req = {}, options = {})"));
-
-        let dart = render_dart_client(&spec);
-        assert!(dart.contains("class EmptyReq"));
-        assert!(dart.contains("class EmptyResp"));
-        assert!(dart.contains("Future<HealthResp> health(EmptyReq req"));
-        assert!(dart.contains("final uri = _uri('/health'"));
-        assert!(dart.contains("Future<EmptyResp> ping(EmptyReq req"));
-        assert!(dart.contains("Future<EmptyResp> logout(LogoutReq req"));
-    }
-
-    #[test]
-    fn renders_dart_http_client() {
-        let spec = parse_api(
-            r#"
-            @server (
-                prefix: /api/v1
-            )
-            service user-api {
-                @handler getUser
-                get /users/:id (GetUserReq) returns (UserResp)
-                @handler login
-                post /login (LoginReq) returns (LoginResp)
-                @handler updateUser
-                patch /users/:id (UpdateUserReq) returns (UserResp)
-            }
-            type (
-                GetUserReq {
-                    id u64 `path:"id"`
-                    token string `header:"Authorization"`
-                    q string `query:"q"`
-                }
-                UserResp {
-                    id u64 `json:"id"`
-                    name string `json:"name"`
-                }
-                LoginReq {
-                    username string `json:"username"`
-                    password string `json:"password"`
-                }
-                UpdateUserReq {
-                    id u64 `path:"id"`
-                    name string `json:"name"`
-                }
-                LoginResp {
-                    token string `json:"token"`
-                }
-            )
-            "#,
-        )
-        .expect("valid api");
-
-        let client = render_dart_client(&spec);
-        assert!(client.contains("import 'package:http/http.dart' as http;"));
-        assert!(client.contains("class RozeApiClient"));
-        assert!(client.contains("case 'HEAD':"));
-        assert!(client.contains("_httpClient.head"));
-        assert!(client.contains("Future<UserResp> getUser(GetUserReq req"));
-        assert!(client.contains("'/api/v1/users/${Uri.encodeComponent(req.id.toString())}'"));
-        assert!(client.contains("\"Authorization\": req.token.toString()"));
-        assert!(client.contains("\"q\": req.q"));
-        assert!(client.contains("break;"));
-        assert!(client.contains("Future<LoginResp> login(LoginReq req"));
-        assert!(client.contains("\"username\": req.username"));
-        assert!(client.contains("Future<UserResp> updateUser(UpdateUserReq req"));
-        assert!(client.contains("\"PATCH\""));
-        assert!(client.contains("_httpClient.patch"));
-    }
-
-    #[test]
-    fn renders_java_http_client() {
-        let spec = parse_api(
-            r#"
-            @server (
-                prefix: /api/v1
-            )
-            service user-api {
-                @handler getUser
-                get /users/:id (GetUserReq) returns (UserResp)
-                @handler login
-                post /login (LoginReq) returns (LoginResp)
-            }
-            type (
-                GetUserReq {
-                    id u64 `path:"id"`
-                    token string `header:"Authorization"`
-                    q string `query:"q"`
-                }
-                UserResp {
-                    id u64 `json:"id"`
-                    name string `json:"name"`
-                }
-                LoginReq {
-                    username string `json:"username"`
-                    password string `json:"password"`
-                }
-                LoginResp {
-                    token string `json:"token"`
-                }
-            )
-            "#,
-        )
-        .expect("valid api");
-
-        let client = render_java_client(&spec);
-        assert!(client.contains("import java.net.http.HttpClient;"));
-        assert!(client.contains("public final class RozeApiClient"));
-        assert!(client.contains("public String getUser(GetUserReq req)"));
-        assert!(client.contains("\"/api/v1/users/\" + urlEncode(String.valueOf(req.id))"));
-        assert!(client.contains("stringMapOf(\"Authorization\" , String.valueOf(req.token))"));
-        assert!(client.contains("mapOf(\"q\" , req.q)"));
-        assert!(client.contains("public static final class GetUserReq"));
-        assert!(client.contains("public long id;"));
-        assert!(client.contains("public String login(LoginReq req)"));
-        assert!(
-            client.contains("jsonObject(\"username\" , req.username, \"password\" , req.password)")
-        );
-    }
-
-    #[test]
-    fn renders_kotlin_http_client() {
-        let spec = parse_api(
-            r#"
-            @server (
-                prefix: /api/v1
-            )
-            service user-api {
-                @handler getUser
-                get /users/:id (GetUserReq) returns (UserResp)
-                @handler login
-                post /login (LoginReq) returns (LoginResp)
-            }
-            type (
-                GetUserReq {
-                    id u64 `path:"id"`
-                    token string `header:"Authorization"`
-                    q string `query:"q"`
-                }
-                UserResp {
-                    id u64 `json:"id"`
-                    name string `json:"name"`
-                }
-                LoginReq {
-                    username string `json:"username"`
-                    password string `json:"password"`
-                }
-                LoginResp {
-                    token string `json:"token"`
-                }
-            )
-            "#,
-        )
-        .expect("valid api");
-
-        let client = render_kotlin_client(&spec);
-        assert!(client.contains("import java.net.http.HttpClient"));
-        assert!(client.contains("data class GetUserReq"));
-        assert!(client.contains("val id: Long"));
-        assert!(client.contains("class RozeApiClient"));
-        assert!(client.contains("fun getUser(req: GetUserReq): String"));
-        assert!(client.contains("\"/api/v1/users/\" + urlEncode(req.id.toString())"));
-        assert!(client.contains("mapOf(\"Authorization\" to req.token.toString())"));
-        assert!(client.contains("mapOf(\"q\" to req.q)"));
-        assert!(client.contains("fun login(req: LoginReq): String"));
-        assert!(client
-            .contains("jsonObject(\"username\" to req.username, \"password\" to req.password)"));
-    }
-
-    #[test]
-    fn renders_swift_urlsession_client() {
-        let spec = parse_api(
-            r#"
-            @server (
-                prefix: /api/v1
-            )
-            service user-api {
-                @handler getUser
-                get /users/:id (GetUserReq) returns (UserResp)
-                @handler login
-                post /login (LoginReq) returns (LoginResp)
-            }
-            type (
-                GetUserReq {
-                    id u64 `path:"id"`
-                    token string `header:"Authorization"`
-                    q string `query:"q"`
-                }
-                UserResp {
-                    id u64 `json:"id"`
-                    name string `json:"name"`
-                }
-                LoginReq {
-                    username string `json:"username"`
-                    password string `json:"password"`
-                }
-                LoginResp {
-                    token string `json:"token"`
-                }
-            )
-            "#,
-        )
-        .expect("valid api");
-
-        let client = render_swift_client(&spec);
-        assert!(client.contains("import Foundation"));
-        assert!(client.contains("public struct GetUserReq: Codable"));
-        assert!(client.contains("public var id: Int64"));
-        assert!(client.contains("public final class RozeApiClient"));
-        assert!(client.contains("public func getUser(_ req: GetUserReq) async throws -> String"));
-        assert!(client
-            .contains("\"/api/v1/users/\" + String(describing: req.id).addingPercentEncoding"));
-        assert!(client.contains("\"Authorization\": String(describing: req.token)"));
-        assert!(client.contains("\"q\": req.q"));
-        assert!(client.contains("public func login(_ req: LoginReq) async throws -> String"));
-        assert!(client.contains("\"username\": req.username"));
-        assert!(client.contains("URLSession"));
     }
 }

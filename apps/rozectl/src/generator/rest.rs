@@ -2655,6 +2655,7 @@ mod tests {
         assert!(!routes.contains("Duration::from_millis"));
         assert!(!routes.contains("Router<ServiceContext>"));
         assert!(routes.contains(".and(ctx.config.governance.timeout_ms)"));
+        assert!(routes.contains("router.with_state(ctx)"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains("builder.security_scheme(\"bearerAuth\""));

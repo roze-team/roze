@@ -41,6 +41,7 @@ pub struct KubeDeployOptions {
     pub env: Vec<String>,
     pub env_file: Option<PathBuf>,
     pub config_map: Option<String>,
+    pub secret: Option<String>,
     pub tls_secret: Option<String>,
     pub image_pull_secret: Option<String>,
     pub min_available: String,
@@ -285,6 +286,9 @@ fn render_kube_deploy(
     let tls_volume_mount = render_kube_tls_volume_mount(options);
     let tls_volume = render_kube_tls_volume(options);
     let image_pull_secrets = render_kube_image_pull_secrets(options);
+    let env_config_checksum = env_file_entries
+        .map(render_env_entries_checksum_annotation)
+        .unwrap_or_default();
     let env_config_map = env_file_entries
         .map(|entries| render_kube_config_map(&format!("{}-env", options.name), options, entries))
         .unwrap_or_default();
@@ -314,11 +318,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: "{port}"
-    spec:
+{env_config_checksum}    spec:
 {service_account_name}      terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
 {image_pull_secrets}      securityContext:
-      securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
@@ -450,6 +453,7 @@ spec:
         tls_volume_mount = tls_volume_mount,
         tls_volume = tls_volume,
         image_pull_secrets = image_pull_secrets,
+        env_config_checksum = env_config_checksum,
         cpu_request = options.cpu_request,
         memory_request = options.memory_request,
         cpu_limit = options.cpu_limit,
@@ -485,11 +489,13 @@ fn render_helm_values_yaml(options: &KubeDeployOptions) -> String {
         .filter_map(|entry| entry.split_once('='))
         .map(|(name, value)| format!("  {name}: {value:?}\n"))
         .collect::<String>();
-    let env_from = options
-        .config_map
-        .as_deref()
-        .map(|name| format!("  - configMapRef:\n      name: {name}\n"))
-        .unwrap_or_default();
+    let mut env_from = String::new();
+    if let Some(name) = options.config_map.as_deref() {
+        env_from.push_str(&format!("  - configMapRef:\n      name: {name}\n"));
+    }
+    if let Some(name) = options.secret.as_deref() {
+        env_from.push_str(&format!("  - secretRef:\n      name: {name}\n"));
+    }
     format!(
         r#"replicaCount: {replicas}
 
@@ -584,7 +590,7 @@ env:
 }
 
 fn render_helm_values_schema() -> &'static str {
-    r#"{
+    r##"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
@@ -659,10 +665,27 @@ fn render_helm_values_schema() -> &'static str {
     "podDisruptionBudget": { "type": "object" },
     "probes": { "type": "object" },
     "env": { "type": "object" },
-    "envFrom": { "type": "array" }
+    "envFrom": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "oneOf": [
+          { "required": ["configMapRef"], "properties": { "configMapRef": { "$ref": "#/$defs/namedReference" } } },
+          { "required": ["secretRef"], "properties": { "secretRef": { "$ref": "#/$defs/namedReference" } } }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "namedReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": { "name": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" } }
+    }
   }
 }
-"#
+"##
 }
 
 fn render_helm_deployment() -> &'static str {
@@ -991,6 +1014,9 @@ fn validate_kube_options(options: &KubeDeployOptions) -> anyhow::Result<()> {
     if let Some(name) = options.config_map.as_deref() {
         validate_kube_dns_label("--config-map", name)?;
     }
+    if let Some(name) = options.secret.as_deref() {
+        validate_kube_dns_label("--secret", name)?;
+    }
     if let Some(name) = options.tls_secret.as_deref() {
         validate_kube_dns_label("--tls-secret", name)?;
     }
@@ -1249,6 +1275,23 @@ data:
     )
 }
 
+fn render_env_entries_checksum_annotation(entries: &[(String, String)]) -> String {
+    // A stable deployment revision trigger; this is deliberately not a security checksum.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for (name, value) in entries {
+        for byte in name
+            .bytes()
+            .chain(std::iter::once(0))
+            .chain(value.bytes())
+            .chain(std::iter::once(b'\n'))
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("        checksum/roze-env: \"{hash:016x}\"\n")
+}
+
 fn render_kube_env(options: &KubeDeployOptions) -> String {
     let entries = options
         .env
@@ -1271,14 +1314,17 @@ fn render_kube_env_from(options: &KubeDeployOptions) -> String {
     if options.env_file.is_some() {
         refs.push(format!("{}-env", options.name));
     }
-    if refs.is_empty() {
-        return String::new();
-    }
-    let refs = refs
+    let mut rendered = refs
         .into_iter()
         .map(|name| format!("        - configMapRef:\n            name: {name}\n"))
         .collect::<String>();
-    format!("        envFrom:\n{refs}")
+    if let Some(name) = options.secret.as_deref() {
+        rendered.push_str(&format!("        - secretRef:\n            name: {name}\n"));
+    }
+    if rendered.is_empty() {
+        return String::new();
+    }
+    format!("        envFrom:\n{rendered}")
 }
 
 fn render_markdown_doc(spec: &ApiSpec) -> String {
@@ -1891,6 +1937,7 @@ mod tests {
                 env: vec!["RUST_LOG=info".to_string()],
                 env_file: Some(PathBuf::from(".env")),
                 config_map: Some("user-config".to_string()),
+                secret: Some("user-secrets".to_string()),
                 tls_secret: Some("user-upstream-tls".to_string()),
                 image_pull_secret: Some("registry-credentials".to_string()),
                 min_available: "1".to_string(),
@@ -1906,6 +1953,8 @@ mod tests {
         assert!(rendered.contains("prometheus.io/scrape: \"true\""));
         assert!(rendered.contains("prometheus.io/path: \"/metrics\""));
         assert!(rendered.contains("prometheus.io/port: \"3000\""));
+        assert!(rendered.contains("checksum/roze-env: \""));
+        assert!(!rendered.contains("      securityContext:\n      securityContext:"));
         assert!(rendered.contains("runAsNonRoot: true"));
         assert!(rendered.contains("runAsUser: 10001"));
         assert!(rendered.contains("allowPrivilegeEscalation: false"));
@@ -1935,6 +1984,8 @@ mod tests {
         assert!(rendered.contains("envFrom:"));
         assert!(rendered.contains("name: user-config"));
         assert!(rendered.contains("name: user-env"));
+        assert!(rendered.contains("secretRef:"));
+        assert!(rendered.contains("name: user-secrets"));
         assert!(rendered.contains("kind: ServiceAccount"));
         assert!(rendered.contains("serviceAccountName: user"));
         assert!(rendered.contains("kind: PodDisruptionBudget"));
@@ -1952,6 +2003,22 @@ mod tests {
         assert!(rendered.contains("stabilizationWindowSeconds: 300"));
         assert!(rendered.contains("value: 25"));
         assert!(rendered.contains("port: 3000"));
+    }
+
+    #[test]
+    fn env_config_checksum_is_stable_and_changes_with_content() {
+        let entries = vec![("FEATURE_FLAG".to_string(), "enabled".to_string())];
+        let same = entries.clone();
+        let changed = vec![("FEATURE_FLAG".to_string(), "disabled".to_string())];
+
+        assert_eq!(
+            render_env_entries_checksum_annotation(&entries),
+            render_env_entries_checksum_annotation(&same)
+        );
+        assert_ne!(
+            render_env_entries_checksum_annotation(&entries),
+            render_env_entries_checksum_annotation(&changed)
+        );
     }
 
     #[test]
@@ -1976,6 +2043,7 @@ mod tests {
                 env: vec!["RUST_LOG=info".to_string()],
                 env_file: None,
                 config_map: Some("user-config".to_string()),
+                secret: Some("user-secrets".to_string()),
                 tls_secret: Some("user-upstream-tls".to_string()),
                 image_pull_secret: Some("registry-credentials".to_string()),
                 min_available: "1".to_string(),
@@ -1994,6 +2062,7 @@ mod tests {
         assert!(render_helm_deployment().contains("automountServiceAccountToken: false"));
         assert!(values.contains("RUST_LOG: \"info\""));
         assert!(values.contains("name: user-config"));
+        assert!(values.contains("secretRef:\n      name: user-secrets"));
         assert!(values.contains("serviceAccount:\n  name: \"\""));
         assert!(values.contains("tlsSecret:\n  name: \"user-upstream-tls\""));
         assert!(render_helm_deployment().contains("readOnly: true"));
@@ -2111,6 +2180,7 @@ mod tests {
             env: vec!["bad-entry".to_string()],
             env_file: None,
             config_map: None,
+            secret: None,
             tls_secret: None,
             image_pull_secret: None,
             min_available: "1".to_string(),
@@ -2154,6 +2224,11 @@ mod tests {
         options.image_pull_secret = Some("Invalid_Registry".to_string());
         let err = validate_kube_options(&options).expect_err("reject invalid pull secret name");
         assert!(err.to_string().contains("--image-pull-secret"));
+
+        options.image_pull_secret = None;
+        options.secret = Some("Invalid_App_Secret".to_string());
+        let err = validate_kube_options(&options).expect_err("reject invalid app secret name");
+        assert!(err.to_string().contains("--secret"));
     }
 
     #[test]

@@ -6,6 +6,12 @@ on:
       - "apps/rozectl/**"
       - "crates/roze-grpc/**"
       - "crates/roze-sqlx/**"
+      - "crates/roze-orm/**"
+      - "crates/roze-migration/**"
+      - "docs/model-ent-parity.md"
+      - "docs/contracts/model-*.md"
+      - "docs/contracts/generator-extensions.md"
+      - "scripts/model-parity-gate.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rozectl.yml"
@@ -14,6 +20,12 @@ on:
       - "apps/rozectl/**"
       - "crates/roze-grpc/**"
       - "crates/roze-sqlx/**"
+      - "crates/roze-orm/**"
+      - "crates/roze-migration/**"
+      - "docs/model-ent-parity.md"
+      - "docs/contracts/model-*.md"
+      - "docs/contracts/generator-extensions.md"
+      - "scripts/model-parity-gate.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rozectl.yml"
@@ -57,6 +69,16 @@ jobs:
       - name: cargo check
         run: cargo check -p rozectl
 
+      - name: model parity gate (SQLite + generated crates)
+        run: bash scripts/model-parity-gate.sh local
+
+      - name: Upload SQLite parity evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-parity-sqlite-evidence
+          path: target/model-parity-evidence/sqlite.json
+          if-no-files-found: error
+
   postgres:
     runs-on: ubuntu-latest
     services:
@@ -85,11 +107,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test (postgres only)
-        run: cargo test -p rozectl postgres
+      - name: PostgreSQL model parity gate
+        run: bash scripts/model-parity-gate.sh postgres
 
-      - name: cargo check
-        run: cargo check -p rozectl
+      - name: Upload PostgreSQL parity evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-parity-postgres-evidence
+          path: target/model-parity-evidence/postgres.json
+          if-no-files-found: error
 
   mysql:
     runs-on: ubuntu-latest
@@ -118,8 +144,45 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test (mysql only)
-        run: cargo test -p rozectl mysql
+      - name: MySQL model parity gate
+        run: bash scripts/model-parity-gate.sh mysql
 
-      - name: cargo check
-        run: cargo check -p rozectl
+      - name: Upload MySQL parity evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-parity-mysql-evidence
+          path: target/model-parity-evidence/mysql.json
+          if-no-files-found: error
+
+  model-parity-release-gate:
+    if: always()
+    needs: [lint, sqlite, postgres, mysql]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download model parity evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: model-parity-*-evidence
+          path: model-parity-evidence
+          merge-multiple: true
+
+      - name: Require all model parity evidence
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          SQLITE_RESULT: ${{ needs.sqlite.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
+          MYSQL_RESULT: ${{ needs.mysql.result }}
+        run: |
+          test "$LINT_RESULT" = success
+          test "$SQLITE_RESULT" = success
+          test "$POSTGRES_RESULT" = success
+          test "$MYSQL_RESULT" = success
+          test -s model-parity-evidence/sqlite.json
+          test -s model-parity-evidence/postgres.json
+          test -s model-parity-evidence/mysql.json
+          grep -F '"backend":"sqlite","status":"passed"' model-parity-evidence/sqlite.json
+          grep -F '"backend":"postgres","status":"passed"' model-parity-evidence/postgres.json
+          grep -F '"backend":"mysql","status":"passed"' model-parity-evidence/mysql.json
+          grep -F "\"revision\":\"$GITHUB_SHA\"" model-parity-evidence/sqlite.json
+          grep -F "\"revision\":\"$GITHUB_SHA\"" model-parity-evidence/postgres.json
+          grep -F "\"revision\":\"$GITHUB_SHA\"" model-parity-evidence/mysql.json
