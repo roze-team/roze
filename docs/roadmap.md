@@ -29,9 +29,10 @@ the concise backlog; the execution plan is the source of truth for completion.
 ### Maturity Marking
 
 - Keep [Module Maturity Matrix](./maturity.md) current.
-- Mark each crate as `stable`, `beta`, `scaffold`, or `planned`.
-- Do not present scaffold modules as production-stable until they have tests,
-  docs, failure semantics, and examples.
+- Keep every 1.x public contract `stable` and review compatibility through the
+  contract/migration gate.
+- Track operational proof separately as `verified`, `integration`,
+  `long-run pending`, or `long-run verified`.
 
 ## P0: Gateway, Config Center, MQ
 
@@ -135,4 +136,4 @@ the concise backlog; the execution plan is the source of truth for completion.
 - Unified security model: JWT key rotation, claims, RBAC/ABAC, tenant isolation,
   i18n error codes, and permission test templates.
 - Real 24h/72h evidence for Gateway, MQ, Config Center, Lifecycle, and generated
-  reference systems before stable promotion.
+  reference systems before long-run verification.

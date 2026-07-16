@@ -1,7 +1,9 @@
 # Upgrade Guide
 
-Roze is pre-release. Treat every upgrade as a source upgrade until tagged
-releases and crates.io publishing are available.
+Roze 1.0 follows Semantic Versioning for Rust APIs, CLI commands, generated
+contracts, configuration schemas, and generator-owned layouts. Review this
+guide and run `rozectl gate check` before every regeneration or framework
+upgrade.
 
 ## Before Upgrading
 

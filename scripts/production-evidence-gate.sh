@@ -8,8 +8,14 @@ require_evidence() {
   local matrix_area="$1"
   local evidence_area="$2"
 
-  if ! grep -Eq "^\| ${matrix_area} \| stable \|" docs/maturity.md; then
+  if grep -Eq "^\| ${matrix_area} \| stable \| long-run pending \|" docs/maturity.md; then
+    printf 'long-run evidence pending: %s\n' "$matrix_area"
     return
+  fi
+
+  if ! grep -Eq "^\| ${matrix_area} \| stable \| long-run verified \|" docs/maturity.md; then
+    echo "runtime area '${matrix_area}' must declare long-run pending or long-run verified" >&2
+    exit 1
   fi
 
   local report
@@ -24,7 +30,7 @@ require_evidence() {
   shopt -u nullglob
 
   if (( found == 0 )); then
-    echo "stable area '${matrix_area}' requires a complete passing 24h/72h ${evidence_area} report" >&2
+    echo "long-run verified area '${matrix_area}' requires a complete passing 24h/72h ${evidence_area} report" >&2
     exit 1
   fi
 }

@@ -30,9 +30,10 @@ Kotlin, Swift, Dart, Java, iOS, Android, and a cross-language SDK error codec
 are intentionally out of scope. New languages do not outrank a reliable Rust
 service path and Web SDK path.
 
-Roze is pre-release. No compatibility shim is required for pre-release public
-contracts; breaking changes must still include regeneration, migration, and
-rollback instructions.
+Roze 1.0 has a stable public contract. Breaking changes require a new major
+version plus regeneration, migration, and rollback instructions. The 1.0
+migration intentionally contains no compatibility shim for the former 0.x
+surface.
 
 ## Architecture To Adopt
 
@@ -73,8 +74,8 @@ supported by repository evidence:
 | Verification | The release gate compiles and smoke-tests every supported generated target and rejects unsafe contract or migration changes. |
 | Evidence | Runtime-critical areas have reproducible 24h and 72h reports with latency, throughput, resource trends, fault recovery, and leak results. |
 
-Feature count alone cannot satisfy this definition. A beta/scaffold capability
-without failure semantics and evidence does not outrank a mature capability.
+Feature count alone cannot satisfy this definition. A stable contract without
+failure semantics and evidence does not outrank a mature, verified capability.
 
 ## Completion Rules
 
@@ -112,7 +113,7 @@ repository.
 | W09 | Gateway and Config Center production governance | W05-W07 | In progress; dependency evidence pending | Canary/blue-green/mirror traffic, stream protocols, signed configuration, staged rollout, audit, listener isolation, snapshots, rollback, and dependency-backed smoke tests pass. |
 | W10 | Security closure | W05-W09 | In progress; cross-boundary evidence pending | OIDC/OAuth2, mTLS, JWT rotation, revocation, redaction, least privilege, audit projection, and cross-tenant isolation tests cover every generated boundary. |
 | W11 | Complete production examples and operations assets | W06-W10 | In progress | Three generated reference systems ship deployable manifests, dashboards, alerts, trace/log queries, SLOs, runbooks, backup/restore, migration, and rollback drills. |
-| W12 | 24h/72h soak and fault-injection evidence | W11 | Evidence pending | Reproducible signed reports prove latency, throughput, bounded resources, retry amplification, leak safety, and recovery objectives before stable promotion. |
+| W12 | 24h/72h soak and fault-injection evidence | W11 | Evidence pending | Reproducible signed reports prove latency, throughput, bounded resources, retry amplification, leak safety, and recovery objectives before long-run verification. |
 
 Execution rules:
 
@@ -288,8 +289,8 @@ Status: **evidence pending**.
 - Maintain Criterion baselines for router, middleware, context, metrics,
   registry, balancing, cache, MQ, model/query, and report aggregation hot paths.
 - Add generated-service load scenarios with fixed hardware/toolchain metadata.
-- Run required 24h reports before beta-to-stable promotion and 72h reports
-  before broad stable claims for Gateway, MQ, Config Center, Lifecycle, and
+- Run required 24h reports before long-run verification and 72h reports before
+  broad battle-tested claims for Gateway, MQ, Config Center, Lifecycle, and
   generated systems.
 - Record p50/p95/p99, throughput, CPU, memory, descriptors/connections, restart
   count, task leaks, retry amplification, and recovery objectives.
@@ -302,7 +303,7 @@ Acceptance:
 - injected failures recover within declared objectives without unexplained
   manual intervention;
 - performance regressions over the approved threshold block release;
-- maturity entries move to `stable` only with linked evidence reports.
+- maturity evidence entries move to `long-run verified` only with linked reports.
 
 ## Current Milestone Board
 

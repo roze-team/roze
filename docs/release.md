@@ -1,12 +1,12 @@
 # Release Policy
 
-Roze is currently pre-release. The repository can be used for evaluation and
-internal pilots, but a team should not treat every crate as production-stable
-until the maturity matrix says so.
+Roze 1.0 is the stable public channel. Rust APIs, CLI commands, generated
+contracts, configuration schemas, and generator-owned layouts follow Semantic
+Versioning. Operational evidence remains an independent adoption input.
 
 ## Current Install Status
 
-Supported today:
+Supported source installation:
 
 ```bash
 cargo install --git https://github.com/roze-team/roze.git rozectl
@@ -14,14 +14,15 @@ cargo install --git https://github.com/roze-team/roze.git rozectl --force
 cargo install --path apps/rozectl
 ```
 
-Not supported yet:
+Publication-dependent paths are supported only after their corresponding
+release artifact is visible:
 
 - `cargo install rozectl`
-- Installing framework crates from crates.io
-- GitHub Release assets
-- Signed release tags
+- `cargo install --git https://github.com/roze-team/roze.git --tag v1.0.0 rozectl`
+- GitHub Release binary assets
+- crates.io framework crates that have not yet been published
 
-Recommended for evaluation and internal pilots:
+Recommended for production adoption:
 
 - Pin a Git revision instead of tracking a branch.
 - Record the Roze revision in generated service repositories.
@@ -29,13 +30,13 @@ Recommended for evaluation and internal pilots:
   production path.
 - Read [Stability Commitment](stability-commitment.md) before making public
   production-readiness claims.
-- Read [Production Evidence](production-evidence.md) before marking runtime
-  modules as stable.
+- Read [Production Evidence](production-evidence.md) before making long-run or
+  battle-tested runtime claims.
 - Read [Upgrade Guide](upgrade.md) before regenerating existing projects.
 
 ## Versioning
 
-Roze should use Semantic Versioning after the first public release:
+Roze 1.x uses Semantic Versioning:
 
 - `MAJOR`: breaking changes in public crate APIs, generated project layout,
   generated config schema, `.api` breaking-change policy, CLI flags, or runtime behavior.
@@ -54,20 +55,19 @@ The current workspace uses Rust 2021. Generated REST/RPC services also pin
 `edition = "2021"` so they do not inherit a parent workspace's Rust 2024
 edition.
 
-Roze does not yet claim a fixed MSRV. Until CI proves an MSRV matrix, do not
-make an MSRV guarantee and use the latest stable Rust toolchain for local
-development and evaluation.
+Roze 1.0 supports the latest stable Rust channel used by CI. It does not claim
+a fixed MSRV until a pinned compiler is continuously verified.
 
-Planned MSRV policy before the first stable release:
+Toolchain policy:
 
-| Channel | Purpose | Required before stable |
+| Channel | Purpose | 1.0 policy |
 | --- | --- | --- |
-| latest stable | Primary development and release build | Yes |
-| pinned MSRV | Proves the minimum supported compiler | Yes |
+| latest stable | Primary development and release build | Required |
+| pinned MSRV | Proves a future minimum supported compiler | Not yet declared |
 | beta | Early warning for upcoming Rust changes | Recommended |
 
-After a fixed MSRV is published, raising MSRV is a breaking change unless it
-happens before `1.0.0`.
+After a fixed MSRV is published, raising it follows the compatibility policy
+announced with that MSRV declaration.
 
 ## crates.io and GitHub Release Plan
 
@@ -87,8 +87,8 @@ Before publishing externally:
 Recommended tag command:
 
 ```bash
-git tag -s v0.1.0 -m "Roze v0.1.0"
-git push origin v0.1.0
+git tag -s v1.0.0 -m "Roze v1.0.0"
+git push origin v1.0.0
 ```
 
 Unsigned tags are acceptable only for local/internal dry runs and must not be
@@ -149,13 +149,14 @@ rdkafka`.
 - Config center tests cover diff, version, rollback, and subscriber failure
   isolation.
 - `CHANGELOG.md` and upgrade notes are updated.
-- `docs/maturity.md` accurately labels modules as stable/beta/scaffold/planned.
+- `docs/maturity.md` accurately labels contract stability and evidence state.
 - Runtime-critical modules marked `stable` have evidence reports that satisfy
   `docs/production-evidence.md`.
 - New evidence reports are generated with `scripts/production-evidence.sh` or
   contain the same required fields.
 - Public release language follows `docs/stability-commitment.md`.
-- `README.md` still states the current pre-release install path.
+- `README.md` states the stable version and only advertises artifacts that have
+  actually been published.
 - Security-sensitive changes are checked against `SECURITY.md`.
 
 The release gate intentionally runs the high-signal stability checks without

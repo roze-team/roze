@@ -1,15 +1,14 @@
 # Roze
 
-Roze is currently pre-release. It is suitable for evaluation, internal pilots,
-and controlled production paths where teams pin a reviewed Git revision, inspect
-generated diffs, run the smoke checks, and own production configuration,
-observability, rollback, auth, and dependency governance. Do not treat Roze or
-`rozectl` as a broadly production-stable platform until the
-[release policy](docs/release.md),
-[maturity matrix](docs/maturity.md), and
-[production evidence](docs/production-evidence.md) say so.
+Roze 1.0 is the stable release channel for the Rust-native framework,
+`rozectl`, generated Rust services, and TypeScript/JavaScript Web clients.
+Public APIs and generated contracts follow Semantic Versioning. Runtime
+adoption must still review the independent evidence state in the
+[maturity matrix](docs/maturity.md) and
+[production evidence](docs/production-evidence.md); stable API does not mean a
+deployment has inherited Roze's test environment or operational evidence.
 
-Roze is a small Rust service framework scaffold with:
+Roze is a Rust service framework with:
 
 - `crates/roze-core`: base types, errors, results, and shared response helpers.
 - `crates/roze-http`: Roze native HTTP server helpers and graceful shutdown wrappers.
@@ -26,8 +25,8 @@ Roze is a small Rust service framework scaffold with:
 - `crates/roze-singleflight`: request coalescing for cache miss protection; key lookup uses DashMap for concurrent hot paths.
 - `crates/roze-openapi`: Swagger/OpenAPI support.
 - `crates/roze-rpc`: tonic gRPC helpers and registry primitives; in-memory registry plus method governance state use DashMap for concurrent hot paths.
-- `crates/roze-job`: scheduled job scaffolding.
-- `crates/roze-mq`: messaging scaffolding; in-memory topic, offset, and idempotency indexes use DashMap/DashSet.
+- `crates/roze-job`: governed scheduled jobs and lifecycle integration.
+- `crates/roze-mq`: reliable messaging primitives; in-memory topic, offset, and idempotency indexes use DashMap/DashSet.
 - `crates/roze-eventbus`: event envelope and in-memory pub/sub; topic sender lookup uses DashMap.
 - `crates/roze-session`: in-memory session store; session lookup uses DashMap.
 - `crates/roze-ws`: WebSocket session hub; session lookup uses DashMap.
@@ -114,14 +113,20 @@ authorization, permission checks, and search ranking rules.
 
 ## Install rozectl
 
-Roze is currently pre-release. The supported install path is Git or local
-checkout installation; crates.io publishing and GitHub Releases are tracked in
-the [release policy](docs/release.md).
+Roze 1.0 supports signed-tag Git installation and local checkout installation.
+The crates.io publication state is tracked separately in the
+[release policy](docs/release.md).
 
 Install from GitHub:
 
 ```bash
 cargo install --git https://github.com/roze-team/roze.git rozectl
+```
+
+After the signed tag is published, install the exact stable 1.0 release with:
+
+```bash
+cargo install --git https://github.com/roze-team/roze.git --tag v1.0.0 rozectl
 ```
 
 Force reinstall or upgrade an existing binary:

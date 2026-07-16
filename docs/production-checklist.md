@@ -3,9 +3,10 @@
 This checklist is the baseline for considering a Roze service production-ready.
 The implementation sequence and completion rules are defined in
 [Roze Production Generation Plan](go-zero-surpass-plan.md).
-Roze itself is currently pre-release, so passing this checklist means a
-specific service has a controlled production path. It does not mean every Roze
-crate, generator, or runtime module is broadly production-stable.
+Roze 1.0 provides stable public contracts. Passing this checklist means a
+specific service has completed its controlled production review; framework API
+stability does not replace deployment-specific capacity, failure, security,
+and recovery evidence.
 
 ## Release and Upgrade
 

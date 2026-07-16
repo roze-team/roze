@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "roze-admin"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3444,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "roze-auth"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "reqwest 0.13.4",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "roze-bootstrap"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "roze-health",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "roze-cache"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "roze-config",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "roze-codec"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "serde",
@@ -3487,7 +3487,7 @@ dependencies = [
 
 [[package]]
 name = "roze-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3507,18 +3507,18 @@ dependencies = [
 
 [[package]]
 name = "roze-context"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "roze-trace",
 ]
 
 [[package]]
 name = "roze-core"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "roze-cron"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "roze-db"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "roze-config",
@@ -3536,7 +3536,7 @@ dependencies = [
 
 [[package]]
 name = "roze-dtm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "roze-dtm-service"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "config",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "roze-error"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "http",
  "roze-grpc",
@@ -3582,7 +3582,7 @@ dependencies = [
 
 [[package]]
 name = "roze-eventbus"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "roze-example"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "config",
@@ -3631,7 +3631,7 @@ dependencies = [
 
 [[package]]
 name = "roze-gateway"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "roze-gateway-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "config",
@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "roze-grpc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "roze-context",
@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "roze-health"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "roze-http"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3735,7 +3735,7 @@ dependencies = [
 
 [[package]]
 name = "roze-job"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "roze-jwt"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "jsonwebtoken",
@@ -3759,7 +3759,7 @@ dependencies = [
 
 [[package]]
 name = "roze-kafka"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3778,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "roze-local-cache"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "moka",
@@ -3787,7 +3787,7 @@ dependencies = [
 
 [[package]]
 name = "roze-log"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "roze-metrics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "dashmap",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "roze-middleware"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "roze-migration"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3842,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "roze-mongo"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "mongodb",
@@ -3852,7 +3852,7 @@ dependencies = [
 
 [[package]]
 name = "roze-mq"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "roze-nats"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -3891,7 +3891,7 @@ dependencies = [
 
 [[package]]
 name = "roze-openapi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3899,7 +3899,7 @@ dependencies = [
 
 [[package]]
 name = "roze-opentelemetry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -3911,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "roze-orm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "sea-orm",
  "serde",
@@ -3922,25 +3922,25 @@ dependencies = [
 
 [[package]]
 name = "roze-permission"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "roze-profiling"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "roze-prometheus"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "roze-metrics",
 ]
 
 [[package]]
 name = "roze-push"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3950,7 +3950,7 @@ dependencies = [
 
 [[package]]
 name = "roze-query"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "thiserror",
@@ -3960,7 +3960,7 @@ dependencies = [
 
 [[package]]
 name = "roze-redis"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "redis",
@@ -3971,7 +3971,7 @@ dependencies = [
 
 [[package]]
 name = "roze-report"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "rust_xlsxwriter",
@@ -3981,7 +3981,7 @@ dependencies = [
 
 [[package]]
 name = "roze-resilience"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "dashmap",
  "serde_json",
@@ -3989,14 +3989,14 @@ dependencies = [
 
 [[package]]
 name = "roze-result"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "roze-rpc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4024,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "roze-sample-service"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "config",
@@ -4055,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "roze-search"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "reqwest 0.13.4",
@@ -4066,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "roze-service"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "roze-shutdown",
@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "roze-session"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4087,7 +4087,7 @@ dependencies = [
 
 [[package]]
 name = "roze-session-hub"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4097,14 +4097,14 @@ dependencies = [
 
 [[package]]
 name = "roze-shutdown"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "roze-singleflight"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "dashmap",
@@ -4113,7 +4113,7 @@ dependencies = [
 
 [[package]]
 name = "roze-sqlx"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "roze-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4135,11 +4135,11 @@ dependencies = [
 
 [[package]]
 name = "roze-swagger"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "roze-trace"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "tracing",
  "uuid",
@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "roze-transaction"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4160,18 +4160,18 @@ dependencies = [
 
 [[package]]
 name = "roze-utils"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "roze-validation"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "validator",
 ]
 
 [[package]]
 name = "roze-worker"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "roze-ws"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -4191,7 +4191,7 @@ dependencies = [
 
 [[package]]
 name = "rozectl"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -5894,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "config",

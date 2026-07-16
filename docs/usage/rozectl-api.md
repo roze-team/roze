@@ -16,14 +16,11 @@ code, and deployment files. Business logic is still written by developers:
 handler-driven logic, complex SQL, domain checks, transactions, authorization,
 permissions, and other product-specific behavior live in the application.
 
-`rozectl` is currently a pre-release generator. It is appropriate for
-evaluation, internal pilots, and controlled production paths where the Roze Git
-revision is pinned, generated diffs are reviewed, smoke checks pass, and
-application teams own runtime configuration, observability, rollback,
-authorization, and dependency governance. It should not be presented as a
-broadly production-stable platform until [Release Policy](../release.md),
-[Module Maturity Matrix](../maturity.md), and
-[Production Evidence](../production-evidence.md) support that claim.
+`rozectl` 1.0 is the stable generator for Rust REST/RPC/stream services,
+models, search, operations assets, OpenAPI, and TypeScript/JavaScript clients.
+Generated contract changes follow Semantic Versioning and the gate policy.
+Runtime evidence is tracked independently in [Module Maturity Matrix](../maturity.md)
+and [Production Evidence](../production-evidence.md).
 
 Install `rozectl` first if the binary is not available:
 
@@ -2235,9 +2232,9 @@ application modules that call the generated repository.
 ## Dockerfile generation
 
 `rozectl docker --binary <name>` writes a production-oriented multi-stage Rust
-Dockerfile and validates it before returning success. Because Roze is
-pre-release, treat the output as reviewed deployment scaffolding rather than a
-complete production certification:
+Dockerfile and validates it before returning success. The output is a stable
+generated deployment baseline, not a certification of an application's image,
+dependencies, capacity, or runtime configuration:
 
 ```bash
 rozectl docker \

@@ -2,14 +2,16 @@
 
 All notable changes to Roze should be recorded in this file.
 
-Roze has not published a stable release yet. Until the first tagged release,
-entries are grouped under `Unreleased`, and users should install `rozectl` from
-Git or a local checkout.
-
-The format follows Keep a Changelog style, and version numbers should follow
-Semantic Versioning once releases begin.
+The format follows Keep a Changelog and Semantic Versioning.
 
 ## Unreleased
+
+## [1.0.0] - 2026-07-16
+
+Roze 1.0 establishes the stable public contract for the Rust framework,
+`rozectl`, generated Rust services, and TypeScript/JavaScript Web clients.
+Runtime evidence remains independently reported and must not be inferred from
+the API stability label.
 
 ### Added
 

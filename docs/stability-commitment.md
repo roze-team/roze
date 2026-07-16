@@ -1,84 +1,58 @@
 # Stability Commitment
 
-Roze uses explicit stability labels. A module is not stable just because it is
-present in the repository.
+Roze 1.0 is the stable public channel for the Rust framework, `rozectl`,
+generated Rust services, and TypeScript/JavaScript Web clients.
 
 ## Public Claim Rules
 
-Allowed today:
+Allowed:
 
-- "Roze is pre-release."
-- "Gateway, MQ, Config Center, and most generators are in beta and are suitable
-  for internal pilots."
-- "Lifecycle/bootstrap and Transactions/outbox/DTM are scaffolds that still
-  need full orchestration or end-to-end examples before stable claims."
-- "Release-gate, smoke tests, and generated compile tests are available."
-- "Some contracts are documented and being hardened."
+- "Roze 1.x provides stable public APIs and generated contracts."
+- "Roze release gates verify deterministic generation, ownership, contract and
+  migration safety, compile coverage, focused failure tests, and smoke paths."
+- "A runtime area has passing long-run evidence" only when the exact signed
+  report and artifact are linked.
 
-Not allowed today:
+Not allowed without evidence:
 
-- "All Roze crates are production-stable."
-- "Roze is battle-tested in production" without a linked production evidence
-  report.
-- "Config Center is stable" before management semantics, audit, rollback,
-  watch status, permission checks, snapshot backup/restore or external
-  control-plane integration, and long-run evidence are implemented and tested.
-- "MSRV is guaranteed" before the release policy names a fixed MSRV and CI
-  proves it.
+- "Roze is battle-tested in production."
+- "Roze has completed 24h/72h validation" when the required run has not
+  completed successfully.
+- Performance, recovery, capacity, or leak claims that are not supported by a
+  reproducible report.
 
-## Stable Module Requirements
-
-A module can be marked `stable` in `docs/maturity.md` only when all of the
-following are true:
-
-- Public API and behavior are documented.
-- Configuration keys, defaults, and precedence are documented.
-- Runtime ordering is documented.
-- Failure semantics are documented.
-- Migration and rollback notes exist for breaking changes.
-- Unit tests and at least one end-to-end or smoke test exist.
-- CI release gate runs the relevant tests.
-- Production evidence exists when the module is runtime-critical.
-
-## API Stability
+## Stable Public Surface
 
 Public API includes:
 
-- Rust crate APIs.
-- CLI flags and subcommands.
-- Generated file layout.
-- Generated configuration schema.
-- Runtime behavior such as retry, fallback, rollback, watch, and shutdown
-  ordering.
-- Metrics, event names, and observable result fields.
+- Rust crate APIs;
+- CLI flags, commands, exit codes, and diagnostics;
+- generated file layout and ownership boundaries;
+- generated configuration and IDL schemas;
+- runtime retry, fallback, rollback, watch, lifecycle, and shutdown ordering;
+- metrics, event envelopes, error codes, and observable result fields.
 
-Generated code is part of the public API. A generator change is breaking when
-it requires users to rewrite preserved logic, service context extensions,
-custom middleware, config, deployment manifests, or CI wiring.
+Breaking any of these after 1.0 requires a new major version. Additive behavior
+uses a minor release; compatible fixes use a patch release. Generated code is
+part of the public API.
 
-## Experimental Surface
+## Evidence Is Independent
 
-Any module marked `beta`, `scaffold`, or `planned` may change before `1.0.0`.
-Breaking changes still require release notes and upgrade documentation, but
-they do not carry a stable compatibility promise.
+API stability and operational evidence are separate axes. A stable runtime API
+may have `long-run pending` evidence in `docs/maturity.md`. That area can be
+adopted with workload-specific validation, but it cannot be described as
+battle-tested until `docs/production-evidence.md` is satisfied.
 
-## MSRV Commitment
+## Toolchain Policy
 
-Roze does not currently guarantee a fixed MSRV. Until the release policy names
-one and CI proves it, use the latest stable Rust toolchain.
-
-Once an MSRV is declared:
-
-- The value must be listed in `docs/release.md`.
-- CI must test the declared MSRV.
-- Raising MSRV after `1.0.0` is a breaking change.
+Roze 1.0 is tested on the latest stable Rust channel. No fixed MSRV is claimed
+until CI adds and continuously verifies one. Once declared, raising the MSRV in
+the 1.x line requires the compatibility treatment documented by the release
+policy.
 
 ## Release Commitment
 
-No release should be described as stable unless:
-
-- `.github/workflows/release-gate.yml` passes on the release commit or tag.
-- `docs/maturity.md` marks the affected modules accurately.
-- `docs/production-evidence.md` requirements are satisfied for stable runtime
-  modules.
-- `docs/upgrade.md` covers breaking changes.
+A 1.x release requires the release gate, accurate maturity/evidence labels,
+upgrade and rollback notes, and a clean supply-chain check. Missing long-run
+evidence does not downgrade API stability, but release notes must preserve the
+`long-run pending` label and must not make battle-tested claims.

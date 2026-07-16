@@ -13,12 +13,12 @@ services.
   modules, gaps, and P0/P1/P2 execution plan.
 - [Roadmap](../roadmap.md): prioritized P0/P1/P2 work across release maturity,
   gateway, config center, MQ, governance, generation, docs, and security.
-- [Module maturity matrix](../maturity.md): stable/beta/scaffold/planned status
+- [Module maturity matrix](../maturity.md): stable contract and independent evidence status
   for each framework area.
 - [Stability commitment](../stability-commitment.md): public claim rules,
   stable-module requirements, experimental surface, and MSRV commitment.
 - [Production evidence](../production-evidence.md): required long-run,
-  failure-injection, and leak-report evidence before stable runtime claims.
+  failure-injection, and leak-report evidence before long-run runtime claims.
 - [Release policy](../release.md): SemVer, MSRV, crates.io/GitHub Release
   expectations, and breaking-change rules.
 - [Production checklist](../production-checklist.md): deployment, config,

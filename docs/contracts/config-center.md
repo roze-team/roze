@@ -1,12 +1,14 @@
 ﻿# Config Center Contract
 
-This document defines the stable behavior expected from Roze Config Center before it can be described as production-ready.
+This document defines the stable 1.x behavior of Roze Config Center.
 
 ## Maturity
 
-Status: `beta`.
+Contract status: `stable`.
 
-Config Center is usable for internal pilots and controlled deployments. It must not be marketed as fully stable until admin snapshot persistence or an external control plane is wired into deployment, watch isolation is covered by integration tests, and long-run release evidence exists.
+Signed publish, staged rollout, audit, permission checks, listener isolation,
+snapshot restore, promotion, rejection, and rollback are stable contracts.
+Long-run evidence is tracked independently and is currently pending.
 
 ## Source Priority
 
@@ -91,10 +93,11 @@ Listener behavior is part of the public contract:
 
 - A slow listener must not block config reload forever.
 - A failing listener must be logged and isolated from other listeners.
-- Listener timeout defaults must be documented and configurable before stable.
+- Listener timeout defaults are documented and configurable in the stable contract.
 - Failed listener delivery must not roll back a successfully parsed config.
 
-Current status: listener failure and timeout handling exists, but production-stable status requires broader tests and explicit timeout configuration docs.
+Current status: listener failure and timeout handling are stable; long-run
+control-plane evidence remains pending.
 
 ## Management API Semantics
 

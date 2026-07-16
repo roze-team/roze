@@ -1,59 +1,54 @@
 # Module Maturity Matrix
 
-Roze contains many crates. This matrix prevents users from assuming every
-module has the same production readiness.
+Roze 1.0 separates public-contract stability from operational evidence. Every
+area below has a stable 1.x API or generated contract. The evidence column says
+what has actually been exercised; it must not be upgraded by declaration.
 
 Status legend:
 
-- `stable`: API and behavior are suitable for production use with normal test
-  coverage.
-- `beta`: usable for pilots, but needs more integration tests, metrics, or
-  upgrade hardening before broad production adoption.
-- `scaffold`: generated/project-shaping code exists, but business behavior or
-  operational semantics are intentionally left to applications.
-- `planned`: design direction exists, implementation is incomplete.
+- `stable`: covered by Semantic Versioning, upgrade notes, and the contract gate.
+- `verified`: focused tests plus generated compile/smoke coverage exist.
+- `integration`: real dependency integration coverage exists.
+- `long-run pending`: the 24h/72h signed evidence required for a
+  battle-tested claim has not yet been archived.
 
-| Area | Status | Notes |
-| --- | --- | --- |
-| REST generation | beta | Generates split route/handler/logic/middleware layout and preserves user-owned logic, service context extensions, custom middleware, and config on `--update`. The non-ignored supported-target matrix proves deterministic REST + model + search composition; the release matrix runs generated compile/clippy smoke. Broader production evidence remains required. |
-| RPC generation | beta | Generates split server/client/pb/logic layout. Method rate-limit and breaker state use DashMap for concurrent hot paths; memory registry has Criterion hot-path baselines. The non-ignored supported-target matrix and release compile smoke cover RPC generation. Proto edge fixtures cover comments, qualified and streaming signatures, optional/repeated/map fields, and empty messages; repeated update generation is byte-deterministic and preserves application-owned logic. |
-| Stream worker generation | beta | `rozectl stream gen` creates producer, consumer, envelope, config, type, and README scaffolding from RPC methods. Generated stream workers run under `ServiceGroup`, propagate shutdown into consumer tasks, and are covered by the non-ignored supported-target matrix plus release compile smoke; live broker examples and richer event-contract fixtures remain. |
-| OpenAPI generation | beta | Produces OpenAPI 3 documents and projects required/optional fields, string and collection lengths, numeric bounds, enums, UUID/email/URI/IP formats, array `dive` item constraints, and map value/property constraints into component and request-body schemas. OpenAPI 3.0-inexpressible map-key rules are exposed as `x-roze-map-key-schema`; all runtime rules, including cross-field and custom validators, are preserved as `x-roze-validator`. Broader consumer compatibility evidence remains before stable promotion. |
-| TypeScript/JavaScript SDK generation | beta | Generates route/path/query/header/body clients, typed errors with business code, message, trace ID, details and Retry-After, bearer-token injection, request/response interceptors, timeout/cancellation, and bounded full-jitter GET/HEAD retries. Non-Web language SDK generators are intentionally not part of the product scope. |
-| HTTP middleware | beta | Covers trace, recover, metrics, CORS, timeout, max connections, shedding, gunzip, and body limit. Route rate-limit and breaker state use DashMap for concurrent hot paths; needs more end-to-end service tests. |
-| Gateway | beta | The Roze native HTTP path enforces method constraints, static or registry-backed upstream forwarding, strict instance-tag filtering, bounded weighted selection, active health checks, passive outlier ejection, fresh-target retries, route/global governance inheritance, timeout, idempotent full-jitter retries, retry budgets, rate limits, half-open breakers, bounded adaptive shedding, strict CORS preflight, non-buffering SSE, RFC 6455-validated WebSocket tunneling, strict public/system-root WSS TLS, per-service private CA and client-certificate mTLS, shared stream idle/connection limits, JWT/API-key enforcement, fallback, correlation propagation, atomic config hot-reload, and metrics. TLS profiles are eagerly validated and covered by a native mutual-TLS handshake test; long-running production evidence remains required before stable promotion. |
-| Config center | beta | Supports Etcd watch, Env/File fallback, diff/version metadata, section-level change events, listener failure isolation, and admin semantics for read, publish validation, audit, rollback, watch status, permissions, and JSON snapshot persistence; still needs deployment integration and long-run evidence before `stable`. |
-| MQ/Kafka/NATS | beta | Publish/subscribe, retry, DLQ, stats, queue metrics, Kafka manual ack/nack/retry/dead-letter decisions, in-memory admin replay, NATS JetStream, and outbox/inbox primitives exist. Governed consumers accept the authoritative resolved policy and enforce timeout, bounded full-jitter retry budgets, rate limits, breakers, and adaptive shedding before ack/nack settlement. In-memory topic, offset, and idempotency indexes use DashMap/DashSet and have Criterion baselines; still needs live broker integration coverage and production examples. |
-| EventBus | beta | In-memory event envelope pub/sub exists. Topic sender lookup uses DashMap and has Criterion baselines for subscribe/publish hot paths. |
-| Service discovery | beta | memory, DNS, etcd, Consul, watch, and cache primitives exist. The in-memory registry uses DashMap for concurrent register/discover paths; needs more failure-mode tests. |
-| Health checks | beta | Probe report types and `HealthRegistry` exist. Dependency checks run concurrently with a bounded timeout and panic isolation. Generated REST services expose `/healthz`, `/readyz`, `/startupz`, and `/metrics`; generated RPC services expose the standard gRPC health protocol and publish `NOT_SERVING` during startup, dependency failure, and draining. Generated service contexts register connected DB/Mongo/Redis/NATS dependencies as readiness checks. Gateway probes and broader protocol-level dependency pings still need standardization. |
-| Lifecycle/bootstrap | beta | `ServiceGroup` uses Starting/Ready/Draining/Stopped/Failed phases with dependency-ordered start/readiness, reverse drain/stop, bounded hooks, isolated shutdown signaling, failed-task reporting, generated REST/RPC/stream entrypoints, and a short/long production soak harness. Real 24h/72h evidence remains required before stable. |
-| DB/ORM/model generation | beta | Toasty is the default generated SQL model scaffold; SeaORM is optional with `--orm sea-orm`. `model inspect` supports sqlite, postgres, mysql, and mongo; Mongo inspection samples documents, maps `_id`, captures index metadata, and emits single-field plus compound-index helpers. |
-| Cache | beta | Redis cache helpers cover cache-aside, negative cache, TTL jitter, and singleflight loading. `roze-local-cache` uses Moka for in-process TTL/capacity eviction and hit/miss statistics, with Criterion baselines for async insert/get/get-or-insert. `roze-singleflight` uses DashMap for key lookup and has Criterion baselines for unique-key, cached-key, and reset paths. |
-| Search generation | beta | `rozectl search generate/inspect` supports Elasticsearch, OpenSearch, and Meilisearch with generated `src/search` document/repository modules backed by `roze-search` health/index/delete/search calls. Elasticsearch/OpenSearch inspect reads mappings; Meilisearch inspect reads settings/index metadata and samples documents for field inference. Generated search modules are included in REST compile smoke. |
-| Transactions/outbox/DTM | scaffold | TCC/Saga/outbox/inbox primitives exist; needs full HTTP + DB transaction + outbox + MQ + RPC examples. |
-| Auth/JWT/permission/session | beta | JWT key sets with `kid` rotation, issuer/audience/clock-skew validation, `jti` revocation, OIDC HTTPS discovery with bounded fresh/stale cache, OAuth2 policy, mTLS identity, RBAC, tenant, ABAC, and session primitives exist. Cross-boundary identity-provider and tenant-isolation integration evidence remains. |
-| Reporting/charts | beta | Generated POST contracts provide bounded chart queries and tenant/subject-bound asynchronous CSV/XLSX exports with formula escaping, cancellation, object-storage delivery, expiry metadata, metrics, audit logs, OpenAPI, and TypeScript/JavaScript clients. Application-owned database query catalogs and real dependency-backed report tests remain before stable. |
-| WebSocket | beta | In-memory WebSocket hub primitives exist. Session lookup uses DashMap and has Criterion baselines for register/get/disconnect paths; needs broader gateway/app integration coverage. |
-| Observability | beta | tracing, metrics, Prometheus, OpenTelemetry, gateway metrics, and queue event metrics exist. Labeled metric state uses DashMap for concurrent hot paths, with Criterion baselines for write/render paths; needs broader dashboards and query examples. |
-| Docker/Kubernetes generation | beta | Generator commands emit production-oriented Dockerfiles, Kubernetes manifests, and Helm charts with offline validation. |
-| Production smoke | beta | `scripts/production-smoke.sh` runs formatting checks, `rozectl` tests, the unified REST/RPC/stream/model/search/OpenAPI/Web SDK generated-target matrix, core runtime tests, and app checks. `--with-compose` starts the real dependency profile for Etcd, Consul, Kafka, NATS, Redis, Postgres, MySQL, Elasticsearch, OpenSearch, and Meilisearch. |
+| Area | Contract | Evidence | Notes |
+| --- | --- | --- | --- |
+| REST generation | stable | verified | Deterministic create/update generation preserves application-owned logic, context extensions, middleware, and configuration. |
+| RPC generation | stable | verified | Split server/client/protobuf generation covers unary and streaming contracts, governance, health, and ownership-preserving updates. |
+| Stream worker generation | stable | verified | Producer, consumer, envelope, lifecycle, shutdown, and generated compile coverage use the shared event contract. |
+| OpenAPI generation | stable | verified | Runtime constraints, extensions, auth declarations, reports, and chart contracts are projected into OpenAPI 3. |
+| TypeScript/JavaScript SDK generation | stable | verified | Web clients include typed errors, auth injection, interceptors, cancellation, timeout, and bounded retry. Non-Web SDKs are out of scope. |
+| HTTP middleware | stable | verified | Trace, recovery, metrics, CORS, timeout, connection/body limits, rate limit, breaker, retry budget, and shedding share bounded operation labels. |
+| Gateway | stable | long-run pending | Registry routing, canary/blue-green/A-B selection, mirroring, health/outlier handling, retry, fallback, SSE, WebSocket, TLS, auth, and hot reload are implemented. |
+| Config center | stable | long-run pending | Signed publish, staged rollout, audit, permissions, listener isolation, snapshot restore, promotion, rejection, and rollback are implemented. |
+| MQ/Kafka/NATS | stable | long-run pending | Shared event envelope, governed consumers, retry/DLQ, replay/purge, lag, inbox/outbox, idempotency, and transport metadata are implemented. |
+| EventBus | stable | verified | Versioned envelopes and concurrent in-memory publish/subscribe have focused tests and hot-path benchmarks. |
+| Service discovery | stable | integration | Memory, DNS, Etcd, and Consul discovery include watch/cache and failure behavior. |
+| Health checks | stable | verified | REST probes, gRPC health, dependency readiness, startup, and draining behavior are generated consistently. |
+| Lifecycle/bootstrap | stable | long-run pending | Starting/Ready/Draining/Stopped/Failed ordering, bounded hooks, failed-task reporting, and reverse dependency drain are implemented. |
+| DB/ORM/model generation | stable | integration | Toasty and SeaORM generation, SQL/Mongo inspection, migration boundaries, and model smoke coverage are supported. |
+| Cache | stable | integration | Redis cache-aside, negative cache, TTL jitter, local cache, and singleflight behavior are covered. |
+| Search generation | stable | integration | Elasticsearch, OpenSearch, and Meilisearch generation/inspection share stable document and repository contracts. |
+| Transactions/outbox/DTM | stable | integration | TCC, Saga, migration, inbox, transactional outbox, relay, recovery, and idempotency contracts are production APIs; complete reference-system long-run evidence remains pending. |
+| Auth/JWT/permission/session | stable | verified | OIDC/OAuth2, mTLS identity, JWT rotation/revocation, RBAC/ABAC, tenant scope, session, and audit contracts are implemented. |
+| Reporting/charts | stable | verified | Bounded chart queries and asynchronous CSV/XLSX exports include tenant/auth binding, cancellation, expiry, object storage, audit, and Web projection. |
+| WebSocket | stable | verified | Session hub and Gateway tunneling have stable lifecycle, capacity, and TLS boundaries. |
+| Observability | stable | verified | Structured tracing, bounded metrics, Prometheus/OpenTelemetry export, dashboards, alerts, and generated queries are supported. |
+| Docker/Kubernetes generation | stable | verified | Immutable deployment, probes, resources, HPA, PDB, NetworkPolicy, service identity, Helm, and offline validation assets are generated. |
+| Production smoke | stable | long-run pending | Release gates run the generated target matrix and runtime smoke; signed generated-system 24h/72h artifacts remain pending. |
 
-## Production-Ready Criteria
+## Stable Contract Requirements
 
-A module can move to `stable` only when it has:
+The 1.x contract includes Rust crate APIs, CLI commands, generated layouts,
+configuration schemas, metrics/events, and documented runtime ordering.
+Breaking changes require a new major version, migration and rollback notes, and
+the hash-bound contract/migration gate. Roze 1.0 does not include compatibility
+shims for the former 0.x surface.
 
-- Documented public API and generated-file ownership.
-- Unit tests and at least one end-to-end test.
-- Metrics, logs, and trace/context propagation documented.
-- Failure behavior documented, including retry/rollback/fallback boundaries.
-- Upgrade notes for breaking generated-code changes.
-- A production example or smoke test that a user can run locally.
-- Reproducible production evidence for runtime-critical modules, following
-  [Production Evidence](production-evidence.md).
+## Evidence Boundary
 
-## Public Commitment Boundary
-
-Public stability claims must follow [Stability Commitment](stability-commitment.md).
-In short: beta modules can be used for pilots, but a module is not production
-stable until this matrix says `stable` and the release policy evidence exists.
+`stable` means users can build against the public contract with normal SemVer
+expectations. It does not mean every workload, dependency topology, or failure
+mode is battle-tested. Claims about long-run behavior require linked passing
+artifacts defined by [Production Evidence](production-evidence.md).
