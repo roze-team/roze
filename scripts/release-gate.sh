@@ -16,8 +16,10 @@ bash -n scripts/production-soak-lifecycle.sh
 bash -n scripts/production-soak-ci.sh
 bash -n scripts/production-evidence-gate.sh
 bash -n scripts/generated-target-matrix.sh
+bash -n scripts/service-dependency-check.sh
 bash scripts/production-evidence-smoke.sh
 bash scripts/production-evidence-gate.sh
+bash scripts/service-dependency-check.sh
 
 cargo test -p roze-gateway
 bash scripts/gateway-smoke.sh

@@ -1048,8 +1048,17 @@ pub fn load<T>(path: impl AsRef<Path>) -> Result<T, config::ConfigError>
 where
     T: for<'de> Deserialize<'de>,
 {
-    config::Config::builder()
-        .add_source(config::File::from(path.as_ref()))
+    let path = path.as_ref();
+    let dependency_defaults = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("config/roze-dependencies.yaml");
+    let mut builder = config::Config::builder();
+    if dependency_defaults.is_file() {
+        builder = builder.add_source(config::File::from(dependency_defaults));
+    }
+    builder
+        .add_source(config::File::from(path))
         .add_source(config::Environment::with_prefix("ROZE").separator("__"))
         .build()?
         .try_deserialize()
@@ -1087,6 +1096,37 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn service_config_overrides_generated_dependency_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "roze-config-dependencies-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("config")).expect("create config directory");
+        fs::write(
+            root.join("config/roze-dependencies.yaml"),
+            "name: defaults\nrpc_clients:\n  order:\n    endpoints: [127.0.0.1:4002]\n    timeout_ms: 1000\n",
+        )
+        .expect("write dependency defaults");
+        fs::write(
+            root.join("config.yaml"),
+            "name: payment\nrpc_clients:\n  order:\n    timeout_ms: 2500\n",
+        )
+        .expect("write service config");
+
+        let value: serde_json::Value = load(root.join("config.yaml")).expect("load merged config");
+        assert_eq!(value["name"], "payment");
+        assert_eq!(value["rpc_clients"]["order"]["timeout_ms"], 2500);
+        assert_eq!(
+            value["rpc_clients"]["order"]["endpoints"][0],
+            "127.0.0.1:4002"
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]

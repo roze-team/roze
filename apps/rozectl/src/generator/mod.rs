@@ -9,8 +9,9 @@ pub mod types;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -87,6 +88,13 @@ struct RpcClientBinding {
     dep_name: String,
     crate_name: String,
     path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedRpcClient {
+    pub name: String,
+    pub dependency_name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4193,6 +4201,72 @@ fn read_project_rpc_client_bindings(out: &Path) -> anyhow::Result<Vec<RpcClientB
     }
     clients.sort();
     Ok(clients)
+}
+
+/// Synchronizes the managed RPC-client sections in an existing generated
+/// service context from the project's `*-rpc` path dependencies.
+pub fn sync_project_rpc_clients(
+    out: &Path,
+    managed_clients: &[ManagedRpcClient],
+    check: bool,
+) -> anyhow::Result<bool> {
+    let service_context = out.join("src/svc/mod.rs");
+    if !service_context.is_file() {
+        bail!(
+            "{} is not a generated Roze service: missing src/svc/mod.rs",
+            out.display()
+        );
+    }
+    let clients = managed_clients
+        .iter()
+        .map(|client| RpcClientBinding {
+            name: client.name.clone(),
+            dep_name: client.dependency_name.clone(),
+            crate_name: client.dependency_name.replace('-', "_"),
+            path: client.path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let existing = fs::read_to_string(&service_context)
+        .with_context(|| format!("failed to read {}", service_context.display()))?;
+    let updated = format_rust_source(&inject_rpc_clients_into_service_context(
+        existing.clone(),
+        &clients,
+    ))?;
+    if updated == existing {
+        return Ok(false);
+    }
+    if check {
+        bail!(
+            "{} is not synchronized; run `rozectl service sync --project {}`",
+            service_context.display(),
+            out.display()
+        );
+    }
+    fs::write(&service_context, updated)
+        .with_context(|| format!("failed to write {}", service_context.display()))?;
+    Ok(true)
+}
+
+fn format_rust_source(content: &str) -> anyhow::Result<String> {
+    let mut child = Command::new("rustfmt")
+        .args(["--edition", "2021", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to start rustfmt for service dependency synchronization")?;
+    child
+        .stdin
+        .take()
+        .context("rustfmt stdin is unavailable")?
+        .write_all(content.as_bytes())
+        .context("failed to write service context to rustfmt")?;
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for rustfmt during service dependency synchronization")?;
+    if !output.status.success() {
+        bail!("rustfmt failed while synchronizing managed RPC clients");
+    }
+    String::from_utf8(output.stdout).context("rustfmt emitted invalid UTF-8")
 }
 
 fn dependency_path(item: &toml_edit::Item) -> Option<&str> {
@@ -11624,6 +11698,33 @@ mod tests {
             assert!(rendered.contains("Arc<dyn roze_storage::ObjectStorage>"));
             assert!(rendered.contains("pub fn with_storage"));
             assert!(rendered.contains("pub async fn media_url"));
+        }
+    }
+
+    #[test]
+    fn managed_rpc_clients_sync_into_api_and_rpc_service_contexts() {
+        let clients = [ManagedRpcClient {
+            name: "order".to_string(),
+            dependency_name: "shop-order-rpc".to_string(),
+            path: "../shop-order-rpc".to_string(),
+        }];
+
+        for (kind, rendered) in [
+            ("api", rest_service_context_rs(&[])),
+            ("rpc", rpc_service_context_rs(&[])),
+        ] {
+            let out = temp_test_root(&format!("rozectl-{kind}-managed-rpc"));
+            fs::create_dir_all(out.join("src/svc")).expect("create service context directory");
+            fs::write(out.join("src/svc/mod.rs"), rendered).expect("write service context");
+
+            assert!(sync_project_rpc_clients(&out, &clients, false).expect("initial sync"));
+            assert!(!sync_project_rpc_clients(&out, &clients, true).expect("idempotent check"));
+            let service_context =
+                fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
+            assert!(service_context.contains("pub order_client: shop_order_rpc::client::RpcClient"));
+            assert!(service_context.contains("pub fn order(&self)"));
+
+            fs::remove_dir_all(out).expect("remove generated service context");
         }
     }
 

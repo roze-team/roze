@@ -23,4 +23,15 @@ Invoke-Cargo @("test", "-p", "rozectl", "--", "--skip", "postgres", "--skip", "m
 Invoke-Cargo @("test", "-p", "roze-gateway")
 Invoke-Cargo @("test", "-p", "roze-config", "config_center")
 
+Get-ChildItem -Path $root -Recurse -Filter "roze-service.yaml" -File |
+    Where-Object {
+        $_.FullName -notmatch '[\\/](\.git|target(?:-[^\\/]+)?)[\\/]'
+    } |
+    ForEach-Object {
+        Invoke-Cargo @(
+            "run", "--quiet", "-p", "rozectl", "--",
+            "service", "sync", "--project", $_.DirectoryName, "--check"
+        )
+    }
+
 Write-Host "Windows release preflight passed. Run 'bash scripts/release-gate.sh' on Linux/WSL before release."

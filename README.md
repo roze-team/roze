@@ -92,6 +92,22 @@ and Kubernetes manifests. Real business behavior still belongs in application
 code, including logic handlers, complex SQL, domain validation, transactions,
 authorization, permission checks, and search ranking rules.
 
+Generated API and RPC services use one service manifest for governed
+cross-service RPC dependencies instead of manual generated-code edits:
+
+```bash
+rozectl service dependency add order \
+  --project services/payment \
+  --crate shop-order-rpc \
+  --path ../shop-order-rpc \
+  --endpoint 127.0.0.1:4002
+rozectl service sync --project services/payment --check
+```
+
+The manifest synchronizes Cargo, dependency configuration defaults, managed
+clients, and readiness while preserving deployment overrides and business
+logic.
+
 ## Usage Documentation
 
 - [Project standards](docs/project-standards.md)

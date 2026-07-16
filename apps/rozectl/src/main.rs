@@ -146,6 +146,10 @@ impl From<SearchEngine> for generator::search::SearchEngine {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
     Api {
         #[command(subcommand)]
         command: ApiCommands,
@@ -278,6 +282,55 @@ enum Commands {
         remote: Option<String>,
         #[arg(long)]
         branch: Option<String>,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Subcommand)]
+enum ServiceCommands {
+    Dependency {
+        #[command(subcommand)]
+        command: ServiceDependencyCommands,
+    },
+    Sync {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceDependencyCommands {
+    Add {
+        name: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long = "crate")]
+        crate_name: String,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        contract: Option<PathBuf>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long = "endpoint")]
+        endpoints: Vec<String>,
+        #[arg(long = "etcd-host")]
+        etcd_hosts: Vec<String>,
+        #[arg(long)]
+        etcd_key: Option<String>,
+        #[arg(long, default_value_t = 2_000)]
+        timeout_ms: u64,
+    },
+    Remove {
+        name: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    List {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -1021,6 +1074,60 @@ fn run() -> anyhow::Result<()> {
     let registry = generator::registry();
 
     match cli.command {
+        Commands::Service { command } => match command {
+            ServiceCommands::Dependency { command } => match command {
+                ServiceDependencyCommands::Add {
+                    name,
+                    project,
+                    crate_name,
+                    path,
+                    contract,
+                    target,
+                    endpoints,
+                    etcd_hosts,
+                    etcd_key,
+                    timeout_ms,
+                } => {
+                    let result = rozectl::service::add_dependency(
+                        &project,
+                        rozectl::service::AddDependency {
+                            name: name.clone(),
+                            crate_name,
+                            path,
+                            contract,
+                            target,
+                            endpoints,
+                            etcd_hosts,
+                            etcd_key,
+                            timeout_ms,
+                        },
+                    )?;
+                    println!("dependency `{name}` synchronized");
+                    print_service_sync_changes(&result);
+                }
+                ServiceDependencyCommands::Remove { name, project } => {
+                    let result = rozectl::service::remove_dependency(&project, &name)?;
+                    println!("dependency `{name}` removed");
+                    print_service_sync_changes(&result);
+                }
+                ServiceDependencyCommands::List { project } => {
+                    for (name, dependency) in rozectl::service::list_dependencies(&project)? {
+                        println!(
+                            "{}\t{}\t{}",
+                            name, dependency.crate_name, dependency.path
+                        );
+                    }
+                }
+            },
+            ServiceCommands::Sync { project, check } => {
+                let result = rozectl::service::sync(&project, check)?;
+                if check {
+                    println!("service dependencies are synchronized");
+                } else {
+                    print_service_sync_changes(&result);
+                }
+            }
+        },
         Commands::Api { command } => match command {
             ApiCommands::Generate {
                 api,
@@ -1685,6 +1792,16 @@ fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_service_sync_changes(result: &rozectl::service::SyncResult) {
+    if result.changed.is_empty() {
+        println!("service dependencies already synchronized");
+    } else {
+        for path in &result.changed {
+            println!("updated {}", path.display());
+        }
+    }
 }
 
 fn parse_cli_from<I, T>(args: I) -> Cli
@@ -4708,6 +4825,39 @@ mod tests {
             resolve_new_out("user", Some(PathBuf::from("services/user"))),
             PathBuf::from("services/user")
         );
+    }
+
+    #[test]
+    fn parses_service_dependency_commands() {
+        let add = parse([
+            "rozectl",
+            "service",
+            "dependency",
+            "add",
+            "order",
+            "--crate",
+            "shop-order-rpc",
+            "--path",
+            "../shop-order-rpc",
+            "--endpoint",
+            "127.0.0.1:4002",
+        ]);
+        assert!(matches!(
+            add.command,
+            Commands::Service {
+                command: ServiceCommands::Dependency {
+                    command: ServiceDependencyCommands::Add { .. }
+                }
+            }
+        ));
+
+        let check = parse(["rozectl", "service", "sync", "--check"]);
+        assert!(matches!(
+            check.command,
+            Commands::Service {
+                command: ServiceCommands::Sync { check: true, .. }
+            }
+        ));
     }
 
     #[test]

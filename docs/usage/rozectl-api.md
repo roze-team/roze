@@ -139,6 +139,26 @@ cargo run -p rozectl -- api generate example/user.api \
 - RPC `src/logic/<method>.rs`
 - `config.yaml`
 
+Cross-service dependencies for both generated API and generated RPC consumer
+services should be managed separately through `roze-service.yaml`:
+
+```bash
+rozectl service dependency add order \
+  --project services/payment \
+  --crate shop-order-rpc \
+  --path ../shop-order-rpc \
+  --endpoint 127.0.0.1:4002
+
+rozectl service sync --project services/payment --check
+```
+
+This synchronizes Cargo, `config/roze-dependencies.yaml`, and the generated
+RPC-client sections inside the preserved `ServiceContext`. The main
+`config.yaml` and `ROZE__...` environment variables override generated
+dependency defaults. The manifest records `kind: api` or `kind: rpc`, and sync
+rejects a mismatch with the generated project boundaries. See
+[RPC Client Configuration](../contracts/rpc-client-config.md).
+
 Generated glue such as route registration, handler module indexes, DTOs,
 OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`, and
 `proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.

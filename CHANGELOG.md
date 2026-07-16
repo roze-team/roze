@@ -6,6 +6,14 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 ## Unreleased
 
+### Added
+
+- Added `roze-service.yaml` and `rozectl service dependency add/list/remove`
+  plus `service sync --check` as the single source of truth for managed RPC
+  dependencies, Cargo entries, connection defaults, readiness, and generated
+  `ServiceContext` clients in both API and RPC consumer services. Manifests
+  record and validate the generated consumer kind.
+
 ## [1.0.0] - 2026-07-16
 
 Roze 1.0 establishes the stable public contract for the Rust framework,
