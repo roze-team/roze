@@ -14,6 +14,12 @@ The format follows Keep a Changelog and Semantic Versioning.
   `ServiceContext` clients in both API and RPC consumer services. Manifests
   record and validate the generated consumer kind.
 
+### Fixed
+
+- Made the first `service dependency add` canonicalize adopted Cargo path
+  dependencies immediately, so a following `service sync --check` no longer
+  reports ordering drift.
+
 ## [1.0.0] - 2026-07-16
 
 Roze 1.0 establishes the stable public contract for the Rust framework,

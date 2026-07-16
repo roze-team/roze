@@ -393,8 +393,15 @@ fn render_cargo(path: &Path, manifest: &ServiceManifest) -> anyhow::Result<Strin
     let dependencies = dependencies
         .as_table_mut()
         .context("Cargo.toml dependencies must be a table")?;
-    for dependency in previously_managed {
-        dependencies.remove(&dependency);
+    // Reinsert both adopted and previously managed entries so the first sync
+    // has the same canonical ordering as every subsequent sync.
+    for dependency in previously_managed.iter().chain(
+        manifest
+            .dependencies
+            .values()
+            .map(|dependency| &dependency.crate_name),
+    ) {
+        dependencies.remove(dependency);
     }
     for dependency in manifest.dependencies.values() {
         let mut table = toml_edit::InlineTable::new();
@@ -785,7 +792,7 @@ mod tests {
         let path = project(ServiceKind::Api);
         fs::write(
             path.join("Cargo.toml"),
-            "[package]\nname = \"payment\"\nversion = \"1.0.0\"\n\n[dependencies]\nshop-inventory-rpc = { path = \"../shop-inventory-rpc\" }\n",
+            "[package]\nname = \"payment\"\nversion = \"1.0.0\"\n\n[dependencies]\nshop-inventory-rpc = { path = \"../shop-inventory-rpc\" }\nserde = \"1\"\n",
         )
         .unwrap();
         fs::write(
@@ -810,12 +817,49 @@ mod tests {
         )
         .unwrap();
 
+        sync(&path, true).unwrap();
+
         let manifest = load_manifest(&path).unwrap();
         assert_eq!(manifest.dependencies.len(), 2);
         assert_eq!(manifest.dependencies["inventory"].timeout_ms, 1800);
         let svc = fs::read_to_string(path.join("src/svc/mod.rs")).unwrap();
         assert!(svc.contains("inventory_client"));
         assert!(svc.contains("order_client"));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn first_add_adopts_existing_rpc_dependency_without_cargo_drift() {
+        let path = project(ServiceKind::Rpc);
+        fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"payment\"\nversion = \"1.0.0\"\n\n[dependencies]\nshop-order-rpc = { path = \"../shop-order-rpc\" }\nserde = \"1\"\n",
+        )
+        .unwrap();
+        fs::write(
+            path.join("config.yaml"),
+            "rpc_clients:\n  order:\n    endpoints: [127.0.0.1:4002]\n    timeout_ms: 1800\n",
+        )
+        .unwrap();
+
+        add_dependency(
+            &path,
+            AddDependency {
+                name: "order".into(),
+                crate_name: "shop-order-rpc".into(),
+                path: PathBuf::from("../shop-order-rpc"),
+                contract: None,
+                target: None,
+                endpoints: vec!["127.0.0.1:4002".into()],
+                etcd_hosts: vec![],
+                etcd_key: None,
+                timeout_ms: 1800,
+            },
+        )
+        .unwrap();
+
+        sync(&path, true).unwrap();
+        assert_eq!(load_manifest(&path).unwrap().dependencies.len(), 1);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
