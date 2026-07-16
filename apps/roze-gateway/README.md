@@ -72,8 +72,12 @@ gateway:
         reset_timeout_ms: 5000
 
 auth:
-  jwt_secret: "secret"
+  jwt_keys:
+    - id: "2026-07"
+      secret: "secret"
+  jwt_active_key_id: "2026-07"
   jwt_issuer: "roze"
+  jwt_audience: "roze-services"
   api_keys:
     header: "x-api-key"
     keys:

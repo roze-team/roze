@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use roze_context::Context;
 use roze_error::RozeError;
 use roze_resilience::{
-    BreakerDecision, BreakerPermit, BreakerRegistry, RateLimitRegistry, SheddingRegistry,
+    BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary, OperationKey,
+    RateLimitRegistry, SheddingRegistry,
 };
 use serde::Serialize;
 
@@ -58,13 +59,17 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    pub jwt_secret: String,
+    pub jwt_active_key_id: String,
+    pub jwt_issuer: String,
+    pub jwt_audience: String,
 }
 
 impl From<&roze_config::AuthConfig> for AuthConfig {
     fn from(config: &roze_config::AuthConfig) -> Self {
         Self {
-            jwt_secret: config.jwt_secret.clone(),
+            jwt_active_key_id: config.jwt_active_key_id.clone(),
+            jwt_issuer: config.jwt_issuer.clone(),
+            jwt_audience: config.jwt_audience.clone(),
         }
     }
 }
@@ -512,7 +517,12 @@ pub fn begin_route(
     let route = route.into();
     let method = method.into();
     let policy = route_policy(governance, &route);
-    let key = format!("{service}:{method}:{route}");
+    let key = OperationKey::new(
+        &service,
+        GovernanceBoundary::Rest,
+        format!("{method}:{route}"),
+    )
+    .to_string();
     if let Some(config) = &policy.rate_limit {
         match enforce_route_rate_limit(&key, config) {
             Ok(()) => roze_metrics::record_resilience_decision(

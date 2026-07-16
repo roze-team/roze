@@ -119,6 +119,16 @@ summary must include all six fields as unsigned integers, with
 These commands are evidence inputs. The final report still needs the measured
 latency/throughput/resource trends and artifacts described above.
 
+The fixed self-hosted workflow `.github/workflows/production-soak.yml` runs on
+the `[self-hosted, linux, x64, roze-production]` runner label. Weekly schedules
+execute the 24h matrix; `workflow_dispatch` selects one area and either 24h or
+72h. `scripts/production-soak-ci.sh` rejects shortened duration labels,
+captures raw workload logs and host samples, writes SHA-256 checksums, uploads
+the complete artifact, and creates GitHub OIDC build-provenance attestation for
+the checksum manifest. The workflow summary records the artifact ID and digest.
+No dispatch or shortened smoke is itself passing evidence; the job must finish
+the required elapsed duration and satisfy this document's criteria.
+
 The Gateway harness repeatedly exercises its retry, fallback, breaker,
 shedding, hot-reload, SSE, WebSocket, and TLS scenarios for the requested
 duration. Its cycle summary proves scenario repetition, but external resource

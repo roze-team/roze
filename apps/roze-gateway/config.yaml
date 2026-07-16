@@ -1,8 +1,13 @@
 name: roze-gateway
 auth:
-  jwt_secret: change-me
+  jwt_keys:
+    - id: "2026-07"
+      secret: change-me
+  jwt_active_key_id: "2026-07"
   jwt_issuer: roze-gateway
+  jwt_audience: roze-services
   jwt_expiration_secs: 7200
+  jwt_clock_skew_secs: 30
 
 gateway:
   listen: "127.0.0.1:8081"

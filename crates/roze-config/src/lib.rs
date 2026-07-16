@@ -152,6 +152,16 @@ pub struct GatewayRoute {
     #[serde(default = "default_gateway_route_weight")]
     pub weight: u32,
     #[serde(default)]
+    pub match_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub match_cookies: BTreeMap<String, String>,
+    #[serde(default = "default_gateway_route_weight")]
+    pub traffic_percent: u32,
+    #[serde(default)]
+    pub mirror_service: Option<String>,
+    #[serde(default)]
+    pub mirror_percent: u32,
+    #[serde(default)]
     pub instance_tags: BTreeMap<String, String>,
     #[serde(default)]
     pub middlewares: Vec<String>,
@@ -450,13 +460,25 @@ pub struct RegistryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    pub jwt_secret: String,
+    pub jwt_keys: Vec<JwtKeyConfig>,
+    pub jwt_active_key_id: String,
     #[serde(default = "default_jwt_issuer")]
     pub jwt_issuer: String,
+    pub jwt_audience: String,
     #[serde(default = "default_jwt_expiration_secs")]
     pub jwt_expiration_secs: u64,
+    #[serde(default = "default_jwt_clock_skew_secs")]
+    pub jwt_clock_skew_secs: u64,
+    #[serde(default)]
+    pub revoked_token_ids: Vec<String>,
     #[serde(default)]
     pub api_keys: Option<roze_auth::ApiKeyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JwtKeyConfig {
+    pub id: String,
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -765,6 +787,10 @@ fn default_jwt_issuer() -> String {
 
 fn default_jwt_expiration_secs() -> u64 {
     24 * 60 * 60
+}
+
+fn default_jwt_clock_skew_secs() -> u64 {
+    30
 }
 
 fn default_cache_namespace() -> String {
@@ -1205,8 +1231,13 @@ backoff_ms = 5
 name = "demo"
 
 [auth]
-jwt_secret = "secret"
+jwt_active_key_id = "2026-07"
 jwt_issuer = "issuer"
+jwt_audience = "demo-api"
+
+[[auth.jwt_keys]]
+id = "2026-07"
+secret = "secret"
 
 [auth.api_keys]
 header = "x-service-key"

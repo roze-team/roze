@@ -101,6 +101,8 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
         out.push('\n');
     }
 
+    out.push_str(&render_reporting_ts(spec));
+
     out
 }
 
@@ -201,6 +203,88 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
         out.push('\n');
     }
 
+    out.push_str(&render_reporting_js(spec));
+
+    out
+}
+
+fn render_reporting_ts(spec: &ApiSpec) -> String {
+    let exports = rest::full_route_path(spec, "/reports/exports");
+    let charts = rest::full_route_path(spec, "/charts/query");
+    let mut out = String::from(
+        r#"export interface ReportExportRequest {
+  report: string;
+  format?: 'csv' | 'xlsx';
+  columns?: string[];
+  filters?: Record<string, unknown>;
+  from?: string;
+  to?: string;
+  timezone?: string;
+}
+
+export interface ReportExportResource {
+  id: string;
+  report: string;
+  format: 'csv' | 'xlsx';
+  status: 'accepted' | 'running' | 'completed' | 'failed' | 'cancelled' | 'expired';
+  progress_percent: number;
+  object_key?: string;
+  download_url?: string;
+  expires_at?: string;
+  error?: string;
+  tenant_id: string;
+}
+
+export interface ChartQueryRequest {
+  chart: string;
+  dimensions?: string[];
+  measures?: string[];
+  filters?: Record<string, unknown>;
+  group_by?: string[];
+  sort?: Array<{ field: string; direction?: 'asc' | 'desc' }>;
+  time_bucket?: string;
+  from?: string;
+  to?: string;
+  timezone?: string;
+  limit?: number;
+}
+
+export interface ChartPoint { timestamp: string; value: number; labels: Record<string, string>; }
+export interface ChartSeries { name: string; points: ChartPoint[]; }
+export interface ChartQueryResponse {
+  chart: string;
+  dimensions: string[];
+  measures: string[];
+  time_bucket?: string;
+  timezone?: string;
+  scanned_rows: number;
+  result_rows: number;
+  series: ChartSeries[];
+}
+
+"#,
+    );
+    out.push_str(&format!("export async function createReportExport(request: ReportExportRequest, options: RequestOptions = {{}}): Promise<ReportExportResource> {{ return requestJson('POST', {exports:?}, {{}}, request, {{}}, options); }}\n"));
+    out.push_str(&format!("export async function getReportExport(id: string, options: RequestOptions = {{}}): Promise<ReportExportResource> {{ return requestJson('GET', `{exports}/${{encodeURIComponent(id)}}`, {{}}, undefined, {{}}, options); }}\n"));
+    out.push_str(&format!("export async function cancelReportExport(id: string, options: RequestOptions = {{}}): Promise<ReportExportResource> {{ return requestJson('DELETE', `{exports}/${{encodeURIComponent(id)}}`, {{}}, undefined, {{}}, options); }}\n"));
+    out.push_str(&format!("export async function queryChart(request: ChartQueryRequest, options: RequestOptions = {{}}): Promise<ChartQueryResponse> {{ return requestJson('POST', {charts:?}, {{}}, request, {{}}, options); }}\n"));
+    out
+}
+
+fn render_reporting_js(spec: &ApiSpec) -> String {
+    let exports = rest::full_route_path(spec, "/reports/exports");
+    let charts = rest::full_route_path(spec, "/charts/query");
+    let mut out = String::from(
+        r#"/** @typedef {{ report: string, format?: 'csv'|'xlsx', columns?: string[], filters?: Record<string, unknown>, from?: string, to?: string, timezone?: string }} ReportExportRequest */
+/** @typedef {{ id: string, report: string, format: string, status: string, progress_percent: number, object_key?: string, download_url?: string, expires_at?: string, error?: string, tenant_id: string }} ReportExportResource */
+/** @typedef {{ chart: string, dimensions?: string[], measures?: string[], filters?: Record<string, unknown>, group_by?: string[], sort?: Array<{field: string, direction?: 'asc'|'desc'}>, time_bucket?: string, from?: string, to?: string, timezone?: string, limit?: number }} ChartQueryRequest */
+
+"#,
+    );
+    out.push_str(&format!("export async function createReportExport(request, options = {{}}) {{ return requestJson('POST', {exports:?}, {{}}, request, {{}}, options); }}\n"));
+    out.push_str(&format!("export async function getReportExport(id, options = {{}}) {{ return requestJson('GET', `{exports}/${{encodeURIComponent(id)}}`, {{}}, undefined, {{}}, options); }}\n"));
+    out.push_str(&format!("export async function cancelReportExport(id, options = {{}}) {{ return requestJson('DELETE', `{exports}/${{encodeURIComponent(id)}}`, {{}}, undefined, {{}}, options); }}\n"));
+    out.push_str(&format!("export async function queryChart(request, options = {{}}) {{ return requestJson('POST', {charts:?}, {{}}, request, {{}}, options); }}\n"));
     out
 }
 
@@ -754,5 +838,35 @@ mod tests {
         let js = render_js_client(&spec);
         assert!(js.contains("@param {EmptyReq} [req]"));
         assert!(js.contains("export async function health(req = {}, options = {})"));
+    }
+
+    #[test]
+    fn renders_async_report_and_bounded_chart_web_clients() {
+        let spec = parse_api(
+            r#"
+            @server (
+                prefix: /api/v1
+            )
+            service reports {
+                get /health returns (HealthResp)
+            }
+            type HealthResp {
+                ok bool `json:"ok"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let ts = render_ts_client(&spec);
+        assert!(ts.contains("export interface ReportExportRequest"));
+        assert!(ts.contains("export async function createReportExport"));
+        assert!(ts.contains("requestJson('POST', \"/api/v1/reports/exports\""));
+        assert!(ts.contains("export async function cancelReportExport"));
+        assert!(ts.contains("export async function queryChart"));
+
+        let js = render_js_client(&spec);
+        assert!(js.contains("@typedef {{ report: string"));
+        assert!(js.contains("export async function createReportExport"));
+        assert!(js.contains("requestJson('POST', \"/api/v1/charts/query\""));
     }
 }

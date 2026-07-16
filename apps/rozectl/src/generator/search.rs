@@ -92,7 +92,7 @@ pub async fn inspect_search_index(
     write_search_project(&spec, engine, out, options)
 }
 
-fn parse_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
+pub fn parse_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
     let trimmed = source.trim();
     if trimmed.starts_with('{') {
         return parse_json_search_schema(trimmed);

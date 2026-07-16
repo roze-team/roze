@@ -178,20 +178,15 @@ impl OutboxMessage {
     }
 
     pub fn to_mq_message(&self) -> roze_mq::Message {
-        let mut message = roze_mq::Message {
-            topic: self.topic.clone(),
-            key: self.key.clone(),
-            headers: self.headers.clone().into_iter().collect(),
-            timestamp_millis: 0,
-            partition: None,
-            offset: None,
-            group: None,
-            attempt: self.attempts,
-            dead_letter_topic: None,
-            idempotency_key: Some(self.idempotency_key.clone()),
-            available_at_millis: self.next_attempt_millis,
-            payload: self.payload.clone(),
-        };
+        let mut message = roze_mq::Message::new(self.topic.clone(), self.payload.clone())
+            .with_event_contract(self.topic.clone(), 1, "1", "outbox")
+            .with_idempotency_key(self.idempotency_key.clone());
+        message.key = self.key.clone();
+        message.headers = self.headers.clone().into_iter().collect();
+        message.trace_context = message.headers.clone();
+        message.timestamp_millis = 0;
+        message.attempt = self.attempts;
+        message.available_at_millis = self.next_attempt_millis;
         message.ensure_trace_id();
         message
     }

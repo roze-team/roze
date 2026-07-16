@@ -19,6 +19,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::StreamExt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::{
     sync::{mpsc, RwLock},
     time::{self, Instant},
@@ -297,6 +298,41 @@ pub struct ConfigChangeRequest {
     pub actor: ConfigPrincipal,
     #[serde(default)]
     pub reason: Option<String>,
+    pub signature: ConfigSignature,
+    pub rollout_percent: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSignature {
+    pub key_id: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfigSigningPolicy {
+    pub trusted_keys: BTreeMap<String, String>,
+}
+
+impl ConfigSigningPolicy {
+    pub fn sign(&self, key_id: &str, raw: &str) -> Result<ConfigSignature> {
+        let secret = self
+            .trusted_keys
+            .get(key_id)
+            .ok_or_else(|| anyhow!("config signing key '{key_id}' is not trusted"))?;
+        Ok(ConfigSignature {
+            key_id: key_id.to_string(),
+            value: hmac_sha256(secret.as_bytes(), raw.as_bytes()),
+        })
+    }
+
+    fn verify(&self, signature: &ConfigSignature, raw: &str) -> Result<()> {
+        let expected = self.sign(&signature.key_id, raw)?;
+        anyhow::ensure!(
+            constant_time_eq(expected.value.as_bytes(), signature.value.as_bytes()),
+            "config signature verification failed"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +348,18 @@ pub struct ConfigVersionRecord {
     pub reason: Option<String>,
     pub created_at_millis: u64,
     pub active: bool,
+    pub rollout_percent: u8,
+    pub rollout_state: ConfigRolloutState,
+    pub signature: ConfigSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigRolloutState {
+    Active,
+    Staged,
+    Retired,
+    RolledBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +437,8 @@ pub struct ConfigCenterAdminStore {
     audit: Vec<ConfigAuditRecord>,
     watch_status: ConfigWatchStatus,
     next_audit_id: u64,
+    #[serde(skip)]
+    signing: ConfigSigningPolicy,
 }
 
 impl ConfigCenterAdminStore {
@@ -397,8 +447,11 @@ impl ConfigCenterAdminStore {
         initial_raw: impl Into<String>,
         metadata: ConfigAdminMetadata,
         actor: impl Into<String>,
+        signing: ConfigSigningPolicy,
+        initial_signature: ConfigSignature,
     ) -> Result<Self> {
         let initial_raw = initial_raw.into();
+        signing.verify(&initial_signature, &initial_raw)?;
         parse_config_value(&initial_raw, format)?;
         let now = current_millis();
         let version = ConfigVersionRecord {
@@ -413,6 +466,9 @@ impl ConfigCenterAdminStore {
             reason: Some("initial import".to_string()),
             created_at_millis: now,
             active: true,
+            rollout_percent: 100,
+            rollout_state: ConfigRolloutState::Active,
+            signature: initial_signature,
         };
         Ok(Self {
             format,
@@ -426,10 +482,11 @@ impl ConfigCenterAdminStore {
                 updated_at_millis: now,
             },
             next_audit_id: 1,
+            signing,
         })
     }
 
-    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn load_from_path(path: impl AsRef<Path>, signing: ConfigSigningPolicy) -> Result<Self> {
         let path = path.as_ref();
         let raw = std::fs::read_to_string(path).map_err(|err| {
             anyhow!(
@@ -443,6 +500,7 @@ impl ConfigCenterAdminStore {
                 path.display()
             )
         })?;
+        store.signing = signing;
         store.validate_snapshot()?;
         store.next_audit_id = store.next_audit_id.max(
             store
@@ -510,6 +568,10 @@ impl ConfigCenterAdminStore {
         )?;
 
         let raw = raw.into();
+        if request.rollout_percent == 0 || request.rollout_percent > 100 {
+            return Err(anyhow!("config rollout_percent must be in 1..=100"));
+        }
+        self.signing.verify(&request.signature, &raw)?;
         if let Err(err) = parse_config_value(&raw, self.format) {
             let error = format!("config validation failed: {err}");
             self.push_audit(ConfigAuditRecordInput {
@@ -526,8 +588,14 @@ impl ConfigCenterAdminStore {
         }
 
         let version = self.next_version();
-        for record in &mut self.versions {
-            record.active = false;
+        let activate = request.rollout_percent == 100;
+        if activate {
+            for record in &mut self.versions {
+                record.active = false;
+                if record.rollout_state == ConfigRolloutState::Active {
+                    record.rollout_state = ConfigRolloutState::Retired;
+                }
+            }
         }
         let record = ConfigVersionRecord {
             version,
@@ -540,7 +608,14 @@ impl ConfigCenterAdminStore {
             author: request.actor.id.clone(),
             reason: request.reason.clone(),
             created_at_millis: current_millis(),
-            active: true,
+            active: activate,
+            rollout_percent: request.rollout_percent,
+            rollout_state: if activate {
+                ConfigRolloutState::Active
+            } else {
+                ConfigRolloutState::Staged
+            },
+            signature: request.signature.clone(),
         };
         self.versions.push(record.clone());
         self.push_audit(ConfigAuditRecordInput {
@@ -554,6 +629,57 @@ impl ConfigCenterAdminStore {
             error: None,
         });
         Ok(record)
+    }
+
+    pub fn promote(
+        &mut self,
+        request: ConfigChangeRequest,
+        version: u64,
+    ) -> Result<ConfigVersionRecord> {
+        self.require(
+            &request.actor,
+            ConfigPermission::Write,
+            ConfigAuditAction::Publish,
+        )?;
+        let staged = self
+            .versions
+            .iter()
+            .find(|record| {
+                record.version == version && record.rollout_state == ConfigRolloutState::Staged
+            })
+            .cloned()
+            .ok_or_else(|| anyhow!("staged config version {version} not found"))?;
+        self.signing.verify(&request.signature, &staged.raw)?;
+        for record in &mut self.versions {
+            record.active = record.version == version;
+            record.rollout_state = if record.version == version {
+                ConfigRolloutState::Active
+            } else if record.rollout_state == ConfigRolloutState::Active {
+                ConfigRolloutState::Retired
+            } else {
+                record.rollout_state
+            };
+        }
+        Ok(self
+            .versions
+            .iter()
+            .find(|record| record.version == version)
+            .expect("promoted version")
+            .clone())
+    }
+
+    pub fn reject_staged(&mut self, version: u64, error: impl Into<String>) -> Result<()> {
+        let record = self
+            .versions
+            .iter_mut()
+            .find(|record| {
+                record.version == version && record.rollout_state == ConfigRolloutState::Staged
+            })
+            .ok_or_else(|| anyhow!("staged config version {version} not found"))?;
+        record.rollout_state = ConfigRolloutState::RolledBack;
+        record.active = false;
+        warn!(version, error = %error.into(), "staged config rejected and rolled back");
+        Ok(())
     }
 
     pub fn rollback(
@@ -591,7 +717,15 @@ impl ConfigCenterAdminStore {
         };
 
         for record in &mut self.versions {
+            let was_active = record.active;
             record.active = record.version == target_version;
+            record.rollout_state = if record.version == target_version {
+                ConfigRolloutState::Active
+            } else if was_active {
+                ConfigRolloutState::Retired
+            } else {
+                record.rollout_state
+            };
         }
         self.push_audit(ConfigAuditRecordInput {
             actor: &request.actor,
@@ -676,6 +810,7 @@ impl ConfigCenterAdminStore {
                     record.version
                 ));
             }
+            self.signing.verify(&record.signature, &record.raw)?;
         }
         Ok(())
     }
@@ -728,6 +863,41 @@ impl ConfigCenterAdminStore {
         self.next_audit_id += 1;
         self.audit.push(record);
     }
+}
+
+fn hmac_sha256(secret: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut key = [0u8; BLOCK];
+    if secret.len() > BLOCK {
+        key[..32].copy_from_slice(&Sha256::digest(secret));
+    } else {
+        key[..secret.len()].copy_from_slice(secret);
+    }
+    let mut inner_pad = [0x36u8; BLOCK];
+    let mut outer_pad = [0x5cu8; BLOCK];
+    for index in 0..BLOCK {
+        inner_pad[index] ^= key[index];
+        outer_pad[index] ^= key[index];
+    }
+    let inner = Sha256::new()
+        .chain_update(inner_pad)
+        .chain_update(message)
+        .finalize();
+    let digest = Sha256::new()
+        .chain_update(outer_pad)
+        .chain_update(inner)
+        .finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
 }
 
 struct ConfigAuditRecordInput<'a> {
@@ -1929,13 +2099,7 @@ gateway:
 
     #[test]
     fn config_admin_publish_validates_permissions_and_payload() {
-        let mut store = ConfigCenterAdminStore::new(
-            ConfigFormat::Yaml,
-            "name: demo\n",
-            ConfigAdminMetadata::default(),
-            "system",
-        )
-        .expect("create store");
+        let mut store = test_admin_store(ConfigFormat::Yaml, "name: demo\n");
         let reader = ConfigPrincipal::new("reader", [ConfigPermission::Read]);
         let writer = ConfigPrincipal::new(
             "writer",
@@ -1947,10 +2111,7 @@ gateway:
         );
 
         let denied = store.publish(
-            ConfigChangeRequest {
-                actor: reader,
-                reason: Some("should fail".to_string()),
-            },
+            signed_request(reader, "should fail", "name: denied\n"),
             "name: denied\n",
             ConfigAdminMetadata::default(),
         );
@@ -1960,10 +2121,7 @@ gateway:
             .contains("lacks Write permission"));
 
         let invalid = store.publish(
-            ConfigChangeRequest {
-                actor: writer.clone(),
-                reason: Some("invalid yaml".to_string()),
-            },
+            signed_request(writer.clone(), "invalid yaml", "name: [broken\n"),
             "name: [broken\n",
             ConfigAdminMetadata::default(),
         );
@@ -1975,10 +2133,7 @@ gateway:
 
         let published = store
             .publish(
-                ConfigChangeRequest {
-                    actor: writer.clone(),
-                    reason: Some("roll forward".to_string()),
-                },
+                signed_request(writer.clone(), "roll forward", "name: next\n"),
                 "name: next\n",
                 ConfigAdminMetadata {
                     source: "admin".to_string(),
@@ -2010,13 +2165,7 @@ gateway:
 
     #[test]
     fn config_admin_rolls_back_and_exposes_watch_status_with_permissions() {
-        let mut store = ConfigCenterAdminStore::new(
-            ConfigFormat::Yaml,
-            "name: v1\n",
-            ConfigAdminMetadata::default(),
-            "system",
-        )
-        .expect("create store");
+        let mut store = test_admin_store(ConfigFormat::Yaml, "name: v1\n");
         let operator = ConfigPrincipal::new(
             "operator",
             [
@@ -2030,10 +2179,7 @@ gateway:
 
         store
             .publish(
-                ConfigChangeRequest {
-                    actor: operator.clone(),
-                    reason: Some("v2".to_string()),
-                },
+                signed_request(operator.clone(), "v2", "name: v2\n"),
                 "name: v2\n",
                 ConfigAdminMetadata::default(),
             )
@@ -2042,10 +2188,7 @@ gateway:
 
         let rolled_back = store
             .rollback(
-                ConfigChangeRequest {
-                    actor: operator.clone(),
-                    reason: Some("bad rollout".to_string()),
-                },
+                signed_request(operator.clone(), "bad rollout", "name: v1\n"),
                 1,
             )
             .expect("rollback");
@@ -2066,6 +2209,39 @@ gateway:
     }
 
     #[test]
+    fn config_admin_requires_signature_and_explicitly_promotes_staged_versions() {
+        let mut store = test_admin_store(ConfigFormat::Yaml, "name: v1\n");
+        let operator = ConfigPrincipal::new(
+            "operator",
+            [ConfigPermission::Read, ConfigPermission::Write],
+        );
+        let mut request = signed_request(operator.clone(), "canary", "name: v2\n");
+        request.rollout_percent = 10;
+        let staged = store
+            .publish(request, "name: v2\n", ConfigAdminMetadata::default())
+            .expect("stage config");
+        assert_eq!(staged.rollout_state, ConfigRolloutState::Staged);
+        assert_eq!(store.current(&operator).expect("current").version, 1);
+
+        let promoted = store
+            .promote(
+                signed_request(operator.clone(), "promote", "name: v2\n"),
+                staged.version,
+            )
+            .expect("promote staged config");
+        assert_eq!(promoted.rollout_state, ConfigRolloutState::Active);
+        assert_eq!(store.current(&operator).expect("current").version, 2);
+
+        let mut invalid = signed_request(operator, "tampered", "name: v3\n");
+        invalid.signature.value.push('0');
+        assert!(store
+            .publish(invalid, "name: v3\n", ConfigAdminMetadata::default())
+            .expect_err("tampered signature must fail")
+            .to_string()
+            .contains("signature verification failed"));
+    }
+
+    #[test]
     fn config_admin_snapshot_round_trips_versions_and_audit() {
         let root = std::env::temp_dir().join(format!(
             "roze-config-admin-snapshot-{}-{}",
@@ -2073,13 +2249,7 @@ gateway:
             current_millis()
         ));
         let snapshot = root.join("admin.json");
-        let mut store = ConfigCenterAdminStore::new(
-            ConfigFormat::Yaml,
-            "name: v1\n",
-            ConfigAdminMetadata::default(),
-            "system",
-        )
-        .expect("create store");
+        let mut store = test_admin_store(ConfigFormat::Yaml, "name: v1\n");
         let operator = ConfigPrincipal::new(
             "operator",
             [
@@ -2090,17 +2260,15 @@ gateway:
         );
         store
             .publish(
-                ConfigChangeRequest {
-                    actor: operator.clone(),
-                    reason: Some("v2".to_string()),
-                },
+                signed_request(operator.clone(), "v2", "name: v2\n"),
                 "name: v2\n",
                 ConfigAdminMetadata::default(),
             )
             .expect("publish v2");
         store.save_to_path(&snapshot).expect("save snapshot");
 
-        let mut loaded = ConfigCenterAdminStore::load_from_path(&snapshot).expect("load snapshot");
+        let mut loaded = ConfigCenterAdminStore::load_from_path(&snapshot, test_signing_policy())
+            .expect("load snapshot");
         assert_eq!(loaded.versions().len(), 2);
         assert_eq!(loaded.current(&operator).expect("current").version, 2);
         let audit = loaded.audit_log(&operator).expect("audit");
@@ -2113,10 +2281,7 @@ gateway:
 
         loaded
             .publish(
-                ConfigChangeRequest {
-                    actor: operator,
-                    reason: Some("v3".to_string()),
-                },
+                signed_request(operator, "v3", "name: v3\n"),
                 "name: v3\n",
                 ConfigAdminMetadata::default(),
             )
@@ -2156,13 +2321,10 @@ gateway:
                 ConfigPermission::WatchStatus,
             ],
         );
-        let mut store = ConfigCenterAdminStore::new(
+        let mut store = test_admin_store(
             ConfigFormat::Yaml,
             "name: v0\ngateway:\n  timeout_ms: 1000\n",
-            ConfigAdminMetadata::default(),
-            "system",
-        )
-        .expect("create store");
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
         let mut accepted = 0u64;
         let mut rejected = 0u64;
@@ -2170,16 +2332,14 @@ gateway:
 
         while std::time::Instant::now() < deadline && accepted < max_updates {
             let update = accepted + 1;
+            let raw = format!(
+                "name: v{update}\ngateway:\n  timeout_ms: {}\n",
+                1000 + update
+            );
             store
                 .publish(
-                    ConfigChangeRequest {
-                        actor: operator.clone(),
-                        reason: Some(format!("soak update {update}")),
-                    },
-                    format!(
-                        "name: v{update}\ngateway:\n  timeout_ms: {}\n",
-                        1000 + update
-                    ),
+                    signed_request(operator.clone(), format!("soak update {update}"), &raw),
+                    raw,
                     ConfigAdminMetadata::default(),
                 )
                 .expect("publish valid config");
@@ -2187,10 +2347,7 @@ gateway:
 
             if update.is_multiple_of(17) {
                 let invalid = store.publish(
-                    ConfigChangeRequest {
-                        actor: operator.clone(),
-                        reason: Some("invalid payload".to_string()),
-                    },
+                    signed_request(operator.clone(), "invalid payload", "name: [broken\n"),
                     "name: [broken\n",
                     ConfigAdminMetadata::default(),
                 );
@@ -2201,10 +2358,11 @@ gateway:
             if update.is_multiple_of(29) {
                 store
                     .rollback(
-                        ConfigChangeRequest {
-                            actor: operator.clone(),
-                            reason: Some("soak rollback".to_string()),
-                        },
+                        signed_request(
+                            operator.clone(),
+                            "soak rollback",
+                            "name: v0\ngateway:\n  timeout_ms: 1000\n",
+                        ),
                         1,
                     )
                     .expect("rollback");
@@ -2219,7 +2377,8 @@ gateway:
                 updated_at_millis: current_millis(),
             });
             store.save_to_path(&snapshot).expect("save snapshot");
-            store = ConfigCenterAdminStore::load_from_path(&snapshot).expect("load snapshot");
+            store = ConfigCenterAdminStore::load_from_path(&snapshot, test_signing_policy())
+                .expect("load snapshot");
             let status = store.watch_status(&operator).expect("watch status");
             assert_eq!(status.last_revision, Some(update as i64));
         }
@@ -2248,5 +2407,40 @@ gateway:
             .iter()
             .find(|signature| signature.section == section)
             .map(|signature| signature.hash.clone())
+    }
+
+    fn test_signing_policy() -> ConfigSigningPolicy {
+        ConfigSigningPolicy {
+            trusted_keys: BTreeMap::from([("test".to_string(), "test-secret".to_string())]),
+        }
+    }
+
+    fn signed_request(
+        actor: ConfigPrincipal,
+        reason: impl Into<String>,
+        raw: &str,
+    ) -> ConfigChangeRequest {
+        ConfigChangeRequest {
+            actor,
+            reason: Some(reason.into()),
+            signature: test_signing_policy()
+                .sign("test", raw)
+                .expect("sign config"),
+            rollout_percent: 100,
+        }
+    }
+
+    fn test_admin_store(format: ConfigFormat, raw: &str) -> ConfigCenterAdminStore {
+        let signing = test_signing_policy();
+        let signature = signing.sign("test", raw).expect("sign initial config");
+        ConfigCenterAdminStore::new(
+            format,
+            raw,
+            ConfigAdminMetadata::default(),
+            "system",
+            signing,
+            signature,
+        )
+        .expect("create store")
     }
 }

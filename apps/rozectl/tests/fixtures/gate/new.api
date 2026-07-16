@@ -1,0 +1,11 @@
+service fixture {
+    get /users/:id (GetUserReq) returns (UserResp)
+}
+
+type GetUserReq {
+    id string `path:"id"`
+}
+
+type UserResp {
+    id string `json:"id"`
+}

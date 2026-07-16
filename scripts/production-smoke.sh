@@ -30,9 +30,7 @@ cargo fmt --all -- --check
 cargo test -p rozectl
 
 if [[ "$RUN_IGNORED" == "1" ]]; then
-  cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- --ignored
-  cargo test -p rozectl generated_rpc_project_compiles -- --ignored
-  cargo test -p rozectl generated_stream_project_compiles -- --ignored
+  bash scripts/generated-target-matrix.sh
 fi
 
 cargo test -p roze-cache

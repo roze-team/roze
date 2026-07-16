@@ -1,0 +1,71 @@
+name: production-soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Required elapsed soak duration
+        required: true
+        type: choice
+        options: [24h, 72h]
+      area:
+        description: Runtime boundary
+        required: true
+        type: choice
+        options: [gateway, mq, config-center, lifecycle, generated-systems]
+  schedule:
+    - cron: "0 0 * * 0"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: production-soak-${{ github.event.inputs.area || 'matrix' }}-${{ github.event.inputs.duration || '24h' }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: ${{ matrix.area }} ${{ github.event.inputs.duration || '24h' }}
+    runs-on: [self-hosted, linux, x64, roze-production]
+    timeout-minutes: 6000
+    strategy:
+      fail-fast: false
+      matrix:
+        area: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.area)) || fromJSON('["gateway","mq","config-center","lifecycle","generated-systems"]') }}
+    env:
+      DURATION: ${{ github.event.inputs.duration || '24h' }}
+      EVIDENCE_DIR: target/production-evidence/${{ matrix.area }}-${{ github.event.inputs.duration || '24h' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run real elapsed-time soak
+        run: bash scripts/production-soak-ci.sh "${{ matrix.area }}" "$DURATION" "$EVIDENCE_DIR"
+
+      - name: Upload complete evidence
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roze-${{ matrix.area }}-${{ env.DURATION }}-${{ github.sha }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest evidence provenance
+        if: success()
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.EVIDENCE_DIR }}/SHA256SUMS
+
+      - name: Publish signed summary pointer
+        if: always()
+        shell: bash
+        run: |
+          cat "$EVIDENCE_DIR/summary.md" >>"$GITHUB_STEP_SUMMARY"
+          printf '\n- Artifact ID: `%s`\n- Artifact digest: `%s`\n' \
+            "${{ steps.upload.outputs.artifact-id }}" \
+            "${{ steps.upload.outputs.artifact-digest }}" >>"$GITHUB_STEP_SUMMARY"

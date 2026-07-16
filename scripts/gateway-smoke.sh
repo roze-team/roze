@@ -180,7 +180,12 @@ EOF_WS_CLIENT
 cat >"$BASE/config.yaml" <<EOF_CONFIG
 name: gateway-smoke
 auth:
-  jwt_secret: smoke-secret
+  jwt_keys:
+    - id: smoke
+      secret: smoke-secret
+  jwt_active_key_id: smoke
+  jwt_issuer: gateway-smoke
+  jwt_audience: gateway-smoke
   api_keys:
     header: x-api-key
     keys:

@@ -246,7 +246,7 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use std::collections::BTreeMap;\n\nuse roze_http::{extract::{Query, State}, routing::get, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\nuse serde::{Deserialize, Serialize};\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
+        "use std::{collections::BTreeMap, sync::{atomic::{AtomicU64, Ordering}, OnceLock}};\n\nuse roze_http::{extract::{Path, State}, http::HeaderMap, routing::{delete, get, post}, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\nuse serde::{Deserialize, Serialize};\nuse tokio::sync::RwLock;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and(ctx.config.governance.timeout_ms);\n    let router = Router::new()\n");
@@ -267,11 +267,15 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
         roze_http_route_path(&full_route_path(spec, "/metrics"))
     ));
     out.push_str(&format!(
-        "        .route(\"{}\", get(report_export))\n",
-        roze_http_route_path(&full_route_path(spec, "/reports/export"))
+        "        .route(\"{}\", post(create_report_export))\n",
+        roze_http_route_path(&full_route_path(spec, "/reports/exports"))
     ));
     out.push_str(&format!(
-        "        .route(\"{}\", get(chart_query))\n",
+        "        .route(\"{}\", get(report_export_status).delete(cancel_report_export))\n",
+        roze_http_route_path(&full_route_path(spec, "/reports/exports/:id"))
+    ));
+    out.push_str(&format!(
+        "        .route(\"{}\", post(chart_query))\n",
         roze_http_route_path(&full_route_path(spec, "/charts/query"))
     ));
     out.push_str(&format!(
@@ -309,54 +313,93 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
 }
 
 fn report_chart_interface_code() -> &'static str {
-    r#"#[derive(Debug, Clone, Deserialize)]
-struct ReportExportQuery {
-    #[serde(default)]
+    r#"const MAX_REPORT_COLUMNS: usize = 128;
+const MAX_CHART_DIMENSIONS: usize = 8;
+const MAX_CHART_MEASURES: usize = 16;
+const MAX_QUERY_LIMIT: u64 = 10_000;
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReportExportRequest {
     report: String,
     #[serde(default = "default_report_format")]
     format: String,
     #[serde(default)]
+    columns: Vec<String>,
+    #[serde(default)]
+    filters: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
     from: Option<String>,
     #[serde(default)]
     to: Option<String>,
     #[serde(default)]
-    filters: Option<String>,
+    timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ReportExportResponse {
+struct ReportExportResource {
+    id: String,
     report: String,
     format: String,
     status: String,
-    export_id: String,
+    progress_percent: u8,
+    object_key: Option<String>,
     download_url: Option<String>,
+    expires_at: Option<String>,
+    error: Option<String>,
     from: Option<String>,
     to: Option<String>,
-    filters: Option<String>,
-    columns: Vec<String>,
+    timezone: Option<String>,
+    column_count: usize,
+    filter_count: usize,
+    tenant_id: String,
+    #[serde(skip_serializing)]
+    owner_subject: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChartQuery {
-    #[serde(default)]
+struct ChartQueryRequest {
     chart: String,
+    #[serde(default)]
+    dimensions: Vec<String>,
+    #[serde(default)]
+    measures: Vec<String>,
+    #[serde(default)]
+    filters: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    group_by: Vec<String>,
+    #[serde(default)]
+    sort: Vec<ChartSort>,
+    #[serde(default)]
+    time_bucket: Option<String>,
     #[serde(default)]
     from: Option<String>,
     #[serde(default)]
     to: Option<String>,
     #[serde(default)]
-    interval: Option<String>,
-    #[serde(default)]
-    filters: Option<String>,
+    timezone: Option<String>,
+    #[serde(default = "default_query_limit")]
+    limit: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChartSort {
+    field: String,
+    #[serde(default = "default_sort_direction")]
+    direction: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ChartQueryResponse {
     chart: String,
-    interval: Option<String>,
+    dimensions: Vec<String>,
+    measures: Vec<String>,
+    time_bucket: Option<String>,
+    timezone: Option<String>,
     from: Option<String>,
     to: Option<String>,
-    filters: Option<String>,
+    filter_count: usize,
+    scanned_rows: u64,
+    result_rows: u64,
     series: Vec<ChartSeries>,
 }
 
@@ -377,44 +420,237 @@ fn default_report_format() -> String {
     "csv".to_string()
 }
 
-fn default_interface_name(value: String) -> String {
-    if value.trim().is_empty() {
-        "default".to_string()
+fn default_query_limit() -> u64 {
+    1_000
+}
+
+fn default_sort_direction() -> String {
+    "asc".to_string()
+}
+
+fn report_exports() -> &'static RwLock<BTreeMap<String, ReportExportResource>> {
+    static EXPORTS: OnceLock<RwLock<BTreeMap<String, ReportExportResource>>> = OnceLock::new();
+    EXPORTS.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+fn validate_report_request(request: &ReportExportRequest) -> Result<(), RozeError> {
+    if request.report.trim().is_empty() {
+        return Err(RozeError::BadRequest("report is required".to_string()));
+    }
+    if !matches!(request.format.as_str(), "csv" | "xlsx") {
+        return Err(RozeError::BadRequest("format must be csv or xlsx".to_string()));
+    }
+    if request.columns.len() > MAX_REPORT_COLUMNS {
+        return Err(RozeError::BadRequest("too many report columns".to_string()));
+    }
+    if request.filters.len() > MAX_REPORT_COLUMNS {
+        return Err(RozeError::BadRequest("too many report filters".to_string()));
+    }
+    Ok(())
+}
+
+fn report_identity(headers: &HeaderMap, ctx: &ServiceContext) -> Result<(String, String), RozeError> {
+    let Some(jwt) = ctx.jwt_config() else {
+        return Ok(("anonymous".to_string(), "public".to_string()));
+    };
+    let header = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(RozeError::Unauthorized)?;
+    let token = roze_jwt::extract_bearer_token(header).ok_or(RozeError::Unauthorized)?;
+    let claims = roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;
+    let tenant = claims.tenant.ok_or(RozeError::Forbidden)?;
+    Ok((claims.sub, tenant))
+}
+
+fn report_object_part(value: &str) -> String {
+    let value = value
+        .chars()
+        .take(96)
+        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') { ch } else { '_' })
+        .collect::<String>();
+    if value.is_empty() { "unknown".to_string() } else { value }
+}
+
+fn ensure_export_owner(export: &ReportExportResource, subject: &str, tenant: &str) -> Result<(), RozeError> {
+    if export.owner_subject == subject && export.tenant_id == tenant {
+        Ok(())
     } else {
-        value
+        Err(RozeError::Forbidden)
     }
 }
 
-async fn report_export(
-    Query(query): Query<ReportExportQuery>,
-) -> Result<ApiResponse<ReportExportResponse>, RozeError> {
-    let report = default_interface_name(query.report);
-    let format = default_interface_name(query.format);
-    let export_id = format!("report-{report}-{format}");
-    Ok(ApiResponse::ok(ReportExportResponse {
-        report,
-        format,
+async fn create_report_export(
+    State(ctx): State<ServiceContext>,
+    headers: HeaderMap,
+    Json(request): Json<ReportExportRequest>,
+) -> Result<ApiResponse<ReportExportResource>, RozeError> {
+    validate_report_request(&request)?;
+    let (subject, tenant_id) = report_identity(&headers, &ctx)?;
+    static EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let id = format!("export-{}", EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let resource = ReportExportResource {
+        id: id.clone(),
+        report: request.report,
+        format: request.format,
         status: "accepted".to_string(),
-        export_id,
+        progress_percent: 0,
+        object_key: None,
         download_url: None,
-        from: query.from,
-        to: query.to,
-        filters: query.filters,
-        columns: Vec::new(),
-    }))
+        expires_at: None,
+        error: None,
+        from: request.from,
+        to: request.to,
+        timezone: request.timezone,
+        column_count: request.columns.len(),
+        filter_count: request.filters.len(),
+        tenant_id: tenant_id.clone(),
+        owner_subject: subject.clone(),
+    };
+    report_exports().write().await.insert(id, resource.clone());
+    let task_id = resource.id.clone();
+    let task_format = resource.format.clone();
+    let task_columns = if request.columns.is_empty() {
+        vec!["result".to_string()]
+    } else {
+        request.columns
+    };
+    let task_tenant = report_object_part(&tenant_id);
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        {
+            let mut exports = report_exports().write().await;
+            if let Some(export) = exports.get_mut(&task_id) {
+                if export.status == "cancelled" { return; }
+                export.status = "running".to_string();
+                export.progress_percent = 10;
+            }
+        }
+        let completed = async {
+            let format = roze_report::ExportFormat::parse(&task_format)?;
+            let bytes = roze_report::render_export(
+                format,
+                &task_columns,
+                &[],
+                roze_report::ExportLimits::default(),
+            )?;
+            let size = bytes.len() as u64;
+            let key = format!("reports/{task_tenant}/{task_id}.{}", format.extension());
+            let storage = ctx.storage()?;
+            storage.put_object(roze_storage::PutObjectRequest {
+                key: key.clone(),
+                bytes,
+                content_type: Some(format.content_type().to_string()),
+                metadata: BTreeMap::from([("export_id".to_string(), task_id.clone())]),
+            }).await?;
+            let download = storage.presign_get(&key, std::time::Duration::from_secs(900)).await?;
+            Ok::<_, anyhow::Error>((key, download.url, download.expires_at_millis, size))
+        }.await;
+        let mut exports = report_exports().write().await;
+        let Some(export) = exports.get_mut(&task_id) else { return; };
+        if export.status == "cancelled" { return; }
+        match completed {
+            Ok((key, url, expires_at, size)) => {
+                export.status = "completed".to_string();
+                export.progress_percent = 100;
+                export.object_key = Some(key);
+                export.download_url = Some(url);
+                export.expires_at = Some(expires_at.to_string());
+                roze_metrics::record_report_export(task_format.clone(), "completed", size, started.elapsed());
+                tracing::info!(event = "report.export.completed", export_id = %task_id, tenant = %task_tenant, "report export completed");
+            }
+            Err(error) => {
+                export.status = "failed".to_string();
+                export.error = Some(error.to_string());
+                roze_metrics::record_report_export(task_format.clone(), "failed", 0, started.elapsed());
+                tracing::warn!(event = "report.export.failed", export_id = %task_id, tenant = %task_tenant, error = %error, "report export failed");
+            }
+        }
+    });
+    Ok(ApiResponse::ok(resource))
+}
+
+async fn report_export_status(
+    State(ctx): State<ServiceContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<ApiResponse<ReportExportResource>, RozeError> {
+    let (subject, tenant) = report_identity(&headers, &ctx)?;
+    let export = report_exports()
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| RozeError::NotFound(format!("report export {id}")))?;
+    ensure_export_owner(&export, &subject, &tenant)?;
+    Ok(ApiResponse::ok(export))
+}
+
+async fn cancel_report_export(
+    State(ctx): State<ServiceContext>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<ApiResponse<ReportExportResource>, RozeError> {
+    let (subject, tenant) = report_identity(&headers, &ctx)?;
+    let mut exports = report_exports().write().await;
+    let export = exports
+        .get_mut(&id)
+        .ok_or_else(|| RozeError::NotFound(format!("report export {id}")))?;
+    ensure_export_owner(export, &subject, &tenant)?;
+    if matches!(export.status.as_str(), "accepted" | "running") {
+        export.status = "cancelled".to_string();
+        roze_metrics::record_report_export(export.format.clone(), "cancelled", 0, std::time::Duration::ZERO);
+        tracing::info!(event = "report.export.cancelled", export_id = %id, tenant = %tenant, subject = %subject, "report export cancelled");
+    }
+    Ok(ApiResponse::ok(export.clone()))
+}
+
+fn validate_chart_query(query: &ChartQueryRequest) -> Result<(), RozeError> {
+    if query.chart.trim().is_empty() {
+        return Err(RozeError::BadRequest("chart is required".to_string()));
+    }
+    if query.dimensions.len() > MAX_CHART_DIMENSIONS
+        || query.group_by.len() > MAX_CHART_DIMENSIONS
+        || query.measures.len() > MAX_CHART_MEASURES
+        || query.filters.len() > MAX_REPORT_COLUMNS
+        || query.sort.len() > MAX_REPORT_COLUMNS
+        || query.limit == 0
+        || query.limit > MAX_QUERY_LIMIT
+    {
+        return Err(RozeError::BadRequest("chart query exceeds configured complexity limits".to_string()));
+    }
+    if query.sort.iter().any(|sort| {
+        sort.field.trim().is_empty() || !matches!(sort.direction.as_str(), "asc" | "desc")
+    }) {
+        return Err(RozeError::BadRequest("invalid chart sort".to_string()));
+    }
+    Ok(())
 }
 
 async fn chart_query(
-    Query(query): Query<ChartQuery>,
+    State(ctx): State<ServiceContext>,
+    headers: HeaderMap,
+    Json(query): Json<ChartQueryRequest>,
 ) -> Result<ApiResponse<ChartQueryResponse>, RozeError> {
-    Ok(ApiResponse::ok(ChartQueryResponse {
-        chart: default_interface_name(query.chart),
-        interval: query.interval,
+    let started = std::time::Instant::now();
+    let (subject, tenant) = report_identity(&headers, &ctx)?;
+    validate_chart_query(&query)?;
+    let response = ChartQueryResponse {
+        chart: query.chart,
+        dimensions: query.dimensions,
+        measures: query.measures,
+        time_bucket: query.time_bucket,
+        timezone: query.timezone,
         from: query.from,
         to: query.to,
-        filters: query.filters,
+        filter_count: query.filters.len(),
+        scanned_rows: 0,
+        result_rows: 0,
         series: Vec::new(),
-    }))
+    };
+    roze_metrics::record_chart_query("completed", response.scanned_rows, response.result_rows, started.elapsed());
+    tracing::info!(event = "chart.query.completed", tenant = %tenant, subject = %subject, scanned_rows = response.scanned_rows, result_rows = response.result_rows, "chart query completed");
+    Ok(ApiResponse::ok(response))
 }
 
 "#
@@ -815,21 +1051,48 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
 }
 
 fn render_report_chart_openapi(spec: &ApiSpec) -> String {
-    let report_path = full_route_path(spec, "/reports/export");
+    let report_path = full_route_path(spec, "/reports/exports");
+    let report_item_path = full_route_path(spec, "/reports/exports/{id}");
     let chart_path = full_route_path(spec, "/charts/query");
     format!(
         r#"    {{
         let mut properties = BTreeMap::new();
         properties.insert("report".to_string(), Schema::string());
         properties.insert("format".to_string(), Schema::string());
-        properties.insert("status".to_string(), Schema::string());
-        properties.insert("export_id".to_string(), Schema::string());
-        properties.insert("download_url".to_string(), Schema::string());
+        properties.insert("columns".to_string(), Schema::array(Schema::string()));
+        properties.insert("filters".to_string(), Schema::object(BTreeMap::new(), Vec::new()));
         properties.insert("from".to_string(), Schema::string());
         properties.insert("to".to_string(), Schema::string());
-        properties.insert("filters".to_string(), Schema::string());
-        properties.insert("columns".to_string(), Schema::array(Schema::string()));
-        builder = builder.component_schema("ReportExportResponse", Schema::object(properties, vec!["report".to_string(), "format".to_string(), "status".to_string(), "export_id".to_string(), "columns".to_string()]));
+        properties.insert("timezone".to_string(), Schema::string());
+        builder = builder.component_schema("ReportExportRequest", Schema::object(properties, vec!["report".to_string()]));
+    }}
+    {{
+        let mut properties = BTreeMap::new();
+        properties.insert("id".to_string(), Schema::string());
+        properties.insert("report".to_string(), Schema::string());
+        properties.insert("format".to_string(), Schema::string());
+        properties.insert("status".to_string(), Schema::string());
+        properties.insert("progress_percent".to_string(), Schema::integer("int32"));
+        properties.insert("object_key".to_string(), Schema::string());
+        properties.insert("download_url".to_string(), Schema::string());
+        properties.insert("expires_at".to_string(), Schema::string());
+        properties.insert("error".to_string(), Schema::string());
+        properties.insert("tenant_id".to_string(), Schema::string());
+        builder = builder.component_schema("ReportExportResource", Schema::object(properties, vec!["id".to_string(), "report".to_string(), "format".to_string(), "status".to_string(), "progress_percent".to_string(), "tenant_id".to_string()]));
+    }}
+    {{
+        let mut properties = BTreeMap::new();
+        properties.insert("chart".to_string(), Schema::string());
+        properties.insert("dimensions".to_string(), Schema::array(Schema::string()));
+        properties.insert("measures".to_string(), Schema::array(Schema::string()));
+        properties.insert("filters".to_string(), Schema::object(BTreeMap::new(), Vec::new()));
+        properties.insert("group_by".to_string(), Schema::array(Schema::string()));
+        properties.insert("time_bucket".to_string(), Schema::string());
+        properties.insert("from".to_string(), Schema::string());
+        properties.insert("to".to_string(), Schema::string());
+        properties.insert("timezone".to_string(), Schema::string());
+        properties.insert("limit".to_string(), Schema::integer("int64"));
+        builder = builder.component_schema("ChartQueryRequest", Schema::object(properties, vec!["chart".to_string()]));
     }}
     {{
         let mut properties = BTreeMap::new();
@@ -847,36 +1110,43 @@ fn render_report_chart_openapi(spec: &ApiSpec) -> String {
     {{
         let mut properties = BTreeMap::new();
         properties.insert("chart".to_string(), Schema::string());
-        properties.insert("interval".to_string(), Schema::string());
-        properties.insert("from".to_string(), Schema::string());
-        properties.insert("to".to_string(), Schema::string());
-        properties.insert("filters".to_string(), Schema::string());
+        properties.insert("dimensions".to_string(), Schema::array(Schema::string()));
+        properties.insert("measures".to_string(), Schema::array(Schema::string()));
+        properties.insert("time_bucket".to_string(), Schema::string());
+        properties.insert("timezone".to_string(), Schema::string());
+        properties.insert("scanned_rows".to_string(), Schema::integer("int64"));
+        properties.insert("result_rows".to_string(), Schema::integer("int64"));
         properties.insert("series".to_string(), Schema::array(Schema::reference("ChartSeries")));
-        builder = builder.component_schema("ChartQueryResponse", Schema::object(properties, vec!["chart".to_string(), "series".to_string()]));
+        builder = builder.component_schema("ChartQueryResponse", Schema::object(properties, vec!["chart".to_string(), "dimensions".to_string(), "measures".to_string(), "scanned_rows".to_string(), "result_rows".to_string(), "series".to_string()]));
     }}
-    let op = Operation::new("reportExport")
-        .summary("Export report data")
+    let op = Operation::new("createReportExport")
+        .summary("Create an asynchronous report export")
         .tag({service:?})
-        .parameter("report", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("format", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("from", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("to", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("filters", roze_openapi::ParameterLocation::Query, "String", false)
-        .response("200", "OK", "ReportExportResponse");
-    builder.add_operation({report_path:?}, HttpMethod::Get, op);
+        .request_body("ReportExportRequest")
+        .response("200", "Accepted", "ReportExportResource");
+    builder.add_operation({report_path:?}, HttpMethod::Post, op);
+    let op = Operation::new("getReportExport")
+        .summary("Get report export status")
+        .tag({service:?})
+        .parameter("id", roze_openapi::ParameterLocation::Path, "String", true)
+        .response("200", "OK", "ReportExportResource");
+    builder.add_operation({report_item_path:?}, HttpMethod::Get, op);
+    let op = Operation::new("cancelReportExport")
+        .summary("Cancel a report export")
+        .tag({service:?})
+        .parameter("id", roze_openapi::ParameterLocation::Path, "String", true)
+        .response("200", "OK", "ReportExportResource");
+    builder.add_operation({report_item_path:?}, HttpMethod::Delete, op);
     let op = Operation::new("chartQuery")
-        .summary("Query chart series")
+        .summary("Run a bounded chart query")
         .tag({service:?})
-        .parameter("chart", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("from", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("to", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("interval", roze_openapi::ParameterLocation::Query, "String", false)
-        .parameter("filters", roze_openapi::ParameterLocation::Query, "String", false)
+        .request_body("ChartQueryRequest")
         .response("200", "OK", "ChartQueryResponse");
-    builder.add_operation({chart_path:?}, HttpMethod::Get, op);
+    builder.add_operation({chart_path:?}, HttpMethod::Post, op);
 "#,
         service = spec.service,
         report_path = report_path,
+        report_item_path = report_item_path,
         chart_path = chart_path
     )
 }
@@ -1874,7 +2144,7 @@ fn resolved_handler_name(route: &crate::parser::RestRoute) -> String {
         .unwrap_or_else(|| handler_name(&route.method, &route.path))
 }
 
-pub(crate) fn full_route_path(spec: &ApiSpec, path: &str) -> String {
+pub fn full_route_path(spec: &ApiSpec, path: &str) -> String {
     let prefix = spec
         .server
         .as_ref()
@@ -2585,26 +2855,30 @@ mod tests {
         .expect("valid api");
 
         let routes = render_route_mod(&spec);
-        assert!(routes.contains(".route(\"/api/v1/reports/export\", get(report_export))"));
-        assert!(routes.contains(".route(\"/api/v1/charts/query\", get(chart_query))"));
-        assert!(routes.contains("struct ReportExportQuery"));
+        assert!(routes.contains(".route(\"/api/v1/reports/exports\", post(create_report_export))"));
+        assert!(routes.contains(".route(\"/api/v1/reports/exports/{id}\", get(report_export_status).delete(cancel_report_export))"));
+        assert!(routes.contains(".route(\"/api/v1/charts/query\", post(chart_query))"));
+        assert!(routes.contains("struct ReportExportRequest"));
+        assert!(routes.contains("struct ReportExportResource"));
         assert!(routes.contains("struct ChartQueryResponse"));
         assert!(routes.contains("download_url: None"));
+        assert!(routes.contains("MAX_QUERY_LIMIT"));
         assert!(routes.contains("series: Vec::new()"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi
-            .contains("builder.add_operation(\"/api/v1/reports/export\", HttpMethod::Get, op);"));
+            .contains("builder.add_operation(\"/api/v1/reports/exports\", HttpMethod::Post, op);"));
+        assert!(openapi.contains(
+            "builder.add_operation(\"/api/v1/reports/exports/{id}\", HttpMethod::Delete, op);"
+        ));
         assert!(openapi
-            .contains("builder.add_operation(\"/api/v1/charts/query\", HttpMethod::Get, op);"));
-        assert!(openapi.contains("builder.component_schema(\"ReportExportResponse\""));
+            .contains("builder.add_operation(\"/api/v1/charts/query\", HttpMethod::Post, op);"));
+        assert!(openapi.contains("builder.component_schema(\"ReportExportRequest\""));
+        assert!(openapi.contains("builder.component_schema(\"ReportExportResource\""));
+        assert!(openapi.contains("builder.component_schema(\"ChartQueryRequest\""));
         assert!(openapi.contains("builder.component_schema(\"ChartQueryResponse\""));
-        assert!(openapi.contains(
-            ".parameter(\"format\", roze_openapi::ParameterLocation::Query, \"String\", false)"
-        ));
-        assert!(openapi.contains(
-            ".parameter(\"interval\", roze_openapi::ParameterLocation::Query, \"String\", false)"
-        ));
+        assert!(openapi.contains(".request_body(\"ReportExportRequest\")"));
+        assert!(openapi.contains(".request_body(\"ChartQueryRequest\")"));
     }
 
     #[test]

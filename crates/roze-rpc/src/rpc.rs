@@ -23,8 +23,8 @@ use roze_grpc::transport::{
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_metrics::{record_resilience_decision, record_rpc_method};
 use roze_resilience::{
-    full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, RateLimitRegistry,
-    RetryBudgetRegistry, SheddingRegistry,
+    full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary,
+    OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
 };
 use roze_trace::generate_trace_id;
 use tokio::time::sleep;
@@ -1003,7 +1003,7 @@ pub fn begin_method(
         fallback = policy.fallback.as_ref().is_some_and(|value| value.enabled),
         "RPC governance policy resolved"
     );
-    let key = format!("{service}:{method}");
+    let key = OperationKey::new(&service, GovernanceBoundary::Rpc, &method).to_string();
     if let Some(config) = &policy.rate_limit {
         match enforce_method_rate_limit(&key, config) {
             Ok(()) => record_resilience_decision(service.as_str(), "rpc", "rate_limit", "allowed"),
@@ -1161,7 +1161,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
-    let budget_key = format!("{service}:{method}");
+    let budget_key = OperationKey::new(service, GovernanceBoundary::Rpc, method).to_string();
     tracing::debug!(
         protocol = "rpc",
         service,

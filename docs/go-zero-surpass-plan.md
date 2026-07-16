@@ -92,14 +92,49 @@ An implementation item is complete only when all applicable evidence exists:
 `Evidence pending` means a real 24h/72h run is still required. A shortened or
 synthetic run can validate the harness but cannot become production evidence.
 
-## Ordered Execution Plan
+## Authoritative Workstream Plan
+
+The following workstreams are the authoritative implementation order. Later
+sections describe the same work by architecture area; they do not change this
+order. A workstream advances only when its completion gate is automated in the
+repository.
+
+| ID | Workstream | Depends on | State | Completion gate |
+| --- | --- | --- | --- | --- |
+| W01 | API/OpenAPI/Search breaking contract diff | M2 generation matrix | Implemented | The CLI classifies additive, behavioral, and breaking changes; breaking changes fail the release gate with stable path-level diagnostics. |
+| W02 | SQL schema and migration risk detection | W01 diff model | Implemented | Drop, rename, narrowing, nullability, constraint, index, lock, and data-rewrite risks are classified for every supported database. |
+| W03 | Explicit migration/rollback acknowledgment gate | W02 | Implemented | Every destructive change requires a generated, reviewable acknowledgment containing migration, rollback, owner, reason, and expiry; missing or stale records fail the gate. |
+| W04 | Diff-gate tests and CLI diagnostics | W01-W03 | Implemented | Fixtures cover accepted and blocked changes, exit codes are stable, diagnostics identify source paths, and the Linux release path invokes the gate. |
+| W05 | Unified service governance model | W04 | Implemented | HTTP, RPC, Gateway, MQ, and Job resolve one policy for deadline, cancellation, retry budget, rate limit, breaker, shedding, and bounded metric labels. |
+| W06 | Lifecycle and graceful shutdown | W05 | Implemented | Generated services enforce startup/readiness/drain/shutdown ordering, bounded hooks, cancellation propagation, failed-task reporting, and dependency-aware draining. |
+| W07 | Reliable MQ event lifecycle | W05-W06 | Implemented | Versioned envelope, idempotent inbox, transactional outbox, bounded retry, DLQ query/replay/purge, lag telemetry, and restart/duplicate tests preserve business invariants. |
+| W08 | Report export and chart query | W04-W07 | Implemented; integration evidence pending | Typed bounded chart queries and asynchronous CSV/XLSX exports include authorization, tenant isolation, cancellation, expiry, object storage, audit, metrics, OpenAPI, and Web SDK projection. |
+| W09 | Gateway and Config Center production governance | W05-W07 | In progress; dependency evidence pending | Canary/blue-green/mirror traffic, stream protocols, signed configuration, staged rollout, audit, listener isolation, snapshots, rollback, and dependency-backed smoke tests pass. |
+| W10 | Security closure | W05-W09 | In progress; cross-boundary evidence pending | OIDC/OAuth2, mTLS, JWT rotation, revocation, redaction, least privilege, audit projection, and cross-tenant isolation tests cover every generated boundary. |
+| W11 | Complete production examples and operations assets | W06-W10 | In progress | Three generated reference systems ship deployable manifests, dashboards, alerts, trace/log queries, SLOs, runbooks, backup/restore, migration, and rollback drills. |
+| W12 | 24h/72h soak and fault-injection evidence | W11 | Evidence pending | Reproducible signed reports prove latency, throughput, bounded resources, retry amplification, leak safety, and recovery objectives before stable promotion. |
+
+Execution rules:
+
+1. Finish W01-W04 before treating generated contract changes as release-safe.
+2. W05-W10 may reuse existing implementations, but remain incomplete until
+   their cross-boundary failure tests and generated defaults pass.
+3. W11 is the shared integration surface for all runtime capabilities.
+4. W12 records real elapsed-time evidence; shortened smoke runs cannot satisfy
+   its 24h/72h completion gate.
+5. Do not introduce compatibility shims or restore non-Web SDK targets.
 
 ### P0. Release Gate For Every Generated Target
 
-Status: **in progress**.
+Status: **implemented**. The unified `scripts/generated-target-matrix.sh`
+entrypoint now runs a non-ignored deterministic structural matrix for every
+supported target plus REST/model/search, RPC, stream, and generated HTTP/
+multi-service smoke compile checks. `rozectl gate check` and the release gate
+block unsafe contract and migration changes unless a hash-bound acknowledgment
+is valid.
 
-- Compile generated REST, RPC, stream, model, search, OpenAPI, TypeScript, and
-  JavaScript outputs in the release gate.
+- Compile generated REST, RPC, stream, HTTP/multi-service smoke, model, search,
+  OpenAPI, TypeScript, and JavaScript outputs in the release gate.
 - Run create, update, and second-update determinism checks.
 - Verify generated ownership manifests and reject overwritten application files.
 - Run contract diff and migration diff; block destructive changes unless the
@@ -138,7 +173,9 @@ Acceptance:
 
 ### P0. Generated Production Systems
 
-Status: **pending**.
+Status: **in progress**. Generated compile/smoke coverage and the dedicated
+`generated-systems` soak runner exist; real dependency-backed failure workflows
+and the three complete reference-system evidence sets remain open.
 
 Generate and continuously execute three reference systems:
 
@@ -181,7 +218,7 @@ Acceptance:
 
 ### P1. Report Export And Chart Query Contracts
 
-Status: **pending**.
+Status: **implemented; integration evidence pending**.
 
 - Add IDL/schema declarations for report dimensions, measures, filters,
   grouping, sorting, time buckets, pagination, and maximum result cost.
@@ -273,27 +310,27 @@ Acceptance:
 | --- | --- | --- |
 | M0 deterministic contracts | API/proto edge fixtures, OpenAPI constraints, typed Web SDK, byte-identical update | Implemented |
 | M1 unified governance | one resolved policy for REST/RPC/Gateway/MQ/Job with shared precedence | Implemented |
-| M2 complete release matrix | every supported generated target compiled and smoked by release gate | In progress |
+| M2 complete release matrix | every supported generated target compiled and smoked by release gate | Implemented |
 | M3 context and observability | end-to-end propagation, cancellation safety, bounded labels | In progress |
 | M4 reference systems | three real dependency-backed generated systems and failure workflows | Pending |
-| M5 reporting | typed chart queries and asynchronous governed CSV/XLSX exports | Pending |
+| M5 reporting | typed chart queries and asynchronous governed CSV/XLSX exports | Implemented; integration evidence pending |
 | M6 security and recovery | identity rotation/isolation plus executable operations drills | In progress |
 | M7 production evidence | passing 24h/72h reports and signed release | Evidence pending |
 
 ## Immediate Work Order
 
-1. Finish M2 release-matrix coverage; it is the prerequisite for trusting every
-   later generated change.
-2. Finish M3 context propagation, cancellation-safe permits, and metric
-   cardinality tests.
-3. Build M4 reference system 1, then systems 2 and 3; use them as the shared
-   integration bed for reliability and security work.
-4. Implement M5 report/chart contracts on top of bounded generated query
-   builders and the job/object-storage path.
-5. Finish M6 security projection, dashboards, alerts, runbooks, migration,
-   backup/restore, and rollback drills.
-6. Run M7 dependency-backed fault tests and real 24h/72h evidence before any
-   broad production-stable claim.
+1. W01: API/OpenAPI/Search breaking contract diff.
+2. W02: SQL schema and migration risk detection.
+3. W03: explicit migration/rollback acknowledgment gate.
+4. W04: diff-gate tests and CLI diagnostics.
+5. W05: unified service governance model.
+6. W06: lifecycle and graceful shutdown.
+7. W07: reliable MQ event lifecycle.
+8. W08: report export and chart query.
+9. W09: Gateway and Config Center production governance.
+10. W10: security closure.
+11. W11: complete production examples and operations assets.
+12. W12: 24h/72h soak and fault-injection evidence.
 
 Do not add another crate, generator language, or isolated feature unless it
 directly closes one of these milestone exits.

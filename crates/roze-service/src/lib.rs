@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU8, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -105,7 +105,19 @@ pub type ServiceFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + S
 pub trait RuntimeService: Send + Sync + 'static {
     fn name(&self) -> &str;
 
+    fn order(&self) -> i32 {
+        0
+    }
+
     fn start(&self, shutdown: ShutdownListener) -> ServiceFuture<'_>;
+
+    fn ready(&self) -> ServiceFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn drain(&self) -> ServiceFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
 
     fn stop(&self) -> ServiceFuture<'_> {
         Box::pin(async { Ok(()) })
@@ -115,14 +127,14 @@ pub trait RuntimeService: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecyclePhase {
     Starting,
-    Running,
+    Ready,
     Draining,
     Stopped,
     Failed,
 }
 
 const PHASE_STARTING: u8 = 0;
-const PHASE_RUNNING: u8 = 1;
+const PHASE_READY: u8 = 1;
 const PHASE_DRAINING: u8 = 2;
 const PHASE_STOPPED: u8 = 3;
 const PHASE_FAILED: u8 = 4;
@@ -159,7 +171,7 @@ impl LifecycleState {
 
 fn phase_from_code(code: u8) -> LifecyclePhase {
     match code {
-        PHASE_RUNNING => LifecyclePhase::Running,
+        PHASE_READY => LifecyclePhase::Ready,
         PHASE_DRAINING => LifecyclePhase::Draining,
         PHASE_STOPPED => LifecyclePhase::Stopped,
         PHASE_FAILED => LifecyclePhase::Failed,
@@ -168,8 +180,8 @@ fn phase_from_code(code: u8) -> LifecyclePhase {
 }
 
 impl LifecycleState {
-    pub fn is_running(&self) -> bool {
-        matches!(self.phase(), LifecyclePhase::Running)
+    pub fn is_ready(&self) -> bool {
+        matches!(self.phase(), LifecyclePhase::Ready)
     }
 
     pub fn is_draining(&self) -> bool {
@@ -197,7 +209,7 @@ impl LifecycleState {
 fn phase_code(phase: LifecyclePhase) -> u8 {
     match phase {
         LifecyclePhase::Starting => PHASE_STARTING,
-        LifecyclePhase::Running => PHASE_RUNNING,
+        LifecyclePhase::Ready => PHASE_READY,
         LifecyclePhase::Draining => PHASE_DRAINING,
         LifecyclePhase::Stopped => PHASE_STOPPED,
         LifecyclePhase::Failed => PHASE_FAILED,
@@ -234,6 +246,8 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceGroupConfig {
+    pub startup_timeout: Duration,
+    pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub stop_on_first_error: bool,
 }
@@ -241,6 +255,8 @@ pub struct ServiceGroupConfig {
 impl Default for ServiceGroupConfig {
     fn default() -> Self {
         Self {
+            startup_timeout: Duration::from_secs(30),
+            drain_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(30),
             stop_on_first_error: true,
         }
@@ -251,16 +267,20 @@ impl Default for ServiceGroupConfig {
 pub struct ServiceGroupSnapshot {
     pub phase: LifecyclePhase,
     pub service_count: usize,
+    pub startup_timeout: Duration,
+    pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub stop_on_first_error: bool,
+    pub failure: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct ServiceGroupHandle {
-    shutdown: ShutdownHandle,
+    shutdown_request: ShutdownHandle,
     lifecycle: LifecycleState,
     config: ServiceGroupConfig,
     service_count: Arc<AtomicUsize>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl ServiceGroupHandle {
@@ -270,7 +290,7 @@ impl ServiceGroupHandle {
             "service group shutdown requested"
         );
         self.lifecycle.mark(LifecyclePhase::Draining);
-        self.shutdown.trigger();
+        self.shutdown_request.trigger();
     }
 
     pub fn phase(&self) -> LifecyclePhase {
@@ -285,8 +305,11 @@ impl ServiceGroupHandle {
         ServiceGroupSnapshot {
             phase: self.phase(),
             service_count: self.service_count.load(Ordering::SeqCst),
+            startup_timeout: self.config.startup_timeout,
+            drain_timeout: self.config.drain_timeout,
             shutdown_timeout: self.config.shutdown_timeout,
             stop_on_first_error: self.config.stop_on_first_error,
+            failure: self.failure.lock().expect("service failure lock").clone(),
         }
     }
 }
@@ -295,9 +318,12 @@ pub struct ServiceGroup {
     config: ServiceGroupConfig,
     services: Vec<Arc<dyn RuntimeService>>,
     service_count: Arc<AtomicUsize>,
-    shutdown: ShutdownHandle,
-    listener: ShutdownListener,
+    shutdown_request: ShutdownHandle,
+    shutdown_request_listener: ShutdownListener,
+    service_shutdown: ShutdownHandle,
+    service_shutdown_listener: ShutdownListener,
     lifecycle: LifecycleState,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for ServiceGroup {
@@ -312,14 +338,18 @@ impl ServiceGroup {
     }
 
     pub fn with_config(config: ServiceGroupConfig) -> Self {
-        let (shutdown, listener) = channel();
+        let (shutdown_request, shutdown_request_listener) = channel();
+        let (service_shutdown, service_shutdown_listener) = channel();
         Self {
             config,
             services: Vec::new(),
             service_count: Arc::new(AtomicUsize::new(0)),
-            shutdown,
-            listener,
+            shutdown_request,
+            shutdown_request_listener,
+            service_shutdown,
+            service_shutdown_listener,
             lifecycle: LifecycleState::new(),
+            failure: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -351,15 +381,16 @@ impl ServiceGroup {
 
     pub fn handle(&self) -> ServiceGroupHandle {
         ServiceGroupHandle {
-            shutdown: self.shutdown.clone(),
+            shutdown_request: self.shutdown_request.clone(),
             lifecycle: self.lifecycle.clone(),
             config: self.config.clone(),
             service_count: self.service_count.clone(),
+            failure: self.failure.clone(),
         }
     }
 
     pub fn shutdown_listener(&self) -> ShutdownListener {
-        self.listener.clone()
+        self.service_shutdown_listener.clone()
     }
 
     pub fn lifecycle(&self) -> LifecycleState {
@@ -370,8 +401,11 @@ impl ServiceGroup {
         ServiceGroupSnapshot {
             phase: self.lifecycle.phase(),
             service_count: self.service_count.load(Ordering::SeqCst),
+            startup_timeout: self.config.startup_timeout,
+            drain_timeout: self.config.drain_timeout,
             shutdown_timeout: self.config.shutdown_timeout,
             stop_on_first_error: self.config.stop_on_first_error,
+            failure: self.failure.lock().expect("service failure lock").clone(),
         }
     }
 
@@ -393,6 +427,8 @@ impl ServiceGroup {
             service_count = service_names.len(),
             services = ?service_names,
             shutdown_timeout_ms = self.config.shutdown_timeout.as_millis(),
+            startup_timeout_ms = self.config.startup_timeout.as_millis(),
+            drain_timeout_ms = self.config.drain_timeout.as_millis(),
             stop_on_first_error = self.config.stop_on_first_error,
             "service group starting"
         );
@@ -401,10 +437,29 @@ impl ServiceGroup {
             return Ok(());
         }
 
-        let mut tasks = spawn_services(&self.services, &self.listener);
-        self.lifecycle.mark(LifecyclePhase::Running);
+        let mut tasks = spawn_services(&self.services, &self.service_shutdown_listener);
+        let mut errors = run_lifecycle_hooks(
+            &self.services,
+            LifecycleHook::Ready,
+            self.config.startup_timeout,
+        )
+        .await;
+        if !errors.is_empty() {
+            self.lifecycle.mark(LifecyclePhase::Failed);
+            self.service_shutdown.trigger();
+            wait_for_tasks(
+                &mut tasks,
+                self.services.len(),
+                self.config.shutdown_timeout,
+                &mut errors,
+            )
+            .await;
+            let failure = errors.join("; ");
+            *self.failure.lock().expect("service failure lock") = Some(failure.clone());
+            return Err(anyhow::anyhow!(failure));
+        }
+        self.lifecycle.mark(LifecyclePhase::Ready);
         let mut active = self.services.len();
-        let mut errors = Vec::new();
         tokio::pin!(shutdown);
 
         while active > 0 {
@@ -412,10 +467,9 @@ impl ServiceGroup {
                 _ = &mut shutdown => {
                     tracing::debug!(source = "external_signal", "service group draining");
                     self.lifecycle.mark(LifecyclePhase::Draining);
-                    self.shutdown.trigger();
                     break;
                 }
-                _ = self.listener.clone().wait() => {
+                _ = self.shutdown_request_listener.clone().wait() => {
                     tracing::debug!(source = "shutdown_handle", "service group draining");
                     self.lifecycle.mark(LifecyclePhase::Draining);
                     break;
@@ -428,15 +482,23 @@ impl ServiceGroup {
                     if handle_service_exit(joined, &mut errors) && self.config.stop_on_first_error {
                         tracing::debug!(source = "service_error", "service group draining");
                         self.lifecycle.mark(LifecyclePhase::Draining);
-                        self.shutdown.trigger();
+                        self.shutdown_request.trigger();
                         break;
                     }
                 }
             }
         }
 
-        if self.listener.is_triggered() || active > 0 {
-            self.shutdown.trigger();
+        if self.shutdown_request_listener.is_triggered() || active > 0 {
+            errors.extend(
+                run_lifecycle_hooks(
+                    &self.services,
+                    LifecycleHook::Drain,
+                    self.config.drain_timeout,
+                )
+                .await,
+            );
+            self.service_shutdown.trigger();
             stop_services(&self.services, self.config.shutdown_timeout, &mut errors).await;
             wait_for_tasks(
                 &mut tasks,
@@ -452,8 +514,45 @@ impl ServiceGroup {
             Ok(())
         } else {
             self.lifecycle.mark(LifecyclePhase::Failed);
-            Err(anyhow::anyhow!("{}", errors.join("; ")))
+            let failure = errors.join("; ");
+            *self.failure.lock().expect("service failure lock") = Some(failure.clone());
+            Err(anyhow::anyhow!(failure))
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LifecycleHook {
+    Ready,
+    Drain,
+}
+
+async fn run_lifecycle_hooks(
+    services: &[Arc<dyn RuntimeService>],
+    hook: LifecycleHook,
+    timeout: Duration,
+) -> Vec<String> {
+    let future = async {
+        let mut errors = Vec::new();
+        for service in ordered_services(services, matches!(hook, LifecycleHook::Drain)) {
+            let result = match hook {
+                LifecycleHook::Ready => service.ready().await,
+                LifecycleHook::Drain => service.drain().await,
+            };
+            if let Err(error) = result {
+                errors.push(format!(
+                    "service {} {hook:?} hook failed: {error:#}",
+                    service.name()
+                ));
+            }
+        }
+        errors
+    };
+    match tokio::time::timeout(timeout, future).await {
+        Ok(errors) => errors,
+        Err(_) => vec![format!(
+            "service group {hook:?} hooks timed out after {timeout:?}"
+        )],
     }
 }
 
@@ -467,7 +566,7 @@ fn spawn_services(
     shutdown: &ShutdownListener,
 ) -> JoinSet<ServiceTaskExit> {
     let mut tasks = JoinSet::new();
-    for service in services {
+    for service in ordered_services(services, false) {
         let service = Arc::clone(service);
         let listener = shutdown.clone();
         let name = service.name().to_string();
@@ -518,28 +617,31 @@ async fn stop_services(
 }
 
 async fn run_stop_hooks(services: &[Arc<dyn RuntimeService>]) -> Vec<String> {
-    let mut tasks = JoinSet::new();
-    for service in services.iter().rev() {
-        let service = Arc::clone(service);
-        let name = service.name().to_string();
-        tracing::debug!(service = %name, "service stop hook spawning");
-        tasks.spawn(async move {
-            service
-                .stop()
-                .await
-                .with_context(|| format!("service {name} stop hook failed"))
-        });
-    }
-
     let mut errors = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => errors.push(format!("{error:#}")),
-            Err(error) => errors.push(format!("service stop task failed: {error}")),
+    for service in ordered_services(services, true) {
+        let name = service.name().to_string();
+        tracing::debug!(service = %name, "service stop hook starting");
+        if let Err(error) = service
+            .stop()
+            .await
+            .with_context(|| format!("service {name} stop hook failed"))
+        {
+            errors.push(format!("{error:#}"));
         }
     }
     errors
+}
+
+fn ordered_services(
+    services: &[Arc<dyn RuntimeService>],
+    reverse: bool,
+) -> Vec<&Arc<dyn RuntimeService>> {
+    let mut ordered = services.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|service| service.order());
+    if reverse {
+        ordered.reverse();
+    }
+    ordered
 }
 
 async fn wait_for_tasks(
@@ -668,6 +770,7 @@ mod tests {
         let mut group = ServiceGroup::with_config(ServiceGroupConfig {
             shutdown_timeout: Duration::from_millis(100),
             stop_on_first_error: true,
+            ..ServiceGroupConfig::default()
         });
         let handle = group.handle();
         let peer_stopped = Arc::new(AtomicUsize::new(0));
@@ -696,7 +799,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_group_exposes_running_and_draining_phases() {
+    async fn service_group_exposes_ready_and_draining_phases() {
         let mut group = ServiceGroup::new();
         let handle = group.handle();
         let observed_draining = Arc::new(AtomicBool::new(false));
@@ -708,7 +811,7 @@ mod tests {
                 let handle = handle.clone();
                 let observed_draining = observed_draining.clone();
                 async move {
-                    while handle.phase() != LifecyclePhase::Running {
+                    while handle.phase() != LifecyclePhase::Ready {
                         tokio::task::yield_now().await;
                     }
                     shutdown.wait().await;
@@ -721,12 +824,12 @@ mod tests {
 
         let join = tokio::spawn(group.start_with_shutdown(std::future::pending()));
         tokio::time::timeout(Duration::from_millis(50), async {
-            while handle.phase() != LifecyclePhase::Running {
+            while handle.phase() != LifecyclePhase::Ready {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("service group should enter running phase");
+        .expect("service group should enter ready phase");
 
         handle.shutdown();
         join.await
@@ -743,12 +846,12 @@ mod tests {
         let cloned = lifecycle.clone();
         tokio::spawn(async move {
             tokio::task::yield_now().await;
-            cloned.mark(LifecyclePhase::Running);
+            cloned.mark(LifecyclePhase::Ready);
         });
 
         assert!(
             lifecycle
-                .wait_for_phase(LifecyclePhase::Running, Duration::from_millis(50))
+                .wait_for_phase(LifecyclePhase::Ready, Duration::from_millis(50))
                 .await
         );
     }
@@ -758,6 +861,7 @@ mod tests {
         let mut group = ServiceGroup::with_config(ServiceGroupConfig {
             shutdown_timeout: Duration::from_millis(75),
             stop_on_first_error: false,
+            ..ServiceGroupConfig::default()
         });
         let handle = group.handle();
 
@@ -766,8 +870,11 @@ mod tests {
             ServiceGroupSnapshot {
                 phase: LifecyclePhase::Starting,
                 service_count: 0,
+                startup_timeout: Duration::from_secs(30),
+                drain_timeout: Duration::from_secs(30),
                 shutdown_timeout: Duration::from_millis(75),
                 stop_on_first_error: false,
+                failure: None,
             }
         );
 
@@ -781,10 +888,10 @@ mod tests {
         assert!(
             handle
                 .lifecycle()
-                .wait_for_phase(LifecyclePhase::Running, Duration::from_millis(50))
+                .wait_for_phase(LifecyclePhase::Ready, Duration::from_millis(50))
                 .await
         );
-        assert_eq!(handle.snapshot().phase, LifecyclePhase::Running);
+        assert_eq!(handle.snapshot().phase, LifecyclePhase::Ready);
         assert_eq!(
             handle.snapshot().shutdown_timeout,
             Duration::from_millis(75)
@@ -821,6 +928,7 @@ mod tests {
             let mut group = ServiceGroup::with_config(ServiceGroupConfig {
                 shutdown_timeout: Duration::from_millis(250),
                 stop_on_first_error: true,
+                ..ServiceGroupConfig::default()
             });
             let handle = group.handle();
             let exits = Arc::new(AtomicUsize::new(0));
@@ -865,12 +973,12 @@ mod tests {
             let join = tokio::spawn(group.start_with_shutdown(std::future::pending()));
             assert!(
                 lifecycle
-                    .wait_for_phase(LifecyclePhase::Running, Duration::from_secs(1))
+                    .wait_for_phase(LifecyclePhase::Ready, Duration::from_secs(1))
                     .await,
-                "service group did not enter running phase"
+                "service group did not enter ready phase"
             );
             let running_snapshot = handle.snapshot();
-            assert_eq!(running_snapshot.phase, LifecyclePhase::Running);
+            assert_eq!(running_snapshot.phase, LifecyclePhase::Ready);
             assert_eq!(running_snapshot.service_count, 4);
             assert_eq!(
                 running_snapshot.shutdown_timeout,

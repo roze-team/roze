@@ -335,18 +335,21 @@ impl KafkaRecord {
     }
 
     pub fn to_event(self) -> roze_eventbus::EventEnvelope {
-        let mut event = roze_eventbus::EventEnvelope::new(self.topic, self.payload);
-        event.key = self.key;
-        event.headers = self.headers;
-        event.attempt = self.attempt;
-        event
+        roze_eventbus::EventEnvelope::from_transport(
+            self.topic,
+            self.payload,
+            self.key,
+            self.headers,
+            self.attempt,
+        )
     }
 
     pub fn from_event(event: roze_eventbus::EventEnvelope) -> Self {
+        let headers = event.transport_headers();
         Self {
             topic: event.topic,
             key: event.key,
-            headers: event.headers,
+            headers,
             timestamp_millis: current_millis(),
             partition: None,
             offset: None,
@@ -358,20 +361,13 @@ impl KafkaRecord {
     }
 
     pub fn to_mq_message(&self) -> roze_mq::Message {
-        roze_mq::Message {
-            topic: self.topic.clone(),
-            key: self.key.clone(),
-            headers: self.headers.clone(),
-            timestamp_millis: self.timestamp_millis,
-            partition: self.partition,
-            offset: self.offset,
-            group: self.group.clone(),
-            attempt: self.attempt,
-            dead_letter_topic: self.dead_letter_topic.clone(),
-            idempotency_key: None,
-            available_at_millis: None,
-            payload: self.payload.clone(),
-        }
+        let mut message = roze_mq::Message::from_event_envelope(self.clone().to_event());
+        message.timestamp_millis = self.timestamp_millis;
+        message.partition = self.partition;
+        message.offset = self.offset;
+        message.group = self.group.clone();
+        message.dead_letter_topic = self.dead_letter_topic.clone();
+        message
     }
 
     pub fn from_mq_message(message: roze_mq::Message) -> Self {

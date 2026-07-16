@@ -20,7 +20,7 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 20] = [
+const REST_ROZE_CRATES: [&str; 21] = [
     "roze-config",
     "roze-error",
     "roze-health",
@@ -35,6 +35,7 @@ const REST_ROZE_CRATES: [&str; 20] = [
     "roze-nats",
     "roze-openapi",
     "roze-query",
+    "roze-report",
     "roze-result",
     "roze-service",
     "roze-storage",
@@ -1014,10 +1015,12 @@ fn render_stream_producer(spec: &ApiSpec) -> String {
         let fn_name = format!("publish_{}", to_snake_case(&method.name));
         writeln!(
             &mut out,
-            "pub async fn {fn_name}<P>(publisher: &P, payload: {request}) -> anyhow::Result<()>\nwhere\n    P: Publisher,\n{{\n    let payload = serde_json::to_value(payload)?;\n    let idempotency_key = format!(\"{{}}:{{}}\", {topic_const}, payload);\n    let message = Message::new({topic_const}, payload)\n        .with_dead_letter_topic({dlq_const})\n        .with_idempotency_key(idempotency_key);\n    publisher.publish(message).await\n}}\n",
+            "pub async fn {fn_name}<P>(publisher: &P, payload: {request}) -> anyhow::Result<()>\nwhere\n    P: Publisher,\n{{\n    let payload = serde_json::to_value(payload)?;\n    let idempotency_key = format!(\"{{}}:{{}}\", {topic_const}, payload);\n    let message = Message::new({topic_const}, payload)\n        .with_event_contract({event_type:?}, 1, \"1\", {producer:?})\n        .with_dead_letter_topic({dlq_const})\n        .with_idempotency_key(idempotency_key);\n    publisher.publish(message).await\n}}\n",
             request = method.request,
             topic_const = stream_topic_const(method),
-            dlq_const = stream_dlq_const(method)
+            dlq_const = stream_dlq_const(method),
+            event_type = format!("{}.{}", spec.service, method.name),
+            producer = spec.service,
         )
         .unwrap();
     }
@@ -1706,59 +1709,56 @@ fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
             "framework_healthz",
             rest::full_route_path(spec, "/healthz"),
             Vec::<(&str, &str)>::new(),
+            None,
             true,
         ),
         (
             "framework_readyz",
             rest::full_route_path(spec, "/readyz"),
             Vec::<(&str, &str)>::new(),
+            None,
             true,
         ),
         (
             "framework_startupz",
             rest::full_route_path(spec, "/startupz"),
             Vec::<(&str, &str)>::new(),
+            None,
             true,
         ),
         (
             "framework_metrics",
             rest::full_route_path(spec, "/metrics"),
             Vec::<(&str, &str)>::new(),
+            None,
             false,
         ),
         (
             "framework_openapi",
             rest::full_route_path(spec, "/openapi.json"),
             Vec::<(&str, &str)>::new(),
+            None,
             true,
         ),
         (
             "framework_report_export",
-            rest::full_route_path(spec, "/reports/export"),
-            vec![
-                ("report", "smoke"),
-                ("format", "csv"),
-                ("from", "2026-01-01T00:00:00Z"),
-                ("to", "2026-01-01T01:00:00Z"),
-                ("filters", "env=smoke"),
-            ],
+            rest::full_route_path(spec, "/reports/exports"),
+            Vec::<(&str, &str)>::new(),
+            Some(r#"serde_json::json!({"report":"smoke","format":"csv","columns":["id"]})"#),
             true,
         ),
         (
             "framework_chart_query",
             rest::full_route_path(spec, "/charts/query"),
-            vec![
-                ("chart", "smoke"),
-                ("interval", "1m"),
-                ("from", "2026-01-01T00:00:00Z"),
-                ("to", "2026-01-01T01:00:00Z"),
-                ("filters", "env=smoke"),
-            ],
+            Vec::<(&str, &str)>::new(),
+            Some(
+                r#"serde_json::json!({"chart":"smoke","dimensions":["time"],"measures":["count"],"time_bucket":"1m","limit":100})"#,
+            ),
             true,
         ),
     ];
-    for (name, path, query, expects_json) in endpoints {
-        render_framework_http_smoke_test(out, name, &path, &query, expects_json);
+    for (name, path, query, body, expects_json) in endpoints {
+        render_framework_http_smoke_test(out, name, &path, &query, body, expects_json);
     }
 }
 
@@ -1767,6 +1767,7 @@ fn render_framework_http_smoke_test(
     name: &str,
     path: &str,
     query: &[(&str, &str)],
+    json_body: Option<&str>,
     expects_json: bool,
 ) {
     use std::fmt::Write as _;
@@ -1783,9 +1784,17 @@ fn render_framework_http_smoke_test(
         path
     )
     .unwrap();
-    writeln!(out, "    let response = client.get(url)").unwrap();
+    writeln!(
+        out,
+        "    let response = client.{}(url)",
+        if json_body.is_some() { "post" } else { "get" }
+    )
+    .unwrap();
     if !query.is_empty() {
         writeln!(out, "        .query(&{query:?})").unwrap();
+    }
+    if let Some(json_body) = json_body {
+        writeln!(out, "        .json(&{json_body})").unwrap();
     }
     writeln!(out, "        .send()").unwrap();
     writeln!(out, "        .await?;").unwrap();
@@ -1855,10 +1864,20 @@ fn render_http_smoke_test_readme(spec: &ApiSpec, api: &Path, base_url: &str) -> 
         "/startupz",
         "/metrics",
         "/openapi.json",
-        "/reports/export",
+        "/reports/exports",
         "/charts/query",
     ] {
-        writeln!(&mut out, "- `GET` `{}`", rest::full_route_path(spec, path)).unwrap();
+        let method = if matches!(path, "/reports/exports" | "/charts/query") {
+            "POST"
+        } else {
+            "GET"
+        };
+        writeln!(
+            &mut out,
+            "- `{method}` `{}`",
+            rest::full_route_path(spec, path)
+        )
+        .unwrap();
     }
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "## Routes").unwrap();
@@ -4684,7 +4703,7 @@ team evidence store before broad rollout.
 - `cargo fmt --all -- --check`
 - `cargo test`
 - Generated project compile check in the Roze workspace
-- Runtime smoke against `/healthz`, `/readyz`, `/startupz`, `/metrics`, `/openapi.json`, `/reports/export`, and `/charts/query` for REST services
+- Runtime smoke against `/healthz`, `/readyz`, `/startupz`, `/metrics`, `/openapi.json`, `/reports/exports`, and `/charts/query` for REST services
 - Graceful shutdown and lifecycle snapshot evidence
 - Resource trend capture: CPU, memory, file descriptors, connections, and restart count
 - Failure timeline with recovery outcome
@@ -5103,7 +5122,7 @@ fn production_verify_ps1(spec: &ApiSpec, kind: ProjectKind) -> String {
                 "GET /startupz",
                 "GET /metrics",
                 "GET /openapi.json",
-                "GET /reports/export",
+                "POST /reports/exports",
                 "POST /charts/query",
             ] {
                 writeln!(&mut out, "    '{endpoint}'").unwrap();
@@ -5552,7 +5571,7 @@ fn production_verify_sh(spec: &ApiSpec, kind: ProjectKind) -> String {
                 "GET /startupz",
                 "GET /metrics",
                 "GET /openapi.json",
-                "GET /reports/export",
+                "POST /reports/exports",
                 "POST /charts/query",
             ] {
                 writeln!(&mut out, "  {}", sh_single_quoted(endpoint)).unwrap();
@@ -6109,7 +6128,7 @@ fn evidence_manifest_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
                 "GET /startupz",
                 "GET /metrics",
                 "GET /openapi.json",
-                "GET /reports/export",
+                "POST /reports/exports",
                 "POST /charts/query",
             ] {
                 writeln!(&mut out, "    - {}", yaml_double_quoted(endpoint)).unwrap();
@@ -10323,13 +10342,13 @@ fn interface_governance_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
                 ),
                 (
                     "report_export",
-                    "GET",
-                    rest::full_route_path(spec, "/reports/export"),
+                    "POST",
+                    rest::full_route_path(spec, "/reports/exports"),
                     "smoke_export_request_returns_typed_response",
                 ),
                 (
                     "chart_query",
-                    "GET",
+                    "POST",
                     rest::full_route_path(spec, "/charts/query"),
                     "smoke_chart_query_returns_typed_series_response",
                 ),
@@ -10567,9 +10586,14 @@ governance:
 #   batch_size: 100
 #   interval_ms: 1000
 # auth:
-#   jwt_secret: change-me
+#   jwt_keys:
+#     - id: "2026-07"
+#       secret: change-me
+#   jwt_active_key_id: "2026-07"
 #   jwt_issuer: {}
+#   jwt_audience: {}
 #   jwt_expiration_secs: 86400
+#   jwt_clock_skew_secs: 30
 # telemetry:
 #   name: {}
 #   endpoint: http://127.0.0.1:4317
@@ -10578,6 +10602,7 @@ governance:
 "#,
             spec.service,
             governance_routes,
+            spec.service,
             spec.service,
             spec.service,
             spec.service,
@@ -10661,9 +10686,14 @@ governance:
 #   batch_size: 100
 #   interval_ms: 1000
 # auth:
-#   jwt_secret: change-me
+#   jwt_keys:
+#     - id: "2026-07"
+#       secret: change-me
+#   jwt_active_key_id: "2026-07"
 #   jwt_issuer: {}
+#   jwt_audience: {}
 #   jwt_expiration_secs: 86400
+#   jwt_clock_skew_secs: 30
 # telemetry:
 #   name: {}
 #   endpoint: http://127.0.0.1:4317
@@ -10672,6 +10702,7 @@ governance:
 "#,
             spec.service,
             governance_routes,
+            spec.service,
             spec.service,
             spec.service,
             spec.service,
@@ -11730,6 +11761,60 @@ mod tests {
         files
     }
 
+    fn assert_snapshot_eq(
+        label: &str,
+        expected: &BTreeMap<PathBuf, Vec<u8>>,
+        actual: &BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        let mut differences = expected
+            .keys()
+            .filter_map(|path| {
+                let (Some(expected), Some(actual)) = (expected.get(path), actual.get(path)) else {
+                    return None;
+                };
+                if expected == actual {
+                    return None;
+                }
+                let detail = match (str::from_utf8(expected), str::from_utf8(actual)) {
+                    (Ok(expected), Ok(actual)) => {
+                        let expected_lines = expected.lines().collect::<Vec<_>>();
+                        let actual_lines = actual.lines().collect::<Vec<_>>();
+                        let index = expected_lines
+                            .iter()
+                            .zip(&actual_lines)
+                            .position(|(expected, actual)| expected != actual)
+                            .unwrap_or(expected_lines.len().min(actual_lines.len()));
+                        format!(
+                            " at line {}: {:?} -> {:?}",
+                            index + 1,
+                            expected_lines.get(index),
+                            actual_lines.get(index)
+                        )
+                    }
+                    _ => String::new(),
+                };
+                Some(format!("changed: {}{detail}", path.display()))
+            })
+            .collect::<Vec<_>>();
+        differences.extend(
+            actual
+                .keys()
+                .filter(|path| !expected.contains_key(*path))
+                .map(|path| format!("added: {}", path.display())),
+        );
+        differences.extend(
+            expected
+                .keys()
+                .filter(|path| !actual.contains_key(*path))
+                .map(|path| format!("removed: {}", path.display())),
+        );
+        assert!(
+            differences.is_empty(),
+            "{label} output drifted:\n{}",
+            differences.join("\n")
+        );
+    }
+
     #[test]
     fn repeated_rest_and_rpc_updates_are_byte_deterministic() {
         let root = temp_test_root("rozectl-deterministic-update-test");
@@ -11825,6 +11910,204 @@ mod tests {
         assert_eq!(rpc_first, snapshot_tree(&rpc_out));
 
         fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn supported_generation_matrix_is_deterministic_and_complete() {
+        let root = temp_test_root("rozectl-supported-generation-matrix");
+        fs::create_dir_all(&root).expect("create matrix workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        let rest = parse_api(
+            r#"
+            service analytics-api {
+                @handler queryChart
+                post /charts/query (ChartQueryReq) returns (ChartQueryResp)
+            }
+
+            type ChartQueryReq {
+                tenant_id: string `json:"tenantId" validate:"required"`
+                metric: string `json:"metric" validate:"oneof=revenue orders"`
+            }
+
+            type ChartQueryResp {
+                values: []f64 `json:"values"`
+            }
+            "#,
+        )
+        .expect("valid rest api");
+        let rest_out = root.join("analytics-api");
+        let model_source = r#"
+            model ReportPoint {
+                table: report_points
+                primary: id
+                field id u64
+                field tenant_id string
+                field metric string
+                field value f64
+                field created_at datetime
+                index: tenant_id,metric,created_at
+            }
+        "#;
+        let search_path = root.join("report.search");
+        fs::write(
+            &search_path,
+            r#"
+            index reports
+            primary id
+            field id u64 primary filterable sortable
+            field tenant_id keyword filterable
+            field metric keyword filterable
+            field value f64 sortable
+            field created_at datetime sortable
+            "#,
+        )
+        .expect("write search schema");
+
+        generate_rest_project(
+            &rest,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create rest target");
+        model::generate_model_project(
+            model_source,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            model::ModelFormat::Dsl,
+            model::ModelOrm::Toasty,
+        )
+        .expect("compose initial model target");
+        search::generate_search_project(
+            &search_path,
+            search::SearchEngine::Elasticsearch,
+            &rest_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("compose initial search target");
+        let mut rest_first = None;
+        for _ in 0..2 {
+            generate_rest_project(
+                &rest,
+                &rest_out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            )
+            .expect("update rest target");
+            model::generate_model_project(
+                model_source,
+                &rest_out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+                model::ModelFormat::Dsl,
+                model::ModelOrm::Toasty,
+            )
+            .expect("update model target");
+            search::generate_search_project(
+                &search_path,
+                search::SearchEngine::Elasticsearch,
+                &rest_out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            )
+            .expect("update search target");
+            let snapshot = snapshot_tree(&rest_out);
+            if let Some(first) = &rest_first {
+                assert_snapshot_eq("REST/model/search", first, &snapshot);
+            } else {
+                rest_first = Some(snapshot);
+            }
+        }
+
+        let rpc = parse_api(
+            r#"
+            service analytics-rpc {
+                rpc Aggregate (AggregateReq) returns (AggregateResp)
+            }
+            type AggregateReq {
+                tenant_id: string
+            }
+            type AggregateResp {
+                total: f64
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let rpc_out = root.join("analytics-rpc");
+        generate_rpc_project(
+            &rpc,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create rpc target");
+        generate_rpc_project(
+            &rpc,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("first rpc update");
+        let rpc_first = snapshot_tree(&rpc_out);
+        generate_rpc_project(
+            &rpc,
+            &rpc_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("second rpc update");
+        assert_snapshot_eq("RPC", &rpc_first, &snapshot_tree(&rpc_out));
+
+        let stream_api = root.join("analytics-stream.api");
+        fs::write(
+            &stream_api,
+            r#"
+            service analytics-stream {
+                rpc ReportRequested (ReportRequestedReq) returns (ReportRequestedResp)
+            }
+            type ReportRequestedReq {
+                report_id: string
+            }
+            type ReportRequestedResp {
+                accepted: bool
+            }
+            "#,
+        )
+        .expect("write stream api");
+        let stream_out = root.join("analytics-stream");
+        write_stream_worker_project(
+            &stream_api,
+            &stream_out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create stream target");
+        write_stream_worker_project(
+            &stream_api,
+            &stream_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("first stream update");
+        let stream_first = snapshot_tree(&stream_out);
+        write_stream_worker_project(
+            &stream_api,
+            &stream_out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("second stream update");
+        assert_snapshot_eq("stream", &stream_first, &snapshot_tree(&stream_out));
+
+        let openapi_first = openapi_document(&rest);
+        assert_eq!(openapi_first, openapi_document(&rest));
+        assert_eq!(openapi_first["openapi"], "3.0.0");
+        assert!(openapi_first["paths"]["/charts/query"].is_object());
+
+        let ts_first = client::render_ts_client(&rest);
+        let js_first = client::render_js_client(&rest);
+        assert_eq!(ts_first, client::render_ts_client(&rest));
+        assert_eq!(js_first, client::render_js_client(&rest));
+        for rendered in [&ts_first, &js_first] {
+            assert!(rendered.contains("RozeApiError"));
+            assert!(rendered.contains("authToken"));
+            assert!(rendered.contains("timeoutMs"));
+            assert!(rendered.contains("maxAttempts"));
+        }
+
+        fs::remove_dir_all(root).expect("remove matrix workspace");
     }
 
     fn repo_root() -> PathBuf {
@@ -13308,7 +13591,7 @@ mod tests {
         assert!(rest_production_verify.contains("ConvertFrom-Json"));
         assert!(rest_production_verify.contains("production_verification_report_schema"));
         assert!(rest_production_verify.contains("Production verification report"));
-        assert!(rest_production_verify.contains("GET /reports/export"));
+        assert!(rest_production_verify.contains("POST /reports/exports"));
         assert!(rest_production_verify.contains("POST /charts/query"));
         assert!(rest_production_verify.contains("GET /users/:id"));
         assert!(rest_production_verify_sh.starts_with("#!/usr/bin/env bash"));
@@ -13346,7 +13629,7 @@ mod tests {
         assert!(rest_production_verify_sh.contains("dependency_transport_security_contract"));
         assert!(rest_production_verify_sh.contains("production_verification_report_schema"));
         assert!(rest_production_verify_sh.contains("Production verification report"));
-        assert!(rest_production_verify_sh.contains("GET /reports/export"));
+        assert!(rest_production_verify_sh.contains("POST /reports/exports"));
         assert!(rest_production_verify_sh.contains("POST /charts/query"));
         assert!(rest_production_verify_sh.contains("GET /users/:id"));
         assert!(rest_production_workflow.contains("name: Roze Production Verify"));
@@ -13394,7 +13677,7 @@ mod tests {
         assert!(rest_evidence_manifest.contains("runtime_artifacts:"));
         assert!(rest_evidence_manifest.contains("path: ops/production-verify-report.json"));
         assert!(rest_evidence_manifest.contains("kind: verification_report"));
-        assert!(rest_evidence_manifest.contains("GET /reports/export"));
+        assert!(rest_evidence_manifest.contains("POST /reports/exports"));
         assert!(rest_evidence_manifest.contains("POST /charts/query"));
         assert!(rest_evidence_manifest.contains("path: \"/users/:id\""));
         assert!(rest_evidence_manifest.contains("ci_evidence_bundle"));
@@ -13640,7 +13923,7 @@ mod tests {
         assert!(rest_data_access_governance.contains("raw_sql_without_review"));
         assert!(rest_interface_governance.contains("boundary: rest"));
         assert!(rest_interface_governance.contains("framework_endpoints:"));
-        assert!(rest_interface_governance.contains("path: /reports/export"));
+        assert!(rest_interface_governance.contains("path: /reports/exports"));
         assert!(rest_interface_governance.contains("path: /charts/query"));
         assert!(rest_interface_governance.contains("business_endpoints:"));
         assert!(rest_interface_governance.contains("path: /users/:id"));
@@ -14807,8 +15090,8 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(tests.contains("async fn smoke_framework_healthz()"));
         assert!(tests.contains("async fn smoke_framework_report_export()"));
         assert!(tests.contains("async fn smoke_framework_chart_query()"));
-        assert!(tests.contains(r#""/api/reports/export""#));
-        assert!(tests.contains(r#".query(&[("report", "smoke"), ("format", "csv")"#));
+        assert!(tests.contains(r#""/api/reports/exports""#));
+        assert!(tests.contains(r#""report":"smoke","format":"csv""#));
         assert!(tests.contains(r#""/api/charts/query""#));
         assert!(tests.contains(r#""/api/users/string""#));
         assert!(tests.contains(r#".header("x-trace-id", "string")"#));
@@ -14816,8 +15099,8 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(tests.contains(r#""name": "string""#));
         let readme = fs::read_to_string(out.join("README.md")).expect("read readme");
         assert!(readme.contains("## Framework Smoke"));
-        assert!(readme.contains("`GET` `/api/reports/export`"));
-        assert!(readme.contains("`GET` `/api/charts/query`"));
+        assert!(readme.contains("`POST` `/api/reports/exports`"));
+        assert!(readme.contains("`POST` `/api/charts/query`"));
         let fixtures_path = out.join("tests/fixtures.rs");
         let assertions_path = out.join("tests/assertions.rs");
         let generated_fixtures = fs::read_to_string(&fixtures_path).expect("read fixtures");

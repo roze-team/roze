@@ -16,8 +16,8 @@ use tokio::{sync::broadcast, task::JoinHandle};
 
 use roze_metrics::record_resilience_decision;
 use roze_resilience::{
-    full_jitter_delay, BreakerDecision, BreakerRegistry, GovernancePolicy, RateLimitRegistry,
-    RetryBudgetRegistry, SheddingRegistry,
+    full_jitter_delay, BreakerDecision, BreakerRegistry, GovernanceBoundary, GovernancePolicy,
+    OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
 };
 
 type DeliveryActionFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
@@ -25,11 +25,19 @@ type DeliveryAction = Arc<dyn Fn() -> DeliveryActionFuture + Send + Sync + 'stat
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
+    pub event_id: String,
+    pub event_type: String,
+    pub version: u32,
+    pub schema_revision: String,
     pub topic: String,
     #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    pub trace_context: HashMap<String, String>,
+    pub tenant_id: Option<String>,
+    pub producer: String,
+    pub occurred_at: i64,
     #[serde(default)]
     pub timestamp_millis: u64,
     #[serde(default)]
@@ -93,12 +101,24 @@ impl Message {
         payload: serde_json::Value,
         trace_id: impl Into<String>,
     ) -> Self {
+        let trace_id = trace_id.into();
         let mut headers = HashMap::new();
-        headers.insert(roze_trace::TRACE_ID_HEADER.to_string(), trace_id.into());
+        headers.insert(roze_trace::TRACE_ID_HEADER.to_string(), trace_id.clone());
+        let mut trace_context = HashMap::new();
+        trace_context.insert(roze_trace::TRACE_ID_HEADER.to_string(), trace_id);
+        let envelope = roze_eventbus::EventEnvelope::new(topic, payload);
         Self {
-            topic: topic.into(),
+            event_id: envelope.event_id,
+            event_type: envelope.event_type,
+            version: envelope.version,
+            schema_revision: envelope.schema_revision,
+            topic: envelope.topic,
             key: None,
             headers,
+            trace_context,
+            tenant_id: None,
+            producer: "unknown".to_string(),
+            occurred_at: envelope.occurred_at,
             timestamp_millis: current_millis(),
             partition: None,
             offset: None,
@@ -107,7 +127,7 @@ impl Message {
             dead_letter_topic: None,
             idempotency_key: None,
             available_at_millis: None,
-            payload,
+            payload: envelope.payload,
         }
     }
 
@@ -116,20 +136,11 @@ impl Message {
         topic: impl Into<String>,
         payload: serde_json::Value,
     ) -> Self {
-        Self {
-            topic: topic.into(),
-            key: None,
-            headers: context.propagation_headers().into_iter().collect(),
-            timestamp_millis: current_millis(),
-            partition: None,
-            offset: None,
-            group: None,
-            attempt: 0,
-            dead_letter_topic: None,
-            idempotency_key: None,
-            available_at_millis: None,
-            payload,
-        }
+        let mut message = Self::new(topic, payload);
+        message.headers = context.propagation_headers().into_iter().collect();
+        message.trace_context = message.headers.clone();
+        message.tenant_id = message.headers.get("x-tenant-id").cloned();
+        message
     }
 
     pub fn context(&self) -> roze_context::Context {
@@ -167,6 +178,70 @@ impl Message {
     pub fn with_group(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());
         self
+    }
+
+    pub fn with_event_contract(
+        mut self,
+        event_type: impl Into<String>,
+        version: u32,
+        schema_revision: impl Into<String>,
+        producer: impl Into<String>,
+    ) -> Self {
+        self.event_type = event_type.into();
+        self.version = version.max(1);
+        self.schema_revision = schema_revision.into();
+        self.producer = producer.into();
+        self
+    }
+
+    pub fn with_tenant(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn into_event_envelope(self) -> roze_eventbus::EventEnvelope {
+        roze_eventbus::EventEnvelope {
+            event_id: self.event_id,
+            event_type: self.event_type,
+            version: self.version,
+            schema_revision: self.schema_revision,
+            topic: self.topic,
+            key: self.key,
+            headers: self.headers,
+            trace_context: self.trace_context,
+            tenant_id: self.tenant_id,
+            idempotency_key: self.idempotency_key,
+            producer: self.producer,
+            attempt: self.attempt,
+            occurred_at: self.occurred_at,
+            payload: self.payload,
+        }
+    }
+
+    pub fn from_event_envelope(event: roze_eventbus::EventEnvelope) -> Self {
+        let headers = event.transport_headers();
+        Self {
+            event_id: event.event_id,
+            event_type: event.event_type,
+            version: event.version,
+            schema_revision: event.schema_revision,
+            topic: event.topic,
+            key: event.key,
+            headers,
+            trace_context: event.trace_context,
+            tenant_id: event.tenant_id,
+            producer: event.producer,
+            occurred_at: event.occurred_at,
+            timestamp_millis: current_millis(),
+            partition: None,
+            offset: None,
+            group: None,
+            attempt: event.attempt,
+            dead_letter_topic: None,
+            idempotency_key: event.idempotency_key,
+            available_at_millis: None,
+            payload: event.payload,
+        }
     }
 
     pub fn delay_for(mut self, delay: Duration) -> Self {
@@ -721,7 +796,7 @@ where
     static SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
     static RETRY_BUDGETS: OnceLock<RetryBudgetRegistry> = OnceLock::new();
 
-    let key = format!("mq:{topic}");
+    let key = OperationKey::new("consumer", GovernanceBoundary::Mq, topic).to_string();
     if let Some(config) = policy.rate_limit {
         let allowed = RATE_LIMITERS
             .get_or_init(RateLimitRegistry::new)
@@ -1115,6 +1190,23 @@ mod tests {
             .expect("record");
         assert_eq!(purged.id, records[0].id);
         assert_eq!(broker.clear_dead_letters().await.expect("clear"), 0);
+    }
+
+    #[test]
+    fn message_and_event_envelope_round_trip_all_business_metadata() {
+        let message = Message::new("orders", serde_json::json!({"id": 7}))
+            .with_event_contract("order.created", 2, "2026-07", "order-service")
+            .with_tenant("acme")
+            .with_idempotency_key("order-7");
+        let expected_id = message.event_id.clone();
+        let round_trip = Message::from_event_envelope(message.into_event_envelope());
+        assert_eq!(round_trip.event_id, expected_id);
+        assert_eq!(round_trip.event_type, "order.created");
+        assert_eq!(round_trip.version, 2);
+        assert_eq!(round_trip.schema_revision, "2026-07");
+        assert_eq!(round_trip.tenant_id.as_deref(), Some("acme"));
+        assert_eq!(round_trip.idempotency_key.as_deref(), Some("order-7"));
+        assert_eq!(round_trip.producer, "order-service");
     }
 
     #[tokio::test]

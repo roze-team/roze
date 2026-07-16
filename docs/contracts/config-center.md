@@ -105,11 +105,21 @@ history, audit records, active version, and watch status.
 | Capability | Required behavior |
 | --- | --- |
 | read current config | expose version, hash, source, namespace, app, and key |
-| publish/update config | validate before commit and reject invalid payloads |
+| publish/update config | verify HMAC-SHA256 signature, validate before commit, and reject invalid payloads |
 | audit history | record who/what/when/source/version/hash |
 | rollback | restore a previous valid version by version/hash |
 | watch status | expose native watch vs polling, last revision, and last error |
 | permission model | separate read, write, rollback, and audit permissions |
+| staged rollout | keep partial rollout versions inactive until explicit promote |
+| failed rollout | mark the staged version rolled back while retaining the active version |
+
+`ConfigCenterAdminStore::new` and `load_from_path` require a
+`ConfigSigningPolicy`. Every initial and published payload is bound to a
+trusted `key_id` and HMAC-SHA256 signature. Signing secrets are never written
+to the snapshot and must be reinjected after restore. A publish with
+`rollout_percent < 100` creates a `staged` version; `promote` verifies the same
+content signature before activation. `reject_staged` records the failed state
+without replacing the current active version.
 
 The snapshot store is enough to prove behavior in tests and can support simple
 single-node deployments. Production-stable status for broader deployments still

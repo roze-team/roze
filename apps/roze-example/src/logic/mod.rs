@@ -18,15 +18,24 @@ pub async fn login(
     }
 
     let jwt = ctx.jwt_config().unwrap_or_else(|| roze_jwt::JwtConfig {
-        jwt_secret: format!("{}-demo-secret", ctx.config.name),
+        jwt_keys: vec![roze_jwt::JwtKey {
+            id: "demo".to_string(),
+            secret: format!("{}-demo-secret", ctx.config.name),
+        }],
+        jwt_active_key_id: "demo".to_string(),
         jwt_issuer: ctx.config.name.clone(),
+        jwt_audience: ctx.config.name.clone(),
         jwt_expiration_secs: 24 * 60 * 60,
+        jwt_clock_skew_secs: 30,
+        revoked_token_ids: Vec::new(),
     });
     let claims = Claims {
         sub: req.username.clone(),
         roles: vec!["user".to_string()],
         tenant: None,
         iss: String::new(),
+        aud: String::new(),
+        jti: format!("login-{}", req.username),
         iat: 0,
         exp: 0,
     };

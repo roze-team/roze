@@ -83,7 +83,9 @@ the concise backlog; the execution plan is the source of truth for completion.
 ## P1: Generator and Contract Completeness
 
 - Put REST, RPC, stream, model, search, OpenAPI, TypeScript, and JavaScript
-  generation into one non-ignored release-gate matrix.
+  generation into one non-ignored release-gate matrix. The unified structural
+  and compile entrypoint is implemented; unsafe contract/migration diff gates
+  remain.
 - Keep deterministic second-update and generated ownership checks mandatory.
 - Block unsafe API, migration, and search contract changes through generated
   diff gates and rollback records.

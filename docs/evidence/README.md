@@ -43,6 +43,12 @@ Use `ROZE_GATEWAY_SOAK_SECONDS`, `ROZE_MQ_SOAK_SECONDS`, `ROZE_MQ_SOAK_MESSAGES`
 `ROZE_LIFECYCLE_SOAK_SECONDS`, and `ROZE_LIFECYCLE_SOAK_CYCLES` for 24h/72h
 runs.
 
+CI evidence uses the fixed self-hosted workflow in
+`.github/workflows/production-soak.yml`. Its artifact contains raw logs, host
+samples, a Markdown summary, and `SHA256SUMS`; GitHub OIDC provenance attests
+the checksum manifest. A 24h/72h job must finish before its artifact can be
+reviewed as production evidence.
+
 For lifecycle reports, keep the `roze_lifecycle_soak` summary line in the
 evidence artifact. It records cycles, worker exits, stop hooks, observed
 running/stopped snapshots, and max service count. The report scaffold includes

@@ -29,8 +29,12 @@ governance:
 #   url: redis://127.0.0.1/
 #   namespace: user-api
 # auth:
-#   jwt_secret: change-me
+#   jwt_keys:
+#     - id: "2026-07"
+#       secret: change-me
+#   jwt_active_key_id: "2026-07"
 #   jwt_issuer: user-api
+#   jwt_audience: user-api
 #   jwt_expiration_secs: 86400
 # telemetry:
 #   name: user-api

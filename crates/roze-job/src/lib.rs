@@ -6,8 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 use roze_resilience::{
-    full_jitter_delay, BreakerDecision, BreakerRegistry, GovernancePolicy, RateLimitRegistry,
-    RetryBudgetRegistry, SheddingRegistry,
+    full_jitter_delay, BreakerDecision, BreakerRegistry, GovernanceBoundary, GovernancePolicy,
+    OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
 };
 use roze_service::{RuntimeService, ServiceFuture};
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -247,7 +247,7 @@ async fn execute_governed_job(
     let empty = GovernancePolicy::default();
     let policy = policy.unwrap_or(&empty);
     let name = job.name();
-    let key = format!("job:{name}");
+    let key = OperationKey::new(name, GovernanceBoundary::Job, name).to_string();
     if let Some(config) = policy.rate_limit {
         let allowed = RATE_LIMITERS
             .get_or_init(RateLimitRegistry::new)

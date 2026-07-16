@@ -55,3 +55,25 @@ Rollback should restore both:
 For config-center or gateway changes, keep the previous valid runtime config
 available so services can restart or reload without depending on a new config
 shape.
+
+## 2026-07 Production Contract Reset
+
+This upgrade intentionally has no compatibility adapters:
+
+- Replace `auth.jwt_secret` with `jwt_keys`, `jwt_active_key_id`,
+  `jwt_audience`, and `jwt_clock_skew_secs`. Issued claims now require `aud`
+  and `jti`; JWT headers require `kid`.
+- Replace lifecycle phase `Running` with `Ready`. Service hooks now execute in
+  dependency order for start/readiness and reverse order for drain/stop.
+- Regenerate stream services for the versioned Event Envelope fields. MQ,
+  Kafka, NATS, inbox, and outbox metadata use event ID/type/version/schema,
+  trace context, tenant, idempotency key, producer, attempt, and occurred time.
+- Replace `GET /reports/export` and `GET /charts/query` with
+  `POST /reports/exports` and `POST /charts/query`; regenerate OpenAPI and Web
+  SDK clients.
+- Config admin publish/restore now requires a signing policy and bound
+  signature. Partial rollout versions require explicit promotion.
+
+Run `rozectl gate check --manifest roze-gate.yaml` before regeneration or
+deployment. Breaking API/Search/SQL changes require a non-expired,
+digest-matched acknowledgment with migration and rollback plans.

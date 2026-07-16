@@ -1,0 +1,6 @@
+version: 1
+checks:
+  - domain: api
+    old: old.api
+    new: new.api
+acknowledgements: []

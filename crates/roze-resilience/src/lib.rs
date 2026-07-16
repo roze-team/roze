@@ -1,10 +1,95 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    fmt,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GovernanceBoundary {
+    Rest,
+    Rpc,
+    Gateway,
+    Mq,
+    Job,
+}
+
+impl GovernanceBoundary {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rest => "rest",
+            Self::Rpc => "rpc",
+            Self::Gateway => "gateway",
+            Self::Mq => "mq",
+            Self::Job => "job",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OperationKey(String);
+
+impl OperationKey {
+    pub fn new(
+        service: impl AsRef<str>,
+        boundary: GovernanceBoundary,
+        operation: impl AsRef<str>,
+    ) -> Self {
+        Self(format!(
+            "{}:{}:{}",
+            canonical_operation_part(service.as_ref()),
+            boundary.as_str(),
+            canonical_operation_part(operation.as_ref())
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for OperationKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for OperationKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<OperationKey> for String {
+    fn from(value: OperationKey) -> Self {
+        value.0
+    }
+}
+
+fn canonical_operation_part(value: &str) -> String {
+    const MAX_LEN: usize = 160;
+    let mut canonical = String::with_capacity(value.len().min(MAX_LEN));
+    let mut previous_separator = false;
+    for ch in value.chars().take(MAX_LEN) {
+        let accepted =
+            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '{' | '}');
+        if accepted {
+            canonical.push(ch.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator {
+            canonical.push('_');
+            previous_separator = true;
+        }
+    }
+    let canonical = canonical.trim_matches('_');
+    if canonical.is_empty() {
+        "unknown".to_string()
+    } else {
+        canonical.to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
@@ -568,6 +653,17 @@ fn should_shed(state: &SheddingState, config: SheddingConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_key_is_stable_and_sanitizes_dynamic_text() {
+        let key = OperationKey::new(
+            "Shop API",
+            GovernanceBoundary::Rest,
+            "GET /users/{id}?token=secret",
+        );
+        assert_eq!(key.as_str(), "shop_api:rest:get_/users/{id}_token_secret");
+        assert!(!key.as_str().contains(' '));
+    }
 
     fn allowed_permit(decision: BreakerDecision) -> BreakerPermit {
         match decision {

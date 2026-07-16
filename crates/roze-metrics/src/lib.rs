@@ -17,6 +17,7 @@ static RPC_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static GATEWAY_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static QUEUE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RESILIENCE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static REPORT_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetricLabels(BTreeMap<String, String>);
@@ -323,6 +324,51 @@ pub fn record_resilience_decision(
     resilience_metrics_registry().inc_counter("roze_resilience_decisions_total", labels, 1);
 }
 
+pub fn record_report_export(
+    format: impl Into<String>,
+    outcome: impl Into<String>,
+    bytes: u64,
+    elapsed: Duration,
+) {
+    let labels = MetricLabels::new()
+        .insert("format", format.into())
+        .insert("outcome", outcome.into());
+    let registry = report_metrics_registry();
+    registry.inc_counter("roze_report_export_events_total", labels.clone(), 1);
+    registry.inc_counter("roze_report_export_bytes_total", labels.clone(), bytes);
+    registry.inc_counter(
+        "roze_report_export_duration_ms_total",
+        labels,
+        elapsed.as_millis() as u64,
+    );
+}
+
+pub fn record_chart_query(
+    outcome: impl Into<String>,
+    scanned_rows: u64,
+    result_rows: u64,
+    elapsed: Duration,
+) {
+    let labels = MetricLabels::new().insert("outcome", outcome.into());
+    let registry = report_metrics_registry();
+    registry.inc_counter("roze_chart_query_events_total", labels.clone(), 1);
+    registry.inc_counter(
+        "roze_chart_query_scanned_rows_total",
+        labels.clone(),
+        scanned_rows,
+    );
+    registry.inc_counter(
+        "roze_chart_query_result_rows_total",
+        labels.clone(),
+        result_rows,
+    );
+    registry.inc_counter(
+        "roze_chart_query_duration_ms_total",
+        labels,
+        elapsed.as_millis() as u64,
+    );
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -351,6 +397,7 @@ pub fn http_metrics() -> String {
     out.push_str(&gateway_metrics_registry().render());
     out.push_str(&queue_metrics_registry().render());
     out.push_str(&resilience_metrics_registry().render());
+    out.push_str(&report_metrics_registry().render());
     out
 }
 
@@ -376,6 +423,10 @@ pub fn queue_metrics_registry() -> &'static MetricRegistry {
 
 pub fn resilience_metrics_registry() -> &'static MetricRegistry {
     RESILIENCE_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn report_metrics_registry() -> &'static MetricRegistry {
+    REPORT_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {

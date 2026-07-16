@@ -4,6 +4,7 @@ use std::{
     fs,
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
+    process::ExitCode,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -176,6 +177,10 @@ enum Commands {
     Contract {
         #[command(subcommand)]
         command: ContractCommands,
+    },
+    Gate {
+        #[command(subcommand)]
+        command: GateCommands,
     },
     Mock {
         #[command(subcommand)]
@@ -722,6 +727,18 @@ enum ContractCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum GateCommands {
+    Check {
+        #[arg(long, default_value = "roze-gate.yaml")]
+        manifest: PathBuf,
+        #[arg(long, default_value = "target/roze-gate.json")]
+        report: PathBuf,
+        #[arg(long)]
+        markdown: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum MockCommands {
     Gen {
         #[arg(short = 'a', long = "api")]
@@ -974,13 +991,29 @@ enum StreamCommands {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    std::thread::Builder::new()
-        .name("rozectl-main".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(run)?
-        .join()
-        .map_err(|_| anyhow::anyhow!("rozectl main thread panicked"))?
+fn main() -> ExitCode {
+    let result = (|| -> anyhow::Result<()> {
+        std::thread::Builder::new()
+            .name("rozectl-main".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(run)?
+            .join()
+            .map_err(|_| anyhow::anyhow!("rozectl main thread panicked"))?
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            if err
+                .downcast_ref::<rozectl::gate::GateInputError>()
+                .is_some()
+            {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
 }
 
 fn run() -> anyhow::Result<()> {
@@ -1423,6 +1456,7 @@ fn run() -> anyhow::Result<()> {
         },
         Commands::Diff { command } => run_diff(command, &registry)?,
         Commands::Contract { command } => run_contract(command)?,
+        Commands::Gate { command } => run_gate(command)?,
         Commands::Mock { command } => match command {
             MockCommands::Gen { api, out, force } => {
                 validate_api_for_generation(&api)?;
@@ -1796,6 +1830,39 @@ fn run_contract(command: ContractCommands) -> anyhow::Result<()> {
                 anyhow::bail!("contract diff detected {} breaking change(s)", issues.len());
             }
             Ok(())
+        }
+    }
+}
+
+fn run_gate(command: GateCommands) -> anyhow::Result<()> {
+    match command {
+        GateCommands::Check {
+            manifest,
+            report,
+            markdown,
+        } => {
+            let gate_report = rozectl::gate::run_manifest(&manifest)?;
+            rozectl::gate::write_json_report(&gate_report, &report)?;
+            if let Some(markdown) = markdown {
+                if let Some(parent) = markdown
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&markdown, rozectl::gate::render_markdown(&gate_report))
+                    .with_context(|| format!("failed to write {}", markdown.display()))?;
+            }
+            if gate_report.passed {
+                println!(
+                    "release gate passed: {} check(s); report={}",
+                    gate_report.checks.len(),
+                    report.display()
+                );
+                Ok(())
+            } else {
+                Err(rozectl::gate::GateBlockedError(gate_report.blocking_issues).into())
+            }
         }
     }
 }
@@ -5445,6 +5512,25 @@ envFrom: []
                     allow_breaking: true,
                     ..
                 }
+            }
+        ));
+
+        let gate = Cli::try_parse_from([
+            "rozectl",
+            "gate",
+            "check",
+            "--manifest",
+            "roze-gate.yaml",
+            "--report",
+            "target/gate.json",
+            "--markdown",
+            "target/gate.md",
+        ])
+        .expect("parse release gate check");
+        assert!(matches!(
+            gate.command,
+            Commands::Gate {
+                command: GateCommands::Check { .. }
             }
         ));
 

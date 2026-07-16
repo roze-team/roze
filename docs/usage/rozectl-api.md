@@ -335,6 +335,43 @@ operations and schemas, and exported SDK interfaces/functions. It is written
 before command failure so CI can retain the artifact. Breaking changes return a
 non-zero status; pass `--allow-breaking` for an explicitly review-only run.
 
+Run the release-facing semantic gate across API/OpenAPI, search, and SQL schema
+contracts:
+
+```bash
+rozectl gate check \
+  --manifest roze-gate.yaml \
+  --report target/roze-gate.json \
+  --markdown target/roze-gate.md
+```
+
+The manifest has version `1`, a non-empty `checks` list, and optional
+acknowledgement file paths. Each check declares `domain: api|search|sql` plus
+`old` and `new` files relative to the manifest. The JSON report has stable
+`code`, `domain`, `severity`, `path`, `before`, `after`, and `remediation`
+fields. Exit code `0` means pass, `1` means an unacknowledged blocking change,
+and `2` means an invalid manifest, acknowledgement, or input contract.
+
+Blocking changes may be acknowledged only by a checked-in YAML record bound to
+the exact lowercase SHA-256 digests:
+
+```yaml
+version: 1
+id: remove-legacy-user-field
+scope: api
+old_digest: <64 lowercase hex characters>
+new_digest: <64 lowercase hex characters>
+owner: identity-platform
+reason: legacy field retirement
+migration_plan: regenerate and deploy all callers before the server change
+rollback_plan: restore the old contract and generated service revision
+expires_at: 2026-12-31
+```
+
+Empty plans, stale hashes, expired records, and bare `--allow-breaking` flags do
+not bypass `rozectl gate check`. The repository release gate writes both JSON
+and Markdown artifacts before deciding whether the release is allowed.
+
 Generate a mock server from the API contract:
 
 ```bash
@@ -361,7 +398,7 @@ path, query, header, form, and JSON requests from the `.api` request types,
 asserts successful HTTP status codes, and verifies JSON responses. It also
 generates smoke checks for the framework-owned production endpoints:
 `/healthz`, `/readyz`, `/startupz`, `/metrics`, `/openapi.json`,
-`/reports/export`, and `/charts/query`. The default base URL is
+`POST /reports/exports` and `POST /charts/query`. The default base URL is
 `http://127.0.0.1:3000`; pass `--base-url` when generating or set
 `ROZE_TEST_BASE_URL` at runtime.
 
@@ -465,8 +502,10 @@ Generated REST services expose standard operational endpoints:
 - `GET /readyz` for readiness
 - `GET /startupz` for startup state
 - `GET /metrics` for Prometheus metrics
-- `GET /reports/export` for a generated report-export scaffold
-- `GET /charts/query` for a generated chart-series query scaffold
+- `POST /reports/exports` to create a tenant-bound asynchronous CSV/XLSX export
+- `GET /reports/exports/:id` to read export status and download metadata
+- `DELETE /reports/exports/:id` to cancel an export
+- `POST /charts/query` for a bounded structured chart-series query
 - `GET /openapi.json` for OpenAPI
 
 The default health handlers return `roze_health::ProbeReport` inside the
@@ -481,11 +520,13 @@ an unhealthy result instead of stalling the probe. Services can set a stricter
 budget with `HealthRegistry::with_check_timeout(Duration)`.
 Panics from application-provided checks are isolated into an unhealthy check,
 so one faulty dependency probe cannot abort the complete readiness response.
-Generated report and chart endpoints are framework-owned production interface
-scaffolds: they publish stable HTTP/OpenAPI boundaries for export jobs and
-chart data lookup, while application teams replace the default accepted/empty
-responses with their own report catalog, BI query, async export, object-store
-download, authorization, and audit implementation.
+Generated report exports run asynchronously, render real CSV or XLSX through
+`roze-report`, escape spreadsheet formulas, enforce row/column/file limits,
+write through `roze-storage`, and expose bounded status/cancel/download
+resources. When JWT is configured, export and chart operations require a token
+with a tenant claim; status and cancellation are restricted to the creating
+subject and tenant. Chart execution remains an application-owned query/catalog
+extension and receives a bounded structured contract instead of raw SQL.
 
 ## Read-model query composition
 

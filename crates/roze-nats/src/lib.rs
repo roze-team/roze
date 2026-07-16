@@ -158,16 +158,21 @@ impl NatsMessage {
     }
 
     pub fn to_event(self) -> roze_eventbus::EventEnvelope {
-        let mut event = roze_eventbus::EventEnvelope::new(self.subject, self.payload);
-        event.headers = self.headers;
-        event
+        roze_eventbus::EventEnvelope::from_transport(
+            self.subject,
+            self.payload,
+            None,
+            self.headers,
+            0,
+        )
     }
 
     pub fn from_event(event: roze_eventbus::EventEnvelope) -> Self {
+        let headers = event.transport_headers();
         Self {
             subject: event.topic,
             reply_to: None,
-            headers: event.headers,
+            headers,
             payload: event.payload,
         }
     }
@@ -237,20 +242,14 @@ impl NatsJetStream {
     }
 
     fn to_mq_message(message: NatsMessage, attempt: u32) -> roze_mq::Message {
-        roze_mq::Message {
-            topic: message.subject,
-            key: None,
-            headers: message.headers,
-            timestamp_millis: current_millis(),
-            partition: None,
-            offset: None,
-            group: None,
+        let event = roze_eventbus::EventEnvelope::from_transport(
+            message.subject,
+            message.payload,
+            None,
+            message.headers,
             attempt,
-            dead_letter_topic: None,
-            idempotency_key: None,
-            available_at_millis: None,
-            payload: message.payload,
-        }
+        );
+        roze_mq::Message::from_event_envelope(event)
     }
 
     fn from_mq_message(message: roze_mq::Message) -> NatsMessage {

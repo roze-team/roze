@@ -86,8 +86,13 @@ gateway:
 
 ```yaml
 auth:
-  jwt_secret: "secret"
+  jwt_keys:
+    - id: "2026-07"
+      secret: "secret"
+  jwt_active_key_id: "2026-07"
   jwt_issuer: "roze"
+  jwt_audience: "roze-services"
+  jwt_clock_skew_secs: 30
   api_keys:
     header: "x-api-key"
     keys:
@@ -96,6 +101,16 @@ auth:
         roles: ["internal"]
         tenant: "acme"
 ```
+
+JWT headers must contain a trusted `kid`. Rotation keeps old verification keys
+in `jwt_keys` while changing `jwt_active_key_id`; issuer, audience, expiry,
+clock skew, and `jti` revocation are enforced on every gateway verification.
+
+Gateway routes additionally support `match_headers`, `match_cookies`,
+`traffic_percent`, `mirror_service`, and `mirror_percent`. Ordered duplicate
+paths provide deterministic canary, blue-green, and A/B routing. Mirrored
+requests run independently of the primary response and invalid percentages or
+unknown mirror services fail config validation.
 
 ## 4. 路由与转发
 

@@ -26,8 +26,8 @@ use roze_context::Context;
 use roze_http::rest::{self, HttpResponse, IncomingRequest};
 use roze_jwt::{verify_token, JwtConfig};
 use roze_resilience::{
-    full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, RateLimitRegistry,
-    RetryBudgetRegistry, SheddingRegistry,
+    full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary,
+    OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
 };
 use roze_rpc::registry::{Registry, ServiceInstance};
 use rustls_pki_types::pem::PemObject;
@@ -96,6 +96,11 @@ struct CompiledRoute {
     path: String,
     service: String,
     methods: Vec<Method>,
+    match_headers: BTreeMap<String, String>,
+    match_cookies: BTreeMap<String, String>,
+    traffic_percent: u32,
+    mirror_service: Option<String>,
+    mirror_percent: u32,
     timeout: Option<Duration>,
     retries: usize,
     retry_backoff: Duration,
@@ -726,7 +731,7 @@ impl GatewayRuntime {
         let started = Instant::now();
         let method = request.method().clone();
         let path = request.uri().path().to_string();
-        let Some(route) = self.select_route(&path) else {
+        let Some(route) = self.select_route(&request) else {
             return self.finish_response(
                 None,
                 &method,
@@ -783,8 +788,13 @@ impl GatewayRuntime {
                 .or(self.global_timeout)
                 .unwrap_or(DEFAULT_TIMEOUT),
         );
-        let key = format!("{}:{}", route.service, route.path);
-        let retry_key = format!("{}:{}:{}", route.service, method, route.path);
+        let key = OperationKey::new(
+            &route.service,
+            GovernanceBoundary::Gateway,
+            format!("{}:{}", method, route.path),
+        )
+        .to_string();
+        let retry_key = key.clone();
 
         if let Some(policy) = self.auth_policy(route) {
             let Some(principal) = validate_request_auth(
@@ -991,6 +1001,8 @@ impl GatewayRuntime {
                 );
             }
         };
+
+        self.dispatch_mirror(route, &method, &path, query.as_deref(), &headers, &body);
 
         let retryable_method = is_idempotent_method(&method);
         let max_retries = if retryable_method { route.retries } else { 0 };
@@ -1432,7 +1444,12 @@ impl GatewayRuntime {
             .max_stream_connections
             .or(service.max_stream_connections)
             .or(self.global_max_stream_connections);
-        let key = format!("{}:{}:{protocol}", route.service, route.path);
+        let key = OperationKey::new(
+            &route.service,
+            GovernanceBoundary::Gateway,
+            format!("{protocol}:{}", route.path),
+        )
+        .to_string();
         let mut states = self.stream_connection_states.lock().map_err(|_| {
             UpstreamError::Unavailable("gateway stream connection state is poisoned".to_string())
         })?;
@@ -1723,8 +1740,62 @@ impl GatewayRuntime {
         }
     }
 
-    fn select_route(&self, path: &str) -> Option<&CompiledRoute> {
-        self.routes.iter().find(|route| route.matches_path(path))
+    fn select_route(&self, request: &IncomingRequest) -> Option<&CompiledRoute> {
+        let path = request.uri().path();
+        let selection_key = gateway_selection_key(request.headers(), path);
+        let bucket = stable_bucket(&selection_key);
+        self.routes.iter().find(|route| {
+            route.matches_path(path)
+                && route.matches_request(request.headers())
+                && bucket < route.traffic_percent
+        })
+    }
+
+    fn dispatch_mirror(
+        &self,
+        route: &CompiledRoute,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: &[(HeaderName, HeaderValue)],
+        body: &Bytes,
+    ) {
+        let Some(mirror_name) = route.mirror_service.as_ref() else {
+            return;
+        };
+        if stable_bucket(&format!("mirror:{}:{}", route.path, path)) >= route.mirror_percent {
+            return;
+        }
+        let Some(service) = self.services.get(mirror_name) else {
+            return;
+        };
+        if service.upstream.trim().is_empty() {
+            return;
+        }
+        let mut upstream = join_url(&service.upstream, path);
+        if let Some(query) = query.filter(|query| !query.is_empty()) {
+            upstream.push('?');
+            upstream.push_str(query);
+        }
+        let client = self.client.clone();
+        let method = method.clone();
+        let headers = headers.to_vec();
+        let body = body.clone();
+        let timeout = service
+            .timeout_ms
+            .map(Duration::from_millis)
+            .or(self.global_timeout)
+            .unwrap_or(DEFAULT_TIMEOUT);
+        tokio::spawn(async move {
+            let mut builder = client.request(method, upstream).timeout(timeout);
+            for (name, value) in headers {
+                builder = builder.header(name, value);
+            }
+            if !body.is_empty() {
+                builder = builder.body(body);
+            }
+            let _ = builder.send().await;
+        });
     }
 
     fn auth_policy(&self, route: &CompiledRoute) -> Option<AuthPolicy> {
@@ -1890,6 +1961,19 @@ pub fn validate_gateway_config(config: &GatewayConfig) -> anyhow::Result<()> {
                 )
             })?;
         }
+        anyhow::ensure!(
+            route.traffic_percent <= 100 && route.mirror_percent <= 100,
+            "gateway route '{}' traffic percentages must be in 0..=100",
+            route.path
+        );
+        if let Some(mirror) = route.mirror_service.as_ref() {
+            anyhow::ensure!(
+                services.contains(mirror.as_str()),
+                "gateway route '{}' references unknown mirror service '{}'",
+                route.path,
+                mirror
+            );
+        }
         if let Some(maximum) = route.max_stream_connections {
             anyhow::ensure!(
                 maximum > 0,
@@ -1954,6 +2038,11 @@ fn compile_routes(
                 path,
                 service: route.service,
                 methods: parse_methods(&route.methods),
+                match_headers: route.match_headers,
+                match_cookies: route.match_cookies,
+                traffic_percent: route.traffic_percent,
+                mirror_service: route.mirror_service,
+                mirror_percent: route.mirror_percent,
                 timeout: route
                     .timeout_ms
                     .map(Duration::from_millis)
@@ -2060,6 +2149,47 @@ impl CompiledRoute {
     fn method_allowed(&self, method: &Method) -> bool {
         self.methods.is_empty() || self.methods.iter().any(|allowed| allowed == method)
     }
+
+    fn matches_request(&self, headers: &HeaderMap) -> bool {
+        let headers_match = self.match_headers.iter().all(|(name, expected)| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == expected)
+        });
+        headers_match
+            && self.match_cookies.iter().all(|(name, expected)| {
+                cookie_value(headers, name).is_some_and(|value| value == expected)
+            })
+    }
+}
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            (key == name).then_some(value)
+        })
+}
+
+fn gateway_selection_key(headers: &HeaderMap, path: &str) -> String {
+    for name in ["x-user-id", "x-tenant-id", roze_context::REQUEST_ID_HEADER] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            return value.to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn stable_bucket(value: &str) -> u32 {
+    let hash = value.bytes().fold(0x811c9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
+    });
+    hash % 100
 }
 
 fn parse_methods(raw: &[String]) -> Vec<Method> {
@@ -2803,6 +2933,11 @@ mod tests {
                 service: "catalog".to_string(),
                 methods: vec![method.to_string()],
                 weight: 100,
+                match_headers: BTreeMap::new(),
+                match_cookies: BTreeMap::new(),
+                traffic_percent: 100,
+                mirror_service: None,
+                mirror_percent: 0,
                 instance_tags: BTreeMap::new(),
                 middlewares: Vec::new(),
                 timeout_ms: Some(1_000),
@@ -3330,6 +3465,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn route_selection_supports_header_cookie_and_percentage_policies() {
+        let mut config = gateway_config("http://127.0.0.1:1".to_string(), "GET");
+        let mut canary = config.routes[0].clone();
+        canary.match_headers = BTreeMap::from([("x-release".to_string(), "canary".to_string())]);
+        canary.match_cookies = BTreeMap::from([("experiment".to_string(), "b".to_string())]);
+        canary.instance_tags = BTreeMap::from([("version".to_string(), "canary".to_string())]);
+        config.routes.insert(0, canary);
+        let runtime = build_router(config, None);
+        let request = Request::builder()
+            .uri("/catalog")
+            .header("x-release", "canary")
+            .header(header::COOKIE, "experiment=b")
+            .body(rest::full_body(Bytes::new()))
+            .expect("request");
+        let selected = runtime
+            .runtime
+            .select_route(&request)
+            .expect("selected route");
+        assert_eq!(
+            selected.instance_tags.get("version").map(String::as_str),
+            Some("canary")
+        );
+        assert!(stable_bucket("stable-user") < 100);
+    }
+
+    #[test]
+    fn gateway_validation_rejects_unknown_mirror_and_invalid_percentages() {
+        let mut config = gateway_config("http://127.0.0.1:1".to_string(), "GET");
+        config.routes[0].mirror_service = Some("shadow".to_string());
+        assert!(validate_gateway_config(&config).is_err());
+        config.routes[0].mirror_service = None;
+        config.routes[0].traffic_percent = 101;
+        assert!(validate_gateway_config(&config).is_err());
+    }
+
     #[tokio::test]
     async fn does_not_retry_non_idempotent_request() {
         let (upstream, hits, _) = scripted_upstream(vec![503]).await;
@@ -3506,7 +3677,7 @@ mod tests {
             runtime
                 .runtime
                 .shedders
-                .snapshot("catalog:/catalog")
+                .snapshot("catalog:gateway:get:/catalog")
                 .expect("shedding snapshot")
                 .in_flight,
             1

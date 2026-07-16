@@ -1,0 +1,12 @@
+version: 1
+checks:
+  - domain: api
+    old: gate/baseline/user.api
+    new: example/user.api
+  - domain: search
+    old: gate/baseline/user.search
+    new: example/user.search
+  - domain: sql
+    old: gate/baseline/user.sql
+    new: example/user.sql
+acknowledgements: []
