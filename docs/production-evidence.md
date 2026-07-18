@@ -86,6 +86,12 @@ bash scripts/production-evidence.sh \
 
 The generated report starts as `inconclusive`. A maintainer must fill in all
 measurements and artifacts before changing the verdict to `pass`.
+The scaffold command rejects `--verdict pass`. Passing reports must be produced
+from a downloaded fixed-runner artifact with
+`scripts/production-evidence-promote.sh`; that command verifies the portable
+checksum manifest, terminal run state, real elapsed duration, resource samples,
+boundary summary, artifact digest, and GitHub provenance URL before writing a
+committable report.
 
 ## Soak Entrypoints
 
@@ -96,23 +102,31 @@ Set the duration to 24h/72h when producing real evidence:
 ROZE_GATEWAY_SOAK_SECONDS=86400 \
   bash scripts/production-soak-gateway.sh
 
-ROZE_MQ_SOAK_SECONDS=86400 ROZE_MQ_SOAK_MESSAGES=100000000 \
+ROZE_MQ_SOAK_SECONDS=86400 \
   bash scripts/production-soak-mq.sh
 
-ROZE_CONFIG_CENTER_SOAK_SECONDS=86400 ROZE_CONFIG_CENTER_SOAK_UPDATES=100000000 \
+ROZE_CONFIG_CENTER_SOAK_SECONDS=86400 \
   bash scripts/production-soak-config-center.sh
 
-ROZE_LIFECYCLE_SOAK_SECONDS=86400 ROZE_LIFECYCLE_SOAK_CYCLES=100000000 \
+ROZE_LIFECYCLE_SOAK_SECONDS=86400 \
   bash scripts/production-soak-lifecycle.sh
 ```
 
+The wrapper scripts default their message, update, and lifecycle-cycle caps to
+`u64::MAX`, so elapsed time is the controlling boundary for 24h/72h runs.
+Set the corresponding cap explicitly only for harness smoke tests. A run that
+reaches an explicit cap before its declared duration is rejected as
+`ended_early`.
+
 Lifecycle soak output includes a single `roze_lifecycle_soak` summary line with
-`cycles`, `worker_exits`, `stop_hooks`, `running_snapshots`,
-`stopped_snapshots`, and `max_service_count`. Copy that line into the report
-alongside resource trends and failure-injection notes. The report scaffold adds
-a lifecycle snapshot section automatically for `--area lifecycle`; pass the
-line with `--lifecycle-summary` to prefill that section. When provided, the
-summary must include all six fields as unsigned integers, with
+`elapsed_ms`, `cycles`, `cycles_per_second_milli`, p50/p95/p99 cycle latency,
+failed-task and drain-timeout detections, p99 fault-detection latency,
+`worker_exits`, `stop_hooks`, `running_snapshots`, `stopped_snapshots`, and
+`max_service_count`. Copy that line into the report alongside resource trends
+and failure-injection notes. The report scaffold adds a lifecycle snapshot
+section automatically for `--area lifecycle`; pass the line with
+`--lifecycle-summary` to prefill that section. When provided, the summary must
+include all fourteen fields as unsigned integers, with
 `running_snapshots == stopped_snapshots == cycles` and
 `worker_exits == stop_hooks == cycles * max_service_count`.
 
@@ -122,17 +136,91 @@ latency/throughput/resource trends and artifacts described above.
 The fixed self-hosted workflow `.github/workflows/production-soak.yml` runs on
 the `[self-hosted, linux, x64, roze-production]` runner label. Weekly schedules
 execute the 24h matrix; `workflow_dispatch` selects one area and either 24h or
-72h. `scripts/production-soak-ci.sh` rejects shortened duration labels,
+72h. `scripts/production-soak-preflight.sh` validates Linux, Rust, Node,
+Docker Compose, procfs counters, and a full Git revision before any workload
+starts. `scripts/production-soak-ci.sh` rejects shortened duration labels,
 captures raw workload logs and host samples, writes SHA-256 checksums, uploads
 the complete artifact, and creates GitHub OIDC build-provenance attestation for
-the checksum manifest. The workflow summary records the artifact ID and digest.
+the checksum manifest. The workflow then promotes and verifies the signed
+evidence report in the same job, uploads a second complete artifact containing
+that report, and publishes the artifact summary. The attested raw artifact and
+the complete report artifact are retained together under the same workflow run.
+The workflow summary records the complete artifact ID and digest.
+Host samples include CPU ticks, available memory, task count, established TCP
+connections, and allocated file handles. Terminal metadata records
+aggregate CPU busy basis points, memory growth, and resource maxima.
+MQ soak health checks accept `ROZE_NATS_SOAK_HOST` and
+`ROZE_NATS_SOAK_PORT`, allowing a fixed runner to isolate its Compose project
+from unrelated broker instances without weakening the broker restart test.
+Set `ROZE_MQ_SOAK_DEBUG_DIR` to retain per-workload `memory.log`, `nats.log`,
+and `kafka.log` files when diagnosing a failed run.
+MQ fault injection uses hard container kills by default (`ROZE_MQ_HARD_FAULT=1`)
+so client disconnect handling is exercised; set it to `0` for graceful broker
+stop/start testing.
+Config Center uses the same policy with `ROZE_CONFIG_HARD_FAULT` and retains
+workload logs when `ROZE_CONFIG_SOAK_DEBUG_DIR` is set.
+Generated-system runs can set `ROZE_REFERENCE_COMPOSE_PROJECT` and
+`ROZE_REFERENCE_COMPOSE_FILE` so repeated integration iterations clean up only
+their own Compose stack.
 No dispatch or shortened smoke is itself passing evidence; the job must finish
 the required elapsed duration and satisfy this document's criteria.
 
-The Gateway harness repeatedly exercises its retry, fallback, breaker,
-shedding, hot-reload, SSE, WebSocket, and TLS scenarios for the requested
-duration. Its cycle summary proves scenario repetition, but external resource
-and latency measurements are still required for a passing report.
+After downloading a successful artifact, promote it with:
+
+```bash
+bash scripts/production-evidence-promote.sh \
+  --bundle target/production-evidence/gateway-24h \
+  --artifact-id 123456 \
+  --artifact-digest sha256:<artifact-digest> \
+  --artifact-url https://github.com/<owner>/<repo>/actions/runs/<run-id> \
+  --attestation-url https://github.com/<owner>/<repo>/attestations/<id>
+```
+
+`SHA256SUMS` contains artifact-relative paths so the downloaded bundle can be
+verified outside the original runner workspace. The maturity evidence gate
+accepts only promoted reports with machine-readable front matter bound to a
+full Git revision, required elapsed duration, artifact digest, checksum digest,
+and GitHub attestation. Promotion requires Node.js to parse `run.json` and GNU
+`sha256sum` to verify the artifact manifest.
+`scripts/production-evidence-report-verify.sh` independently validates the
+committed report metadata and is the only report predicate used by the
+maturity evidence gate.
+It also validates each area-specific boundary schema, counter invariants,
+monotonic percentiles, fault-scenario counts, at least 90 percent host-sampler
+coverage, consistent memory endpoints, and a maximum 20 percent available
+memory decline.
+The fixed-runner objectives are Gateway request p99 at or below 250ms, MQ
+delivery p99 at or below 1s, Config Center update p99 at or below 5s,
+Lifecycle cycle p99 at or below 1s, and Lifecycle fault-detection p99 at or
+below 2s. These are evidence-environment objectives, not hidden runtime
+timeouts; changing them requires a reviewed evidence-policy change.
+MQ DLQ replay must also recover within 1s, and Config Center rollback p99 must
+remain at or below 5s.
+The MQ soak runs the in-memory reliability workload beside real NATS JetStream
+and Kafka publisher/consumer workloads. Both brokers are periodically stopped
+and restarted in an isolated Compose project. Promotion requires each broker
+to record disconnects, successful post-restart delivery and acknowledgment,
+and positive recovery throughput. NATS delivery/recovery p99 must remain at or
+below 5s/30s; Kafka delivery/recovery p99 must remain at or below 10s/60s.
+In-memory-only or single-broker output cannot satisfy the MQ evidence schema.
+The Config Center soak runs its signed admin-store workload beside a real Etcd
+value/watch workload. Etcd is periodically stopped and restarted; the promoted
+report requires observed disconnects, resumed reads and watches, at least one
+recovery, Etcd operation p99 at or below 5s, and recovery p99 at or below 30s.
+
+The Gateway harness repeatedly executes the real network
+`scripts/gateway-smoke.sh` workflow, covering retry, fallback, rate limiting,
+shedding, hot reload, SSE, and WebSocket behavior for the requested duration.
+Its summary records cycle throughput, p50/p95/p99 workflow duration, and
+per-cycle recovery counts. Each cycle also samples the real HTTP rewrite path;
+the final summary aggregates request count, errors, and request p50/p95/p99
+across every cycle. In parallel, `scripts/gateway-registry-recovery.sh` starts
+isolated real Etcd and Consul services, registers each upstream once, and
+periodically restarts both registries. The service registration keepalive must
+recreate lost registrations automatically; the test does not call register
+again after a fault. Promotion requires positive fault, disconnect, successful
+route, and recovery counts for both registries, recovery from every injected
+fault, route p99 at or below 250ms, and recovery p99 at or below 60s.
 
 ## Release Gate Relationship
 

@@ -90,6 +90,61 @@ pub struct SyncResult {
     pub changed: Vec<PathBuf>,
 }
 
+#[derive(Debug)]
+struct ManagedFileSnapshot {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+impl ManagedFileSnapshot {
+    fn capture(project: &Path, include_manifest: bool) -> anyhow::Result<Vec<Self>> {
+        let mut paths = vec![
+            project.join("Cargo.toml"),
+            project.join(DEPENDENCY_CONFIG),
+            project.join("src/svc/mod.rs"),
+        ];
+        if include_manifest {
+            paths.push(project.join(MANIFEST_NAME));
+        }
+        paths
+            .into_iter()
+            .map(|path| {
+                let contents = fs::read(&path)
+                    .with_context(|| format!("failed to snapshot managed file {}", path.display()))
+                    .map(Some)
+                    .or_else(|error| if path.exists() { Err(error) } else { Ok(None) })?;
+                Ok(Self { path, contents })
+            })
+            .collect()
+    }
+
+    fn restore_all(snapshots: &[Self]) -> anyhow::Result<()> {
+        for snapshot in snapshots {
+            match &snapshot.contents {
+                Some(contents) => {
+                    if let Some(parent) = snapshot.path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(&snapshot.path, contents).with_context(|| {
+                        format!("failed to restore managed file {}", snapshot.path.display())
+                    })?;
+                }
+                None => {
+                    if snapshot.path.exists() {
+                        fs::remove_file(&snapshot.path).with_context(|| {
+                            format!(
+                                "failed to remove partially written {}",
+                                snapshot.path.display()
+                            )
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn add_dependency(project: &Path, input: AddDependency) -> anyhow::Result<SyncResult> {
     validate_name(&input.name, "dependency name")?;
     validate_crate_name(&input.crate_name)?;
@@ -141,8 +196,7 @@ pub fn add_dependency(project: &Path, input: AddDependency) -> anyhow::Result<Sy
         },
     );
     validate_manifest(&manifest)?;
-    write_manifest(project, &manifest)?;
-    sync(project, false)
+    apply_manifest_transaction(project, &manifest)
 }
 
 pub fn remove_dependency(project: &Path, name: &str) -> anyhow::Result<SyncResult> {
@@ -150,8 +204,7 @@ pub fn remove_dependency(project: &Path, name: &str) -> anyhow::Result<SyncResul
     if manifest.dependencies.remove(name).is_none() {
         bail!("dependency `{name}` is not declared");
     }
-    write_manifest(project, &manifest)?;
-    sync(project, false)
+    apply_manifest_transaction(project, &manifest)
 }
 
 pub fn list_dependencies(project: &Path) -> anyhow::Result<Vec<(String, RpcDependency)>> {
@@ -160,6 +213,50 @@ pub fn list_dependencies(project: &Path) -> anyhow::Result<Vec<(String, RpcDepen
 
 pub fn sync(project: &Path, check: bool) -> anyhow::Result<SyncResult> {
     let manifest = load_manifest(project)?;
+    if check {
+        return sync_inner(project, &manifest, true);
+    }
+    let snapshots = ManagedFileSnapshot::capture(project, false)?;
+    match sync_inner(project, &manifest, false) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            if let Err(restore) = ManagedFileSnapshot::restore_all(&snapshots) {
+                return Err(error.context(format!(
+                    "failed to restore service sync after error: {restore}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn apply_manifest_transaction(
+    project: &Path,
+    manifest: &ServiceManifest,
+) -> anyhow::Result<SyncResult> {
+    let snapshots = ManagedFileSnapshot::capture(project, true)?;
+    let result = (|| {
+        write_manifest(project, manifest)?;
+        sync_inner(project, manifest, false)
+    })();
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            if let Err(restore) = ManagedFileSnapshot::restore_all(&snapshots) {
+                return Err(error.context(format!(
+                    "failed to restore service dependency transaction after error: {restore}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn sync_inner(
+    project: &Path,
+    manifest: &ServiceManifest,
+    check: bool,
+) -> anyhow::Result<SyncResult> {
     validate_manifest(&manifest)?;
     validate_project_kind(project, manifest.kind)?;
 
@@ -784,6 +881,61 @@ mod tests {
         assert!(!fs::read_to_string(path.join("src/svc/mod.rs"))
             .unwrap()
             .contains("order_client"));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dependency_add_rolls_back_manifest_and_managed_files_when_sync_fails() {
+        let path = project(ServiceKind::Api);
+        let cargo_before = fs::read(path.join("Cargo.toml")).unwrap();
+        let svc_before = b"pub struct Broken {".to_vec();
+        fs::write(path.join("src/svc/mod.rs"), &svc_before).unwrap();
+
+        let error = add_dependency(
+            &path,
+            AddDependency {
+                name: "order".into(),
+                crate_name: "shop-order-rpc".into(),
+                path: PathBuf::from("../shop-order-rpc"),
+                contract: None,
+                target: Some("http://127.0.0.1:4002".into()),
+                endpoints: vec![],
+                etcd_hosts: vec![],
+                etcd_key: None,
+                timeout_ms: 2000,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("rustfmt failed"));
+        assert!(!path.join(MANIFEST_NAME).exists());
+        assert_eq!(fs::read(path.join("Cargo.toml")).unwrap(), cargo_before);
+        assert_eq!(fs::read(path.join("src/svc/mod.rs")).unwrap(), svc_before);
+        assert!(!path.join(DEPENDENCY_CONFIG).exists());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn service_sync_rolls_back_managed_files_when_client_render_fails() {
+        let path = project(ServiceKind::Api);
+        fs::write(
+            path.join(MANIFEST_NAME),
+            "version: 1\nservice: payment\nkind: api\ndependencies:\n  order:\n    protocol: rpc\n    crate: shop-order-rpc\n    path: ../shop-order-rpc\n    target: http://127.0.0.1:4002\n    timeout_ms: 2000\n",
+        )
+        .unwrap();
+        let cargo_before = fs::read(path.join("Cargo.toml")).unwrap();
+        fs::write(path.join("src/svc/mod.rs"), "pub struct Broken {").unwrap();
+
+        let error = sync(&path, false).unwrap_err().to_string();
+
+        assert!(error.contains("rustfmt failed"));
+        assert_eq!(fs::read(path.join("Cargo.toml")).unwrap(), cargo_before);
+        assert!(!path.join(DEPENDENCY_CONFIG).exists());
+        assert_eq!(
+            fs::read_to_string(path.join("src/svc/mod.rs")).unwrap(),
+            "pub struct Broken {"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

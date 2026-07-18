@@ -916,15 +916,40 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(u64::MAX);
-        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(seconds);
         let mut cycles = 0_u64;
         let mut worker_exits = 0_u64;
         let mut stop_hooks = 0_u64;
         let mut running_snapshots = 0_u64;
         let mut stopped_snapshots = 0_u64;
         let mut max_service_count = 0_usize;
+        let mut cycle_latency = roze_metrics::LatencyHistogram::new();
+        let mut fault_detection_latency = roze_metrics::LatencyHistogram::new();
+        let mut failed_task_detections = 0_u64;
+        let mut drain_timeout_detections = 0_u64;
+
+        struct TimeoutDrainService;
+
+        impl RuntimeService for TimeoutDrainService {
+            fn name(&self) -> &str {
+                "timeout-drain"
+            }
+
+            fn start(&self, shutdown: ShutdownListener) -> ServiceFuture<'_> {
+                Box::pin(async move {
+                    shutdown.wait().await;
+                    Ok(())
+                })
+            }
+
+            fn drain(&self) -> ServiceFuture<'_> {
+                Box::pin(std::future::pending())
+            }
+        }
 
         while Instant::now() < deadline && cycles < max_cycles {
+            let cycle_started = Instant::now();
             let mut group = ServiceGroup::with_config(ServiceGroupConfig {
                 shutdown_timeout: Duration::from_millis(250),
                 stop_on_first_error: true,
@@ -1003,11 +1028,88 @@ mod tests {
             cycles += 1;
             worker_exits += exits.load(Ordering::SeqCst) as u64;
             stop_hooks += stops.load(Ordering::SeqCst) as u64;
+            cycle_latency.observe(cycle_started.elapsed());
+
+            if cycles == 1 || cycles.is_multiple_of(128) {
+                let fault_started = Instant::now();
+                let mut failed_group = ServiceGroup::with_config(ServiceGroupConfig {
+                    shutdown_timeout: Duration::from_millis(50),
+                    stop_on_first_error: true,
+                    ..ServiceGroupConfig::default()
+                });
+                let failed_handle = failed_group.handle();
+                failed_group.add_fn("failing", |_| async {
+                    Err(anyhow::anyhow!("injected lifecycle failure"))
+                });
+                failed_group.add_fn("peer", |shutdown| async move {
+                    shutdown.wait().await;
+                    Ok(())
+                });
+                let error = failed_group
+                    .start_with_shutdown(std::future::pending())
+                    .await
+                    .expect_err("injected service failure must fail the group");
+                assert!(error.to_string().contains("injected lifecycle failure"));
+                assert_eq!(failed_handle.phase(), LifecyclePhase::Failed);
+                failed_task_detections += 1;
+                fault_detection_latency.observe(fault_started.elapsed());
+            }
+
+            if cycles == 1 || cycles.is_multiple_of(256) {
+                let fault_started = Instant::now();
+                let mut timeout_group = ServiceGroup::with_config(ServiceGroupConfig {
+                    drain_timeout: Duration::from_millis(1),
+                    shutdown_timeout: Duration::from_millis(50),
+                    stop_on_first_error: true,
+                    ..ServiceGroupConfig::default()
+                });
+                let timeout_handle = timeout_group.handle();
+                timeout_group.add(TimeoutDrainService);
+                let timeout_lifecycle = timeout_handle.lifecycle();
+                let timeout_join =
+                    tokio::spawn(timeout_group.start_with_shutdown(std::future::pending()));
+                assert!(
+                    timeout_lifecycle
+                        .wait_for_phase(LifecyclePhase::Ready, Duration::from_secs(1))
+                        .await,
+                    "timeout fault group did not enter ready phase"
+                );
+                timeout_handle.shutdown();
+                let error = timeout_join
+                    .await
+                    .expect("timeout fault group task should join")
+                    .expect_err("drain timeout must fail the group");
+                assert!(error.to_string().contains("Drain hooks timed out"));
+                assert_eq!(timeout_handle.phase(), LifecyclePhase::Failed);
+                drain_timeout_detections += 1;
+                fault_detection_latency.observe(fault_started.elapsed());
+            }
         }
 
+        let elapsed_ms = started.elapsed().as_millis().max(1);
+        let cycles_per_second_milli = u128::from(cycles).saturating_mul(1_000_000) / elapsed_ms;
+        let p50_cycle_us = cycle_latency
+            .percentile_upper_bound_micros(50)
+            .expect("cycle latency");
+        let p95_cycle_us = cycle_latency
+            .percentile_upper_bound_micros(95)
+            .expect("cycle latency");
+        let p99_cycle_us = cycle_latency
+            .percentile_upper_bound_micros(99)
+            .expect("cycle latency");
+        let p99_fault_detection_us = fault_detection_latency
+            .percentile_upper_bound_micros(99)
+            .expect("fault detection latency");
         println!(
-            "roze_lifecycle_soak cycles={cycles} worker_exits={worker_exits} stop_hooks={stop_hooks} running_snapshots={running_snapshots} stopped_snapshots={stopped_snapshots} max_service_count={max_service_count}"
+            "roze_lifecycle_soak elapsed_ms={elapsed_ms} cycles={cycles} cycles_per_second_milli={cycles_per_second_milli} p50_cycle_us={p50_cycle_us} p95_cycle_us={p95_cycle_us} p99_cycle_us={p99_cycle_us} failed_task_detections={failed_task_detections} drain_timeout_detections={drain_timeout_detections} p99_fault_detection_us={p99_fault_detection_us} worker_exits={worker_exits} stop_hooks={stop_hooks} running_snapshots={running_snapshots} stopped_snapshots={stopped_snapshots} max_service_count={max_service_count}"
         );
         assert!(cycles > 0, "soak must run at least one lifecycle cycle");
+        assert_eq!(cycle_latency.count(), cycles);
+        assert!(failed_task_detections > 0);
+        assert!(drain_timeout_detections > 0);
+        assert_eq!(
+            fault_detection_latency.count(),
+            failed_task_detections + drain_timeout_detections
+        );
     }
 }

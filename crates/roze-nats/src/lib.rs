@@ -253,12 +253,7 @@ impl NatsJetStream {
     }
 
     fn from_mq_message(message: roze_mq::Message) -> NatsMessage {
-        NatsMessage {
-            subject: message.topic,
-            reply_to: None,
-            headers: message.headers,
-            payload: message.payload,
-        }
+        NatsMessage::from_event(message.into_event_envelope())
     }
 
     async fn publish_nats(&self, mut message: NatsMessage, attempt: u32) -> anyhow::Result<()> {
@@ -485,6 +480,7 @@ fn current_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roze_mq::{Publisher, Subscriber};
 
     #[test]
     fn formats_servers_and_subjects() {
@@ -527,5 +523,172 @@ mod tests {
         assert_eq!(cfg.stream, "ROZE");
         assert_eq!(cfg.durable, "roze");
         assert_eq!(cfg.max_retries, 3);
+    }
+
+    #[test]
+    fn nats_transport_preserves_idempotency_metadata() {
+        let message = roze_mq::Message::new("orders", serde_json::json!({"order_id": "order-1"}))
+            .with_idempotency_key("order-1");
+
+        let wire = NatsJetStream::from_mq_message(message);
+        let restored = NatsJetStream::to_mq_message(wire, 0);
+
+        assert_eq!(restored.idempotency_key.as_deref(), Some("order-1"));
+        assert_eq!(restored.payload["order_id"], "order-1");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_NATS_URL, for example nats://127.0.0.1:4222"]
+    async fn jetstream_round_trip_against_real_service() {
+        let server = std::env::var("ROZE_TEST_NATS_URL").expect("ROZE_TEST_NATS_URL is required");
+        let suffix = format!("{}-{}", std::process::id(), current_millis());
+        let topic = format!("events-{suffix}");
+        let broker = NatsJetStream::connect(NatsConfig {
+            servers: vec![server],
+            client_name: Some(format!("roze-reference-{suffix}")),
+            subject_prefix: format!("roze.reference.{suffix}"),
+            jetstream: JetStreamConfig {
+                stream: format!("ROZE_REFERENCE_{suffix}"),
+                subjects: vec![topic.clone()],
+                durable: format!("roze-reference-{suffix}"),
+                max_messages: 100,
+                max_retries: 1,
+                retry_subject: None,
+                dead_letter_subject: None,
+                consumer_buffer: 8,
+            },
+        })
+        .await
+        .expect("connect NATS JetStream");
+        let mut receiver = broker.subscribe(&topic).await.expect("subscribe");
+        broker
+            .publish(
+                roze_mq::Message::new(&topic, serde_json::json!({"order_id": "order-1"}))
+                    .with_idempotency_key("order-1"),
+            )
+            .await
+            .expect("publish");
+
+        let delivery = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
+            .await
+            .expect("NATS delivery timeout")
+            .expect("receive delivery");
+        assert_eq!(delivery.message().payload["order_id"], "order-1");
+        assert_eq!(
+            delivery.message().idempotency_key.as_deref(),
+            Some("order-1")
+        );
+        delivery.ack().await.expect("ack delivery");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_NATS_URL and an externally managed NATS restart cycle"]
+    async fn production_soak_jetstream_disconnect_recovery() {
+        let server = std::env::var("ROZE_TEST_NATS_URL").expect("ROZE_TEST_NATS_URL is required");
+        let seconds = std::env::var("ROZE_NATS_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300);
+        let require_disconnect =
+            std::env::var("ROZE_NATS_REQUIRE_DISCONNECT").is_ok_and(|value| value == "1");
+        let suffix = format!("{}-{}", std::process::id(), current_millis());
+        let topic = format!("events-{suffix}");
+        let broker = NatsJetStream::connect(NatsConfig {
+            servers: vec![server],
+            client_name: Some(format!("roze-soak-{suffix}")),
+            subject_prefix: format!("roze.soak.{suffix}"),
+            jetstream: JetStreamConfig {
+                stream: format!("ROZE_SOAK_{suffix}"),
+                subjects: vec![topic.clone()],
+                durable: format!("roze-soak-{suffix}"),
+                max_messages: 100_000,
+                max_retries: 3,
+                retry_subject: None,
+                dead_letter_subject: None,
+                consumer_buffer: 1_024,
+            },
+        })
+        .await
+        .expect("connect NATS JetStream");
+        let mut receiver = broker.subscribe(&topic).await.expect("subscribe");
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(seconds);
+        let mut attempts = 0_u64;
+        let mut delivered = 0_u64;
+        let mut disconnect_observations = 0_u64;
+        let mut recoveries = 0_u64;
+        let mut recovery_started = None;
+        let mut delivery_latency = roze_metrics::LatencyHistogram::new();
+        let mut recovery_latency = roze_metrics::LatencyHistogram::new();
+
+        while std::time::Instant::now() < deadline {
+            attempts = attempts.saturating_add(1);
+            let operation_started = std::time::Instant::now();
+            let message = roze_mq::Message::new(
+                &topic,
+                serde_json::json!({"sequence": attempts, "sent_at_ms": current_millis()}),
+            )
+            .with_idempotency_key(format!("{suffix}-{attempts}"));
+            let publish_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), broker.publish(message))
+                    .await;
+            if !matches!(publish_result, Ok(Ok(()))) {
+                disconnect_observations = disconnect_observations.saturating_add(1);
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                delivery_latency.observe(operation_started.elapsed());
+                continue;
+            }
+
+            let receive_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await;
+            let Ok(Ok(delivery)) = receive_result else {
+                disconnect_observations = disconnect_observations.saturating_add(1);
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                delivery_latency.observe(operation_started.elapsed());
+                continue;
+            };
+            let ack_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), delivery.ack()).await;
+            if !matches!(ack_result, Ok(Ok(()))) {
+                disconnect_observations = disconnect_observations.saturating_add(1);
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                delivery_latency.observe(operation_started.elapsed());
+                continue;
+            }
+
+            delivered = delivered.saturating_add(1);
+            delivery_latency.observe(operation_started.elapsed());
+            if let Some(recovery_started) = recovery_started.take() {
+                recoveries = recoveries.saturating_add(1);
+                recovery_latency.observe(recovery_started.elapsed());
+            }
+        }
+
+        let elapsed_ms = started.elapsed().as_millis().max(1);
+        let messages_per_second_milli =
+            u128::from(delivered).saturating_mul(1_000_000) / elapsed_ms;
+        let p99_delivery_us = delivery_latency
+            .percentile_upper_bound_micros(99)
+            .expect("NATS delivery latency");
+        let p99_recovery_us = recovery_latency
+            .percentile_upper_bound_micros(99)
+            .unwrap_or(0);
+        println!(
+            "roze_nats_soak nats_elapsed_ms={elapsed_ms} nats_attempts={attempts} nats_delivered={delivered} nats_disconnect_observations={disconnect_observations} nats_recoveries={recoveries} nats_messages_per_second_milli={messages_per_second_milli} nats_p99_delivery_us={p99_delivery_us} nats_p99_recovery_us={p99_recovery_us}"
+        );
+
+        assert!(attempts > 0);
+        assert!(delivered > 0);
+        if require_disconnect {
+            assert!(disconnect_observations > 0);
+            assert!(recoveries > 0);
+            assert!(p99_recovery_us > 0);
+            assert!(
+                recovery_started.is_none(),
+                "NATS did not recover before the soak ended"
+            );
+        }
     }
 }

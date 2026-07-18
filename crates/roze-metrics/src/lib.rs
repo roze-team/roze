@@ -18,6 +18,66 @@ static GATEWAY_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static QUEUE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RESILIENCE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static REPORT_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+const LATENCY_BUCKETS: usize = 65;
+
+/// Fixed-memory, power-of-two latency histogram for long-running evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatencyHistogram {
+    buckets: [u64; LATENCY_BUCKETS],
+    count: u64,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: [0; LATENCY_BUCKETS],
+            count: 0,
+        }
+    }
+}
+
+impl LatencyHistogram {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn observe(&mut self, latency: Duration) {
+        let micros = latency.as_micros().min(u128::from(u64::MAX)) as u64;
+        let bucket = if micros == 0 {
+            0
+        } else {
+            (u64::BITS - micros.leading_zeros()) as usize
+        };
+        self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
+        self.count = self.count.saturating_add(1);
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// Returns the inclusive upper bound of the bucket containing the percentile.
+    pub fn percentile_upper_bound_micros(&self, percentile: u8) -> Option<u64> {
+        if self.count == 0 || !(1..=100).contains(&percentile) {
+            return None;
+        }
+        let target = (u128::from(self.count) * u128::from(percentile)).div_ceil(100);
+        let mut cumulative = 0_u128;
+        for (index, count) in self.buckets.iter().enumerate() {
+            cumulative += u128::from(*count);
+            if cumulative >= target {
+                return Some(if index == 0 {
+                    0
+                } else if index >= u64::BITS as usize {
+                    u64::MAX
+                } else {
+                    (1_u64 << index) - 1
+                });
+            }
+        }
+        Some(u64::MAX)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetricLabels(BTreeMap<String, String>);
@@ -466,6 +526,28 @@ mod tests {
         let metrics = http_metrics();
         assert!(metrics.contains("roze_http_requests_total"));
         assert!(metrics.contains("roze_http_requests_failed_total"));
+    }
+
+    #[test]
+    fn latency_histogram_tracks_percentiles_with_fixed_buckets() {
+        let mut histogram = LatencyHistogram::new();
+        for micros in [1, 2, 3, 4, 5, 8, 13, 21, 34, 55] {
+            histogram.observe(Duration::from_micros(micros));
+        }
+
+        assert_eq!(histogram.count(), 10);
+        assert_eq!(histogram.percentile_upper_bound_micros(50), Some(7));
+        assert_eq!(histogram.percentile_upper_bound_micros(95), Some(63));
+        assert_eq!(histogram.percentile_upper_bound_micros(99), Some(63));
+        assert_eq!(histogram.percentile_upper_bound_micros(0), None);
+    }
+
+    #[test]
+    fn empty_latency_histogram_has_no_percentile() {
+        assert_eq!(
+            LatencyHistogram::new().percentile_upper_bound_micros(50),
+            None
+        );
     }
 
     #[test]

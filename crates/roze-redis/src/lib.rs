@@ -86,4 +86,35 @@ mod tests {
     fn namespaces_keys() {
         assert_eq!(namespace_key("roze", "user:1"), "roze:user:1");
     }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_REDIS_URL, for example redis://127.0.0.1:6379"]
+    async fn redis_round_trip_against_real_service() {
+        let url = std::env::var("ROZE_TEST_REDIS_URL").expect("ROZE_TEST_REDIS_URL is required");
+        let namespace = format!("roze-reference-{}", std::process::id());
+        let client = RedisClient::open(url)
+            .expect("open Redis client")
+            .with_namespace(namespace);
+        let value = serde_json::json!({"status": "ready", "attempt": 1});
+
+        client
+            .set_json("dependency", &value, Duration::from_secs(30))
+            .await
+            .expect("write Redis value");
+        assert_eq!(
+            client
+                .get_json::<serde_json::Value>("dependency")
+                .await
+                .expect("read Redis value"),
+            Some(value)
+        );
+        client.del("dependency").await.expect("delete Redis value");
+        assert_eq!(
+            client
+                .get_json::<serde_json::Value>("dependency")
+                .await
+                .expect("read deleted Redis value"),
+            None
+        );
+    }
 }

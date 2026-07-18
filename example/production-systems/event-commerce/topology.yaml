@@ -1,0 +1,23 @@
+system: event-commerce
+services:
+  - order-api
+  - order-events
+  - roze-gateway
+dependencies:
+  - postgres
+  - redis
+  - etcd
+  - kafka
+  - nats
+  - object-storage
+required_workflows:
+  - gateway_registry_canary_and_outlier_recovery
+  - order_commit_and_transactional_outbox
+  - duplicate_delivery_inbox_idempotency
+  - broker_disconnect_and_relay_recovery
+  - retry_exhaustion_dlq_query_replay_and_purge
+  - saga_timeout_and_idempotent_compensation
+  - tcc_confirm_cancel_restart_recovery
+  - object_storage_failure_and_cleanup
+  - config_reject_and_automatic_rollback
+  - graceful_drain_with_outbox_backlog

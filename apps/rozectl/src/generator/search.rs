@@ -4,8 +4,9 @@ use anyhow::{bail, Context};
 use serde_json::Value;
 
 use super::{
-    find_workspace_root, local_crates_prefix, rust_identifier, to_pascal_case, to_snake_case,
-    DependencySource, GenerateMode, GenerateOptions,
+    find_workspace_root, local_crates_prefix, plan::GenerationPlan, rust_identifier,
+    sync_managed_service_if_present, to_pascal_case, to_snake_case, DependencySource, GenerateMode,
+    GenerateOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub fn generate_search_project(
     let source = fs::read_to_string(schema)
         .with_context(|| format!("failed to read {}", schema.display()))?;
     let spec = parse_search_schema(&source)?;
-    write_search_project(&spec, engine, out, options)
+    commit_search_project(&spec, engine, out, options)
 }
 
 pub async fn inspect_search_index(
@@ -89,7 +90,7 @@ pub async fn inspect_search_index(
             inspect_meilisearch_index(index, url, api_key, sample_size).await?
         }
     };
-    write_search_project(&spec, engine, out, options)
+    commit_search_project(&spec, engine, out, options)
 }
 
 pub fn parse_search_schema(source: &str) -> anyhow::Result<SearchIndexSpec> {
@@ -527,10 +528,23 @@ async fn http_json(
     Ok(request.send().await?.error_for_status()?.json().await?)
 }
 
+fn commit_search_project(
+    spec: &SearchIndexSpec,
+    engine: SearchEngine,
+    out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
+    let plan = GenerationPlan::prepare_component(out)?;
+    write_search_project(spec, engine, plan.staged(), out, options)?;
+    sync_managed_service_if_present(plan.staged())?;
+    plan.commit()
+}
+
 fn write_search_project(
     spec: &SearchIndexSpec,
     engine: SearchEngine,
     out: &Path,
+    logical_out: &Path,
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
     let search_dir = out.join("src/search");
@@ -546,7 +560,7 @@ fn write_search_project(
         search_dir.join(format!("{}.rs", to_snake_case(&spec.name))),
         render_search_index(spec, engine),
     )?;
-    update_search_dependencies(out, options.dependency_source)?;
+    update_search_dependencies(out, logical_out, options.dependency_source)?;
     update_main_rs(out)?;
     Ok(())
 }
@@ -717,7 +731,11 @@ fn search_field_name(field: &SearchFieldSpec) -> &str {
     field.source_name.as_deref().unwrap_or(&field.name)
 }
 
-fn update_search_dependencies(out: &Path, source: DependencySource) -> anyhow::Result<()> {
+fn update_search_dependencies(
+    out: &Path,
+    logical_out: &Path,
+    source: DependencySource,
+) -> anyhow::Result<()> {
     let manifest_path = out.join("Cargo.toml");
     if !manifest_path.is_file() {
         return Ok(());
@@ -746,12 +764,12 @@ fn update_search_dependencies(out: &Path, source: DependencySource) -> anyhow::R
                 r#"{ git = "https://github.com/roze-team/roze.git" }"#.parse::<toml_edit::Item>()?
             }
             DependencySource::Path => {
-                let workspace_root = find_workspace_root(out)?.ok_or_else(|| {
+                let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
                     anyhow::anyhow!(
                         "--roze-source path requires output inside a Cargo workspace containing Roze crates"
                     )
                 })?;
-                let prefix = local_crates_prefix(out, &workspace_root)?;
+                let prefix = local_crates_prefix(logical_out, &workspace_root)?;
                 format!(r#"{{ path = "{prefix}/roze-search" }}"#).parse::<toml_edit::Item>()?
             }
         };

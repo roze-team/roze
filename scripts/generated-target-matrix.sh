@@ -13,5 +13,6 @@ cargo test -p rozectl generated_rest_project_compiles_with_model_and_search -- -
 cargo test -p rozectl generated_rpc_project_compiles -- --ignored
 cargo test -p rozectl generated_stream_project_compiles -- --ignored
 cargo test -p rozectl generated_http_smoke_project_compiles -- --ignored
+bash scripts/generated-reference-systems.sh
 
 echo "generated target matrix passed"

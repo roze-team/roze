@@ -1,0 +1,27 @@
+@server (
+    prefix: /api
+)
+service checkout-api {
+    @permission checkout:write
+    post /checkouts (CreateCheckoutReq) returns (CheckoutResp)
+
+    @permission checkout:read
+    get /checkouts/:id (GetCheckoutReq) returns (CheckoutResp)
+}
+
+type (
+    CreateCheckoutReq {
+        product_id: u64 `json:"product_id"`
+        quantity: i64 `json:"quantity" validate:"min=1,max=1000"`
+    }
+
+    GetCheckoutReq {
+        id: string `path:"id"`
+    }
+
+    CheckoutResp {
+        id: string `json:"id"`
+        status: string `json:"status"`
+        reservation_id: string `json:"reservation_id"`
+    }
+)

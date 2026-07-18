@@ -9,7 +9,7 @@ rm -rf "$SMOKE_DIR"
 mkdir -p "$SMOKE_DIR"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
-VALID_SUMMARY="roze_lifecycle_soak cycles=2 worker_exits=8 stop_hooks=8 running_snapshots=2 stopped_snapshots=2 max_service_count=4"
+VALID_SUMMARY="roze_lifecycle_soak elapsed_ms=2000 cycles=2 cycles_per_second_milli=1000 p50_cycle_us=100 p95_cycle_us=200 p99_cycle_us=300 failed_task_detections=1 drain_timeout_detections=1 p99_fault_detection_us=500 worker_exits=8 stop_hooks=8 running_snapshots=2 stopped_snapshots=2 max_service_count=4"
 VALID_REPORT="$SMOKE_DIR/lifecycle-valid.md"
 
 bash scripts/production-evidence.sh \
@@ -22,6 +22,11 @@ bash scripts/production-evidence.sh \
   --out "$VALID_REPORT" >/dev/null
 
 grep -F "$VALID_SUMMARY" "$VALID_REPORT" >/dev/null
+grep -F "| elapsed_ms | 2000 |" "$VALID_REPORT" >/dev/null
+grep -F "| cycles_per_second_milli | 1000 |" "$VALID_REPORT" >/dev/null
+grep -F "| p99_cycle_us | 300 |" "$VALID_REPORT" >/dev/null
+grep -F "| failed_task_detections | 1 |" "$VALID_REPORT" >/dev/null
+grep -F "| drain_timeout_detections | 1 |" "$VALID_REPORT" >/dev/null
 grep -F "| worker_exits | 8 |" "$VALID_REPORT" >/dev/null
 grep -F "| max_service_count | 4 |" "$VALID_REPORT" >/dev/null
 
@@ -62,7 +67,7 @@ expect_failure "non-numeric lifecycle summary field" \
     --workload "start" \
     --failure-injection "stuck task" \
     --command "bash scripts/production-soak-lifecycle.sh" \
-    --lifecycle-summary "roze_lifecycle_soak cycles=two worker_exits=8 stop_hooks=8 running_snapshots=2 stopped_snapshots=2 max_service_count=4" \
+    --lifecycle-summary "roze_lifecycle_soak elapsed_ms=2000 cycles=two cycles_per_second_milli=1000 p50_cycle_us=100 p95_cycle_us=200 p99_cycle_us=300 failed_task_detections=1 drain_timeout_detections=1 p99_fault_detection_us=500 worker_exits=8 stop_hooks=8 running_snapshots=2 stopped_snapshots=2 max_service_count=4" \
     --out "$SMOKE_DIR/non-numeric.md"
 
 expect_failure "inconsistent lifecycle summary counts" \
@@ -72,7 +77,17 @@ expect_failure "inconsistent lifecycle summary counts" \
     --workload "start" \
     --failure-injection "stuck task" \
     --command "bash scripts/production-soak-lifecycle.sh" \
-    --lifecycle-summary "roze_lifecycle_soak cycles=2 worker_exits=7 stop_hooks=8 running_snapshots=2 stopped_snapshots=2 max_service_count=4" \
+    --lifecycle-summary "roze_lifecycle_soak elapsed_ms=2000 cycles=2 cycles_per_second_milli=1000 p50_cycle_us=100 p95_cycle_us=200 p99_cycle_us=300 failed_task_detections=1 drain_timeout_detections=1 p99_fault_detection_us=500 worker_exits=7 stop_hooks=8 running_snapshots=2 stopped_snapshots=2 max_service_count=4" \
     --out "$SMOKE_DIR/inconsistent.md"
+
+expect_failure "passing scaffold without a verified CI artifact" \
+  bash scripts/production-evidence.sh \
+    --area gateway \
+    --duration 24h \
+    --workload "proxy traffic" \
+    --failure-injection "timeout" \
+    --command "bash scripts/production-soak-gateway.sh" \
+    --verdict pass \
+    --out "$SMOKE_DIR/unverified-pass.md"
 
 echo "production evidence smoke passed"

@@ -1,0 +1,8 @@
+index inventory
+primary id
+field id u64 primary filterable sortable
+field tenant_id keyword filterable
+field sku keyword searchable filterable
+field name text searchable
+field quantity i64 filterable sortable
+field updated_at datetime sortable

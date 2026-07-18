@@ -28,6 +28,12 @@ manifest, and immediately synchronizes:
 - managed RPC client fields, startup connections, readiness registration, and
   accessors in `src/svc/mod.rs`.
 
+The operation is transactional across the manifest and all generated managed
+files. If Cargo rendering, dependency configuration, or service-context
+generation fails, the previous manifest and managed files are restored. The
+same rollback rule applies to `service dependency remove` and a write-mode
+`service sync`.
+
 The manifest records the generated consumer kind explicitly:
 
 ```yaml

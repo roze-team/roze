@@ -773,6 +773,33 @@ impl GatewayRuntime {
 
         ensure_correlation_header(&mut request, roze_context::REQUEST_ID_HEADER);
         ensure_correlation_header(&mut request, roze_context::TRACE_ID_HEADER);
+
+        // Identity headers are trusted only after this gateway authenticates
+        // the request. Remove client-supplied values before building context
+        // or forwarding the request downstream.
+        clear_untrusted_auth_context_headers(request.headers_mut());
+        if let Some(policy) = self.auth_policy(route) {
+            let Some(principal) = validate_request_auth(
+                request.headers(),
+                policy,
+                self.jwt.as_ref(),
+                self.api_keys.as_ref(),
+            ) else {
+                return self.finish_response(
+                    Some(route),
+                    &method,
+                    "unauthorized",
+                    started,
+                    fallback_response(
+                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                    ),
+                );
+            };
+            inject_auth_context_headers(request.headers_mut(), &principal);
+        }
+
         let propagation = request
             .headers()
             .iter()
@@ -795,28 +822,6 @@ impl GatewayRuntime {
         )
         .to_string();
         let retry_key = key.clone();
-
-        if let Some(policy) = self.auth_policy(route) {
-            let Some(principal) = validate_request_auth(
-                request.headers(),
-                policy,
-                self.jwt.as_ref(),
-                self.api_keys.as_ref(),
-            ) else {
-                return self.finish_response(
-                    Some(route),
-                    &method,
-                    "unauthorized",
-                    started,
-                    fallback_response(
-                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
-                        StatusCode::UNAUTHORIZED,
-                        "unauthorized",
-                    ),
-                );
-            };
-            inject_auth_context_headers(request.headers_mut(), &principal);
-        }
 
         if let Some(config) = route.rate_limit {
             let allowed = self.rate_limits.allow(
@@ -2243,11 +2248,7 @@ fn validate_request_auth(
                 .and_then(roze_jwt::extract_bearer_token),
         ) {
             if let Ok(claims) = verify_token(token, jwt) {
-                return Some(roze_auth::principal(
-                    claims.sub,
-                    claims.roles,
-                    claims.tenant,
-                ));
+                return Some(claims.into());
             }
         }
     }
@@ -2269,6 +2270,22 @@ fn validate_request_auth(
     None
 }
 
+fn clear_untrusted_auth_context_headers(headers: &mut HeaderMap) {
+    for name in [
+        roze_context::SUBJECT_HEADER,
+        roze_context::TENANT_HEADER,
+        roze_context::ROLES_HEADER,
+        roze_context::PERMISSIONS_HEADER,
+        roze_context::SCOPE_HEADER,
+        roze_context::HULA_UID_HEADER,
+        roze_context::HULA_TENANT_ID_HEADER,
+        roze_context::HULA_ROLE_HEADER,
+        roze_context::HULA_SCOPE_HEADER,
+    ] {
+        headers.remove(name);
+    }
+}
+
 fn inject_auth_context_headers(headers: &mut HeaderMap, principal: &roze_auth::AuthPrincipal) {
     insert_header(headers, roze_context::SUBJECT_HEADER, &principal.subject);
     if let Some(tenant) = principal
@@ -2283,6 +2300,20 @@ fn inject_auth_context_headers(headers: &mut HeaderMap, principal: &roze_auth::A
             headers,
             roze_context::ROLES_HEADER,
             &principal.roles.join(","),
+        );
+    }
+    if !principal.permissions.is_empty() {
+        insert_header(
+            headers,
+            roze_context::PERMISSIONS_HEADER,
+            &principal.permissions.join(","),
+        );
+    }
+    if !principal.scopes.is_empty() {
+        insert_header(
+            headers,
+            roze_context::SCOPE_HEADER,
+            &principal.scopes.join(","),
         );
     }
 }
@@ -2907,8 +2938,10 @@ mod tests {
     };
 
     use http::Request;
-    use roze_config::RetryConfig;
-    use roze_rpc::registry::MemoryRegistry;
+    use roze_config::{RegistryConfig, RegistryKind, RetryConfig};
+    use roze_rpc::registry::{
+        ConsulRegistry, EtcdRegistry, MemoryRegistry, Registry, ServiceInstance,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -3002,6 +3035,36 @@ mod tests {
         (format!("http://{addr}"), hits, requests)
     }
 
+    async fn reliable_upstream() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reliable upstream");
+        let addr = listener.local_addr().expect("reliable upstream addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_task = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept upstream request");
+                let hits = hits_task.clone();
+                tokio::spawn(async move {
+                    let mut request = vec![0_u8; 4096];
+                    let _ = stream
+                        .read(&mut request)
+                        .await
+                        .expect("read reliable upstream request");
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                        )
+                        .await
+                        .expect("write reliable upstream response");
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
     async fn held_sse_upstream() -> (String, tokio::sync::oneshot::Sender<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3091,6 +3154,280 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(bad_hits.load(Ordering::SeqCst), 1);
         assert_eq!(good_hits.load(Ordering::SeqCst), 1);
+    }
+
+    async fn wait_for_registry_instance(
+        registry: &dyn Registry,
+        name: &str,
+        expected_addr: Option<&str>,
+    ) {
+        for _ in 0..100 {
+            let instances = registry.discover(name).await.expect("discover registry");
+            let matches = match expected_addr {
+                Some(addr) => instances.iter().any(|instance| instance.addr == addr),
+                None => instances.is_empty(),
+            };
+            if matches {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("registry state did not converge for {name}");
+    }
+
+    async fn assert_external_registry_gateway_recovery(
+        registry: Arc<dyn Registry>,
+        registry_label: &str,
+    ) {
+        let (upstream, hits, _) = scripted_upstream(vec![200, 200]).await;
+        let addr = upstream
+            .strip_prefix("http://")
+            .expect("scripted upstream URL");
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let name = format!(
+            "roze-gateway-{registry_label}-{}-{suffix}",
+            std::process::id()
+        );
+        let mut instance = ServiceInstance::new(&name, addr);
+        instance
+            .metadata
+            .insert("version".to_string(), "integration".to_string());
+        registry
+            .register(instance.clone())
+            .await
+            .expect("register gateway upstream");
+        wait_for_registry_instance(registry.as_ref(), &name, Some(addr)).await;
+
+        let mut config = gateway_config(String::new(), "GET");
+        config.services[0].registry_name = Some(name.clone());
+        config.services[0]
+            .instance_tags
+            .insert("version".to_string(), "integration".to_string());
+        let runtime = build_router_with_registry(config, None, Some(registry.clone()));
+        let request = || {
+            Request::builder()
+                .uri("/catalog")
+                .body(rest::full_body(Bytes::new()))
+                .expect("gateway request")
+        };
+
+        assert_eq!(
+            runtime.runtime.handle(request()).await.status(),
+            StatusCode::OK
+        );
+        registry
+            .deregister(&name, addr)
+            .await
+            .expect("deregister gateway upstream");
+        wait_for_registry_instance(registry.as_ref(), &name, None).await;
+        assert_eq!(
+            runtime.runtime.handle(request()).await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        registry
+            .register(instance)
+            .await
+            .expect("reregister gateway upstream");
+        wait_for_registry_instance(registry.as_ref(), &name, Some(addr)).await;
+        assert_eq!(
+            runtime.runtime.handle(request()).await.status(),
+            StatusCode::OK
+        );
+        registry
+            .deregister(&name, addr)
+            .await
+            .expect("cleanup gateway upstream");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    async fn assert_external_registry_restart_recovery(
+        registry: Arc<dyn Registry>,
+        registry_label: &str,
+    ) {
+        let duration = std::env::var("ROZE_GATEWAY_REGISTRY_RECOVERY_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30);
+        assert!(
+            duration >= 10,
+            "registry recovery duration must be at least 10s"
+        );
+
+        let (upstream, hits) = reliable_upstream().await;
+        let addr = upstream
+            .strip_prefix("http://")
+            .expect("reliable upstream URL");
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let name = format!(
+            "roze-gateway-restart-{registry_label}-{}-{suffix}",
+            std::process::id()
+        );
+        let mut instance = ServiceInstance::new(&name, addr);
+        instance
+            .metadata
+            .insert("version".to_string(), "restart-recovery".to_string());
+        registry
+            .register(instance)
+            .await
+            .expect("register restart recovery upstream");
+        wait_for_registry_instance(registry.as_ref(), &name, Some(addr)).await;
+
+        let mut config = gateway_config(String::new(), "GET");
+        config.services[0].registry_name = Some(name.clone());
+        config.services[0]
+            .instance_tags
+            .insert("version".to_string(), "restart-recovery".to_string());
+        let runtime = build_router_with_registry(config, None, Some(registry.clone()));
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_secs(duration);
+        let mut attempts = 0_u64;
+        let mut successful_routes = 0_u64;
+        let mut disconnect_observations = 0_u64;
+        let mut recoveries = 0_u64;
+        let mut disconnected_at: Option<std::time::Instant> = None;
+        let mut recovery_latencies = Vec::new();
+        let mut route_latencies = Vec::new();
+        let mut ready_written = false;
+
+        while std::time::Instant::now() < deadline {
+            let request_started = std::time::Instant::now();
+            let response = runtime
+                .runtime
+                .handle(
+                    Request::builder()
+                        .uri("/catalog")
+                        .body(rest::full_body(Bytes::new()))
+                        .expect("restart recovery request"),
+                )
+                .await;
+            route_latencies.push(request_started.elapsed().as_micros() as u64);
+            attempts += 1;
+            match response.status() {
+                StatusCode::OK => {
+                    successful_routes += 1;
+                    if let Some(disconnected) = disconnected_at.take() {
+                        recoveries += 1;
+                        recovery_latencies.push(disconnected.elapsed().as_micros() as u64);
+                    }
+                    if !ready_written {
+                        if let Ok(path) = std::env::var("ROZE_GATEWAY_REGISTRY_READY_FILE") {
+                            std::fs::write(path, format!("{registry_label}\n"))
+                                .expect("write registry recovery ready file");
+                        }
+                        ready_written = true;
+                    }
+                }
+                StatusCode::BAD_GATEWAY => {
+                    disconnect_observations += 1;
+                    disconnected_at.get_or_insert_with(std::time::Instant::now);
+                }
+                status => panic!("unexpected Gateway status during registry recovery: {status}"),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        route_latencies.sort_unstable();
+        recovery_latencies.sort_unstable();
+        let percentile = |values: &[u64], percent: usize| -> u64 {
+            if values.is_empty() {
+                return 0;
+            }
+            let rank = (values.len() * percent).div_ceil(100).max(1);
+            values[rank.saturating_sub(1).min(values.len() - 1)]
+        };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let p99_route_us = percentile(&route_latencies, 99);
+        let p99_recovery_us = percentile(&recovery_latencies, 99);
+        println!(
+            "roze_gateway_registry_recovery registry={registry_label} elapsed_ms={elapsed_ms} \
+             attempts={attempts} successful_routes={successful_routes} \
+             disconnect_observations={disconnect_observations} recoveries={recoveries} \
+             p99_route_us={p99_route_us} p99_recovery_us={p99_recovery_us}"
+        );
+
+        assert!(
+            ready_written,
+            "Gateway never reached its registered upstream"
+        );
+        assert!(
+            disconnect_observations > 0,
+            "external coordinator did not produce a visible registry outage"
+        );
+        assert!(
+            recoveries > 0,
+            "Gateway did not recover after registry restart"
+        );
+        assert!(successful_routes > recoveries);
+        assert_eq!(hits.load(Ordering::SeqCst) as u64, successful_routes);
+        registry
+            .deregister(&name, addr)
+            .await
+            .expect("cleanup restart recovery upstream");
+    }
+
+    fn external_registry_config(kind: RegistryKind, endpoint: String) -> RegistryConfig {
+        RegistryConfig {
+            kind,
+            endpoints: vec![endpoint],
+            prefix: "/roze/gateway-integration".to_string(),
+            ttl_seconds: 10,
+            renew_interval_secs: 2,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_ETCD_ENDPOINT"]
+    async fn gateway_routes_and_recovers_through_real_etcd_registry() {
+        let endpoint =
+            std::env::var("ROZE_TEST_ETCD_ENDPOINT").expect("ROZE_TEST_ETCD_ENDPOINT is required");
+        let registry = Arc::new(EtcdRegistry::new(&external_registry_config(
+            RegistryKind::Etcd,
+            endpoint,
+        )));
+        assert_external_registry_gateway_recovery(registry, "etcd").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_CONSUL_ENDPOINT"]
+    async fn gateway_routes_and_recovers_through_real_consul_registry() {
+        let endpoint = std::env::var("ROZE_TEST_CONSUL_ENDPOINT")
+            .expect("ROZE_TEST_CONSUL_ENDPOINT is required");
+        let registry = Arc::new(ConsulRegistry::new(&external_registry_config(
+            RegistryKind::Consul,
+            endpoint,
+        )));
+        assert_external_registry_gateway_recovery(registry, "consul").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires externally coordinated Etcd restart"]
+    async fn gateway_automatically_reregisters_after_real_etcd_restart() {
+        let endpoint =
+            std::env::var("ROZE_TEST_ETCD_ENDPOINT").expect("ROZE_TEST_ETCD_ENDPOINT is required");
+        let registry = Arc::new(EtcdRegistry::new(&external_registry_config(
+            RegistryKind::Etcd,
+            endpoint,
+        )));
+        assert_external_registry_restart_recovery(registry, "etcd").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires externally coordinated Consul restart"]
+    async fn gateway_automatically_reregisters_after_real_consul_restart() {
+        let endpoint = std::env::var("ROZE_TEST_CONSUL_ENDPOINT")
+            .expect("ROZE_TEST_CONSUL_ENDPOINT is required");
+        let registry = Arc::new(ConsulRegistry::new(&external_registry_config(
+            RegistryKind::Consul,
+            endpoint,
+        )));
+        assert_external_registry_restart_recovery(registry, "consul").await;
     }
 
     #[tokio::test]
@@ -3745,6 +4082,8 @@ mod tests {
                 subject: "worker-1".to_string(),
                 roles: vec!["internal".to_string()],
                 tenant: Some("tenant-1".to_string()),
+                permissions: vec!["catalog:read".to_string()],
+                scopes: vec!["catalog.read".to_string()],
             }],
         };
         let mut headers = HeaderMap::new();
@@ -3771,6 +4110,108 @@ mod tests {
                 .get(roze_context::ROLES_HEADER)
                 .and_then(|value| value.to_str().ok()),
             Some("internal")
+        );
+        assert_eq!(
+            headers
+                .get(roze_context::PERMISSIONS_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("catalog:read")
+        );
+        assert_eq!(
+            headers
+                .get(roze_context::SCOPE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("catalog.read")
+        );
+    }
+
+    #[test]
+    fn gateway_removes_untrusted_identity_headers_before_context_creation() {
+        let mut headers = HeaderMap::new();
+        for name in [
+            roze_context::SUBJECT_HEADER,
+            roze_context::TENANT_HEADER,
+            roze_context::ROLES_HEADER,
+            roze_context::PERMISSIONS_HEADER,
+            roze_context::SCOPE_HEADER,
+            roze_context::HULA_UID_HEADER,
+            roze_context::HULA_TENANT_ID_HEADER,
+            roze_context::HULA_ROLE_HEADER,
+            roze_context::HULA_SCOPE_HEADER,
+        ] {
+            headers.insert(name, HeaderValue::from_static("spoofed"));
+        }
+
+        clear_untrusted_auth_context_headers(&mut headers);
+
+        for name in [
+            roze_context::SUBJECT_HEADER,
+            roze_context::TENANT_HEADER,
+            roze_context::ROLES_HEADER,
+            roze_context::PERMISSIONS_HEADER,
+            roze_context::SCOPE_HEADER,
+            roze_context::HULA_UID_HEADER,
+            roze_context::HULA_TENANT_ID_HEADER,
+            roze_context::HULA_ROLE_HEADER,
+            roze_context::HULA_SCOPE_HEADER,
+        ] {
+            assert!(headers.get(name).is_none(), "header {name} was not removed");
+        }
+    }
+
+    #[test]
+    fn jwt_auth_preserves_permissions_and_scopes_for_downstream_context() {
+        let config = JwtConfig {
+            jwt_keys: vec![roze_jwt::JwtKey {
+                id: "active".into(),
+                secret: "gateway-secret".into(),
+            }],
+            jwt_active_key_id: "active".into(),
+            jwt_issuer: "https://issuer.example".into(),
+            jwt_audience: "catalog-api".into(),
+            jwt_expiration_secs: 60,
+            jwt_clock_skew_secs: 0,
+            revoked_token_ids: Vec::new(),
+        };
+        let token = roze_jwt::issue_token(
+            &roze_jwt::Claims {
+                sub: "worker-1".into(),
+                roles: vec!["internal".into()],
+                tenant: Some("tenant-1".into()),
+                permissions: vec!["catalog:read".into()],
+                scopes: vec!["catalog.read".into()],
+                iss: String::new(),
+                aud: String::new(),
+                jti: "token-1".into(),
+                iat: 0,
+                exp: 0,
+            },
+            &config,
+        )
+        .expect("issue JWT");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("authorization header"),
+        );
+
+        let principal = validate_request_auth(&headers, AuthPolicy::Jwt, Some(&config), None)
+            .expect("valid JWT");
+        assert_eq!(principal.permissions, ["catalog:read"]);
+        assert_eq!(principal.scopes, ["catalog.read"]);
+
+        inject_auth_context_headers(&mut headers, &principal);
+        let propagation = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let context = Context::from_propagation_headers(&propagation);
+        assert!(context.has_permissions(["catalog:read"]));
+        assert_eq!(
+            context.metadata_value("scope").as_deref(),
+            Some("catalog.read")
         );
     }
 

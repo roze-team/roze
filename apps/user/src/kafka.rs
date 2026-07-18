@@ -213,7 +213,7 @@ fn kafka_restart_decision(
 
 fn serialize_signature(config: &roze_kafka::KafkaConfig) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         config.brokers_csv(),
         config.client_id_or_default(),
         config.group_id_or_default(),
@@ -228,6 +228,7 @@ fn serialize_signature(config: &roze_kafka::KafkaConfig) -> String {
         config.heartbeat_interval_ms,
         config.max_poll_interval_ms,
         config.flush_timeout_ms,
+        config.message_timeout_ms,
         config.max_retries,
         config.retry_backoff_ms,
         config.retry_topic.clone().unwrap_or_default(),
@@ -254,6 +255,7 @@ fn map_kafka_config(config: &crate::config::Config) -> Option<roze_kafka::KafkaC
         heartbeat_interval_ms: k.heartbeat_interval_ms,
         max_poll_interval_ms: k.max_poll_interval_ms,
         flush_timeout_ms: k.flush_timeout_ms,
+        message_timeout_ms: k.message_timeout_ms,
         linger_ms: k.linger_ms,
         batch_size: k.batch_size,
         max_retries: k.max_retries,

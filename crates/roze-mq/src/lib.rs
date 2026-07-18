@@ -1305,12 +1305,15 @@ mod tests {
         let broker = InMemoryBroker::with_dead_letter("dead", 1);
         let mut orders = broker.subscribe("orders").await.expect("subscribe orders");
         let mut dead = broker.subscribe("dead").await.expect("subscribe dead");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(seconds);
         let mut sent = 0u64;
         let mut acked = 0u64;
         let mut nacked = 0u64;
+        let mut delivery_latency = roze_metrics::LatencyHistogram::new();
 
         while std::time::Instant::now() < deadline && sent < max_messages {
+            let delivery_started = std::time::Instant::now();
             let message = Message::new("orders", serde_json::json!({ "id": sent }))
                 .with_group("soak")
                 .with_dead_letter_topic("dead")
@@ -1337,6 +1340,7 @@ mod tests {
                 delivery.ack().await.expect("ack");
                 acked += 1;
             }
+            delivery_latency.observe(delivery_started.elapsed());
             sent += 1;
         }
 
@@ -1349,25 +1353,46 @@ mod tests {
             })
             .await
             .expect("dead letters");
+        let mut replayed = 0_u64;
+        let mut replay_recovery_us = 0_u128;
         if let Some(record) = records.first() {
+            let replay_started = std::time::Instant::now();
             let mut replay_rx = broker.subscribe("orders").await.expect("subscribe replay");
             broker
                 .replay_dead_letter(record.id)
                 .await
                 .expect("replay")
                 .expect("replayed message");
-            let replayed =
+            let replayed_delivery =
                 tokio::time::timeout(std::time::Duration::from_secs(1), replay_rx.recv())
                     .await
                     .expect("replay timeout")
                     .expect("replayed delivery");
-            replayed.ack().await.expect("ack replay");
+            replayed_delivery.ack().await.expect("ack replay");
+            replayed = 1;
+            replay_recovery_us = replay_started.elapsed().as_micros().max(1);
         }
 
         let stats = broker.stats().await.expect("stats");
-        println!("roze_mq_soak sent={sent} acked={acked} nacked={nacked} stats={stats:?}");
+        let elapsed_ms = started.elapsed().as_millis().max(1);
+        let messages_per_second_milli = u128::from(sent).saturating_mul(1_000_000) / elapsed_ms;
+        let p50_delivery_us = delivery_latency
+            .percentile_upper_bound_micros(50)
+            .expect("delivery latency");
+        let p95_delivery_us = delivery_latency
+            .percentile_upper_bound_micros(95)
+            .expect("delivery latency");
+        let p99_delivery_us = delivery_latency
+            .percentile_upper_bound_micros(99)
+            .expect("delivery latency");
+        println!(
+            "roze_mq_soak elapsed_ms={elapsed_ms} sent={sent} acked={acked} nacked={nacked} messages_per_second_milli={messages_per_second_milli} p50_delivery_us={p50_delivery_us} p95_delivery_us={p95_delivery_us} p99_delivery_us={p99_delivery_us} replayed={replayed} replay_recovery_us={replay_recovery_us} published={} duplicated={} dead_lettered={}",
+            stats.published, stats.duplicated, stats.dead_lettered
+        );
 
         assert!(sent > 0, "soak must send at least one message");
+        assert_eq!(delivery_latency.count(), sent);
+        assert_eq!(replayed, 1);
         assert_eq!(stats.published, sent + ((sent.saturating_sub(1)) / 97 + 1));
         assert_eq!(stats.acked, acked + nacked + u64::from(!records.is_empty()));
         assert_eq!(stats.nacked, nacked);

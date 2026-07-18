@@ -72,7 +72,9 @@ This upgrade intentionally has no compatibility adapters:
   trace context, tenant, idempotency key, producer, attempt, and occurred time.
 - Replace `GET /reports/export` and `GET /charts/query` with
   `POST /reports/exports` and `POST /charts/query`; regenerate OpenAPI and Web
-  SDK clients.
+  SDK clients. Generated endpoints no longer return successful empty datasets:
+  register `ReportDataSource` from the preserved `src/application.rs` hook or
+  they return `503`.
 - Config admin publish/restore now requires a signing policy and bound
   signature. Partial rollout versions require explicit promotion.
 

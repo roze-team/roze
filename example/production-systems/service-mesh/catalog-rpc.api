@@ -1,0 +1,31 @@
+service catalog-rpc {
+    @permission catalog:read
+    rpc GetProduct (GetProductReq) returns (ProductResp)
+
+    @permission inventory:reserve
+    rpc ReserveStock (ReserveStockReq) returns (ReserveStockResp)
+}
+
+type (
+    GetProductReq {
+        id: u64
+    }
+
+    ProductResp {
+        id: u64
+        sku: string
+        name: string
+        available: i64
+    }
+
+    ReserveStockReq {
+        product_id: u64
+        quantity: i64 `validate:"min=1,max=1000"`
+        order_id: string `validate:"required"`
+    }
+
+    ReserveStockResp {
+        reservation_id: string
+        version: u64
+    }
+)

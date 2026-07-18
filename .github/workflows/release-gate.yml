@@ -8,6 +8,7 @@ on:
     paths:
       - "crates/**"
       - "apps/**"
+      - "example/**"
       - "scripts/**"
       - "docs/release.md"
       - "docs/maturity.md"
@@ -18,10 +19,12 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/release-gate.yml"
+      - ".github/workflows/production-soak.yml"
   pull_request:
     paths:
       - "crates/**"
       - "apps/**"
+      - "example/**"
       - "scripts/**"
       - "docs/release.md"
       - "docs/maturity.md"
@@ -32,6 +35,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/release-gate.yml"
+      - ".github/workflows/production-soak.yml"
 
 jobs:
   supply-chain:
@@ -65,8 +69,35 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Release gate
         run: bash scripts/release-gate.sh
+
+  reference-systems:
+    name: production reference systems
+    needs: release-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run real dependency success, failure, and recovery workflows
+        run: bash scripts/reference-systems-integration.sh

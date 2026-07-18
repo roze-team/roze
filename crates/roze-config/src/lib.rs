@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fmt,
     net::IpAddr,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -475,10 +476,20 @@ pub struct AuthConfig {
     pub api_keys: Option<roze_auth::ApiKeyConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JwtKeyConfig {
     pub id: String,
     pub secret: String,
+}
+
+impl fmt::Debug for JwtKeyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JwtKeyConfig")
+            .field("id", &self.id)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,6 +529,8 @@ pub struct KafkaConfig {
     pub max_poll_interval_ms: u64,
     #[serde(default = "default_kafka_flush_timeout_ms")]
     pub flush_timeout_ms: u64,
+    #[serde(default = "default_kafka_message_timeout_ms")]
+    pub message_timeout_ms: u64,
     #[serde(default = "default_kafka_max_retries")]
     pub max_retries: u32,
     #[serde(default = "default_kafka_retry_backoff_ms")]
@@ -1028,6 +1041,10 @@ fn default_kafka_flush_timeout_ms() -> u64 {
     5_000
 }
 
+fn default_kafka_message_timeout_ms() -> u64 {
+    30_000
+}
+
 fn default_kafka_max_retries() -> u32 {
     3
 }
@@ -1307,6 +1324,18 @@ tenant = "acme"
     }
 
     #[test]
+    fn debug_redacts_jwt_secret() {
+        let key = JwtKeyConfig {
+            id: "active".into(),
+            secret: "super-secret-jwt-key".into(),
+        };
+
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("super-secret-jwt-key"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn loads_mongo_defaults() {
         let source = r#"
 name = "demo"
@@ -1473,6 +1502,25 @@ governance: {}
             config.kafka.expect("kafka").client_id,
             default_kafka_client_id()
         );
+    }
+
+    #[test]
+    fn kafka_message_timeout_defaults_for_disconnect_recovery() {
+        let source = r#"
+name: demo
+kafka:
+  brokers: ["127.0.0.1:9092"]
+  client_id: worker
+governance: {}
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        assert_eq!(config.kafka.expect("kafka").message_timeout_ms, 30_000);
     }
 
     #[test]

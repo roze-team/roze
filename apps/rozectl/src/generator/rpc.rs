@@ -9,7 +9,8 @@ pub fn render_main(spec: &ApiSpec) -> String {
     let server_mod = format!("{}_server", to_snake_case(&service));
 
     format!(
-        r#"mod config;
+        r#"mod application;
+mod config;
 mod client;
 mod logic;
 mod pb;
@@ -50,7 +51,7 @@ async fn main() -> anyhow::Result<()> {{
     tracing::info!(service = %config.name, protocol = "rpc", addr = %rpc.advertise_addr.unwrap_or(rpc.addr), "service registered");
     let service_name = config.name.clone();
     let rpc_addr = rpc.addr;
-    let ctx = svc::ServiceContext::new(config).await?;
+    let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
     tracing::info!(service = %service_name, protocol = "rpc", "service context initialized");
     let health = ctx.health.clone();
     let (rpc_health, grpc_health_service) =

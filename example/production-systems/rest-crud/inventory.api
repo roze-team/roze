@@ -1,0 +1,30 @@
+@server (
+    prefix: /api
+)
+service inventory-api {
+    @permission inventory:read
+    get /inventory/:id (GetInventoryReq) returns (InventoryResp)
+
+    @permission inventory:write
+    post /inventory (CreateInventoryReq) returns (InventoryResp)
+}
+
+type (
+    GetInventoryReq {
+        id: u64 `path:"id"`
+    }
+
+    CreateInventoryReq {
+        sku: string `json:"sku" validate:"required,min=1,max=64"`
+        name: string `json:"name" validate:"required,min=1,max=255"`
+        quantity: i64 `json:"quantity" validate:"min=0"`
+    }
+
+    InventoryResp {
+        id: u64 `json:"id"`
+        sku: string `json:"sku"`
+        name: string `json:"name"`
+        quantity: i64 `json:"quantity"`
+        version: u64 `json:"version"`
+    }
+)

@@ -42,12 +42,58 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate fixed runner
+        run: bash scripts/production-soak-preflight.sh
+
       - name: Run real elapsed-time soak
         run: bash scripts/production-soak-ci.sh "${{ matrix.area }}" "$DURATION" "$EVIDENCE_DIR"
 
-      - name: Upload complete evidence
+      - name: Upload raw evidence for attestation
         id: upload
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roze-raw-${{ matrix.area }}-${{ env.DURATION }}-${{ github.sha }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest evidence provenance
+        id: attest
+        if: success()
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.EVIDENCE_DIR }}/SHA256SUMS
+
+      - name: Promote and verify evidence report
+        if: success()
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          case "${{ matrix.area }}" in
+            generated-systems) EVIDENCE_AREA=generated-services ;;
+            *) EVIDENCE_AREA="${{ matrix.area }}" ;;
+          esac
+          REPORT="$EVIDENCE_DIR/production-${EVIDENCE_AREA}-${DURATION}.md"
+          bash scripts/production-evidence-promote.sh \
+            --bundle "$EVIDENCE_DIR" \
+            --artifact-id "$ARTIFACT_ID" \
+            --artifact-digest "$ARTIFACT_DIGEST" \
+            --artifact-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --attestation-url "$ATTESTATION_URL" \
+            --out "$REPORT"
+          bash scripts/production-evidence-report-verify.sh "$REPORT" "$EVIDENCE_AREA"
+
+      - name: Upload complete evidence
+        id: upload_complete
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: roze-${{ matrix.area }}-${{ env.DURATION }}-${{ github.sha }}
@@ -55,17 +101,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Attest evidence provenance
-        if: success()
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: ${{ env.EVIDENCE_DIR }}/SHA256SUMS
-
       - name: Publish signed summary pointer
         if: always()
         shell: bash
         run: |
           cat "$EVIDENCE_DIR/summary.md" >>"$GITHUB_STEP_SUMMARY"
           printf '\n- Artifact ID: `%s`\n- Artifact digest: `%s`\n' \
-            "${{ steps.upload.outputs.artifact-id }}" \
-            "${{ steps.upload.outputs.artifact-digest }}" >>"$GITHUB_STEP_SUMMARY"
+            "${{ steps.upload_complete.outputs.artifact-id || steps.upload.outputs.artifact-id }}" \
+            "${{ steps.upload_complete.outputs.artifact-digest || steps.upload.outputs.artifact-digest }}" >>"$GITHUB_STEP_SUMMARY"

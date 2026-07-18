@@ -13,6 +13,23 @@ modules: they are created once and preserved by `--update`. Extensions must use
 their own unmarked files or those application-owned modules and must not depend
 on formatting or private helper functions inside generated artifacts.
 
+API, RPC, stream, model and search generation is transactional at the project
+directory boundary. `rozectl` copies the current project into a same-volume
+staging directory, applies ownership rules, renders dependencies, formats the
+generated artifacts and validates the result there. It replaces the target
+directory only after every generation step succeeds. A parse, extension,
+dependency-resolution or formatting failure therefore leaves the original
+project byte-for-byte unchanged and removes the staging directory.
+
+For API, RPC and stream projects, `create` requires an empty or absent target;
+`update` and `force` begin from the current project so application-owned files
+survive according to their ownership contract. Model and search are components
+of an existing service, so their initial `create` begins from that service and
+requires only the component-owned directory to be absent. Directory replacement
+is atomic on the target volume. Parent workspace registration is a separate
+Cargo workspace operation and is performed only after project generation
+succeeds.
+
 The stable surface for API version 1 is:
 
 - `GeneratorCommand::key()` and `GeneratorCommand::output_dir()`;

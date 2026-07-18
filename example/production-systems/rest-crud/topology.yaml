@@ -1,0 +1,16 @@
+system: rest-crud
+services:
+  - inventory-api
+dependencies:
+  - postgres
+  - redis
+  - elasticsearch
+required_workflows:
+  - create_read_update_with_tenant_scope
+  - optimistic_concurrency_conflict
+  - cache_invalidation_after_commit
+  - database_disconnect_and_recovery
+  - search_reindex_and_alias_rollback
+  - migration_apply_and_rollback
+  - report_export_cancel_and_expiry
+  - graceful_drain

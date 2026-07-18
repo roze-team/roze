@@ -33,6 +33,9 @@ the concise backlog; the execution plan is the source of truth for completion.
   contract/migration gate.
 - Track operational proof separately as `verified`, `integration`,
   `long-run pending`, or `long-run verified`.
+- Promote passing 24h/72h reports only from checksum-verified fixed-runner
+  artifacts bound to a full Git revision, artifact digest, and GitHub
+  attestation.
 
 ## P0: Gateway, Config Center, MQ
 
@@ -85,8 +88,8 @@ the concise backlog; the execution plan is the source of truth for completion.
 
 - Put REST, RPC, stream, model, search, OpenAPI, TypeScript, and JavaScript
   generation into one non-ignored release-gate matrix. The unified structural
-  and compile entrypoint is implemented; unsafe contract/migration diff gates
-  remain.
+  and compile entrypoint and unsafe contract/migration diff gates are
+  implemented.
 - Keep deterministic second-update and generated ownership checks mandatory.
 - Block unsafe API, migration, and search contract changes through generated
   diff gates and rollback records.
@@ -110,6 +113,10 @@ the concise backlog; the execution plan is the source of truth for completion.
   grouping, sorting, time buckets, pagination, and query cost.
 - Generate asynchronous CSV/XLSX export jobs with progress, cancel, expiry,
   object-storage delivery, audit records, and tenant isolation.
+- Require an explicitly registered, whitelisted `ReportDataSource`; generated
+  endpoints no longer report successful empty data when no source exists.
+- Preserve `src/application.rs` across API/RPC regeneration for async resource
+  injection, including report catalogs backed by DB or downstream RPC calls.
 - Project report/chart contracts into OpenAPI and TypeScript/JavaScript clients.
 - Generate report/export metrics, dashboards, alerts, and failure runbooks.
 
@@ -128,6 +135,10 @@ the concise backlog; the execution plan is the source of truth for completion.
   - REST CRUD monolith.
   - REST + RPC + DB + Redis.
   - Gateway + Registry + MQ + Outbox + DTM.
+  - Authoritative generation inputs and compile coverage live under
+    `example/production-systems/`; the release workflow runs the real dependency
+    success/failure/recovery matrix. Completed 24h/72h evidence remains required
+    before broad production claims.
 - Production checklist for config, secrets, JWT rotation, migrations,
   connection pools, timeout/retry defaults, Prometheus, tracing, probes, HPA,
   PDB, logs, error codes, gray release, and rollback.

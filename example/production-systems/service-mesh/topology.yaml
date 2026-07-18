@@ -1,0 +1,16 @@
+system: service-mesh
+services:
+  - checkout-api
+  - catalog-rpc
+dependencies:
+  - postgres
+  - redis
+required_workflows:
+  - rest_to_rpc_context_and_trace_propagation
+  - downstream_deadline_and_cancellation
+  - retry_budget_exhaustion
+  - rpc_outlier_ejection_and_recovery
+  - redis_disconnect_and_cache_fallback
+  - database_disconnect_and_readiness
+  - regenerated_dependency_sync
+  - reverse_dependency_graceful_drain

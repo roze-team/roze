@@ -542,8 +542,31 @@ Generated report exports run asynchronously, render real CSV or XLSX through
 write through `roze-storage`, and expose bounded status/cancel/download
 resources. When JWT is configured, export and chart operations require a token
 with a tenant claim; status and cancellation are restricted to the creating
-subject and tenant. Chart execution remains an application-owned query/catalog
-extension and receives a bounded structured contract instead of raw SQL.
+subject and tenant. Export and chart execution use an application-owned
+`Arc<dyn roze_report::ReportDataSource>`; an unconfigured source returns `503`
+instead of a successful empty result. Register a `ReportCatalog` through the
+preserved async `src/application.rs` hook:
+
+```rust
+pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {
+    let reports = roze_report::ReportCatalog::new()
+        .register_export("sales", |context, query| async move {
+            context.ensure_active()?;
+            load_tenant_sales(context.tenant_id, query).await
+        })?
+        .register_chart("sales-total", |context, query| async move {
+            context.ensure_active()?;
+            aggregate_tenant_sales(context.tenant_id, query).await
+        })?;
+    Ok(ctx.with_report_source(std::sync::Arc::new(reports)))
+}
+```
+
+Handlers receive the authenticated subject, tenant, cancellation signal, and
+bounded structured query rather than client-supplied SQL. The shared executor
+enforces cancellation, chart timeout/result limits, export row/column/file
+limits, and spreadsheet escaping. Set `ROZE_REPORT_SOURCE_CONFIGURED=1` when
+running generated HTTP smoke tests against a service with this source.
 
 ## Read-model query composition
 

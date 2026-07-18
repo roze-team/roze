@@ -13,17 +13,30 @@ esac
 STARTED="$(date +%s)"
 DEADLINE=$((STARTED + SECONDS_REQUIRED))
 ITERATION=0
+ITERATION_LATENCIES="$(mktemp)"
 
 cleanup() {
-  docker compose -f docker-compose.integration.yml down --remove-orphans || true
+  if [[ -n "${ROZE_REFERENCE_COMPOSE_PROJECT:-}" ]]; then
+    docker compose -p "$ROZE_REFERENCE_COMPOSE_PROJECT" \
+      -f "${ROZE_REFERENCE_COMPOSE_FILE:-docker-compose.integration.yml}" \
+      down --remove-orphans || true
+  else
+    docker compose -f docker-compose.integration.yml down --remove-orphans || true
+  fi
+  rm -f "$ITERATION_LATENCIES"
 }
 trap cleanup EXIT
 
 while (( $(date +%s) < DEADLINE )); do
   ITERATION=$((ITERATION + 1))
+  ITERATION_STARTED_NS="$(date +%s%N)"
   printf 'generated-systems iteration=%s started_at=%s\n' \
     "$ITERATION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  bash scripts/production-smoke.sh --with-compose
+  bash scripts/reference-systems-integration.sh
+  bash scripts/production-smoke.sh --skip-generated
+  ITERATION_FINISHED_NS="$(date +%s%N)"
+  ITERATION_MILLIS=$(((ITERATION_FINISHED_NS - ITERATION_STARTED_NS) / 1000000))
+  printf '%s\n' "$ITERATION_MILLIS" >>"$ITERATION_LATENCIES"
   printf 'generated-systems iteration=%s finished_at=%s\n' \
     "$ITERATION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 done
@@ -33,6 +46,29 @@ if (( ELAPSED < SECONDS_REQUIRED )); then
   echo "generated systems soak ended early: required=$SECONDS_REQUIRED actual=$ELAPSED" >&2
   exit 1
 fi
+if (( ITERATION == 0 || ELAPSED == 0 )); then
+  echo "generated systems soak produced no measurable iteration" >&2
+  exit 1
+fi
 
-printf 'generated-systems completed iterations=%s elapsed_seconds=%s\n' \
-  "$ITERATION" "$ELAPSED"
+percentile() {
+  local percent="$1"
+  sort -n "$ITERATION_LATENCIES" |
+    awk -v percent="$percent" '
+      { values[NR] = $1 }
+      END {
+        rank = int((NR * percent + 99) / 100)
+        if (rank < 1) rank = 1
+        print values[rank] + 0
+      }
+    '
+}
+
+P50_MILLIS="$(percentile 50)"
+P95_MILLIS="$(percentile 95)"
+P99_MILLIS="$(percentile 99)"
+ITERATIONS_PER_HOUR=$((ITERATION * 3600 / ELAPSED))
+
+printf 'roze_generated_systems_soak iterations=%s elapsed_seconds=%s iterations_per_hour=%s p50_iteration_ms=%s p95_iteration_ms=%s p99_iteration_ms=%s\n' \
+  "$ITERATION" "$ELAPSED" "$ITERATIONS_PER_HOUR" \
+  "$P50_MILLIS" "$P95_MILLIS" "$P99_MILLIS"

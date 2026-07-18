@@ -8,17 +8,94 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Added a whitelisted asynchronous `ReportDataSource`/`ReportCatalog` boundary,
+  shared export/chart executors, real SQLite tenant aggregation tests,
+  in-flight cancellation, bounded result enforcement, and sanitized failures.
+- Added preserved API/RPC `src/application.rs` hooks for attaching report data
+  sources and other application resources without editing generated context or
+  bootstrap files.
+- Bound passing long-run evidence reports to verified fixed-runner artifacts,
+  portable SHA-256 manifests, real elapsed duration, and GitHub provenance.
+- Added promotion smoke coverage that rejects modified artifacts and shortened
+  runs before a passing evidence report can be created.
+- Added an independently testable evidence-report verifier used by the maturity
+  gate for duration, resource, artifact, checksum, provenance, and boundary
+  summary validation.
+- Made MQ, Config Center, and Lifecycle soak wrappers time-bound by default
+  instead of allowing small implicit operation caps to terminate 24h/72h runs
+  early, and added elapsed-time throughput fields to their summaries.
+- Changed the Gateway long-run harness to repeat the real network smoke
+  topology and report cycle percentiles plus retry, fallback, reload, SSE, and
+  WebSocket recovery counts.
+- Added real HTTP load sampling to each Gateway soak cycle and aggregate
+  request count, error count, and p50/p95/p99 latency to the boundary summary.
+- Added automatic Etcd and Consul service re-registration after keepalive
+  failure, preserving explicit deregistration while recovering transparently
+  from registry process restarts.
+- Added real Gateway routing probes that register an upstream once, coordinate
+  external Etcd/Consul restarts, require visible disconnect and automatic
+  recovery, and report route/recovery p99 latency to the evidence gate.
+- Upgraded the Gateway soak to run static policy/stream checks beside isolated
+  real Etcd and Consul fault injection. Promotion now rejects evidence without
+  both registry workloads and recovery from every injected outage.
+- Added a fixed-memory logarithmic latency histogram and used it to report
+  p50/p95/p99 delivery, update, and lifecycle-cycle latency during long runs.
+- Expanded fixed-runner host evidence with aggregate CPU busy time, first/last
+  and minimum available memory, memory growth, tasks, established TCP
+  connections, and allocated file handles.
+- Added periodic failed-task and drain-hook-timeout injection to Lifecycle
+  soak runs with detection counts and p99 fault-detection latency.
+- Hardened promoted-report validation with area-specific boundary schemas,
+  counter invariants, percentile ordering, fault-scenario counts, sampler
+  continuity, and bounded available-memory decline.
+- Added explicit fixed-runner p99 objectives for Gateway, MQ, Config Center,
+  Lifecycle cycles, and Lifecycle fault detection.
+- Added first-cycle MQ DLQ replay and Config Center rollback measurements with
+  explicit recovery objectives in the promoted-report gate.
+- Upgraded MQ soak to run in-memory reliability, real NATS JetStream, and real
+  Kafka workloads concurrently while periodically restarting both brokers,
+  with merged disconnect, recovery, throughput, and p99 evidence.
+- Changed real Kafka delivery acknowledgment to wait for the broker offset
+  commit result, so commit failures are returned to consumers instead of being
+  reported as successful in-memory enqueue operations.
+- Isolated MQ and Config Center Compose projects so fixed-runner cleanup cannot
+  tear down another evidence workload with the same default project name.
+- Made MQ and Config Center soak harnesses terminate peer workloads when one
+  child exits unexpectedly, avoiding wasted long-run runner allocations.
+- Added a real Etcd Config Center value/watch integration test and exercised it
+  across healthy, disconnected, and recovered phases in the reference-system
+  workflow.
+- Upgraded Config Center soak to run admin rollback and real Etcd value/watch
+  workloads concurrently while periodically stopping and restarting Etcd, with
+  merged disconnect, recovery, throughput, and p99 evidence.
 - Added `roze-service.yaml` and `rozectl service dependency add/list/remove`
   plus `service sync --check` as the single source of truth for managed RPC
   dependencies, Cargo entries, connection defaults, readiness, and generated
   `ServiceContext` clients in both API and RPC consumer services. Manifests
   record and validate the generated consumer kind.
+- Added same-volume transactional generation for API, RPC, stream, model and
+  search outputs. Rendering, dependency synchronization and formatting happen
+  in a staging project, and failed generation leaves the existing project
+  unchanged.
+- Added three authoritative production reference-system inputs and a generated
+  compile matrix covering REST/SQL/search, managed REST-to-RPC dependencies,
+  stream workers, repeated updates, dependency synchronization, and generated
+  operations assets.
+- Added real Redis and NATS integration tests plus a Docker-backed reference
+  systems workflow covering registry, migration rollback, Kafka, Elasticsearch,
+  and dependency disconnect/recovery.
+- Production soak jobs now finalize terminal run metadata, host resource
+  aggregates, Markdown summaries, and checksums for successful, failed, and
+  prematurely ended workloads before returning the workload status.
 
 ### Fixed
 
 - Made the first `service dependency add` canonicalize adopted Cargo path
   dependencies immediately, so a following `service sync --check` no longer
   reports ordering drift.
+- Kept managed API/RPC dependencies canonical after API, RPC, model, and search
+  regeneration by running the authoritative service synchronizer inside the
+  generation transaction before commit.
 
 ## [1.0.0] - 2026-07-16
 

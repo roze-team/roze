@@ -9,6 +9,7 @@ claims.
 
 Current scoped verification notes:
 
+- [2026-07-17 production generation verification](2026-07-17-production-generation-verification.md)
 - [2026-07-09 generation verification](2026-07-09-generation-verification.md)
 - [2026-07-07 generation requirements](2026-07-07-generation-requirements.md)
 - [2026-07-06 generation verification](2026-07-06-generation-verification.md)
@@ -38,10 +39,36 @@ bash scripts/production-soak-config-center.sh 300
 bash scripts/production-soak-lifecycle.sh 300
 ```
 
+Gateway soak iterations execute the real network smoke workflow rather than
+re-running only unit tests. Its standardized summary includes cycle
+p50/p95/p99 and retry, fallback, configuration-rejection, SSE, and WebSocket
+recovery counts, plus cross-cycle HTTP request count, errors, and request
+p50/p95/p99. A concurrent real Etcd/Consul workload registers Gateway
+upstreams once, periodically restarts both registries, and requires automatic
+re-registration. Its fault, disconnect, successful-route, recovery, route-p99,
+and recovery-p99 fields are mandatory in promoted evidence.
+
+MQ soak runs the bounded in-memory ack/nack/idempotency/DLQ workload beside
+real NATS JetStream and Kafka publish/receive/ack workloads. The harness
+periodically stops and restarts both brokers, then merges disconnect
+observations, recoveries, throughput, delivery p99, and recovery p99 into the
+final boundary summary. Reports missing either real broker are rejected.
+
+Config Center soak runs the signed publish/validation/rollback workload and a
+real Etcd value/watch workload concurrently. The harness periodically stops
+and restarts Etcd and merges disconnect observations, recoveries, throughput,
+operation p99, and recovery p99 into the final boundary summary.
+
 Use `ROZE_GATEWAY_SOAK_SECONDS`, `ROZE_MQ_SOAK_SECONDS`, `ROZE_MQ_SOAK_MESSAGES`,
 `ROZE_CONFIG_CENTER_SOAK_SECONDS`, `ROZE_CONFIG_CENTER_SOAK_UPDATES`,
 `ROZE_LIFECYCLE_SOAK_SECONDS`, and `ROZE_LIFECYCLE_SOAK_CYCLES` for 24h/72h
 runs.
+The wrappers use an effectively unbounded operation cap unless one of the
+message/update/cycle variables is explicitly set, preventing a nominal 24h/72h
+job from stopping after a small default operation count.
+MQ and Config Center harnesses monitor every child workload while running; an
+unexpected early exit terminates the peer workloads instead of consuming the
+remaining 24h/72h runner allocation.
 
 CI evidence uses the fixed self-hosted workflow in
 `.github/workflows/production-soak.yml`. Its artifact contains raw logs, host
@@ -49,10 +76,26 @@ samples, a Markdown summary, and `SHA256SUMS`; GitHub OIDC provenance attests
 the checksum manifest. A 24h/72h job must finish before its artifact can be
 reviewed as production evidence.
 
+The runner finalizes evidence even when a workload fails or ends early.
+`run.json` records the terminal status, workload exit code, required and
+observed elapsed time, host sample count, minimum available memory, and maximum
+host task count. The command returns failure only after `summary.md` and
+`SHA256SUMS` have been written, so failed runs remain diagnosable and attestable.
+The last standardized `roze_*_soak` line is also stored in
+`boundary-summary.txt`. Generated-system runs report iteration throughput and
+p50/p95/p99 workflow duration; protocol-level latency and throughput remain
+separate required measurements.
+
+The checksum manifest uses artifact-relative paths, so it remains verifiable
+after download. A passing report must be generated with
+`scripts/production-evidence-promote.sh`; manually changing an inconclusive
+scaffold to `pass` does not satisfy the maturity gate.
+
 For lifecycle reports, keep the `roze_lifecycle_soak` summary line in the
-evidence artifact. It records cycles, worker exits, stop hooks, observed
-running/stopped snapshots, and max service count. The report scaffold includes
-a lifecycle snapshot table automatically when generated with `--area lifecycle`;
-pass the complete six-field numeric summary line with `--lifecycle-summary "..."`
-to prefill it. The script rejects inconsistent lifecycle counts before writing
-the report.
+evidence artifact. It records elapsed time, cycle throughput, p50/p95/p99 cycle
+latency, injected failed-task and drain-timeout detections, fault-detection
+p99, cycles, worker exits, stop hooks, observed running/stopped snapshots, and
+max service count. The report scaffold includes a lifecycle snapshot table
+automatically when generated with `--area lifecycle`; pass the complete
+fourteen-field numeric summary line with `--lifecycle-summary "..."` to prefill
+it. The script rejects inconsistent lifecycle counts before writing the report.

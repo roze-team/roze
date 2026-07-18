@@ -6,9 +6,20 @@ BASE="${ROZE_GATEWAY_SMOKE_DIR:-/tmp/roze-gateway-smoke}"
 GATEWAY_PORT="${ROZE_GATEWAY_SMOKE_PORT:-19081}"
 UPSTREAM_PORT="${ROZE_GATEWAY_SMOKE_UPSTREAM_PORT:-19082}"
 GATEWAY_BIN="$ROOT/target/debug/roze-gateway-app"
+LOAD_REQUESTS="${ROZE_GATEWAY_SMOKE_LOAD_REQUESTS:-100}"
+LOAD_METRICS_FILE="${ROZE_GATEWAY_SMOKE_METRICS_FILE:-}"
+LOAD_LATENCIES="$BASE/load-latencies-us.txt"
+
+case "$LOAD_REQUESTS" in
+  ''|*[!0-9]*) echo "gateway load request count must be a positive integer" >&2; exit 2 ;;
+  0) echo "gateway load request count must be greater than zero" >&2; exit 2 ;;
+esac
 
 mkdir -p "$BASE"
-rm -f "$BASE/gateway.out" "$BASE/gateway.err" "$BASE/upstream.out" "$BASE/upstream.err"
+rm -f \
+  "$BASE/gateway.out" "$BASE/gateway.err" \
+  "$BASE/upstream.out" "$BASE/upstream.err" \
+  "$LOAD_LATENCIES"
 
 cat >"$BASE/upstream.js" <<EOF_NODE
 const http = require("http");
@@ -321,6 +332,35 @@ done
 
 require_status 200 "http://127.0.0.1:$GATEWAY_PORT/rewrite"
 grep -q '"route":"rewritten"' "$BASE/response.json"
+
+for _ in $(seq 1 "$LOAD_REQUESTS"); do
+  request_seconds="$(
+    curl -fsS -o /dev/null -w '%{time_total}' \
+      "http://127.0.0.1:$GATEWAY_PORT/rewrite"
+  )"
+  awk -v seconds="$request_seconds" \
+    'BEGIN { printf "%.0f\n", seconds * 1000000 }' \
+    >>"$LOAD_LATENCIES"
+done
+if [[ -n "$LOAD_METRICS_FILE" ]]; then
+  cat "$LOAD_LATENCIES" >>"$LOAD_METRICS_FILE"
+fi
+
+percentile() {
+  local percent="$1"
+  sort -n "$LOAD_LATENCIES" |
+    awk -v percent="$percent" '
+      { values[NR] = $1 }
+      END {
+        rank = int((NR * percent + 99) / 100)
+        if (rank < 1) rank = 1
+        print values[rank] + 0
+      }
+    '
+}
+
+printf 'roze_gateway_request_batch requests=%s errors=0 p50_request_us=%s p95_request_us=%s p99_request_us=%s\n' \
+  "$LOAD_REQUESTS" "$(percentile 50)" "$(percentile 95)" "$(percentile 99)"
 
 cors_status="$(curl -sS -o /dev/null -D "$BASE/cors.headers" -w "%{http_code}" \
   -X OPTIONS \

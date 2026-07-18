@@ -1,6 +1,7 @@
 pub mod client;
 pub mod model;
 pub mod native;
+mod plan;
 pub mod rest;
 pub mod rpc;
 pub mod search;
@@ -45,7 +46,7 @@ const REST_ROZE_CRATES: [&str; 21] = [
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 21] = [
+const RPC_ROZE_CRATES: [&str; 22] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -61,6 +62,7 @@ const RPC_ROZE_CRATES: [&str; 21] = [
     "roze-nats",
     "roze-result",
     "roze-query",
+    "roze-report",
     "roze-rpc",
     "roze-service",
     "roze-storage",
@@ -515,7 +517,10 @@ fn should_skip_diff_path(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name == ".git" || name == "target" || name.starts_with(".rozectl-diff-")
+    name == ".git"
+        || name == "target"
+        || name.starts_with(".rozectl-diff-")
+        || name.starts_with(".rozectl-plan-")
 }
 
 pub fn template(name: &str) -> anyhow::Result<String> {
@@ -646,6 +651,20 @@ pub fn write_stream_worker_project(
         );
     }
 
+    let plan = plan::GenerationPlan::prepare(out, options.mode)?;
+    write_stream_worker_project_in_place(&spec, api, plan.staged(), out, options)?;
+    plan.commit()?;
+    register_workspace_member(out)?;
+    Ok(())
+}
+
+fn write_stream_worker_project_in_place(
+    spec: &ApiSpec,
+    api: &Path,
+    out: &Path,
+    logical_out: &Path,
+    options: GenerateOptions,
+) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
     fs::create_dir_all(out.join("src/config"))
         .with_context(|| format!("failed to create {}", out.join("src/config").display()))?;
@@ -654,15 +673,15 @@ pub fn write_stream_worker_project(
     fs::create_dir_all(out.join("src/types"))
         .with_context(|| format!("failed to create {}", out.join("src/types").display()))?;
 
-    write_stream_cargo_toml(&spec, out, options)?;
-    fs::write(out.join("README.md"), render_stream_readme(&spec, api))
+    write_stream_cargo_toml(spec, out, logical_out, options)?;
+    fs::write(out.join("README.md"), render_stream_readme(spec, api))
         .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
     write_preserved(
         &out.join("config.yaml"),
-        render_stream_config_yaml(&spec),
+        render_stream_config_yaml(spec),
         options.mode,
     )?;
-    fs::write(out.join("src/main.rs"), render_stream_main(&spec))
+    fs::write(out.join("src/main.rs"), render_stream_main(spec))
         .with_context(|| format!("failed to write {}", out.join("src/main.rs").display()))?;
     write_preserved(
         &out.join("src/config/mod.rs"),
@@ -682,7 +701,7 @@ pub fn write_stream_worker_project(
     })?;
     fs::write(
         out.join("src/stream/envelope.rs"),
-        render_stream_envelope(&spec),
+        render_stream_envelope(spec),
     )
     .with_context(|| {
         format!(
@@ -692,7 +711,7 @@ pub fn write_stream_worker_project(
     })?;
     fs::write(
         out.join("src/stream/producer.rs"),
-        render_stream_producer(&spec),
+        render_stream_producer(spec),
     )
     .with_context(|| {
         format!(
@@ -702,10 +721,9 @@ pub fn write_stream_worker_project(
     })?;
     write_preserved(
         &out.join("src/stream/consumer.rs"),
-        render_stream_consumer(&spec),
+        render_stream_consumer(spec),
         options.mode,
     )?;
-    register_workspace_member(out)?;
     Ok(())
 }
 
@@ -735,13 +753,14 @@ fn write_api_markdown_doc_with(
 fn write_stream_cargo_toml(
     spec: &ApiSpec,
     out: &Path,
+    logical_out: &Path,
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
-    let workspace_root = find_workspace_root(out)?;
+    let workspace_root = find_workspace_root(logical_out)?;
     let local_crates_prefix = match options.dependency_source {
         DependencySource::Git => None,
         DependencySource::Path => Some(local_crates_prefix(
-            out,
+            logical_out,
             workspace_root.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "--roze-source path requires a Cargo workspace containing the Roze crates"
@@ -753,7 +772,7 @@ fn write_stream_cargo_toml(
         out.join("Cargo.toml"),
         render_stream_cargo_toml(
             spec,
-            out,
+            logical_out,
             options.dependency_source,
             local_crates_prefix.as_deref(),
             workspace_root.is_some(),
@@ -1187,6 +1206,11 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
+        "| `src/application.rs` | application | async context configuration hook preserved during `--update` |"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
         "| `src/middleware/app.rs` | application | service-wide Router hook preserved during `--update` |"
     )
     .unwrap();
@@ -1262,6 +1286,7 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "- `src/logic/**`").unwrap();
     writeln!(&mut out, "- `src/middleware/app.rs`").unwrap();
+    writeln!(&mut out, "- `src/application.rs`").unwrap();
     writeln!(&mut out, "- `src/middleware/<custom>.rs`").unwrap();
     writeln!(&mut out, "- `src/model/*_ext.rs`").unwrap();
     writeln!(
@@ -1719,6 +1744,7 @@ fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
             Vec::<(&str, &str)>::new(),
             None,
             true,
+            false,
         ),
         (
             "framework_readyz",
@@ -1726,6 +1752,7 @@ fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
             Vec::<(&str, &str)>::new(),
             None,
             true,
+            false,
         ),
         (
             "framework_startupz",
@@ -1733,12 +1760,14 @@ fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
             Vec::<(&str, &str)>::new(),
             None,
             true,
+            false,
         ),
         (
             "framework_metrics",
             rest::full_route_path(spec, "/metrics"),
             Vec::<(&str, &str)>::new(),
             None,
+            false,
             false,
         ),
         (
@@ -1747,12 +1776,14 @@ fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
             Vec::<(&str, &str)>::new(),
             None,
             true,
+            false,
         ),
         (
             "framework_report_export",
             rest::full_route_path(spec, "/reports/exports"),
             Vec::<(&str, &str)>::new(),
             Some(r#"serde_json::json!({"report":"smoke","format":"csv","columns":["id"]})"#),
+            true,
             true,
         ),
         (
@@ -1763,10 +1794,19 @@ fn render_framework_http_smoke_tests(out: &mut String, spec: &ApiSpec) {
                 r#"serde_json::json!({"chart":"smoke","dimensions":["time"],"measures":["count"],"time_bucket":"1m","limit":100})"#,
             ),
             true,
+            true,
         ),
     ];
-    for (name, path, query, body, expects_json) in endpoints {
-        render_framework_http_smoke_test(out, name, &path, &query, body, expects_json);
+    for (name, path, query, body, expects_json, requires_report_source) in endpoints {
+        render_framework_http_smoke_test(
+            out,
+            name,
+            &path,
+            &query,
+            body,
+            expects_json,
+            requires_report_source,
+        );
     }
 }
 
@@ -1777,6 +1817,7 @@ fn render_framework_http_smoke_test(
     query: &[(&str, &str)],
     json_body: Option<&str>,
     expects_json: bool,
+    requires_report_source: bool,
 ) {
     use std::fmt::Write as _;
     writeln!(out, "#[tokio::test]").unwrap();
@@ -1807,11 +1848,31 @@ fn render_framework_http_smoke_test(
     writeln!(out, "        .send()").unwrap();
     writeln!(out, "        .await?;").unwrap();
     writeln!(out).unwrap();
-    writeln!(
-        out,
-        "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
-    )
-    .unwrap();
+    if requires_report_source {
+        writeln!(
+            out,
+            "    if std::env::var(\"ROZE_REPORT_SOURCE_CONFIGURED\").ok().as_deref() == Some(\"1\") {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        assert!(response.status().is_success(), \"expected configured report source success, got {{}}\", response.status());"
+        )
+        .unwrap();
+        writeln!(out, "    }} else {{").unwrap();
+        writeln!(
+            out,
+            "        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE, \"unconfigured report source must fail explicitly\");"
+        )
+        .unwrap();
+        writeln!(out, "    }}").unwrap();
+    } else {
+        writeln!(
+            out,
+            "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
+        )
+        .unwrap();
+    }
     if expects_json {
         writeln!(
             out,
@@ -2939,9 +3000,6 @@ fn api_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
             let source = read_api_source(&api)?;
             let spec = crate::parser::parse_api(&source)?;
             validate_project_kind(&spec, ProjectKind::Rest)?;
-            if matches!(options.mode, GenerateMode::Force) {
-                cleanup_rest_project(&out)?;
-            }
             generate_rest_project_with_rpc_clients(&spec, &out, options, &rpc_clients)
                 .with_context(|| format!("failed to generate api project at {}", out.display()))
         }
@@ -2963,9 +3021,6 @@ fn rpc_generate_handler(command: GeneratorCommand) -> anyhow::Result<()> {
             let source = read_api_source(&api)?;
             let spec = crate::parser::parse_api(&source)?;
             validate_project_kind(&spec, ProjectKind::Rpc)?;
-            if matches!(options.mode, GenerateMode::Force) {
-                cleanup_rpc_project(&out)?;
-            }
             generate_rpc_project(&spec, &out, options)
                 .with_context(|| format!("failed to generate rpc project at {}", out.display()))
         }
@@ -3071,15 +3126,14 @@ pub fn create_api_project_from_source(
     options: GenerateOptions,
     source: String,
 ) -> anyhow::Result<()> {
-    let api_path = out.join(format!("{}.api", service));
     let spec = crate::parser::parse_api(&source)?;
-    fs::create_dir_all(out)?;
-    if matches!(options.mode, GenerateMode::Force) {
-        cleanup_rest_project(out)?;
-    }
-    generate_rest_project(&spec, out, options)?;
+    let rpc_clients = read_project_rpc_client_bindings(out)?;
+    let plan = plan::GenerationPlan::prepare(out, options.mode)?;
+    generate_rest_project_in_place(&spec, plan.staged(), out, options, &rpc_clients)?;
+    let api_path = plan.staged().join(format!("{}.api", service));
     fs::write(&api_path, &source)
         .with_context(|| format!("failed to write {}", api_path.display()))?;
+    plan.commit()?;
     register_workspace_member(out)?;
     Ok(())
 }
@@ -3099,15 +3153,14 @@ pub fn create_rpc_project_from_source(
     options: GenerateOptions,
     source: String,
 ) -> anyhow::Result<()> {
-    let api_path = out.join(format!("{}.api", service));
     let spec = crate::parser::parse_api(&source)?;
-    fs::create_dir_all(out)?;
-    if matches!(options.mode, GenerateMode::Force) {
-        cleanup_rpc_project(out)?;
-    }
-    generate_rpc_project(&spec, out, options)?;
+    let rpc_clients = read_project_rpc_client_bindings(out)?;
+    let plan = plan::GenerationPlan::prepare(out, options.mode)?;
+    generate_rpc_project_in_place(&spec, plan.staged(), out, options, &rpc_clients)?;
+    let api_path = plan.staged().join(format!("{}.api", service));
     fs::write(&api_path, &source)
         .with_context(|| format!("failed to write {}", api_path.display()))?;
+    plan.commit()?;
     register_workspace_member(out)?;
     Ok(())
 }
@@ -3166,6 +3219,7 @@ fn migrate_flat_module_file(
     remove_path_if_exists(&old_path)
 }
 
+#[cfg(test)]
 fn generate_rest_project(
     spec: &ApiSpec,
     out: &Path,
@@ -3181,7 +3235,23 @@ fn generate_rest_project_with_rpc_clients(
     options: GenerateOptions,
     rpc_clients: &[RpcClientBinding],
 ) -> anyhow::Result<()> {
+    let plan = plan::GenerationPlan::prepare(out, options.mode)?;
+    generate_rest_project_in_place(spec, plan.staged(), out, options, rpc_clients)?;
+    sync_managed_service_if_present(plan.staged())?;
+    plan.commit()
+}
+
+fn generate_rest_project_in_place(
+    spec: &ApiSpec,
+    out: &Path,
+    logical_out: &Path,
+    options: GenerateOptions,
+    rpc_clients: &[RpcClientBinding],
+) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
+    if matches!(options.mode, GenerateMode::Force) {
+        cleanup_rest_project(out)?;
+    }
     remove_path_if_exists(&out.join("src/handler"))?;
 
     fs::create_dir_all(out.join("src"))?;
@@ -3196,7 +3266,14 @@ fn generate_rest_project_with_rpc_clients(
     fs::create_dir_all(out.join("ops"))?;
     fs::create_dir_all(out.join(".cargo"))?;
     fs::create_dir_all(out.join(".github/workflows"))?;
-    write_cargo_toml_with_rpc_clients(spec, out, options, ProjectKind::Rest, rpc_clients)?;
+    write_cargo_toml_with_rpc_clients(
+        spec,
+        out,
+        logical_out,
+        options,
+        ProjectKind::Rest,
+        rpc_clients,
+    )?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rest))?;
     fs::write(
@@ -3359,6 +3436,11 @@ fn generate_rest_project_with_rpc_clients(
         rest::render_application_middleware(),
         options.mode,
     )?;
+    write_preserved(
+        &out.join("src/application.rs"),
+        application_context_rs(),
+        options.mode,
+    )?;
     for (name, content) in rest::render_middleware_files(spec) {
         write_preserved(
             &out.join("src/middleware").join(format!("{name}.rs")),
@@ -3408,7 +3490,30 @@ fn generate_rpc_project_with_rpc_clients(
     options: GenerateOptions,
     rpc_clients: &[RpcClientBinding],
 ) -> anyhow::Result<()> {
+    let plan = plan::GenerationPlan::prepare(out, options.mode)?;
+    generate_rpc_project_in_place(spec, plan.staged(), out, options, rpc_clients)?;
+    sync_managed_service_if_present(plan.staged())?;
+    plan.commit()
+}
+
+pub(super) fn sync_managed_service_if_present(out: &Path) -> anyhow::Result<()> {
+    if out.join("roze-service.yaml").is_file() {
+        crate::service::sync(out, false)?;
+    }
+    Ok(())
+}
+
+fn generate_rpc_project_in_place(
+    spec: &ApiSpec,
+    out: &Path,
+    logical_out: &Path,
+    options: GenerateOptions,
+    rpc_clients: &[RpcClientBinding],
+) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
+    if matches!(options.mode, GenerateMode::Force) {
+        cleanup_rpc_project(out)?;
+    }
 
     fs::create_dir_all(out.join("src"))?;
     fs::create_dir_all(out.join("src/client"))?;
@@ -3427,7 +3532,14 @@ fn generate_rpc_project_with_rpc_clients(
     remove_path_if_exists(&out.join("src/pb.rs"))?;
     remove_path_if_exists(&out.join("src/rpc.rs"))?;
     remove_path_if_exists(&out.join("src/types.rs"))?;
-    write_cargo_toml_with_rpc_clients(spec, out, options, ProjectKind::Rpc, rpc_clients)?;
+    write_cargo_toml_with_rpc_clients(
+        spec,
+        out,
+        logical_out,
+        options,
+        ProjectKind::Rpc,
+        rpc_clients,
+    )?;
     fs::write(out.join(".cargo/config.toml"), cargo_config())?;
     fs::write(out.join("README.md"), readme(spec, ProjectKind::Rpc))?;
     fs::write(
@@ -3564,6 +3676,11 @@ fn generate_rpc_project_with_rpc_clients(
         rpc_service_context_rs(rpc_clients),
         options.mode,
         rpc_clients,
+    )?;
+    write_preserved(
+        &out.join("src/application.rs"),
+        application_context_rs(),
+        options.mode,
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
@@ -4015,17 +4132,18 @@ fn ensure_model_module(out: &Path) -> anyhow::Result<()> {
 fn write_cargo_toml_with_rpc_clients(
     spec: &ApiSpec,
     out: &Path,
+    logical_out: &Path,
     options: GenerateOptions,
     kind: ProjectKind,
     rpc_clients: &[RpcClientBinding],
 ) -> anyhow::Result<()> {
     let path = out.join("Cargo.toml");
-    let package_name = package_name_from_output(out, spec);
-    let workspace_root = find_workspace_root(out)?;
+    let package_name = package_name_from_output(logical_out, spec);
+    let workspace_root = find_workspace_root(logical_out)?;
     let local_crates_prefix = match options.dependency_source {
         DependencySource::Git => None,
         DependencySource::Path => Some(local_crates_prefix(
-            out,
+            logical_out,
             workspace_root.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "--roze-source path requires a Cargo workspace containing the Roze crates"
@@ -4042,7 +4160,7 @@ fn write_cargo_toml_with_rpc_clients(
                 local_crates_prefix.as_deref(),
                 workspace_root.is_some(),
                 kind,
-                out,
+                logical_out,
                 rpc_clients,
             ),
         )
@@ -4074,7 +4192,7 @@ fn write_cargo_toml_with_rpc_clients(
             &client.dep_name,
             toml_edit::value(toml_edit::InlineTable::from_iter([(
                 "path",
-                toml_edit::Value::from(rpc_client_dependency_path(out, client)),
+                toml_edit::Value::from(rpc_client_dependency_path(logical_out, client)),
             )])),
         );
     }
@@ -11018,6 +11136,19 @@ pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigE
     .to_string()
 }
 
+fn application_context_rs() -> String {
+    r#"use crate::svc::ServiceContext;
+
+/// Stable application-owned hook for attaching data sources and other resources.
+///
+/// This file is preserved by `rozectl ... generate --update`.
+pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {
+    Ok(ctx)
+}
+"#
+    .to_string()
+}
+
 fn rest_service_context_rs(rpc_clients: &[RpcClientBinding]) -> String {
     let mut out = r#"#![allow(dead_code)]
 
@@ -11032,6 +11163,7 @@ pub struct ServiceContext {
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
+    pub report_source: Option<Arc<dyn roze_report::ReportDataSource>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
@@ -11071,6 +11203,7 @@ impl ServiceContext {
             cache,
             mq,
             storage,
+            report_source: None,
             outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
             idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
         })
@@ -11104,6 +11237,20 @@ impl ServiceContext {
         self.storage
             .clone()
             .ok_or_else(|| anyhow::anyhow!("object storage is not configured"))
+    }
+
+    pub fn with_report_source(
+        mut self,
+        report_source: Arc<dyn roze_report::ReportDataSource>,
+    ) -> Self {
+        self.report_source = Some(report_source);
+        self
+    }
+
+    pub fn report_source(&self) -> anyhow::Result<Arc<dyn roze_report::ReportDataSource>> {
+        self.report_source
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("report data source is not configured"))
     }
 
     pub async fn media_url(
@@ -11145,6 +11292,7 @@ pub struct ServiceContext {
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
+    pub report_source: Option<Arc<dyn roze_report::ReportDataSource>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
@@ -11194,6 +11342,7 @@ impl ServiceContext {
             cache,
             mq,
             storage,
+            report_source: None,
             outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
             idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
         })
@@ -11227,6 +11376,20 @@ impl ServiceContext {
         self.storage
             .clone()
             .ok_or_else(|| anyhow::anyhow!("object storage is not configured"))
+    }
+
+    pub fn with_report_source(
+        mut self,
+        report_source: Arc<dyn roze_report::ReportDataSource>,
+    ) -> Self {
+        self.report_source = Some(report_source);
+        self
+    }
+
+    pub fn report_source(&self) -> anyhow::Result<Arc<dyn roze_report::ReportDataSource>> {
+        self.report_source
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("report data source is not configured"))
     }
 
     pub async fn media_url(
@@ -11698,6 +11861,9 @@ mod tests {
             assert!(rendered.contains("Arc<dyn roze_storage::ObjectStorage>"));
             assert!(rendered.contains("pub fn with_storage"));
             assert!(rendered.contains("pub async fn media_url"));
+            assert!(rendered.contains("Arc<dyn roze_report::ReportDataSource>"));
+            assert!(rendered.contains("pub fn with_report_source"));
+            assert!(rendered.contains("pub fn report_source"));
         }
     }
 
@@ -11738,6 +11904,139 @@ mod tests {
                 .expect("system time")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn failed_api_and_rpc_generation_leave_existing_projects_unchanged() {
+        let api = parse_api(
+            r#"
+            service payment-api {
+                get /payments (ListPaymentsReq) returns (ListPaymentsResp)
+            }
+            type ListPaymentsReq {
+                page: u64
+            }
+            type ListPaymentsResp {
+                total: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+        let rpc = parse_api(
+            r#"
+            service payment-rpc {
+                rpc GetPayment (GetPaymentReq) returns (GetPaymentResp)
+            }
+            type GetPaymentReq {
+                id: u64
+            }
+            type GetPaymentResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid rpc");
+
+        for (kind, spec) in [("api", api), ("rpc", rpc)] {
+            let out = temp_test_root(&format!("rozectl-transaction-{kind}"));
+            fs::create_dir_all(&out).expect("create existing project");
+            fs::write(out.join("application.txt"), "unchanged").expect("write sentinel");
+
+            let options = GenerateOptions::new(GenerateMode::Update, DependencySource::Path);
+            let error = match kind {
+                "api" => generate_rest_project(&spec, &out, options),
+                "rpc" => generate_rpc_project(&spec, &out, options),
+                _ => unreachable!(),
+            }
+            .expect_err("path dependencies without a Roze workspace must fail");
+
+            let message = error.to_string();
+            assert!(
+                message.contains("--roze-source path requires")
+                    && message.contains("Cargo workspace"),
+                "{error:#}"
+            );
+            assert_eq!(
+                fs::read_to_string(out.join("application.txt")).expect("read sentinel"),
+                "unchanged"
+            );
+            assert!(!out.join("src").exists());
+            assert!(!out.join("Cargo.toml").exists());
+            fs::remove_dir_all(out).expect("remove project");
+        }
+    }
+
+    #[test]
+    fn failed_model_and_search_generation_leave_existing_projects_unchanged() {
+        let model_source = r#"
+        CREATE TABLE products (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL
+        );
+        "#;
+        let search_source = r#"
+        index products
+        primary id
+        field id keyword primary filterable sortable
+        field name text searchable
+        "#;
+
+        for kind in ["model", "search"] {
+            let out = temp_test_root(&format!("rozectl-component-transaction-{kind}"));
+            fs::create_dir_all(out.join("src")).expect("create existing project");
+            fs::write(
+                out.join("Cargo.toml"),
+                "[package]\nname = \"existing-service\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+            )
+            .expect("write cargo manifest");
+            fs::write(out.join("src/main.rs"), "fn main() {}\n").expect("write main");
+            fs::write(out.join("application.txt"), "unchanged").expect("write sentinel");
+
+            let options = GenerateOptions::new(GenerateMode::Create, DependencySource::Path);
+            let error = match kind {
+                "model" => model::generate_model_project(
+                    model_source,
+                    &out,
+                    options,
+                    model::ModelFormat::Sql,
+                    model::ModelOrm::SeaOrm,
+                ),
+                "search" => {
+                    let schema = out.join("products.search");
+                    fs::write(&schema, search_source).expect("write search schema");
+                    search::generate_search_project(
+                        &schema,
+                        search::SearchEngine::Elasticsearch,
+                        &out,
+                        options,
+                    )
+                }
+                _ => unreachable!(),
+            }
+            .expect_err("path dependencies without a Roze workspace must fail");
+
+            let message = error.to_string();
+            assert!(
+                message.contains("--roze-source path requires")
+                    && message.contains("Cargo workspace"),
+                "{error:#}"
+            );
+            assert_eq!(
+                fs::read_to_string(out.join("application.txt")).expect("read sentinel"),
+                "unchanged"
+            );
+            assert_eq!(
+                fs::read_to_string(out.join("src/main.rs")).expect("read main"),
+                "fn main() {}\n"
+            );
+            assert_eq!(
+                fs::read_to_string(out.join("Cargo.toml")).expect("read cargo manifest"),
+                "[package]\nname = \"existing-service\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"
+            );
+            assert!(!out.join("src/model").exists());
+            assert!(!out.join("src/search").exists());
+            fs::remove_dir_all(out).expect("remove project");
+        }
     }
 
     #[test]
@@ -13222,6 +13521,177 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "compile-smoke: generates and compiles the three production reference systems"]
+    fn generated_production_reference_systems_compile() {
+        let root = generated_compile_workspace("rozectl-production-reference-systems");
+        let fixtures = repo_root().join("example/production-systems");
+        let options = GenerateOptions::new(GenerateMode::Create, DependencySource::Path);
+        let update = GenerateOptions::new(GenerateMode::Update, DependencySource::Path);
+
+        let inventory_api = fixtures.join("rest-crud/inventory.api");
+        let inventory_out = root.join("apps/inventory-api");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: inventory_api.clone(),
+                out: inventory_out.clone(),
+                options,
+            })
+            .expect("generate inventory API");
+        register_workspace_member(&inventory_out).expect("register inventory API");
+        model::generate_model_project(
+            &fs::read_to_string(fixtures.join("rest-crud/inventory.sql"))
+                .expect("read inventory schema"),
+            &inventory_out,
+            update,
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("generate inventory model");
+        search::generate_search_project(
+            &fixtures.join("rest-crud/inventory.search"),
+            search::SearchEngine::Elasticsearch,
+            &inventory_out,
+            update,
+        )
+        .expect("generate inventory search");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: inventory_api,
+                out: inventory_out.clone(),
+                options: update,
+            })
+            .expect("update inventory API");
+        assert_generated_operations_assets(&inventory_out);
+
+        let catalog_api = fixtures.join("service-mesh/catalog-rpc.api");
+        let catalog_out = root.join("apps/catalog-rpc");
+        registry()
+            .dispatch(GeneratorCommand::RpcGenerate {
+                api: catalog_api.clone(),
+                out: catalog_out.clone(),
+                options,
+            })
+            .expect("generate catalog RPC");
+        register_workspace_member(&catalog_out).expect("register catalog RPC");
+
+        let checkout_api = fixtures.join("service-mesh/checkout.api");
+        let checkout_out = root.join("apps/checkout-api");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: checkout_api.clone(),
+                out: checkout_out.clone(),
+                options,
+            })
+            .expect("generate checkout API");
+        register_workspace_member(&checkout_out).expect("register checkout API");
+        crate::service::add_dependency(
+            &checkout_out,
+            crate::service::AddDependency {
+                name: "catalog".to_string(),
+                crate_name: "catalog-rpc".to_string(),
+                path: PathBuf::from("../catalog-rpc"),
+                contract: Some(catalog_api.clone()),
+                target: None,
+                endpoints: vec!["127.0.0.1:18100".to_string()],
+                etcd_hosts: Vec::new(),
+                etcd_key: None,
+                timeout_ms: 1500,
+            },
+        )
+        .expect("add managed catalog dependency");
+        model::generate_model_project(
+            &fs::read_to_string(fixtures.join("service-mesh/checkout.sql"))
+                .expect("read checkout schema"),
+            &checkout_out,
+            update,
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("generate checkout model");
+        registry()
+            .dispatch(GeneratorCommand::RpcGenerate {
+                api: catalog_api,
+                out: catalog_out.clone(),
+                options: update,
+            })
+            .expect("update catalog RPC");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: checkout_api,
+                out: checkout_out.clone(),
+                options: update,
+            })
+            .expect("update checkout API");
+        crate::service::sync(&checkout_out, true).expect("check managed dependency sync");
+        assert_generated_operations_assets(&catalog_out);
+        assert_generated_operations_assets(&checkout_out);
+
+        let order_api = fixtures.join("event-commerce/order.api");
+        let order_out = root.join("apps/order-api");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: order_api.clone(),
+                out: order_out.clone(),
+                options,
+            })
+            .expect("generate order API");
+        register_workspace_member(&order_out).expect("register order API");
+        model::generate_model_project(
+            &fs::read_to_string(fixtures.join("event-commerce/order.sql"))
+                .expect("read order schema"),
+            &order_out,
+            update,
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("generate order model");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: order_api,
+                out: order_out.clone(),
+                options: update,
+            })
+            .expect("update order API");
+        assert_generated_operations_assets(&order_out);
+
+        let events_api = fixtures.join("event-commerce/order-events.api");
+        let events_out = root.join("apps/order-events");
+        write_stream_worker_project(&events_api, &events_out, options)
+            .expect("generate order event worker");
+        write_stream_worker_project(&events_api, &events_out, update)
+            .expect("update order event worker");
+
+        for project in [
+            &inventory_out,
+            &catalog_out,
+            &checkout_out,
+            &order_out,
+            &events_out,
+        ] {
+            cargo_check_generated(&project.join("Cargo.toml"));
+        }
+
+        fs::remove_dir_all(root).expect("remove reference systems workspace");
+    }
+
+    fn assert_generated_operations_assets(project: &Path) {
+        for asset in [
+            "ops/production-evidence.md",
+            "ops/prometheus-rules.yaml",
+            "ops/grafana-dashboard.json",
+            "ops/slo.yaml",
+            "ops/incident-response.yaml",
+            "ops/release-rollout.yaml",
+        ] {
+            assert!(
+                project.join(asset).is_file(),
+                "missing generated operations asset {}",
+                project.join(asset).display()
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "compile-smoke: generates HTTP and multi-service smoke tests and runs cargo check"]
     fn generated_http_smoke_project_compiles() {
         let root = generated_compile_workspace("rozectl-http-smoke-compile");
@@ -14339,9 +14809,14 @@ mod tests {
         .expect("write custom middleware");
         fs::write(
             out.join("src/middleware/app.rs"),
-            "use roze_http::Router;\n\npub fn apply(router: Router) -> Router {\n    // application context/session layer\n    router\n}\n",
+            "use roze_http::Router;\n\nuse crate::svc::ServiceContext;\n\npub fn apply(router: Router, ctx: ServiceContext) -> Router {\n    // application context/session layer\n    let _ = ctx;\n    router\n}\n",
         )
         .expect("write application middleware hook");
+        fs::write(
+            out.join("src/application.rs"),
+            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    // attach application report source\n    Ok(ctx)\n}\n",
+        )
+        .expect("write application context hook");
         fs::write(
             out.join("src/logic/users/mod.rs"),
             "mod get_user;\npub use get_user::{get_user, AdminTokenReq};\nmod catalog_map;\n",
@@ -14388,9 +14863,15 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/middleware/app.rs"))
             .expect("read application middleware hook")
             .contains("application context/session layer"));
+        assert!(fs::read_to_string(out.join("src/application.rs"))
+            .expect("read application context hook")
+            .contains("attach application report source"));
         assert!(fs::read_to_string(out.join("src/main.rs"))
             .expect("read generated main")
-            .contains("middleware::app::apply(app)"));
+            .contains("middleware::app::apply(app, ctx)"));
+        assert!(fs::read_to_string(out.join("src/main.rs"))
+            .expect("read generated main")
+            .contains("application::configure_context"));
         assert_eq!(
             fs::read_to_string(out.join("config.yaml")).expect("read config"),
             "name: custom\n"

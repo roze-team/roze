@@ -12,7 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 #[cfg(feature = "rdkafka")]
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::{sync::broadcast, task::JoinHandle};
 
 #[cfg(feature = "rdkafka")]
@@ -65,6 +65,8 @@ pub struct KafkaConfig {
     pub max_poll_interval_ms: u64,
     #[serde(default = "default_flush_timeout_ms")]
     pub flush_timeout_ms: u64,
+    #[serde(default = "default_message_timeout_ms")]
+    pub message_timeout_ms: u64,
     #[serde(default = "default_linger_ms")]
     pub linger_ms: u64,
     #[serde(default = "default_batch_size")]
@@ -101,6 +103,7 @@ impl Default for KafkaConfig {
             heartbeat_interval_ms: default_heartbeat_interval_ms(),
             max_poll_interval_ms: default_max_poll_interval_ms(),
             flush_timeout_ms: default_flush_timeout_ms(),
+            message_timeout_ms: default_message_timeout_ms(),
             linger_ms: default_linger_ms(),
             batch_size: default_batch_size(),
             retry_backoff_ms: default_retry_backoff_ms(),
@@ -143,6 +146,10 @@ fn default_max_poll_interval_ms() -> u64 {
 
 fn default_flush_timeout_ms() -> u64 {
     5_000
+}
+
+fn default_message_timeout_ms() -> u64 {
+    30_000
 }
 
 fn default_linger_ms() -> u64 {
@@ -371,18 +378,18 @@ impl KafkaRecord {
     }
 
     pub fn from_mq_message(message: roze_mq::Message) -> Self {
-        Self {
-            topic: message.topic,
-            key: message.key,
-            headers: message.headers,
-            timestamp_millis: message.timestamp_millis,
-            partition: message.partition,
-            offset: message.offset,
-            group: message.group,
-            payload: message.payload,
-            attempt: message.attempt,
-            dead_letter_topic: message.dead_letter_topic,
-        }
+        let timestamp_millis = message.timestamp_millis;
+        let partition = message.partition;
+        let offset = message.offset;
+        let group = message.group.clone();
+        let dead_letter_topic = message.dead_letter_topic.clone();
+        let mut record = Self::from_event(message.into_event_envelope());
+        record.timestamp_millis = timestamp_millis;
+        record.partition = partition;
+        record.offset = offset;
+        record.group = group;
+        record.dead_letter_topic = dead_letter_topic;
+        record
     }
 }
 
@@ -778,6 +785,7 @@ impl RdkafkaProducer {
             .set("linger.ms", config.linger_ms.to_string())
             .set("message.send.max.retries", config.max_retries.to_string())
             .set("retry.backoff.ms", config.retry_backoff_ms.to_string())
+            .set("message.timeout.ms", config.message_timeout_ms.to_string())
             .create()?;
 
         Ok(Self { producer, config })
@@ -865,7 +873,10 @@ impl Publisher for RdkafkaProducer {
 #[cfg(feature = "rdkafka")]
 #[derive(Debug)]
 enum RdkafkaAckCmd {
-    Commit(TopicOffsetMetadata),
+    Commit {
+        metadata: TopicOffsetMetadata,
+        result: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[cfg(feature = "rdkafka")]
@@ -1055,7 +1066,7 @@ impl RdkafkaSubscriber {
             meta.partition,
             Offset::Offset(meta.next_offset),
         )?;
-        consumer.commit(&offsets, CommitMode::Async)?;
+        consumer.commit(&offsets, CommitMode::Sync)?;
         Ok(())
     }
 }
@@ -1120,10 +1131,17 @@ impl Subscriber for RdkafkaSubscriber {
                                         let ack_tx = ack_tx.clone();
                                         let meta = commit_meta.clone();
                                         Box::pin(async move {
+                                            let (result_tx, result_rx) = oneshot::channel();
                                             ack_tx
-                                                .send(RdkafkaAckCmd::Commit(meta))
-                                                .map_err(|_| anyhow::anyhow!("ack channel closed"))
-                                                .map(|_| ())
+                                                .send(RdkafkaAckCmd::Commit {
+                                                    metadata: meta,
+                                                    result: result_tx,
+                                                })
+                                                .map_err(|_| anyhow::anyhow!("ack channel closed"))?;
+                                            result_rx
+                                                .await
+                                                .map_err(|_| anyhow::anyhow!("ack result channel closed"))?
+                                                .map_err(anyhow::Error::msg)
                                         })
                                     }),
                                     Arc::new(move || {
@@ -1147,12 +1165,15 @@ impl Subscriber for RdkafkaSubscriber {
                         }
                     }
                     maybe_ack = ack_rx.recv() => {
-                        if let Some(RdkafkaAckCmd::Commit(meta)) = maybe_ack {
-                            if let Err(err) = RdkafkaSubscriber::commit_with_consumer(&consumer, &meta) {
-                                record_kafka_event(&meta.topic, Some(&cfg.group_id_or_default()), "commit_failed");
-                                tracing::warn!(topic=%meta.topic, error=%err, "kafka commit failed");
+                        if let Some(RdkafkaAckCmd::Commit { metadata, result }) = maybe_ack {
+                            if let Err(err) = RdkafkaSubscriber::commit_with_consumer(&consumer, &metadata) {
+                                let message = err.to_string();
+                                let _ = result.send(Err(message.clone()));
+                                record_kafka_event(&metadata.topic, Some(&cfg.group_id_or_default()), "commit_failed");
+                                tracing::warn!(topic=%metadata.topic, error=%message, "kafka commit failed");
                             } else {
-                                record_kafka_event(&meta.topic, Some(&cfg.group_id_or_default()), "acked");
+                                let _ = result.send(Ok(()));
+                                record_kafka_event(&metadata.topic, Some(&cfg.group_id_or_default()), "acked");
                             }
                         }
                     }
@@ -1287,6 +1308,11 @@ mod tests {
         assert_eq!(cfg.topic_name("orders"), "app.orders");
     }
 
+    #[test]
+    fn message_timeout_is_bounded_by_default() {
+        assert_eq!(KafkaConfig::default().message_timeout_ms, 30_000);
+    }
+
     #[tokio::test]
     async fn in_memory_kafka_round_trips() {
         let broker = InMemoryKafkaBroker::new();
@@ -1336,6 +1362,9 @@ mod tests {
     #[test]
     fn kafka_record_preserves_standard_mq_metadata() {
         let mut record = KafkaRecord::new("orders", serde_json::json!({"id": 1}));
+        record
+            .headers
+            .insert("x-roze-idempotency-key".to_string(), "order-1".to_string());
         record.timestamp_millis = 42;
         record.partition = Some(3);
         record.offset = Some(99);
@@ -1352,6 +1381,10 @@ mod tests {
         assert_eq!(restored.partition, Some(3));
         assert_eq!(restored.offset, Some(99));
         assert_eq!(restored.group.as_deref(), Some("workers"));
+        assert_eq!(
+            restored.to_mq_message().idempotency_key.as_deref(),
+            Some("order-1")
+        );
     }
 
     #[test]
@@ -1514,5 +1547,149 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         handle.abort();
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "rdkafka")]
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_KAFKA_BROKERS and an externally managed Kafka restart cycle"]
+    async fn production_soak_rdkafka_disconnect_recovery() {
+        let brokers =
+            std::env::var("ROZE_TEST_KAFKA_BROKERS").expect("ROZE_TEST_KAFKA_BROKERS is required");
+        let probe_broker = split_csv(&brokers)
+            .into_iter()
+            .next()
+            .expect("ROZE_TEST_KAFKA_BROKERS must contain one endpoint");
+        let probe_address = probe_broker
+            .parse::<std::net::SocketAddr>()
+            .expect("ROZE_TEST_KAFKA_BROKERS must contain host:port");
+        let seconds = std::env::var("ROZE_KAFKA_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300);
+        let require_disconnect =
+            std::env::var("ROZE_KAFKA_REQUIRE_DISCONNECT").is_ok_and(|value| value == "1");
+        let suffix = format!("{}-{}", std::process::id(), current_millis());
+        let topic = format!("events-{suffix}");
+        let config = KafkaConfig {
+            brokers: split_csv(&brokers),
+            client_id: Some(format!("roze-soak-{suffix}")),
+            group_id: Some(format!("roze-soak-{suffix}")),
+            topic_prefix: format!("roze.soak.{suffix}"),
+            enable_manual_ack: true,
+            enable_auto_commit: false,
+            flush_timeout_ms: 2_000,
+            message_timeout_ms: 2_000,
+            linger_ms: 0,
+            retry_backoff_ms: 100,
+            max_retries: 3,
+            ..Default::default()
+        };
+        let producer = RdkafkaProducer::new(config.clone()).expect("create Kafka producer");
+        let subscriber = RdkafkaSubscriber::new(config);
+        let mut receiver = subscriber.subscribe(&topic).await.expect("subscribe");
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(seconds);
+        let mut attempts = 0_u64;
+        let mut delivered = 0_u64;
+        let mut disconnect_observations = 0_u64;
+        let mut recoveries = 0_u64;
+        let mut recovery_started = None;
+        let mut delivery_latency = roze_metrics::LatencyHistogram::new();
+        let mut recovery_latency = roze_metrics::LatencyHistogram::new();
+
+        while std::time::Instant::now() < deadline {
+            attempts = attempts.saturating_add(1);
+            if require_disconnect {
+                if std::net::TcpStream::connect_timeout(&probe_address, Duration::from_millis(500))
+                    .is_err()
+                {
+                    disconnect_observations = disconnect_observations.saturating_add(1);
+                    recovery_started.get_or_insert_with(std::time::Instant::now);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                let metadata_result = producer
+                    .producer
+                    .client()
+                    .fetch_metadata(None, Timeout::After(Duration::from_millis(500)));
+                if metadata_result.is_err() {
+                    disconnect_observations = disconnect_observations.saturating_add(1);
+                    recovery_started.get_or_insert_with(std::time::Instant::now);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                if let Some(recovery_started_at) = recovery_started.take() {
+                    recoveries = recoveries.saturating_add(1);
+                    recovery_latency.observe(recovery_started_at.elapsed());
+                }
+            }
+            let operation_started = std::time::Instant::now();
+            let mut message = KafkaRecord::new(
+                &topic,
+                serde_json::json!({"sequence": attempts, "sent_at_ms": current_millis()}),
+            );
+            message.key = Some(format!("{suffix}-{attempts}"));
+            let publish_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), producer.publish(message))
+                    .await;
+            if !matches!(publish_result, Ok(Ok(()))) {
+                disconnect_observations = disconnect_observations.saturating_add(1);
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                delivery_latency.observe(operation_started.elapsed());
+                continue;
+            }
+
+            let receive_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv()).await;
+            let Ok(Ok(delivery)) = receive_result else {
+                disconnect_observations = disconnect_observations.saturating_add(1);
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                delivery_latency.observe(operation_started.elapsed());
+                continue;
+            };
+            let ack_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), delivery.ack()).await;
+            if !matches!(ack_result, Ok(Ok(()))) {
+                disconnect_observations = disconnect_observations.saturating_add(1);
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                delivery_latency.observe(operation_started.elapsed());
+                continue;
+            }
+
+            delivered = delivered.saturating_add(1);
+            delivery_latency.observe(operation_started.elapsed());
+            if let Some(recovery_started) = recovery_started.take() {
+                recoveries = recoveries.saturating_add(1);
+                recovery_latency.observe(recovery_started.elapsed());
+            }
+        }
+
+        let _ = producer.flush();
+        let elapsed_ms = started.elapsed().as_millis().max(1);
+        let messages_per_second_milli =
+            u128::from(delivered).saturating_mul(1_000_000) / elapsed_ms;
+        let p99_delivery_us = delivery_latency
+            .percentile_upper_bound_micros(99)
+            .expect("Kafka delivery latency");
+        let p99_recovery_us = recovery_latency
+            .percentile_upper_bound_micros(99)
+            .unwrap_or(0);
+        println!(
+            "roze_kafka_soak kafka_elapsed_ms={elapsed_ms} kafka_attempts={attempts} kafka_delivered={delivered} kafka_disconnect_observations={disconnect_observations} kafka_recoveries={recoveries} kafka_messages_per_second_milli={messages_per_second_milli} kafka_p99_delivery_us={p99_delivery_us} kafka_p99_recovery_us={p99_recovery_us}"
+        );
+
+        assert!(attempts > 0);
+        assert!(delivered > 0);
+        if require_disconnect {
+            assert!(disconnect_observations > 0);
+            assert!(recoveries > 0);
+            assert!(p99_recovery_us > 0);
+            assert!(
+                recovery_started.is_none(),
+                "Kafka did not recover before the soak ended"
+            );
+        }
     }
 }

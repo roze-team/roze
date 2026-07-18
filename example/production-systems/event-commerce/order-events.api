@@ -1,0 +1,27 @@
+service order-events {
+    rpc OrderCreated (OrderCreatedEvent) returns (EventAccepted)
+    rpc PaymentCaptured (PaymentCapturedEvent) returns (EventAccepted)
+    rpc OrderCancelled (OrderCancelledEvent) returns (EventAccepted)
+}
+
+type (
+    OrderCreatedEvent {
+        order_id: string
+        tenant_id: string
+        amount_minor: i64
+    }
+
+    PaymentCapturedEvent {
+        order_id: string
+        payment_id: string
+    }
+
+    OrderCancelledEvent {
+        order_id: string
+        reason: string
+    }
+
+    EventAccepted {
+        accepted: bool
+    }
+)

@@ -6,6 +6,10 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 jsonwebtoken.workspace = true
+reqwest.workspace = true
+roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 serde.workspace = true
+tokio.workspace = true

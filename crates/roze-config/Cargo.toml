@@ -19,3 +19,6 @@ roze-auth = { path = "../roze-auth" }
 roze-nats = { path = "../roze-nats" }
 roze-resilience = { path = "../roze-resilience" }
 roze-storage = { path = "../roze-storage" }
+
+[dev-dependencies]
+roze-metrics = { path = "../roze-metrics" }

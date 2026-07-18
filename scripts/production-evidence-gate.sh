@@ -22,7 +22,9 @@ require_evidence() {
   local found=0
   shopt -s nullglob
   for report in docs/evidence/*-"${evidence_area}"-24h.md docs/evidence/*-"${evidence_area}"-72h.md; do
-    if grep -Eq '^pass$' "$report" && ! grep -Eq 'TBD|inconclusive' "$report"; then
+    if bash scripts/production-evidence-report-verify.sh \
+      "$report" "$evidence_area" >/dev/null
+    then
       found=1
       break
     fi

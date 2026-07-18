@@ -6,7 +6,8 @@ use crate::{
 };
 
 pub fn render_rest_main(_spec: &ApiSpec) -> String {
-    r#"mod config;
+    r#"mod application;
+mod config;
 mod handler;
 mod logic;
 mod middleware;
@@ -48,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let service_name = config.name.clone();
-    let ctx = svc::ServiceContext::new(config).await?;
+    let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
     tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
     let health = ctx.health.clone();
     let middleware_config = roze_middleware::CommonMiddlewareConfig::from(&rest.middlewares);
@@ -62,9 +63,9 @@ async fn main() -> anyhow::Result<()> {
         body_limit_bytes = ?middleware_config.body_limit_bytes,
         "REST middleware plan resolved"
     );
-    let app = route::router(ctx);
+    let app = route::router(ctx.clone());
     tracing::debug!(protocol = "rest", "REST router constructed");
-    let app = middleware::app::apply(app);
+    let app = middleware::app::apply(app, ctx);
     tracing::debug!(protocol = "rest", "application middleware hook applied");
     let app = roze_middleware::apply_common_with_config(app, middleware_config);
     tracing::debug!(protocol = "rest", "Roze common middleware applied");
@@ -317,6 +318,10 @@ fn report_chart_interface_code() -> &'static str {
 const MAX_CHART_DIMENSIONS: usize = 8;
 const MAX_CHART_MEASURES: usize = 16;
 const MAX_QUERY_LIMIT: u64 = 10_000;
+const MAX_ACTIVE_REPORT_EXPORTS: usize = 10_000;
+const REPORT_EXPORT_EXPIRY_SECS: u64 = 15 * 60;
+const REPORT_EXPORT_RETENTION_MILLIS: u64 = REPORT_EXPORT_EXPIRY_SECS * 1_000;
+const CHART_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone, Deserialize)]
 struct ReportExportRequest {
@@ -354,6 +359,10 @@ struct ReportExportResource {
     tenant_id: String,
     #[serde(skip_serializing)]
     owner_subject: String,
+    #[serde(skip_serializing)]
+    cancellation: roze_report::ReportCancellation,
+    #[serde(skip_serializing)]
+    terminal_at_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -433,6 +442,13 @@ fn report_exports() -> &'static RwLock<BTreeMap<String, ReportExportResource>> {
     EXPORTS.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
+fn report_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
 fn validate_report_request(request: &ReportExportRequest) -> Result<(), RozeError> {
     if request.report.trim().is_empty() {
         return Err(RozeError::BadRequest("report is required".to_string()));
@@ -487,8 +503,21 @@ async fn create_report_export(
 ) -> Result<ApiResponse<ReportExportResource>, RozeError> {
     validate_report_request(&request)?;
     let (subject, tenant_id) = report_identity(&headers, &ctx)?;
+    let report_source = ctx
+        .report_source()
+        .map_err(|error| RozeError::Unavailable(error.to_string()))?;
     static EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
     let id = format!("export-{}", EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let cancellation = roze_report::ReportCancellation::new();
+    let task_query = roze_report::ReportDataQuery {
+        report: request.report.clone(),
+        columns: request.columns.clone(),
+        filters: request.filters.clone(),
+        from: request.from.clone(),
+        to: request.to.clone(),
+        timezone: request.timezone.clone(),
+        max_rows: roze_report::ExportLimits::default().max_rows,
+    };
     let resource = ReportExportResource {
         id: id.clone(),
         report: request.report,
@@ -506,15 +535,26 @@ async fn create_report_export(
         filter_count: request.filters.len(),
         tenant_id: tenant_id.clone(),
         owner_subject: subject.clone(),
+        cancellation: cancellation.clone(),
+        terminal_at_millis: None,
     };
-    report_exports().write().await.insert(id, resource.clone());
+    {
+        let mut exports = report_exports().write().await;
+        let now = report_now_millis();
+        exports.retain(|_, export| {
+            export
+                .terminal_at_millis
+                .is_none_or(|terminal| now.saturating_sub(terminal) < REPORT_EXPORT_RETENTION_MILLIS)
+        });
+        if exports.len() >= MAX_ACTIVE_REPORT_EXPORTS {
+            return Err(RozeError::Unavailable(
+                "report export capacity is exhausted".to_string(),
+            ));
+        }
+        exports.insert(id, resource.clone());
+    }
     let task_id = resource.id.clone();
     let task_format = resource.format.clone();
-    let task_columns = if request.columns.is_empty() {
-        vec!["result".to_string()]
-    } else {
-        request.columns
-    };
     let task_tenant = report_object_part(&tenant_id);
     tokio::spawn(async move {
         let started = std::time::Instant::now();
@@ -527,43 +567,96 @@ async fn create_report_export(
             }
         }
         let completed = async {
+            let query_context = roze_report::ReportQueryContext {
+                subject,
+                tenant_id,
+                cancellation,
+            };
             let format = roze_report::ExportFormat::parse(&task_format)?;
-            let bytes = roze_report::render_export(
+            let rendered = roze_report::execute_export(
+                report_source,
+                query_context,
+                task_query,
                 format,
-                &task_columns,
-                &[],
                 roze_report::ExportLimits::default(),
-            )?;
-            let size = bytes.len() as u64;
-            let key = format!("reports/{task_tenant}/{task_id}.{}", format.extension());
+            )
+            .await?;
+            let size = rendered.bytes.len() as u64;
+            let key = format!("reports/{task_tenant}/{task_id}.{}", rendered.extension);
             let storage = ctx.storage()?;
             storage.put_object(roze_storage::PutObjectRequest {
                 key: key.clone(),
-                bytes,
-                content_type: Some(format.content_type().to_string()),
+                bytes: rendered.bytes,
+                content_type: Some(rendered.content_type),
                 metadata: BTreeMap::from([("export_id".to_string(), task_id.clone())]),
             }).await?;
-            let download = storage.presign_get(&key, std::time::Duration::from_secs(900)).await?;
+            let download = match storage
+                .presign_get(
+                    &key,
+                    std::time::Duration::from_secs(REPORT_EXPORT_EXPIRY_SECS),
+                )
+                .await
+            {
+                Ok(download) => download,
+                Err(error) => {
+                    let _ = storage.delete_object(&key).await;
+                    return Err(error);
+                }
+            };
             Ok::<_, anyhow::Error>((key, download.url, download.expires_at_millis, size))
         }.await;
         let mut exports = report_exports().write().await;
         let Some(export) = exports.get_mut(&task_id) else { return; };
-        if export.status == "cancelled" { return; }
+        if export.status == "cancelled" {
+            let orphaned_key = completed
+                .as_ref()
+                .ok()
+                .map(|(key, _, _, _)| key.clone());
+            drop(exports);
+            if let Some(key) = orphaned_key {
+                if let Ok(storage) = ctx.storage() {
+                    let _ = storage.delete_object(&key).await;
+                }
+            }
+            return;
+        }
+        let mut cleanup_key = None;
         match completed {
             Ok((key, url, expires_at, size)) => {
+                cleanup_key = Some(key.clone());
                 export.status = "completed".to_string();
                 export.progress_percent = 100;
                 export.object_key = Some(key);
                 export.download_url = Some(url);
                 export.expires_at = Some(expires_at.to_string());
+                export.terminal_at_millis = Some(report_now_millis());
                 roze_metrics::record_report_export(task_format.clone(), "completed", size, started.elapsed());
                 tracing::info!(event = "report.export.completed", export_id = %task_id, tenant = %task_tenant, "report export completed");
             }
             Err(error) => {
                 export.status = "failed".to_string();
-                export.error = Some(error.to_string());
+                export.error = Some("report export failed".to_string());
+                export.terminal_at_millis = Some(report_now_millis());
                 roze_metrics::record_report_export(task_format.clone(), "failed", 0, started.elapsed());
                 tracing::warn!(event = "report.export.failed", export_id = %task_id, tenant = %task_tenant, error = %error, "report export failed");
+            }
+        }
+        drop(exports);
+        if let Some(key) = cleanup_key {
+            if let Ok(storage) = ctx.storage() {
+                let cleanup_id = task_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        REPORT_EXPORT_EXPIRY_SECS,
+                    ))
+                    .await;
+                    if let Err(error) = storage.delete_object(&key).await {
+                        tracing::warn!(event = "report.export.cleanup_failed", export_id = %cleanup_id, object_key = %key, error = %error, "expired report object cleanup failed");
+                        return;
+                    }
+                    report_exports().write().await.remove(&cleanup_id);
+                    tracing::info!(event = "report.export.expired", export_id = %cleanup_id, object_key = %key, "expired report object removed");
+                });
             }
         }
     });
@@ -599,6 +692,8 @@ async fn cancel_report_export(
     ensure_export_owner(export, &subject, &tenant)?;
     if matches!(export.status.as_str(), "accepted" | "running") {
         export.status = "cancelled".to_string();
+        export.cancellation.cancel();
+        export.terminal_at_millis = Some(report_now_millis());
         roze_metrics::record_report_export(export.format.clone(), "cancelled", 0, std::time::Duration::ZERO);
         tracing::info!(event = "report.export.cancelled", export_id = %id, tenant = %tenant, subject = %subject, "report export cancelled");
     }
@@ -635,6 +730,54 @@ async fn chart_query(
     let started = std::time::Instant::now();
     let (subject, tenant) = report_identity(&headers, &ctx)?;
     validate_chart_query(&query)?;
+    let report_source = ctx
+        .report_source()
+        .map_err(|error| RozeError::Unavailable(error.to_string()))?;
+    let query_context = roze_report::ReportQueryContext {
+        subject: subject.clone(),
+        tenant_id: tenant.clone(),
+        cancellation: roze_report::ReportCancellation::new(),
+    };
+    let data_query = roze_report::ChartDataQuery {
+        chart: query.chart.clone(),
+        dimensions: query.dimensions.clone(),
+        measures: query.measures.clone(),
+        filters: query.filters.clone(),
+        group_by: query.group_by.clone(),
+        sort: query
+            .sort
+            .iter()
+            .map(|sort| roze_report::ChartDataSort {
+                field: sort.field.clone(),
+                direction: sort.direction.clone(),
+            })
+            .collect(),
+        time_bucket: query.time_bucket.clone(),
+        from: query.from.clone(),
+        to: query.to.clone(),
+        timezone: query.timezone.clone(),
+        limit: query.limit,
+    };
+    let dataset = roze_report::execute_chart(
+        report_source,
+        query_context,
+        data_query,
+        CHART_QUERY_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(event = "chart.query.failed", tenant = %tenant, subject = %subject, error = %error, "chart query failed");
+        if error.to_string().contains("timed out") {
+            RozeError::Unavailable("chart query timed out".to_string())
+        } else {
+            RozeError::Internal("chart query failed".to_string())
+        }
+    })?;
+    let result_rows = dataset
+        .series
+        .iter()
+        .map(|series| series.points.len() as u64)
+        .sum::<u64>();
     let response = ChartQueryResponse {
         chart: query.chart,
         dimensions: query.dimensions,
@@ -644,9 +787,24 @@ async fn chart_query(
         from: query.from,
         to: query.to,
         filter_count: query.filters.len(),
-        scanned_rows: 0,
-        result_rows: 0,
-        series: Vec::new(),
+        scanned_rows: dataset.scanned_rows,
+        result_rows,
+        series: dataset
+            .series
+            .into_iter()
+            .map(|series| ChartSeries {
+                name: series.name,
+                points: series
+                    .points
+                    .into_iter()
+                    .map(|point| ChartPoint {
+                        timestamp: point.timestamp,
+                        value: point.value,
+                        labels: point.labels,
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
     roze_metrics::record_chart_query("completed", response.scanned_rows, response.result_rows, started.elapsed());
     tracing::info!(event = "chart.query.completed", tenant = %tenant, subject = %subject, scanned_rows = response.scanned_rows, result_rows = response.result_rows, "chart query completed");
@@ -755,12 +913,15 @@ pub fn render_middleware_mod(spec: &ApiSpec) -> String {
 pub fn render_application_middleware() -> String {
     r#"use roze_http::Router;
 
+use crate::svc::ServiceContext;
+
 /// Stable application-owned hook for service-wide middleware.
 ///
 /// This file is preserved by `rozectl api generate --update`. Add custom
 /// Tower/Roze HTTP layers here; Roze common middleware wraps the returned
 /// router so request context and CORS preflight run before application layers.
-pub fn apply(router: Router) -> Router {
+pub fn apply(router: Router, ctx: ServiceContext) -> Router {
+    let _ = ctx;
     router
 }
 "#
@@ -1205,6 +1366,9 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
             partial_struct_name(&handler, &request_ty.name, FieldSource::Query)
         ));
     }
+    if route_spec.has_header || uses_auth || uses_idempotency {
+        params.push("headers: HeaderMap".to_string());
+    }
     if route_spec.groups.contains_key(&FieldSource::Form) {
         params.push(format!(
             "Form(form): Form<{}>",
@@ -1216,9 +1380,6 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
             "Json(body): Json<{}>",
             partial_struct_name(&handler, &request_ty.name, FieldSource::Json)
         ));
-    }
-    if route_spec.has_header || uses_auth || uses_idempotency {
-        params.push("headers: HeaderMap".to_string());
     }
 
     out.push_str(&format!(
@@ -2755,15 +2916,16 @@ mod tests {
         .expect("valid api");
 
         let main = render_rest_main(&spec);
-        assert!(main.contains("let app = route::router(ctx);"));
-        assert!(main.contains("middleware::app::apply(app)"));
+        assert!(main.contains("let app = route::router(ctx.clone());"));
+        assert!(main.contains("middleware::app::apply(app, ctx)"));
         assert!(main.contains("apply_common_with_config(app, middleware_config)"));
         assert!(main.contains("\"REST middleware plan resolved\""));
         assert!(main.contains("\"REST router constructed\""));
 
         let middleware_mod = render_middleware_mod(&spec);
         assert!(middleware_mod.contains("pub mod app;"));
-        assert!(render_application_middleware().contains("pub fn apply(router: Router) -> Router"));
+        assert!(render_application_middleware()
+            .contains("pub fn apply(router: Router, ctx: ServiceContext) -> Router"));
     }
 
     #[test]
@@ -2818,6 +2980,13 @@ mod tests {
 
         let handlers = render_handlers(&spec);
         assert!(handlers.contains("headers: HeaderMap"));
+        assert!(
+            handlers
+                .find("headers: HeaderMap")
+                .expect("headers extractor")
+                < handlers.find("Json(body)").expect("JSON extractor"),
+            "header extraction must precede the body-consuming JSON extractor"
+        );
         assert!(handlers.contains("IDEMPOTENCY_MISSING_KEY"));
         assert!(handlers.contains("idempotency_fingerprint(&req)"));
         assert!(handlers.contains("begin_idempotency(ctx.idempotency.as_ref()"));
@@ -2863,7 +3032,10 @@ mod tests {
         assert!(routes.contains("struct ChartQueryResponse"));
         assert!(routes.contains("download_url: None"));
         assert!(routes.contains("MAX_QUERY_LIMIT"));
-        assert!(routes.contains("series: Vec::new()"));
+        assert!(routes.contains("roze_report::execute_export("));
+        assert!(routes.contains("roze_report::execute_chart("));
+        assert!(routes.contains("export.cancellation.cancel()"));
+        assert!(!routes.contains("series: Vec::new()"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi

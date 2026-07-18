@@ -9,3 +9,6 @@ anyhow.workspace = true
 roze-shutdown = { path = "../roze-shutdown" }
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+roze-metrics = { path = "../roze-metrics" }

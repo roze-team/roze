@@ -173,6 +173,34 @@ impl EtcdRegistry {
         extract_json_field(&value, "ID")
             .ok_or_else(|| anyhow::anyhow!("missing etcd lease id in response"))
     }
+
+    async fn put_instance(&self, key: &str, payload: &[u8]) -> anyhow::Result<(String, String)> {
+        let mut last_error = None;
+        for endpoint in registry_endpoints(self.endpoints(), "http://127.0.0.1:2379") {
+            let result = async {
+                let lease_id = self.grant_lease(&endpoint).await?;
+                let body = serde_json::json!({
+                    "key": STANDARD.encode(key.as_bytes()),
+                    "value": STANDARD.encode(payload),
+                    "lease": lease_id,
+                });
+                self.client
+                    .post(format!("{}/v3/kv/put", endpoint))
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
+                    .error_for_status()?;
+                Ok::<_, anyhow::Error>(lease_id)
+            }
+            .await;
+            match result {
+                Ok(lease_id) => return Ok((endpoint, lease_id)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("etcd registry endpoint list is empty")))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +234,50 @@ impl ConsulRegistry {
     fn check_id(&self, service_id: &str) -> String {
         consul_check_id(service_id)
     }
+
+    async fn register_instance_once(
+        &self,
+        instance: &ServiceInstance,
+    ) -> anyhow::Result<(String, String, String)> {
+        let (address, port) = split_addr(&instance.addr)?;
+        let service_id = consul_instance_id(&instance.name, &instance.addr);
+        let endpoint = first_registry_endpoint(self.endpoints(), "http://127.0.0.1:8500");
+        let weight = instance.weight.max(1);
+        let mut metadata = instance.metadata.clone();
+        metadata.insert("weight".to_string(), weight.to_string());
+        let body = serde_json::json!({
+            "ID": service_id,
+            "Name": instance.name,
+            "Address": address,
+            "Port": port,
+            "Meta": metadata,
+            "Tags": [format!("weight={weight}")],
+            "Check": {
+                "TTL": format!("{}s", self.ttl_seconds),
+                "DeregisterCriticalServiceAfter": format!("{}s", self.ttl_seconds.saturating_mul(3)),
+            },
+        });
+        self.client
+            .put(format!("{}/v1/agent/service/register", endpoint))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
+            .error_for_status()?;
+        let check_id = self.check_id(&service_id);
+        Ok((endpoint, service_id, check_id))
+    }
+
+    async fn pass_check(&self, endpoint: &str, check_id: &str) -> anyhow::Result<()> {
+        self.client
+            .put(format!("{endpoint}/v1/agent/check/pass/{check_id}"))
+            .query(&[("note", format!("ttl={}s", self.ttl_seconds))])
+            .send()
+            .await
+            .map_err(|err| with_proxy_diagnostic(err.into(), endpoint))?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -213,24 +285,9 @@ impl Registry for EtcdRegistry {
     async fn register(&self, instance: ServiceInstance) -> anyhow::Result<()> {
         let payload = serde_json::to_vec(&instance)?;
         let key = etcd_instance_key(&self.prefix, &instance.name, &instance.addr);
-        let endpoint = first_registry_endpoint(self.endpoints(), "http://127.0.0.1:2379");
-        let lease_id = self.grant_lease(&endpoint).await?;
-        let body = serde_json::json!({
-            "key": STANDARD.encode(key.as_bytes()),
-            "value": STANDARD.encode(payload),
-            "lease": lease_id,
-        });
-
-        self.client
-            .post(format!("{}/v3/kv/put", endpoint))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
-            .error_for_status()?;
-
-        let lease = lease_id.clone();
-        let client = self.client.clone();
+        let (mut endpoint, mut lease) = self.put_instance(&key, &payload).await?;
+        let registry = self.clone();
+        let recovery_key = key.clone();
         let renew_interval = self.renew_interval_secs;
         let renew_handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(renew_interval));
@@ -238,16 +295,44 @@ impl Registry for EtcdRegistry {
             loop {
                 ticker.tick().await;
                 let body = serde_json::json!({ "ID": lease });
-                let result = client
+                let result = registry
+                    .client
                     .post(format!("{}/v3/lease/keepalive", endpoint))
                     .json(&body)
                     .send()
                     .await;
-                let Ok(resp) = result else {
-                    break;
+                let keepalive_ok = match result {
+                    Ok(response) => response.error_for_status().is_ok(),
+                    Err(_) => false,
                 };
-                if resp.error_for_status().is_err() {
-                    break;
+                if keepalive_ok {
+                    continue;
+                }
+                tracing::warn!(
+                    registry = "etcd",
+                    instance_key = %recovery_key,
+                    "registry keepalive failed; waiting to recreate registration"
+                );
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    match registry.put_instance(&recovery_key, &payload).await {
+                        Ok((recovered_endpoint, recovered_lease)) => {
+                            endpoint = recovered_endpoint;
+                            lease = recovered_lease;
+                            tracing::info!(
+                                registry = "etcd",
+                                instance_key = %recovery_key,
+                                "registry registration recovered"
+                            );
+                            break;
+                        }
+                        Err(error) => tracing::warn!(
+                            registry = "etcd",
+                            instance_key = %recovery_key,
+                            error = %error,
+                            "registry registration recovery attempt failed"
+                        ),
+                    }
                 }
             }
         });
@@ -382,52 +467,50 @@ impl Registry for EtcdRegistry {
 #[async_trait]
 impl Registry for ConsulRegistry {
     async fn register(&self, instance: ServiceInstance) -> anyhow::Result<()> {
-        let (address, port) = split_addr(&instance.addr)?;
-        let service_id = consul_instance_id(&instance.name, &instance.addr);
-        let endpoint = first_registry_endpoint(self.endpoints(), "http://127.0.0.1:8500");
-        let weight = instance.weight.max(1);
-        let mut metadata = instance.metadata;
-        metadata.insert("weight".to_string(), weight.to_string());
-        let body = serde_json::json!({
-            "ID": service_id,
-            "Name": instance.name,
-            "Address": address,
-            "Port": port,
-            "Meta": metadata,
-            "Tags": [format!("weight={weight}")],
-            "Check": {
-                "TTL": format!("{}s", self.ttl_seconds),
-                "DeregisterCriticalServiceAfter": format!("{}s", self.ttl_seconds.saturating_mul(3)),
-            },
-        });
-
-        self.client
-            .put(format!("{}/v1/agent/service/register", endpoint))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
-            .error_for_status()?;
-
-        let client = self.client.clone();
+        let (mut endpoint, service_id, mut check_id) =
+            self.register_instance_once(&instance).await?;
+        self.pass_check(&endpoint, &check_id).await?;
+        let registry = self.clone();
+        let recovery_instance = instance.clone();
         let renew_interval = self.renew_interval_secs;
-        let ttl_seconds = self.ttl_seconds;
-        let check_id = self.check_id(&service_id);
         let renew_handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(renew_interval));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                let result = client
-                    .put(format!("{}/v1/agent/check/pass/{}", endpoint, check_id))
-                    .query(&[("note", format!("ttl={}s", ttl_seconds))])
-                    .send()
-                    .await;
-                let Ok(resp) = result else {
-                    break;
-                };
-                if resp.error_for_status().is_err() {
-                    break;
+                if registry.pass_check(&endpoint, &check_id).await.is_ok() {
+                    continue;
+                }
+                tracing::warn!(
+                    registry = "consul",
+                    service = %recovery_instance.name,
+                    addr = %recovery_instance.addr,
+                    "registry keepalive failed; waiting to recreate registration"
+                );
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    match registry.register_instance_once(&recovery_instance).await {
+                        Ok((recovered_endpoint, _, recovered_check_id)) => {
+                            endpoint = recovered_endpoint;
+                            check_id = recovered_check_id;
+                            if registry.pass_check(&endpoint, &check_id).await.is_ok() {
+                                tracing::info!(
+                                    registry = "consul",
+                                    service = %recovery_instance.name,
+                                    addr = %recovery_instance.addr,
+                                    "registry registration recovered"
+                                );
+                                break;
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            registry = "consul",
+                            service = %recovery_instance.name,
+                            addr = %recovery_instance.addr,
+                            error = %error,
+                            "registry registration recovery attempt failed"
+                        ),
+                    }
                 }
             }
         });

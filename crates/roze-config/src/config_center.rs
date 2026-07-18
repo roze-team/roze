@@ -20,6 +20,7 @@ use futures_util::StreamExt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use tokio::{
     sync::{mpsc, RwLock},
     time::{self, Instant},
@@ -1373,18 +1374,30 @@ async fn notify_config_listeners<T>(
         .enumerate()
         .map(|(index, listener)| {
             let config = config.clone();
-            tokio::task::spawn_blocking(move || {
-                listener(&config);
-                index
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(|| listener(&config)))
+                    .map(|_| index)
+                    .map_err(|_| ());
+                let _ = sender.send(result);
+            });
+            tokio::spawn(async move {
+                (
+                    index,
+                    time::timeout(timeout.max(Duration::from_millis(1)), receiver).await,
+                )
             })
         })
         .collect::<Vec<_>>();
 
     for task in tasks.drain(..) {
-        match time::timeout(timeout.max(Duration::from_millis(1)), task).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => {
-                warn!(%err, source, "config center config listener failed");
+        match task.await {
+            Ok((_, Ok(Ok(_)))) => {}
+            Ok((_, Ok(Err(_)))) => {
+                warn!(source, "config center config listener panicked");
+            }
+            Ok((_, Err(_))) => {
+                warn!(source, "config center config listener channel closed");
             }
             Err(_) => {
                 warn!(
@@ -1410,18 +1423,30 @@ async fn notify_reload_listeners<T>(
         .enumerate()
         .map(|(index, listener)| {
             let result = result.clone();
-            tokio::task::spawn_blocking(move || {
-                listener(&result);
-                index
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let outcome = catch_unwind(AssertUnwindSafe(|| listener(&result)))
+                    .map(|_| index)
+                    .map_err(|_| ());
+                let _ = sender.send(outcome);
+            });
+            tokio::spawn(async move {
+                (
+                    index,
+                    time::timeout(timeout.max(Duration::from_millis(1)), receiver).await,
+                )
             })
         })
         .collect::<Vec<_>>();
 
     for task in tasks.drain(..) {
-        match time::timeout(timeout.max(Duration::from_millis(1)), task).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => {
-                warn!(%err, source, "config center reload listener failed");
+        match task.await {
+            Ok((_, Ok(Ok(_)))) => {}
+            Ok((_, Ok(Err(_)))) => {
+                warn!(source, "config center reload listener panicked");
+            }
+            Ok((_, Err(_))) => {
+                warn!(source, "config center reload listener channel closed");
             }
             Err(_) => {
                 warn!(
@@ -1873,6 +1898,172 @@ mod tests {
         assert_eq!(values, vec!["name: demo\n"]);
     }
 
+    async fn try_etcd_write(endpoint: &str, key: &str, value: &str) -> Result<()> {
+        reqwest::Client::new()
+            .post(format!("{}/v3/kv/put", endpoint.trim_end_matches('/')))
+            .json(&serde_json::json!({
+                "key": STANDARD.encode(key),
+                "value": STANDARD.encode(value),
+            }))
+            .send()
+            .await?
+            .error_for_status()
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    async fn try_etcd_delete(endpoint: &str, key: &str) -> Result<()> {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/v3/kv/deleterange",
+                endpoint.trim_end_matches('/')
+            ))
+            .json(&serde_json::json!({ "key": STANDARD.encode(key) }))
+            .send()
+            .await?
+            .error_for_status()
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_ETCD_ENDPOINT, for example http://127.0.0.1:2379"]
+    async fn etcd_subscriber_reads_and_watches_real_service() {
+        let endpoint =
+            std::env::var("ROZE_TEST_ETCD_ENDPOINT").expect("ROZE_TEST_ETCD_ENDPOINT is required");
+        let key = format!(
+            "/roze/reference/config-{}-{}",
+            std::process::id(),
+            current_millis()
+        );
+        try_etcd_write(&endpoint, &key, "name: v1\n")
+            .await
+            .expect("write initial Etcd config");
+
+        let subscriber = EtcdSubscriber::new(vec![endpoint.clone()], key.clone());
+        assert_eq!(
+            subscriber.value().await.expect("read Etcd config"),
+            "name: v1\n"
+        );
+
+        let mut updates = subscriber.watch().await.expect("watch Etcd config");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        try_etcd_write(&endpoint, &key, "name: v2\n")
+            .await
+            .expect("write updated Etcd config");
+        let updated = tokio::time::timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .expect("Etcd watch timeout")
+            .expect("Etcd watch update");
+        assert_eq!(updated, "name: v2\n");
+
+        try_etcd_delete(&endpoint, &key)
+            .await
+            .expect("delete Etcd config");
+    }
+
+    #[tokio::test]
+    #[ignore = "production-soak: requires ROZE_TEST_ETCD_ENDPOINT and external disconnect injection"]
+    async fn production_soak_etcd_subscriber_disconnect_recovery() {
+        let endpoint =
+            std::env::var("ROZE_TEST_ETCD_ENDPOINT").expect("ROZE_TEST_ETCD_ENDPOINT is required");
+        let seconds = std::env::var("ROZE_CONFIG_ETCD_SOAK_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300);
+        let require_disconnect =
+            std::env::var("ROZE_CONFIG_ETCD_REQUIRE_DISCONNECT").is_ok_and(|value| value == "1");
+        let key = format!(
+            "/roze/soak/config-{}-{}",
+            std::process::id(),
+            current_millis()
+        );
+        try_etcd_write(&endpoint, &key, "name: initial\n")
+            .await
+            .expect("write initial soak config");
+        let subscriber = EtcdSubscriber::new(vec![endpoint.clone()], key.clone());
+        let mut updates = subscriber.watch().await.expect("watch soak config");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_secs(seconds);
+        let mut attempts = 0_u64;
+        let mut writes = 0_u64;
+        let mut reads = 0_u64;
+        let mut watch_updates = 0_u64;
+        let mut disconnect_observations = 0_u64;
+        let mut recoveries = 0_u64;
+        let mut recovery_started = None;
+        let mut operation_latency = roze_metrics::LatencyHistogram::new();
+        let mut recovery_latency = roze_metrics::LatencyHistogram::new();
+
+        while std::time::Instant::now() < deadline {
+            attempts += 1;
+            let operation_started = std::time::Instant::now();
+            let raw = format!("name: v{attempts}\n");
+            let write_result = tokio::time::timeout(
+                Duration::from_secs(2),
+                try_etcd_write(&endpoint, &key, &raw),
+            )
+            .await;
+            if !matches!(write_result, Ok(Ok(()))) {
+                disconnect_observations += 1;
+                recovery_started.get_or_insert_with(std::time::Instant::now);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                operation_latency.observe(operation_started.elapsed());
+                continue;
+            }
+            writes += 1;
+
+            let read_result =
+                tokio::time::timeout(Duration::from_secs(2), subscriber.value()).await;
+            if matches!(read_result, Ok(Ok(ref value)) if value == &raw) {
+                reads += 1;
+            }
+
+            if let Ok(Some(value)) =
+                tokio::time::timeout(Duration::from_millis(500), updates.recv()).await
+            {
+                if value == raw {
+                    watch_updates += 1;
+                }
+                if let Some(recovery_started) = recovery_started.take() {
+                    recoveries += 1;
+                    recovery_latency.observe(recovery_started.elapsed());
+                }
+            }
+            operation_latency.observe(operation_started.elapsed());
+        }
+
+        let _ = try_etcd_delete(&endpoint, &key).await;
+        let elapsed_ms = started.elapsed().as_millis().max(1);
+        let operations_per_second_milli =
+            u128::from(attempts).saturating_mul(1_000_000) / elapsed_ms;
+        let p99_operation_us = operation_latency
+            .percentile_upper_bound_micros(99)
+            .expect("Etcd operation latency");
+        let p99_recovery_us = recovery_latency
+            .percentile_upper_bound_micros(99)
+            .unwrap_or(0);
+        println!(
+            "roze_config_etcd_soak etcd_elapsed_ms={elapsed_ms} etcd_attempts={attempts} etcd_writes={writes} etcd_reads={reads} etcd_watch_updates={watch_updates} etcd_disconnect_observations={disconnect_observations} etcd_recoveries={recoveries} etcd_operations_per_second_milli={operations_per_second_milli} etcd_p99_operation_us={p99_operation_us} etcd_p99_recovery_us={p99_recovery_us}"
+        );
+
+        assert!(attempts > 0);
+        assert!(writes > 0);
+        assert!(reads > 0);
+        assert!(watch_updates > 0);
+        if require_disconnect {
+            assert!(disconnect_observations > 0);
+            assert!(recoveries > 0);
+            assert!(p99_recovery_us > 0);
+            assert!(
+                recovery_started.is_none(),
+                "Etcd did not recover before the soak ended"
+            );
+        }
+    }
+
     #[test]
     fn normalizes_config_center_endpoints() {
         assert_eq!(
@@ -2050,14 +2241,14 @@ gateway:
     async fn config_listener_timeout_does_not_block_following_listeners() {
         let hits = StdArc::new(AtomicUsize::new(0));
         let slow: Listener<()> = Arc::new(|_| {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(500));
         });
         let fast_hits = hits.clone();
         let fast: Listener<()> = Arc::new(move |_| {
             fast_hits.fetch_add(1, Ordering::SeqCst);
         });
 
-        notify_config_listeners(vec![slow, fast], (), Duration::from_millis(10), "test").await;
+        notify_config_listeners(vec![slow, fast], (), Duration::from_millis(100), "test").await;
 
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
@@ -2089,7 +2280,7 @@ gateway:
         notify_reload_listeners(
             vec![panicking, fast],
             result,
-            Duration::from_millis(50),
+            Duration::from_millis(100),
             "test",
         )
         .await;
@@ -2325,12 +2516,16 @@ gateway:
             ConfigFormat::Yaml,
             "name: v0\ngateway:\n  timeout_ms: 1000\n",
         );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(seconds);
         let mut accepted = 0u64;
         let mut rejected = 0u64;
         let mut rollbacks = 0u64;
+        let mut update_latency = roze_metrics::LatencyHistogram::new();
+        let mut rollback_latency = roze_metrics::LatencyHistogram::new();
 
         while std::time::Instant::now() < deadline && accepted < max_updates {
+            let update_started = std::time::Instant::now();
             let update = accepted + 1;
             let raw = format!(
                 "name: v{update}\ngateway:\n  timeout_ms: {}\n",
@@ -2345,7 +2540,7 @@ gateway:
                 .expect("publish valid config");
             accepted += 1;
 
-            if update.is_multiple_of(17) {
+            if update == 1 || update.is_multiple_of(17) {
                 let invalid = store.publish(
                     signed_request(operator.clone(), "invalid payload", "name: [broken\n"),
                     "name: [broken\n",
@@ -2355,7 +2550,8 @@ gateway:
                 rejected += 1;
             }
 
-            if update.is_multiple_of(29) {
+            if update == 1 || update.is_multiple_of(29) {
+                let rollback_started = std::time::Instant::now();
                 store
                     .rollback(
                         signed_request(
@@ -2366,6 +2562,7 @@ gateway:
                         1,
                     )
                     .expect("rollback");
+                rollback_latency.observe(rollback_started.elapsed());
                 rollbacks += 1;
             }
 
@@ -2381,15 +2578,32 @@ gateway:
                 .expect("load snapshot");
             let status = store.watch_status(&operator).expect("watch status");
             assert_eq!(status.last_revision, Some(update as i64));
+            update_latency.observe(update_started.elapsed());
         }
 
         let audit = store.audit_log(&operator).expect("audit");
+        let elapsed_ms = started.elapsed().as_millis().max(1);
+        let updates_per_second_milli = u128::from(accepted).saturating_mul(1_000_000) / elapsed_ms;
+        let p50_update_us = update_latency
+            .percentile_upper_bound_micros(50)
+            .expect("update latency");
+        let p95_update_us = update_latency
+            .percentile_upper_bound_micros(95)
+            .expect("update latency");
+        let p99_update_us = update_latency
+            .percentile_upper_bound_micros(99)
+            .expect("update latency");
+        let p99_rollback_us = rollback_latency
+            .percentile_upper_bound_micros(99)
+            .expect("rollback latency");
         println!(
-            "roze_config_center_soak accepted={accepted} rejected={rejected} rollbacks={rollbacks} versions={} audit_records={}",
+            "roze_config_center_soak elapsed_ms={elapsed_ms} accepted={accepted} rejected={rejected} rollbacks={rollbacks} updates_per_second_milli={updates_per_second_milli} p50_update_us={p50_update_us} p95_update_us={p95_update_us} p99_update_us={p99_update_us} p99_rollback_us={p99_rollback_us} versions={} audit_records={}",
             store.versions().len(),
             audit.len()
         );
         assert!(accepted > 0, "soak must publish at least one valid update");
+        assert_eq!(update_latency.count(), accepted);
+        assert_eq!(rollback_latency.count(), rollbacks);
         assert!(audit
             .iter()
             .any(|record| record.result == ConfigAuditResult::Allowed));

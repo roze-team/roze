@@ -1,0 +1,28 @@
+@server (
+    prefix: /api
+)
+service order-api {
+    @permission orders:write
+    post /orders (CreateOrderReq) returns (OrderResp)
+
+    @permission orders:read
+    get /orders/:id (GetOrderReq) returns (OrderResp)
+}
+
+type (
+    CreateOrderReq {
+        product_id: u64 `json:"product_id"`
+        quantity: i64 `json:"quantity" validate:"min=1,max=1000"`
+        amount_minor: i64 `json:"amount_minor" validate:"min=1"`
+    }
+
+    GetOrderReq {
+        id: string `path:"id"`
+    }
+
+    OrderResp {
+        id: string `json:"id"`
+        status: string `json:"status"`
+        payment_status: string `json:"payment_status"`
+    }
+)

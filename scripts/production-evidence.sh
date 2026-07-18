@@ -164,6 +164,11 @@ case "$VERDICT" in
     ;;
 esac
 
+if [[ "$VERDICT" == "pass" ]]; then
+  echo "passing reports must be created from a verified CI artifact with scripts/production-evidence-promote.sh" >&2
+  exit 2
+fi
+
 require_value "--duration" "$DURATION"
 require_value "--workload" "$WORKLOAD"
 require_value "--failure-injection" "$FAILURE_INJECTION"
@@ -174,7 +179,15 @@ if [[ -n "$LIFECYCLE_SUMMARY" && "$AREA" != "lifecycle" ]]; then
   exit 2
 fi
 
+LIFECYCLE_ELAPSED_MS="TBD"
 LIFECYCLE_CYCLES="TBD"
+LIFECYCLE_CYCLES_PER_SECOND_MILLI="TBD"
+LIFECYCLE_P50_CYCLE_US="TBD"
+LIFECYCLE_P95_CYCLE_US="TBD"
+LIFECYCLE_P99_CYCLE_US="TBD"
+LIFECYCLE_FAILED_TASK_DETECTIONS="TBD"
+LIFECYCLE_DRAIN_TIMEOUT_DETECTIONS="TBD"
+LIFECYCLE_P99_FAULT_DETECTION_US="TBD"
 LIFECYCLE_WORKER_EXITS="TBD"
 LIFECYCLE_STOP_HOOKS="TBD"
 LIFECYCLE_RUNNING_SNAPSHOTS="TBD"
@@ -190,8 +203,32 @@ if [[ -n "$LIFECYCLE_SUMMARY" ]]; then
 
   for part in "${LIFECYCLE_SUMMARY_PARTS[@]:1}"; do
     case "$part" in
+      elapsed_ms=*)
+        LIFECYCLE_ELAPSED_MS="${part#elapsed_ms=}"
+        ;;
       cycles=*)
         LIFECYCLE_CYCLES="${part#cycles=}"
+        ;;
+      cycles_per_second_milli=*)
+        LIFECYCLE_CYCLES_PER_SECOND_MILLI="${part#cycles_per_second_milli=}"
+        ;;
+      p50_cycle_us=*)
+        LIFECYCLE_P50_CYCLE_US="${part#p50_cycle_us=}"
+        ;;
+      p95_cycle_us=*)
+        LIFECYCLE_P95_CYCLE_US="${part#p95_cycle_us=}"
+        ;;
+      p99_cycle_us=*)
+        LIFECYCLE_P99_CYCLE_US="${part#p99_cycle_us=}"
+        ;;
+      failed_task_detections=*)
+        LIFECYCLE_FAILED_TASK_DETECTIONS="${part#failed_task_detections=}"
+        ;;
+      drain_timeout_detections=*)
+        LIFECYCLE_DRAIN_TIMEOUT_DETECTIONS="${part#drain_timeout_detections=}"
+        ;;
+      p99_fault_detection_us=*)
+        LIFECYCLE_P99_FAULT_DETECTION_US="${part#p99_fault_detection_us=}"
         ;;
       worker_exits=*)
         LIFECYCLE_WORKER_EXITS="${part#worker_exits=}"
@@ -215,13 +252,45 @@ if [[ -n "$LIFECYCLE_SUMMARY" ]]; then
     esac
   done
 
+  require_unsigned_integer "lifecycle summary elapsed_ms" "$LIFECYCLE_ELAPSED_MS"
   require_unsigned_integer "lifecycle summary cycles" "$LIFECYCLE_CYCLES"
+  require_unsigned_integer \
+    "lifecycle summary cycles_per_second_milli" \
+    "$LIFECYCLE_CYCLES_PER_SECOND_MILLI"
+  require_unsigned_integer "lifecycle summary p50_cycle_us" "$LIFECYCLE_P50_CYCLE_US"
+  require_unsigned_integer "lifecycle summary p95_cycle_us" "$LIFECYCLE_P95_CYCLE_US"
+  require_unsigned_integer "lifecycle summary p99_cycle_us" "$LIFECYCLE_P99_CYCLE_US"
+  require_unsigned_integer \
+    "lifecycle summary failed_task_detections" \
+    "$LIFECYCLE_FAILED_TASK_DETECTIONS"
+  require_unsigned_integer \
+    "lifecycle summary drain_timeout_detections" \
+    "$LIFECYCLE_DRAIN_TIMEOUT_DETECTIONS"
+  require_unsigned_integer \
+    "lifecycle summary p99_fault_detection_us" \
+    "$LIFECYCLE_P99_FAULT_DETECTION_US"
   require_unsigned_integer "lifecycle summary worker_exits" "$LIFECYCLE_WORKER_EXITS"
   require_unsigned_integer "lifecycle summary stop_hooks" "$LIFECYCLE_STOP_HOOKS"
   require_unsigned_integer "lifecycle summary running_snapshots" "$LIFECYCLE_RUNNING_SNAPSHOTS"
   require_unsigned_integer "lifecycle summary stopped_snapshots" "$LIFECYCLE_STOPPED_SNAPSHOTS"
   require_unsigned_integer "lifecycle summary max_service_count" "$LIFECYCLE_MAX_SERVICE_COUNT"
+  require_positive_integer "lifecycle summary elapsed_ms" "$LIFECYCLE_ELAPSED_MS"
   require_positive_integer "lifecycle summary cycles" "$LIFECYCLE_CYCLES"
+  require_positive_integer \
+    "lifecycle summary cycles_per_second_milli" \
+    "$LIFECYCLE_CYCLES_PER_SECOND_MILLI"
+  require_positive_integer "lifecycle summary p50_cycle_us" "$LIFECYCLE_P50_CYCLE_US"
+  require_positive_integer "lifecycle summary p95_cycle_us" "$LIFECYCLE_P95_CYCLE_US"
+  require_positive_integer "lifecycle summary p99_cycle_us" "$LIFECYCLE_P99_CYCLE_US"
+  require_positive_integer \
+    "lifecycle summary failed_task_detections" \
+    "$LIFECYCLE_FAILED_TASK_DETECTIONS"
+  require_positive_integer \
+    "lifecycle summary drain_timeout_detections" \
+    "$LIFECYCLE_DRAIN_TIMEOUT_DETECTIONS"
+  require_positive_integer \
+    "lifecycle summary p99_fault_detection_us" \
+    "$LIFECYCLE_P99_FAULT_DETECTION_US"
   require_positive_integer "lifecycle summary max_service_count" "$LIFECYCLE_MAX_SERVICE_COUNT"
 
   LIFECYCLE_EXPECTED_WORKERS=$((LIFECYCLE_CYCLES * LIFECYCLE_MAX_SERVICE_COUNT))
@@ -253,12 +322,20 @@ if [[ "$AREA" == "lifecycle" ]]; then
 Copy the \`roze_lifecycle_soak\` summary line from the completed run:
 
 \`\`\`text
-${LIFECYCLE_SUMMARY:-roze_lifecycle_soak cycles=TBD worker_exits=TBD stop_hooks=TBD running_snapshots=TBD stopped_snapshots=TBD max_service_count=TBD}
+${LIFECYCLE_SUMMARY:-roze_lifecycle_soak elapsed_ms=TBD cycles=TBD cycles_per_second_milli=TBD p50_cycle_us=TBD p95_cycle_us=TBD p99_cycle_us=TBD failed_task_detections=TBD drain_timeout_detections=TBD p99_fault_detection_us=TBD worker_exits=TBD stop_hooks=TBD running_snapshots=TBD stopped_snapshots=TBD max_service_count=TBD}
 \`\`\`
 
 | Field | Result | Notes |
 | --- | --- | --- |
+| elapsed_ms | ${LIFECYCLE_ELAPSED_MS} | Observed monotonic runtime. |
 | cycles | ${LIFECYCLE_CYCLES} | Completed lifecycle start/drain/stop cycles. |
+| cycles_per_second_milli | ${LIFECYCLE_CYCLES_PER_SECOND_MILLI} | Throughput in thousandths of a cycle per second. |
+| p50_cycle_us | ${LIFECYCLE_P50_CYCLE_US} | Fixed-memory histogram p50 upper bound. |
+| p95_cycle_us | ${LIFECYCLE_P95_CYCLE_US} | Fixed-memory histogram p95 upper bound. |
+| p99_cycle_us | ${LIFECYCLE_P99_CYCLE_US} | Fixed-memory histogram p99 upper bound. |
+| failed_task_detections | ${LIFECYCLE_FAILED_TASK_DETECTIONS} | Injected task failures detected and drained. |
+| drain_timeout_detections | ${LIFECYCLE_DRAIN_TIMEOUT_DETECTIONS} | Injected drain hook timeouts detected. |
+| p99_fault_detection_us | ${LIFECYCLE_P99_FAULT_DETECTION_US} | Combined failure-detection p99 upper bound. |
 | worker_exits | ${LIFECYCLE_WORKER_EXITS} | Must equal \`cycles * max_service_count\` for the default soak. |
 | stop_hooks | ${LIFECYCLE_STOP_HOOKS} | Must equal \`cycles * max_service_count\` for the default soak. |
 | running_snapshots | ${LIFECYCLE_RUNNING_SNAPSHOTS} | Must equal \`cycles\`. |
