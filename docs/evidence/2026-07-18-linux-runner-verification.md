@@ -119,3 +119,8 @@ Linux server with PID `1485792`, output directory
 five-minute interval. Its first six samples have passed (the sixth completed
 at `2026-07-18T15:32:48Z` on the runner); no long-run claim is made until the
 run reaches 86400 seconds and its checksums verify.
+
+The same run crossed a one-hour diagnostic health checkpoint at runner time
+`2026-07-18T16:08:56Z` (`01:01:11` elapsed, 13 samples, all passed, process
+still alive). This checkpoint is useful for early liveness confirmation only;
+it is not S5 evidence and does not relax the 24h/72h completion gate.
