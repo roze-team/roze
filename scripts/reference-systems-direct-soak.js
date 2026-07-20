@@ -60,6 +60,9 @@ if (process.env.ROZE_DIRECT_SOAK_MINIO_BIN) {
 if (process.env.ROZE_DIRECT_SOAK_REDIS_BIN) {
   env.ROZE_TEST_REDIS_URL = `redis://:${process.env.ROZE_DIRECT_SOAK_REDIS_PASSWORD || "diagnostic-only-secret"}@127.0.0.1:${redisPort}`;
 }
+if (process.env.ROZE_DIRECT_SOAK_ETCD_ENDPOINT) {
+  env.ROZE_TEST_ETCD_ENDPOINT = process.env.ROZE_DIRECT_SOAK_ETCD_ENDPOINT;
+}
 const startedAt = new Date().toISOString();
 const startedEpoch = Math.floor(Date.now() / 1000);
 const revision = childProcess
