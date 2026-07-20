@@ -8,6 +8,8 @@ The executable cross-area plan, acceptance rules, go-zero design baseline, and
 evidence boundary are tracked in
 [Roze Production Generation Plan](go-zero-surpass-plan.md). This roadmap keeps
 the concise backlog; the execution plan is the source of truth for completion.
+The phase-by-phase work packages, exit gates, and evidence checklist are in
+[the execution appendix](go-zero-surpass-execution-plan.md).
 
 ## P0: Maturity and Trust
 
@@ -128,6 +130,9 @@ the concise backlog; the execution plan is the source of truth for completion.
   reliable event publishing as application-owned code.
 - Provide full examples for DB transaction + outbox + MQ publish + RPC call +
   TCC compensation.
+- S3-compatible object storage now has a SigV4 runtime adapter; track real
+  MinIO success/failure/recovery evidence in the
+  [storage runtime contract](contracts/storage-s3-runtime.md).
 
 ## P2: Production Documentation and Examples
 

@@ -3,6 +3,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiSpec {
     pub service: String,
+    pub rpc_package: Option<String>,
     pub server: Option<ServerSpec>,
     pub info: Vec<InfoPair>,
     pub types: Vec<TypeDef>,
@@ -289,6 +290,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
 
     Ok(ApiSpec {
         service: service.ok_or(ParseError::MissingService)?,
+        rpc_package: None,
         server,
         info,
         types,

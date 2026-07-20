@@ -33,10 +33,13 @@ write_checksums() {
   (
     cd "$BUNDLE"
     sha256sum \
-      run.json summary.md boundary-summary.txt workload.log host.jsonl \
+      run.json runner.json summary.md boundary-summary.txt workload.log host.jsonl \
       >SHA256SUMS
   )
 }
+
+printf '{"schema_version":1,"revision":"%s","os":"Linux","kernel":"test","arch":"x86_64","rustc":"rustc test","cargo":"cargo test","node":"v22.0.0","docker":"test","compose":"Docker Compose version v2","sha256sum":"sha256sum test"}\n' \
+  "$REVISION" >"$BUNDLE/runner.json"
 
 write_run gateway 86400
 printf '# completed fixed-runner smoke fixture\n' >"$BUNDLE/summary.md"

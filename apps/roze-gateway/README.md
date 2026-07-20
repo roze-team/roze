@@ -1,15 +1,16 @@
 # roze-gateway
 
-最小可用网关（Roze native HTTP + Tower HTTP 转发）示例，覆盖�?
+`roze-gateway-app` 是 Roze native HTTP + Tower 的可运行网关示例。它覆盖：
 
-- 跨服务路由映�?
-- 方法约束 / 前缀匹配
-- 鉴权（JWT / API Key�?
-- 路由级限流与熔断
-- trace/request-id 透传
-- 统一 fallback 与超时控�?
-- HTTP / WebSocket / SSE 同一路由模型
-- CORS
+- 静态 upstream 与 registry 服务发现；
+- 方法约束、前缀匹配与 path rewrite；
+- JWT / API key 鉴权；
+- route/service/global 三级治理；
+- timeout、retry、rate limit、breaker、shedding、fallback；
+- 主动健康检查、被动 outlier ejection 与加权选址；
+- request ID、trace ID 和标准 Context header 传播；
+- HTTP、WebSocket 与 SSE；
+- 配置中心热更新。
 
 ## 运行
 
@@ -17,24 +18,18 @@
 cargo run -p roze-gateway-app
 ```
 
-网关监听地址�?`gateway.listen` 决定（示例：`127.0.0.1:8081`）�?
+默认读取 `apps/roze-gateway/config.yaml`。可用
+`ROZE_GATEWAY_CONFIG_FILE=/path/to/config.yaml` 指定其他文件。监听地址由
+`gateway.listen` 决定，未配置时使用 `127.0.0.1:8081`。
 
-## 重载行为
+## 配置
 
-- 配置中心有更新时，网关在主循环中动态替换运行时路由，无需重启�?
-- 当路由签名与当前一致时，输�?`gateway.config.hot_reloaded.skipped`�?
-- 当签名变化时，输�?`gateway.config.hot_reloaded` 并刷新路由�?
-
-## 网关配置示例
+仓库中的 [config.yaml](config.yaml) 是权威示例。核心结构如下：
 
 ```yaml
 gateway:
   listen: "127.0.0.1:8081"
-  middlewares:
-    - trace
-  # Optional. Applies to streaming responses such as SSE when no chunk is received.
   stream_idle_timeout_ms: 60000
-  # Optional. Limits active SSE/WebSocket connections per route/protocol.
   max_stream_connections: 1000
   services:
     - name: user
@@ -49,7 +44,7 @@ gateway:
         unhealthy_threshold: 3
         healthy_threshold: 1
         expected_status: 200
-    # registry-only upstream:
+    # 也可只配置 registry_name，由 registry 动态提供实例。
     # - name: order
     #   registry_name: order-api
   routes:
@@ -59,11 +54,7 @@ gateway:
       rewrite: /user
       retries: 2
       retry_backoff_ms: 100
-      middlewares:
-        - trace
-        - rate
-        - breaker
-        - auth
+      middlewares: [trace, rate, breaker, auth]
       rate_limit:
         burst: 20
         refill_ms: 200
@@ -74,54 +65,72 @@ gateway:
 auth:
   jwt_keys:
     - id: "2026-07"
-      secret: "secret"
+      secret: "replace-in-production"
   jwt_active_key_id: "2026-07"
   jwt_issuer: "roze"
   jwt_audience: "roze-services"
   api_keys:
     header: "x-api-key"
     keys:
-      - key: "service-secret"
+      - key: "replace-in-production"
         subject: "internal-worker"
         roles: ["internal"]
         tenant: "acme"
 ```
 
-路由中间�?`jwt` 只接�?`Authorization: Bearer <token>`，`api_key`/`apikey` 只接�?API key header，`auth` 接受 JWT �?API key 任一方式�?
+路由 middleware `jwt` 只接受 `Authorization: Bearer <token>`；
+`api_key` / `apikey` 只接受配置的 API key header；`auth` 接受两者之一。
+生产部署必须从 secret 管理系统注入真实密钥，不能提交明文凭据。
 
-## HTTP、WebSocket、SSE
+## HTTP、WebSocket 与 SSE
 
-网关可以同时承载普�?HTTP、WebSocket �?SSE�?
+三种协议复用同一套路由、身份、治理、registry 和 Context 传播规则。
 
-- 普�?HTTP：按 route/service 配置转发 request/response�?
-- WebSocket：客户端�?`Upgrade: websocket` 时，网关完成上游握手并做双向流量转发�?
-- SSE：上游返�?`Content-Type: text/event-stream` 时，网关自动启用流式响应，不会等待完�?body 结束�?
+- 普通 HTTP 原样转发受允许的方法、headers、body 和上游响应。
+- WebSocket 在标准 upgrade 握手后进行双向流量转发。
+- 上游返回 `Content-Type: text/event-stream` 时使用流式 SSE body，不等待完整
+  response body。
+- `stream_idle_timeout_ms` 可在 route、service 或 gateway 层设置；优先级依次
+  从具体到全局。
+- `max_stream_connections` 同样支持 route、service、gateway 三级配置；容量
+  耗尽时返回 429，body 生命周期结束后 permit 由 RAII 释放。
 
-三者共用同一套路由、鉴权、限流、熔断、超时、fallback、registry upstream �?trace header 机制。SSE 不需要额外配置；只要上游按标准返�?`text/event-stream` 即可。长连接可选配�?`stream_idle_timeout_ms`，当 SSE 长时间没有任何事件或 heartbeat 时由网关主动结束空闲流；也可配置 `max_stream_connections` 限制 SSE/WebSocket 活跃连接数，超限返回 429�?
+## 热更新
 
-## 配置中心（可选）
+配置中心 reload 只在 `gateway`、`auth`、`governance` 或 `registry` section
+变化时重建 runtime：
 
-- `ROZE_CONFIG_CENTER_ETCD_ENDPOINTS`：Etcd 端点（`,` 分隔�?
-- `ROZE_CONFIG_CENTER_ETCD_KEY` / `ROZE_CONFIG_CENTER_KEY`
-- `ROZE_CONFIG_CENTER_NAMESPACE` + `ROZE_CONFIG_CENTER_APP`
-- `ROZE_CONFIG_CENTER_ENV_KEY`
-- `ROZE_CONFIG_CENTER_FILE`
-- `ROZE_CONFIG_CENTER_POLL_SECS`
-- `ROZE_CONFIG_CENTER_DEBOUNCE_MS`
+- 有效变更会原子替换 runtime，并记录 `gateway.config.hot_reloaded`。
+- 无关变更记录 `gateway.config.hot_reloaded.skipped`。
+- 解析、校验、registry 或 runtime 构建失败时保留最后有效快照，并记录
+  `gateway.config.reload.failed`。
+- `gateway.listen` 变化需要进程重启，不会在热更新中偷偷更换监听 socket。
 
-网关配置中心变更将触发运行时路由重建（无进程重启），并在 `gateway.config.hot_reloaded` 日志事件中可观测�?
+可选环境变量：
 
-## Admin API
+- `ROZE_CONFIG_CENTER_ETCD_ENDPOINTS`：逗号分隔的 Etcd endpoints。
+- `ROZE_CONFIG_CENTER_ETCD_KEY` 或 `ROZE_CONFIG_CENTER_KEY`。
+- `ROZE_CONFIG_CENTER_NAMESPACE`、`ROZE_CONFIG_CENTER_APP`、
+  `ROZE_CONFIG_CENTER_ENV_KEY`。
+- `ROZE_CONFIG_CENTER_FILE`、`ROZE_CONFIG_CENTER_FORMAT`。
+- `ROZE_CONFIG_CENTER_POLL_SECS`、`ROZE_CONFIG_CENTER_DEBOUNCE_MS`、
+  `ROZE_CONFIG_CENTER_LISTENER_TIMEOUT_MS`。
 
-`roze-gateway-app` 默认挂载 `roze-admin` 控制面路由：
+## Admin 控制面
 
-- `GET /admin/registry/{service}`：查�?registry 服务实例（仅配置 registry 时可用）�?
-- `GET /admin/config/reloads?offset=0&limit=100`：查询配置中�?reload 审计历史�?
+`roze-admin` 提供可组合的控制面 service 和数据适配器，但当前
+`roze-gateway-app` 不会默认把 admin endpoint 暴露到公网 listener。需要控制面
+时，应显式构造 `AdminState`、配置 `AdminAuthConfig`，并挂载到受网络策略保护的
+内部 listener。详细契约见
+[Admin 控制面](../../docs/contracts/admin.md)。
 
-未配置对应能力时返回 `404`。可通过环境变量启用内置鉴权�?
+## 验证
 
-- `ROZE_ADMIN_TOKEN`：要�?`Authorization: Bearer <token>`
-- `ROZE_ADMIN_API_KEY`：要�?API key header
-- `ROZE_ADMIN_API_KEY_HEADER`：API key header 名称，默�?`x-api-key`
+```bash
+cargo test -p roze-gateway
+cargo test -p roze-admin
+bash scripts/gateway-smoke.sh
+```
 
-未设置上述变量时 Admin 路由不做鉴权，仅适合本地开发或外层已有访问控制的部署�?
+真实 registry、故障恢复与长连接 soak 必须在 Linux/Docker 权威环境执行；本地
+单元测试不能替代生产证据。

@@ -1479,8 +1479,14 @@ fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
 
 fn parse_proto_api_spec(source: &str) -> anyhow::Result<ApiSpec> {
     let source = strip_proto_comments(source);
+    let rpc_package = parse_proto_package(&source);
     let service = parse_proto_service_name(&source)
-        .or_else(|| parse_proto_package(&source))
+        .or_else(|| {
+            rpc_package
+                .as_deref()
+                .and_then(|package| package.split('.').next_back())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "service".to_string());
     let types = parse_proto_messages(&source)?;
     let rpc_methods = parse_proto_rpcs(&source)?;
@@ -1489,6 +1495,7 @@ fn parse_proto_api_spec(source: &str) -> anyhow::Result<ApiSpec> {
     }
     Ok(ApiSpec {
         service,
+        rpc_package,
         server: None,
         info: Vec::new(),
         types,
@@ -1534,8 +1541,8 @@ fn parse_proto_package(source: &str) -> Option<String> {
     source.lines().find_map(|line| {
         let line = line.trim();
         line.strip_prefix("package ")
-            .and_then(|rest| rest.trim_end_matches(';').split('.').next_back())
-            .map(|name| name.trim().replace('-', "_"))
+            .map(|rest| rest.trim_end_matches(';').trim().to_string())
+            .filter(|name| !name.is_empty())
     })
 }
 
@@ -1851,11 +1858,14 @@ mod tests {
         .expect("parse proto");
 
         assert_eq!(spec.service, "HulaGroup");
+        assert_eq!(spec.rpc_package.as_deref(), Some("hula.group"));
         let proto = crate::generator::render_proto(&spec).expect("render proto");
-        assert!(proto.contains("package hula_group;"));
+        assert!(proto.contains("package hula.group;"));
         assert!(proto.contains("service HulaGroup {"));
         let rpc = crate::generator::rpc::render_rpc(&spec);
-        assert!(rpc.contains("hula_group_server::HulaGroup"));
+        assert!(
+            rpc.contains("crate::pb::hula_group::{self as proto, hula_group_server::HulaGroup}")
+        );
         assert!(rpc.contains("impl HulaGroup for RpcService"));
         assert!(rpc.contains("r#type: req.r#type"));
     }

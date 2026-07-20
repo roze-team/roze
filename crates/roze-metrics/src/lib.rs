@@ -131,6 +131,10 @@ impl MetricRegistry {
         self.update(name.into(), labels, |_| MetricValue::Duration(value));
     }
 
+    pub fn series_count(&self) -> usize {
+        self.inner.len()
+    }
+
     pub fn render(&self) -> String {
         let mut entries = self
             .inner
@@ -242,6 +246,26 @@ pub fn record_rpc_method(
         labels,
         elapsed.as_millis() as u64,
     );
+}
+
+pub fn record_rpc_client_attempt(
+    service: impl Into<String>,
+    method: impl Into<String>,
+    outcome: impl Into<String>,
+) {
+    let outcome = normalize_rpc_client_attempt_outcome(outcome.into());
+    let labels = MetricLabels::new()
+        .insert("service", service.into())
+        .insert("method", method.into())
+        .insert("outcome", outcome);
+    rpc_metrics_registry().inc_counter("roze_rpc_client_attempts_total", labels, 1);
+}
+
+fn normalize_rpc_client_attempt_outcome(outcome: String) -> String {
+    match outcome.as_str() {
+        "success" | "failure" | "timeout" | "cancelled" => outcome,
+        _ => "other".to_string(),
+    }
 }
 
 pub fn record_gateway_route(
@@ -599,13 +623,46 @@ mod tests {
     fn renders_route_and_rpc_metrics_with_labels() {
         record_http_route("svc", "/users/:id", "GET", "200", Duration::from_millis(7));
         record_rpc_method("svc", "GetUser", "ok", Duration::from_millis(11));
+        record_rpc_client_attempt("svc", "GetUser", "timeout");
 
         let metrics = http_metrics();
         assert!(metrics.contains("roze_http_route_requests_total"));
         assert!(metrics.contains(r#"service="svc""#));
         assert!(metrics.contains(r#"route="/users/:id""#));
         assert!(metrics.contains("roze_rpc_method_requests_total"));
+        assert!(metrics.contains("roze_rpc_client_attempts_total"));
         assert!(metrics.contains(r#"method="GetUser""#));
+        assert!(metrics.contains(r#"outcome="timeout""#));
+    }
+
+    #[test]
+    fn rpc_client_attempt_normalizes_adversarial_outcomes() {
+        let unique_error = format!("tenant-17 /orders/{} secret failure", std::process::id());
+        record_rpc_client_attempt("svc", "GetUser", unique_error.clone());
+
+        let metrics = http_metrics();
+        assert!(metrics.contains(r#"outcome="other""#));
+        assert!(!metrics.contains(&unique_error));
+    }
+
+    #[test]
+    fn adversarial_rpc_attempt_values_create_one_bounded_series() {
+        let registry = MetricRegistry::new();
+        for index in 0..1_000 {
+            let outcome = normalize_rpc_client_attempt_outcome(format!(
+                "tenant-{index} /orders/{index} secret error {index}"
+            ));
+            let labels = MetricLabels::new()
+                .insert("service", "checkout")
+                .insert("method", "CreateOrder")
+                .insert("outcome", outcome);
+            registry.inc_counter("roze_rpc_client_attempts_total", labels, 1);
+        }
+
+        assert_eq!(registry.series_count(), 1);
+        let rendered = registry.render();
+        assert!(rendered.contains(r#"outcome="other""#));
+        assert!(!rendered.contains("tenant-999"));
     }
 
     #[test]

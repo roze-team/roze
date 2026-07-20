@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "roze": {
+    "repository": "https://github.com/roze-team/roze.git",
+    "revision": "d73f4ff01ea6d128b98d6e5c5b2b1166ebc266ab"
+  },
+  "goZero": {
+    "repository": "https://github.com/zeromicro/go-zero.git",
+    "revision": "6a6b81ef20d5697f4fbe9c2a92c436e85d687be4"
+  },
+  "toolchains": {
+    "rust": "1.96.1",
+    "cargo": "1.96.1",
+    "go": "1.26.2",
+    "node": "24.14.1",
+    "protoc": "31.1"
+  },
+  "runner": {
+    "labels": ["self-hosted", "linux", "x64", "roze-production"],
+    "os": "linux",
+    "arch": "x86_64",
+    "exclusive": true,
+    "cpuAffinity": "0-7",
+    "cpuGovernor": "performance",
+    "memoryLimitBytes": 8589934592
+  },
+  "measurement": {
+    "warmups": 1,
+    "samples": 5,
+    "sampleSeconds": 60,
+    "maxCoefficientOfVariation": 0.1,
+    "telemetry": {
+      "metrics": true,
+      "tracing": true,
+      "debugLogs": false
+    }
+  },
+  "dependencies": [
+    {
+      "name": "etcd",
+      "image": "quay.io/coreos/etcd:v3.5.15",
+      "digestEnvironment": "ROZE_COMPETITIVE_ETCD_DIGEST"
+    },
+    {
+      "name": "consul",
+      "image": "hashicorp/consul:1.20",
+      "digestEnvironment": "ROZE_COMPETITIVE_CONSUL_DIGEST"
+    },
+    {
+      "name": "redis",
+      "image": "redis:7-alpine",
+      "digestEnvironment": "ROZE_COMPETITIVE_REDIS_DIGEST"
+    },
+    {
+      "name": "postgres",
+      "image": "postgres:16-alpine",
+      "digestEnvironment": "ROZE_COMPETITIVE_POSTGRES_DIGEST"
+    },
+    {
+      "name": "nats",
+      "image": "nats:2.10-alpine",
+      "digestEnvironment": "ROZE_COMPETITIVE_NATS_DIGEST"
+    },
+    {
+      "name": "kafka",
+      "image": "confluentinc/cp-kafka:7.7.1",
+      "digestEnvironment": "ROZE_COMPETITIVE_KAFKA_DIGEST"
+    }
+  ]
+}

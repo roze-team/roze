@@ -1,0 +1,3 @@
+Name: competitive.v1.rpc
+ListenOn: 127.0.0.1:19090
+Timeout: 2000

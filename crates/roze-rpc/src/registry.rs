@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::{sync::mpsc, time::interval};
 
-use crate::balance::{self, Balancer};
+use crate::balance::{self, AttemptLease, Balancer, EwmaP2cBalancer};
 use roze_config::{RegistryConfig, RegistryKind, RpcClientEtcdConfig, ServiceConfig};
 
 pub type RegistryWatchFuture<'a> = Pin<
@@ -831,6 +831,24 @@ where
     }
 }
 
+impl<R> RegistryResolver<R, EwmaP2cBalancer>
+where
+    R: Registry,
+{
+    pub async fn pick_tracked(&self, name: &str) -> anyhow::Result<Option<AttemptLease>> {
+        let instances = self.registry.discover(name).await?;
+        let picked = self.balancer.pick_tracked(&instances);
+        tracing::debug!(
+            protocol = "rpc",
+            service = name,
+            candidate_count = instances.len(),
+            selected = picked.is_some(),
+            "tracked RPC registry endpoint selected"
+        );
+        Ok(picked)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CachedRegistryResolver<R, B> {
     registry: Arc<R>,
@@ -1030,6 +1048,29 @@ where
         });
 
         watch_tasks.insert(name, handle);
+    }
+}
+
+impl<R> CachedRegistryResolver<R, EwmaP2cBalancer>
+where
+    R: Registry,
+{
+    pub async fn pick_tracked(&self, name: &str) -> anyhow::Result<Option<AttemptLease>> {
+        let instances = self.discover(name).await?;
+        let picked = self.balancer.pick_tracked(&instances);
+        tracing::debug!(
+            protocol = "rpc",
+            service = name,
+            candidate_count = instances.len(),
+            selected = picked.is_some(),
+            source = "cache",
+            "tracked RPC cached endpoint selected"
+        );
+        Ok(picked)
+    }
+
+    pub fn ewma_balancer(&self) -> &EwmaP2cBalancer {
+        self.balancer.as_ref()
     }
 }
 
@@ -1400,6 +1441,45 @@ mod tests {
 
         let watched = resolver.discover("user").await.expect("discover");
         assert_eq!(watched[0].addr, "127.0.0.1:8081");
+        resolver.invalidate("user");
+    }
+
+    #[tokio::test]
+    async fn cached_resolver_exposes_tracked_attempt_lifecycle() {
+        let registry = MemoryRegistry::default();
+        registry
+            .register(ServiceInstance::new("user", "127.0.0.1:8080"))
+            .await
+            .expect("register");
+        let resolver = CachedRegistryResolver::new(
+            registry,
+            EwmaP2cBalancer::default(),
+            Duration::from_secs(60),
+        );
+
+        let lease = resolver
+            .pick_tracked("user")
+            .await
+            .expect("pick")
+            .expect("lease");
+        let instance = lease.instance().clone();
+        assert_eq!(
+            resolver
+                .ewma_balancer()
+                .snapshot(&instance)
+                .expect("state")
+                .inflight,
+            1
+        );
+        lease.finish(crate::balance::AttemptOutcome::Success);
+        assert_eq!(
+            resolver
+                .ewma_balancer()
+                .snapshot(&instance)
+                .expect("state")
+                .inflight,
+            0
+        );
         resolver.invalidate("user");
     }
 

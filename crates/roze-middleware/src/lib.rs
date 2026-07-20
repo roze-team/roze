@@ -6,7 +6,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use roze_context::Context;
+use roze_auth::BearerTokenVerifier as _;
+use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_resilience::{
     BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary, OperationKey,
@@ -27,6 +28,7 @@ pub struct CommonMiddlewareConfig {
     pub cors_config: Option<CorsConfig>,
     pub timeout_ms: Option<u64>,
     pub body_limit_bytes: Option<usize>,
+    pub trust_forwarded_identity_headers: bool,
 }
 
 impl Default for CommonMiddlewareConfig {
@@ -39,6 +41,7 @@ impl Default for CommonMiddlewareConfig {
             cors_config: None,
             timeout_ms: None,
             body_limit_bytes: None,
+            trust_forwarded_identity_headers: false,
         }
     }
 }
@@ -53,24 +56,37 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
             cors_config: config.cors_config.as_ref().map(CorsConfig::from),
             timeout_ms: config.timeout.then_some(30_000),
             body_limit_bytes: config.request_body_limit_bytes,
+            trust_forwarded_identity_headers: config.trust_forwarded_identity_headers,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    pub jwt_active_key_id: String,
-    pub jwt_issuer: String,
-    pub jwt_audience: String,
+    pub jwt: roze_jwt::JwtConfig,
+    pub public_routes: Vec<String>,
 }
 
 impl From<&roze_config::AuthConfig> for AuthConfig {
     fn from(config: &roze_config::AuthConfig) -> Self {
         Self {
-            jwt_active_key_id: config.jwt_active_key_id.clone(),
-            jwt_issuer: config.jwt_issuer.clone(),
-            jwt_audience: config.jwt_audience.clone(),
+            jwt: roze_jwt::JwtConfig::from(config),
+            public_routes: Vec::new(),
         }
+    }
+}
+
+impl CommonMiddlewareConfig {
+    pub fn from_service(
+        middlewares: &roze_config::HttpMiddlewaresConfig,
+        auth: Option<&roze_config::AuthConfig>,
+    ) -> Self {
+        let mut config = Self::from(middlewares);
+        config.auth = auth.map(|auth| AuthConfig {
+            jwt: roze_jwt::JwtConfig::from(auth),
+            public_routes: middlewares.auth_public_routes.clone(),
+        });
+        config
     }
 }
 
@@ -108,8 +124,19 @@ pub fn apply_common_with_config(
     if config.tracing {
         service = service.layer(roze_http::middleware::from_fn(trace_http_request));
     }
+    if let Some(auth) = config.auth {
+        service = service.layer(roze_http::middleware::from_fn_with_state(
+            auth,
+            authenticate_request,
+        ));
+    }
     if config.request_context {
         service = service.layer(roze_http::middleware::from_fn(inject_request_context));
+    }
+    if !config.trust_forwarded_identity_headers {
+        service = service.layer(roze_http::middleware::from_fn(
+            strip_untrusted_identity_headers,
+        ));
     }
     if let Some(limit) = config.body_limit_bytes {
         service = service.layer(roze_http::middleware::from_fn_with_state(
@@ -121,6 +148,79 @@ pub fn apply_common_with_config(
         service = service.layer(cors_layer(config.cors_config.as_ref()));
     }
     service
+}
+
+async fn authenticate_request(
+    roze_http::extract::State(config): roze_http::extract::State<AuthConfig>,
+    mut request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    if route_is_public(
+        request.method().as_str(),
+        request.uri().path(),
+        &config.public_routes,
+    ) {
+        return next.run(request).await;
+    }
+
+    let Some(token) = bearer_token(request.headers()) else {
+        return unauthorized_response();
+    };
+    let verifier = roze_jwt::LocalJwtVerifier::new(config.jwt);
+    let Ok(principal) = verifier.verify(token).await else {
+        return unauthorized_response();
+    };
+    let context = request
+        .extensions()
+        .get::<Context>()
+        .cloned()
+        .unwrap_or_default()
+        .with_auth(AuthContext {
+            subject: principal.subject,
+            roles: principal.roles,
+            tenant: principal.tenant,
+        })
+        .with_permissions(principal.permissions)
+        .with_metadata(roze_context::SCOPE_METADATA_KEY, principal.scopes.join(","));
+    request.extensions_mut().insert(context);
+    next.run(request).await
+}
+
+fn bearer_token(headers: &roze_http::http::HeaderMap) -> Option<&str> {
+    let value = headers
+        .get(roze_http::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()).then(|| token.trim())
+}
+
+fn route_is_public(method: &str, path: &str, allowlist: &[String]) -> bool {
+    allowlist.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        let (allowed_method, pattern) = entry
+            .split_once(char::is_whitespace)
+            .map(|(method, path)| (Some(method.trim()), path.trim()))
+            .unwrap_or((None, entry));
+        if allowed_method.is_some_and(|allowed| !allowed.eq_ignore_ascii_case(method)) {
+            return false;
+        }
+        pattern
+            .strip_suffix('*')
+            .map_or(path == pattern, |prefix| path.starts_with(prefix))
+    })
+}
+
+fn unauthorized_response() -> roze_http::HttpResponse {
+    let mut response = roze_http::IntoResponse::into_response(RozeError::Unauthorized);
+    response.headers_mut().insert(
+        roze_http::http::header::WWW_AUTHENTICATE,
+        roze_http::http::HeaderValue::from_static("Bearer"),
+    );
+    response
 }
 
 async fn trace_http_request(
@@ -252,6 +352,30 @@ async fn inject_request_context(
         response.headers_mut().insert(name, value);
     }
     response
+}
+
+async fn strip_untrusted_identity_headers(
+    mut request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    strip_identity_headers(request.headers_mut());
+    next.run(request).await
+}
+
+fn strip_identity_headers(headers: &mut roze_http::http::HeaderMap) {
+    for name in [
+        roze_context::SUBJECT_HEADER,
+        roze_context::TENANT_HEADER,
+        roze_context::ROLES_HEADER,
+        roze_context::PERMISSIONS_HEADER,
+        roze_context::SCOPE_HEADER,
+        roze_context::HULA_TENANT_ID_HEADER,
+        roze_context::HULA_UID_HEADER,
+        roze_context::HULA_ROLE_HEADER,
+        roze_context::HULA_SCOPE_HEADER,
+    ] {
+        headers.remove(name);
+    }
 }
 
 async fn enforce_request_body_limit(
@@ -952,6 +1076,69 @@ pub type RateLimitConfig = roze_resilience::RateLimitConfig;
 mod tests {
     use super::*;
 
+    fn test_auth_config(expiration_secs: u64) -> AuthConfig {
+        AuthConfig {
+            jwt: roze_jwt::JwtConfig {
+                jwt_keys: vec![roze_jwt::JwtKey {
+                    id: "test-key".into(),
+                    secret: "test-secret-at-least-32-bytes-long".into(),
+                }],
+                jwt_active_key_id: "test-key".into(),
+                jwt_issuer: "https://issuer.example".into(),
+                jwt_audience: "roze-tests".into(),
+                jwt_expiration_secs: expiration_secs,
+                jwt_clock_skew_secs: 0,
+                revoked_token_ids: Vec::new(),
+            },
+            public_routes: vec!["GET /public".into()],
+        }
+    }
+
+    fn issue_test_token(config: &AuthConfig) -> String {
+        roze_jwt::issue_token(
+            &roze_jwt::Claims {
+                sub: "verified-user".into(),
+                roles: vec!["admin".into()],
+                tenant: Some("tenant-1".into()),
+                permissions: vec!["orders:read".into()],
+                scopes: vec!["orders".into()],
+                iss: String::new(),
+                aud: String::new(),
+                jti: "token-1".into(),
+                iat: 0,
+                exp: 0,
+            },
+            &config.jwt,
+        )
+        .expect("issue token")
+    }
+
+    fn authenticated_context_app(config: AuthConfig) -> roze_http::Router {
+        use roze_http::{extract::Extension, routing::get, Router};
+
+        apply_common_with_config(
+            Router::new()
+                .route(
+                    "/protected",
+                    get(|Extension(ctx): Extension<Context>| async move {
+                        format!(
+                            "{}|{}|{}|{}",
+                            ctx.subject().unwrap_or_default(),
+                            ctx.tenant().unwrap_or_default(),
+                            ctx.roles().join(","),
+                            ctx.permissions().join(",")
+                        )
+                    }),
+                )
+                .route("/public", get(|| async { "public" })),
+            CommonMiddlewareConfig {
+                auth: Some(config),
+                cors: false,
+                ..Default::default()
+            },
+        )
+    }
+
     #[tokio::test]
     async fn common_middleware_injects_request_context() {
         use roze_http::{extract::Extension, routing::get, Router};
@@ -982,6 +1169,132 @@ mod tests {
             .await
             .expect("response body");
         assert_eq!(&body[..], b"request-123");
+    }
+
+    #[tokio::test]
+    async fn common_auth_rejects_missing_and_invalid_tokens() {
+        use tower::ServiceExt as _;
+
+        let app = authenticated_context_app(test_auth_config(3_600));
+        for authorization in [None, Some("Bearer invalid")] {
+            let mut request = roze_http::http::Request::builder().uri("/protected");
+            if let Some(value) = authorization {
+                request = request.header(roze_http::http::header::AUTHORIZATION, value);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(roze_http::body::empty())
+                        .expect("protected request"),
+                )
+                .await
+                .expect("infallible router");
+            assert_eq!(response.status(), roze_http::http::StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers()[roze_http::http::header::WWW_AUTHENTICATE],
+                "Bearer"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn common_auth_populates_context_from_verified_claims() {
+        use tower::ServiceExt as _;
+
+        let config = test_auth_config(3_600);
+        let token = issue_test_token(&config);
+        let app = authenticated_context_app(config);
+        let request = roze_http::http::Request::builder()
+            .uri("/protected")
+            .header(
+                roze_http::http::header::AUTHORIZATION,
+                format!("Bearer {token}"),
+            )
+            .header(roze_context::SUBJECT_HEADER, "forged-user")
+            .body(roze_http::body::empty())
+            .expect("protected request");
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert_eq!(response.status(), roze_http::http::StatusCode::OK);
+        let body = roze_http::body::to_bytes(response.into_body(), 256)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"verified-user|tenant-1|admin|orders:read");
+    }
+
+    #[tokio::test]
+    async fn common_auth_rejects_expired_tokens_and_allows_public_routes() {
+        use tower::ServiceExt as _;
+
+        let config = test_auth_config(0);
+        let token = issue_test_token(&config);
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let app = authenticated_context_app(config);
+        let expired = roze_http::http::Request::builder()
+            .uri("/protected")
+            .header(
+                roze_http::http::header::AUTHORIZATION,
+                format!("Bearer {token}"),
+            )
+            .body(roze_http::body::empty())
+            .expect("protected request");
+        let response = app
+            .clone()
+            .oneshot(expired)
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), roze_http::http::StatusCode::UNAUTHORIZED);
+
+        let public = roze_http::http::Request::builder()
+            .uri("/public")
+            .body(roze_http::body::empty())
+            .expect("public request");
+        let response = app.oneshot(public).await.expect("infallible router");
+        assert_eq!(response.status(), roze_http::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn request_context_strips_identity_headers_unless_proxy_is_trusted() {
+        use roze_http::{extract::Extension, routing::get, Router};
+        use tower::ServiceExt as _;
+
+        let router = || {
+            Router::new().route(
+                "/identity",
+                get(|Extension(ctx): Extension<Context>| async move {
+                    ctx.subject().unwrap_or_default()
+                }),
+            )
+        };
+        let request = || {
+            roze_http::http::Request::builder()
+                .uri("/identity")
+                .header(roze_context::SUBJECT_HEADER, "forged-user")
+                .body(roze_http::body::empty())
+                .expect("identity request")
+        };
+
+        let response = apply_common(router())
+            .oneshot(request())
+            .await
+            .expect("infallible router");
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert!(body.is_empty());
+
+        let trusted = apply_common_with_config(
+            router(),
+            CommonMiddlewareConfig {
+                trust_forwarded_identity_headers: true,
+                ..Default::default()
+            },
+        );
+        let response = trusted.oneshot(request()).await.expect("infallible router");
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"forged-user");
     }
 
     #[tokio::test]

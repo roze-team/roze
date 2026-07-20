@@ -109,12 +109,31 @@ for url in "$ARTIFACT_URL" "$ATTESTATION_URL"; do
   fi
 done
 
-for file in run.json summary.md boundary-summary.txt workload.log host.jsonl SHA256SUMS; do
+for file in run.json runner.json summary.md boundary-summary.txt workload.log host.jsonl SHA256SUMS; do
   if [[ ! -s "$BUNDLE/$file" ]]; then
     echo "evidence bundle is missing non-empty $file" >&2
     exit 1
   fi
 done
+
+RUNNER_FIELDS="$(node - "$BUNDLE/runner.json" "$BUNDLE/run.json" <<'NODE'
+const fs = require("fs");
+const runner = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const run = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const fields = ["os", "kernel", "arch", "rustc", "cargo", "node", "docker", "compose", "sha256sum"];
+for (const field of fields) {
+  if (typeof runner[field] !== "string" || runner[field].trim() === "") {
+    throw new Error(`runner.json field ${field} must be a non-empty string`);
+  }
+}
+if (runner.schema_version !== 1 || runner.revision !== run.revision) {
+  throw new Error("runner.json schema or revision does not match run.json");
+}
+console.log(fields.map((field) => runner[field].replace(/[\t\r\n]/g, " ")).join("\t"));
+NODE
+)"
+IFS=$'\t' read -r RUNNER_OS RUNNER_KERNEL RUNNER_ARCH RUNNER_RUSTC RUNNER_CARGO \
+  RUNNER_NODE RUNNER_DOCKER RUNNER_COMPOSE RUNNER_SHA256SUM <<<"$RUNNER_FIELDS"
 
 (
   cd "$BUNDLE"
@@ -257,6 +276,15 @@ artifact_digest: ${ARTIFACT_DIGEST}
 artifact_url: ${ARTIFACT_URL}
 attestation_url: ${ATTESTATION_URL}
 checksums_sha256: ${CHECKSUMS_SHA256}
+runner_os: ${RUNNER_OS}
+runner_kernel: ${RUNNER_KERNEL}
+runner_arch: ${RUNNER_ARCH}
+runner_rustc: ${RUNNER_RUSTC}
+runner_cargo: ${RUNNER_CARGO}
+runner_node: ${RUNNER_NODE}
+runner_docker: ${RUNNER_DOCKER}
+runner_compose: ${RUNNER_COMPOSE}
+runner_sha256sum: ${RUNNER_SHA256SUM}
 ---
 
 # Production Evidence: ${EVIDENCE_AREA} ${DURATION}
@@ -285,6 +313,9 @@ pass
 - Provenance: [GitHub attestation](${ATTESTATION_URL})
 - Artifact digest: \`${ARTIFACT_DIGEST}\`
 - SHA256SUMS digest: \`${CHECKSUMS_SHA256}\`
+- Runner: \`${RUNNER_OS} ${RUNNER_ARCH} ${RUNNER_KERNEL}\`
+- Rust/Cargo: \`${RUNNER_RUSTC}\` / \`${RUNNER_CARGO}\`
+- Node/Docker/Compose: \`${RUNNER_NODE}\` / \`${RUNNER_DOCKER}\` / \`${RUNNER_COMPOSE}\`
 
 ## Boundary Summary
 

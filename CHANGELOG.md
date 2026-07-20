@@ -90,6 +90,12 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Apply configured service JWT authentication in generated REST common
+  middleware, populate request context only from verified claims, strip
+  untrusted identity headers by default, and support explicit public-route and
+  trusted-proxy configuration.
+- Accept standalone SQL `CREATE INDEX` and `CREATE UNIQUE INDEX` declarations
+  in model generation, including composite and PostgreSQL partial indexes.
 - Made the first `service dependency add` canonicalize adopted Cargo path
   dependencies immediately, so a following `service sync --check` no longer
   reports ordering drift.

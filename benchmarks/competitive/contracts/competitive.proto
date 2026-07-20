@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package competitive.v1;
+
+option go_package = "./competitive";
+
+service Competitive {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  bytes payload = 1;
+}
+
+message EchoResponse {
+  bytes payload = 1;
+}

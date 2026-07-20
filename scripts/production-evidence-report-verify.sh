@@ -47,6 +47,15 @@ ARTIFACT_DIGEST="$(frontmatter_value artifact_digest)"
 ARTIFACT_URL="$(frontmatter_value artifact_url)"
 ATTESTATION_URL="$(frontmatter_value attestation_url)"
 CHECKSUMS_SHA256="$(frontmatter_value checksums_sha256)"
+RUNNER_OS="$(frontmatter_value runner_os)"
+RUNNER_KERNEL="$(frontmatter_value runner_kernel)"
+RUNNER_ARCH="$(frontmatter_value runner_arch)"
+RUNNER_RUSTC="$(frontmatter_value runner_rustc)"
+RUNNER_CARGO="$(frontmatter_value runner_cargo)"
+RUNNER_NODE="$(frontmatter_value runner_node)"
+RUNNER_DOCKER="$(frontmatter_value runner_docker)"
+RUNNER_COMPOSE="$(frontmatter_value runner_compose)"
+RUNNER_SHA256SUM="$(frontmatter_value runner_sha256sum)"
 
 [[ "$SCHEMA_VERSION" == "1" ]] || {
   echo "unsupported evidence report schema: $SCHEMA_VERSION" >&2
@@ -84,6 +93,13 @@ CHECKSUMS_SHA256="$(frontmatter_value checksums_sha256)"
   echo "evidence checksum-manifest digest is invalid" >&2
   exit 1
 }
+for runner_value in "$RUNNER_OS" "$RUNNER_KERNEL" "$RUNNER_ARCH" "$RUNNER_RUSTC" \
+  "$RUNNER_CARGO" "$RUNNER_NODE" "$RUNNER_DOCKER" "$RUNNER_COMPOSE" "$RUNNER_SHA256SUM"; do
+  [[ -n "$runner_value" ]] || {
+    echo "evidence report is missing fixed-runner metadata" >&2
+    exit 1
+  }
+done
 [[ "$ARTIFACT_URL" =~ ^https://github\.com/.+/actions/runs/[1-9][0-9]* ]] || {
   echo "evidence artifact URL is invalid" >&2
   exit 1

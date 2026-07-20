@@ -81,6 +81,9 @@ The runner finalizes evidence even when a workload fails or ends early.
 observed elapsed time, host sample count, minimum available memory, and maximum
 host task count. The command returns failure only after `summary.md` and
 `SHA256SUMS` have been written, so failed runs remain diagnosable and attestable.
+Each bundle also contains `runner.json`, a snapshot of the fixed Linux
+runner's OS, kernel, architecture, Rust/Cargo/Node/Docker/Compose and
+checksum-tool versions.
 The last standardized `roze_*_soak` line is also stored in
 `boundary-summary.txt`. Generated-system runs report iteration throughput and
 p50/p95/p99 workflow duration; protocol-level latency and throughput remain
@@ -99,3 +102,9 @@ max service count. The report scaffold includes a lifecycle snapshot table
 automatically when generated with `--area lifecycle`; pass the complete
 fourteen-field numeric summary line with `--lifecycle-summary "..."` to prefill
 it. The script rejects inconsistent lifecycle counts before writing the report.
+
+For the S6 handoff, run `bash scripts/production-release-audit.sh` after the
+release, evidence, and supply-chain checks. Its JSON output is the state
+machine snapshot: each area is `pending` or `verified`, and a verified report
+must be promoted for the exact audited Git revision. Add `--require-long-run`
+when the release text intends to claim battle-tested runtime behavior.

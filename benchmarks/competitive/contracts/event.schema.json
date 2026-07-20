@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roze.dev/benchmarks/competitive-event-v1.json",
+  "title": "Competitive outbox/inbox event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "requestId",
+    "traceId",
+    "idempotencyKey",
+    "sequence",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt-[0-9]{12}$"
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^req-[0-9]{12}$"
+    },
+    "traceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^idem-[0-9]{12}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "payload": {
+      "type": "string",
+      "minLength": 1024,
+      "maxLength": 1024
+    }
+  }
+}

@@ -1,29 +1,55 @@
 # Roze 项目规范
 
-本文档定�?Roze 仓库�?`rozectl` 生成项目的默认规范。目标是�?API、RPC、网关、MQ、配置中心和运维能力按同一套边界演进，避免每个服务重复定义自己的工程习惯�?
+本文定义 Roze 仓库和 `rozectl` 生成项目的默认工程边界。代码与测试是事实源；
+文档、示例和计划必须跟随实现更新。
 
-## 总原�?
+## 总原则
 
-- IDL 优先：REST 路由、RPC 方法、请�?响应 DTO 优先�?`.api` �?`.proto` 描述，再�?`rozectl` 生成边界代码�?
-- 约定优于配置：生成项目保持稳定目录结构，业务代码只进入明确的扩展点�?
-- Rust 原生优先：命令、模板和运行时都�?Roze 原生能力为唯一入口，输出保�?Roze native HTTP、Tower、tonic、prost、Toasty/SeaORM �?Rust 技术栈�?
-- 框架边界统一：HTTP、RPC、MQ、Gateway 都必须使用统一 Context、错误、日志、指标和配置模型�?
-- 可重复生成：生成器必须支持重复运行，默认保护业务逻辑和本地配置�?
+- IDL 优先：REST、RPC、DTO、model 与 search schema 先写入 `.api`、`.proto`、
+  `.ent` 或 `.search`，再由 `rozectl` 生成边界代码。
+- 约定优于配置：目录、命名、生命周期和错误语义保持稳定。
+- Rust 原生：HTTP 使用 Roze native HTTP/Tower，RPC 使用 tonic/prost，数据层
+  使用受支持的 Toasty/SeaORM 路径。
+- 框架边界统一：HTTP、RPC、Gateway、MQ、Job 使用同一 Context、错误、治理、
+  telemetry 和配置模型。
+- 可重复生成：create、update、second update 应字节确定；失败原子回滚。
+- 所有权明确：generator-owned 文件可刷新，application-owned 文件不得覆盖。
+- 兼容优先：Roze 1.x 公共 API 只做向后兼容扩展；破坏性变更进入新 major。
+- 证据诚实：单元测试、Windows smoke、真实依赖、固定 Linux benchmark 和
+  24h/72h evidence 必须分级表述。
 
 ## 仓库结构
 
-- `crates/roze-*`：可复用框架能力。新增通用能力优先进入 crate，而不是写死在示例应用�?
-- `apps/rozectl`：Roze 原生代码生成器。生成逻辑、模板、解析规则和生成器测试放在这里�?
-- `apps/roze-example`、`apps/user`、`apps/roze-sample`：示例和验收应用，只承载真实使用方式，不承载框架专用逻辑�?
-- `apps/roze-gateway`、`apps/roze-dtm`：可独立运行的基础设施服务�?
-- `docs/contracts`：运行时契约。Context、Gateway、Queue、Config Center、DTM、Storage 等跨模块行为在这里固化�?
-- `docs/usage`：用户指南。命令、生成结果、SDK/OpenAPI 使用方式在这里说明�?
+- `crates/roze-*`：可复用 runtime 与基础能力。
+- `apps/rozectl`：parser、generator、模板、所有权规则和生成器测试。
+- `apps/*`：真实使用示例或可运行基础设施；不能承载只为绕过 runtime 缺口的
+  私有实现。
+- `examples/`：可编译的集成示例。
+- `docs/contracts/`：跨模块运行时契约。
+- `docs/usage/`：用户命令与生成结果说明。
+- `docs/evidence/`：绑定 revision、runner 和原始结果的证据索引。
+- `scripts/`：release、smoke、soak、故障和证据 verifier。
 
-## API 项目规范
+除非直接关闭既定里程碑，不新增孤立 crate、生成语言或旁路工具。
 
-API 项目�?`rozectl api generate` 生成，面�?HTTP REST 服务�?
+## 生成文件所有权
 
-固定结构�?
+生成器必须在模板或写入计划中声明文件归属：
+
+- framework-owned：handler/server、route、pb、生成 client、DTO、OpenAPI、
+  generated model/search repository、构建 glue。
+- application-owned：业务 logic、自定义 middleware、扩展模块和本地
+  `config.yaml`。
+- marker-owned region：只更新显式 marker 之间的内容。
+
+`--update` 只刷新 framework/marker-owned 内容并删除有 marker 的陈旧生成文件。
+`--force` 只用于明确的全量重建。生成失败时，目标项目必须保持调用前状态。
+任何生成输出变化都应修改 `apps/rozectl` 的 generator/template/test，不手改临时
+生成目录。
+
+## REST/API 项目
+
+典型结构：
 
 ```text
 config.yaml
@@ -31,77 +57,39 @@ Cargo.toml
 src/
   main.rs
   config/mod.rs
-  route/
-    mod.rs
-    <group>.rs
-  handler/
-    mod.rs
-    <group>/
-      mod.rs
-      <method>.rs
-  logic/
-    mod.rs
-    <group>/
-      mod.rs
-      <method>.rs
-  middleware/
-    mod.rs
-    <custom>.rs
+  route/<group>.rs
+  handler/<group>/<method>.rs
+  logic/<group>/<method>.rs
+  middleware/mod.rs
+  middleware/<custom>.rs
   openapi/mod.rs
   svc/mod.rs
   types/mod.rs
 ```
 
-文件归属�?
+- `logic/**` 是默认业务落点，可包含领域校验、授权、事务编排和对 repository/
+  client 的调用；update 必须保留。
+- `handler/**` 只负责协议提取、Context、校验、logic 调用和响应转换。
+- `route/**` 只负责路由与 middleware/governance 组装。
+- `svc/mod.rs` 只保存依赖，不放业务流程。
+- `types/mod.rs` 与 `openapi/mod.rs` 来自 IDL，wire name 必须稳定。
+- 自定义 middleware 文件与 `config.yaml` 默认由应用拥有。
+- HTTP 成功响应使用 `roze-result::ApiResponse`，错误使用 `RozeError`。
+- route/service middleware 的优先级和行为遵守
+  [Middleware Contract](contracts/middleware.md)。
+- `rozectl openapi generate` 与运行服务暴露的 schema 必须语义一致。
+- API-only 生成输入不得混入 RPC method；无 request/response 时使用稳定的空类型。
 
-- `src/logic/<group>/<method>.rs`：业务逻辑唯一默认落点。复�?SQL、领域校验、事务、授权和权限检查都写在这里或这里调用的业务模块。`--update` 保留这些文件�?
-- `src/handler`：HTTP handler 适配层，由生成器维护，只做请求解析、Context 提取、调�?logic 和响应包装�?
-- `src/route`：路由注册，由生成器维护，并�?route group 拆分�?
-- `src/types/mod.rs`：请�?响应 DTO，由 `.api` 生成�?
-- `src/openapi/mod.rs`：OpenAPI schema 和文档导出，由生成器维护�?
-- `src/middleware/mod.rs`：自定义 middleware 聚合入口，由生成器维护�?
-- `src/middleware/<custom>.rs`：应用自定义 middleware。`--update` 保留这些文件�?
-- `src/svc/mod.rs`：依赖注入和服务上下文，只放 cache、MQ、配置、外�?client 等依赖。API 层默认不链接数据库�?
-- `config.yaml`：本地和部署配置，`--update` 默认保留�?
+## RPC 项目
 
-API 运行边界�?
-
-- HTTP 响应统一使用 `roze-result::ApiResponse`�?
-- HTTP 错误统一使用 `RozeError`，禁止在 handler 中手写不一致的错误 JSON�?
-- 请求入口必须注入和传�?`roze-context` 标准 header�?
-- REST route 级别治理包括 timeout、JWT、middleware、rate limit、breaker �?OpenAPI 安全声明�?
-- REST 服务�?middleware �?`rest.middlewares` 配置，包�?recover、trace、stat、prometheus、cors、timeout、max_conns、shedding、gunzip �?request body limit。详细行为见 [Middleware Contract](contracts/middleware.md)�?
-- `rozectl openapi generate` 和生成服务的 `/openapi.json` 必须保持同一 schema 语义�?
-
-API 生成策略�?
-
-- 使用 `--update` 重新生成框架拥有的文件，并保�?`src/logic/<group>/<method>.rs`、`src/middleware/<custom>.rs` �?`config.yaml`�?
-- 使用 `--force` 只适合全量重建或一次性脚手架验证�?
-- API 定义不能包含 RPC method；如�?`.api` 中存�?`rpc`，应使用 `rozectl rpc generate`�?
-- �?request �?REST 路由生成 `EmptyReq`，无 response �?REST 路由生成 `EmptyResp`�?
-- `.api` 中声明的 Roze 内建 middleware 名称会先解析为内建项；只有未知名称才会生成自定义 middleware 文件�?
-
-API 测试要求�?
-
-- parser/generator 改动必须�?`rozectl` 测试�?
-- validator tag、OpenAPI、SDK、route prefix/middleware/JWT 行为必须有覆盖�?
-- 改动 HTTP 运行时或 middleware 时，至少运行相关 crate 测试�?`cargo test -p rozectl -- --skip postgres --skip mysql`�?
-
-## RPC 项目规范
-
-RPC 项目�?`rozectl rpc generate` �?`rozectl rpc protoc` 生成，面�?tonic/prost gRPC 服务�?
-
-固定结构�?
+典型结构：
 
 ```text
 config.yaml
 Cargo.toml
 build.rs
-proto/
-  service.proto
-  source.proto
+proto/service.proto
 src/
-  lib.rs
   main.rs
   client/mod.rs
   config/mod.rs
@@ -109,163 +97,133 @@ src/
   server/mod.rs
   svc/mod.rs
   types/mod.rs
-  logic/
-    mod.rs
-    <method>.rs
+  logic/<method>.rs
 ```
 
-文件归属�?
+- `logic/**` 由应用拥有。
+- `server/mod.rs` 恢复 Context、执行校验、调用 logic、转换统一错误，并在 success
+  response/status 返回剩余 retry budget。
+- `client/mod.rs` 负责 Context metadata、deadline、请求级 retry budget、
+  per-attempt discovery/P2C/EWMA、结果结算和治理。
+- `pb/mod.rs`、规范化 proto、types 和构建 glue 由生成器拥有。
+- RPC client 的第一个业务上下文参数保持为 `&roze_context::Context`。
+- RPC error metadata 使用 `x-roze-error-code`、`x-roze-error-kind`、
+  `x-request-id`、`x-trace-id`、可选 locale 与 retry budget。
+- 服务注册与发现统一使用 `roze_rpc::registry`。
+- `.api` RPC 输入不得混入 REST route；proto 不支持的字段必须 fail fast。
 
-- `src/logic/<method>.rs`：RPC 业务逻辑默认落点。`--update` 保留这些文件�?
-- `src/server/mod.rs`：tonic server 适配层，由生成器维护，负�?Context 提取、参数校验、错误转换和调用 logic�?
-- `src/client/mod.rs`：生成的 RPC client，由生成器维护，负责 Context metadata 注入、超时、retry �?registry 连接�?
-- `src/pb/mod.rs`：prost include 入口，由生成器维护�?
-- `src/types/mod.rs`：共享类型或辅助类型，由生成器维护�?
-- `src/svc/mod.rs`：依赖注入和服务上下文，只放依赖，不放业务流程�?
-- `config.yaml` 属于部署配置，`--update` 默认保留�?
-- `proto/service.proto` 是生成器规范化后的构建输入�?
+## Context、deadline 与 cancellation
 
-RPC 运行边界�?
+标准契约见 [Context Contract](contracts/context.md)。
 
-- RPC server 必须使用 `roze_rpc::rpc::request_context` 恢复 Context�?
-- RPC client 必须�?`&roze_context::Context` 作为第一个业务上下文参数�?
-- RPC 错误统一通过 `roze_rpc::rpc::status_from_error(err, &request_ctx)` 转为 gRPC status�?
-- 错误 metadata 必须包含 `x-roze-error-code`、`x-roze-error-kind`、`x-roze-request-id`、`x-roze-trace-id` �?`x-roze-locale`�?
-- 服务注册发现统一�?`roze_rpc::registry`�?
+- 使用 `x-request-id`、`x-trace-id`、`x-roze-timeout-ms`、标准 auth/tenant/
+  locale/idempotency metadata。
+- 入站没有 request/trace ID 时由入口生成，并在适用响应中返回。
+- deadline 传播剩余时间，不在每一跳重置。
+- clone/fork 共享取消和同进程 retry budget。
+- 跨进程 fan-out 原子划拨预算，不复制完整 remaining 值。
+- success、error、timeout、cancel 和 panic 均须释放 lease、permit、connection
+  和 task。
 
-RPC 生成策略�?
+## 配置与热更新
 
-- `rozectl rpc generate` �?`.api` �?`rpc` method 生成 Rust-native RPC 项目�?
-- `rozectl rpc protoc` 接受 proto3 源文件，Rust RPC 项目文件生成�?`--out`�?
-- RPC 定义不能包含 REST route；如�?`.api` 中存�?REST route，应使用 `rozectl api generate`�?
-- proto parser 遇到不支持的字段类型必须 fail fast�?
+- 应用配置统一使用 `roze_config::ServiceConfig`。
+- 本地默认 `config.yaml`；环境与配置中心作为覆盖或热更新来源。
+- 解析、校验或 listener 失败时保留最后有效配置。
+- listener 有 timeout；变更按 section/signature 判断重建范围。
+- listener address、数据库 schema 等不可安全热换的字段必须明确要求 restart。
+- 新配置字段同步示例、serde 默认、契约、生成模板和测试。
+- secret 不提交到示例真实值，不进入 diff 日志或 reload 审计正文。
 
-RPC 测试要求�?
+## 校验、错误与类型
 
-- RPC 生成器改动必须覆�?`src/server/mod.rs`、`src/client/mod.rs`、`src/pb/mod.rs`、`proto/service.proto` 和业�?logic 保留行为�?
-- Context metadata、validation、retry、registry resolver、错�?metadata 必须有测试�?
-- 改动 RPC runtime 时至少运�?`cargo test -p roze-rpc` 和相关生成器测试�?
+- REST/RPC DTO 在入口执行 `roze-validation`。
+- Rust 字段使用 snake_case，serde/prost 保留 wire name。
+- `required`、范围、长度、email/url/ip、跨字段、条件必填、collection dive、
+  map keys/endkeys 等映射必须有生成器测试。
+- HTTP、RPC、Gateway 与 MQ 的错误分类保持一致；协议 adapter 只负责映射。
+- 禁止 handler/server 手写互不兼容的错误 JSON/status。
 
-## 配置规范
+## 服务发现、Gateway 与治理
 
-- 应用配置统一使用 `roze-config::ServiceConfig`�?
-- 本地文件默认使用 `config.yaml`；环境变量和配置中心只作为覆盖或热更新来源�?
-- 配置中心必须保留上一次有效配置；新配置解析失败时记录 reload failure，不替换运行态配置�?
-- 需要热更新的子系统必须�?section 或签名判断是否重建，避免无关配置变更触发全量重启�?
-- 配置字段新增时必须同步示例配置、契约文档和测试�?
+- registry 统一使用 Memory、DNS、Etcd、Consul 与 cached resolver。
+- RPC 每个真实 attempt 重新选择实例，并反馈 latency、success、timeout、failure
+  与 in-flight。
+- Gateway upstream 可来自静态 URL 或 registry；route > service > global
+  governance。
+- 健康、outlier、权重、instance tags 与 route 灰度必须显式、可观测、有回收
+  路径。
+- retry 只统计真实执行的额外 attempt；deadline/cancel 阻止的计划不计 retry。
+- timeout、rate limit、breaker、shedding、fallback、health、registry churn
+  必须有成功、失败、恢复和资源释放测试。
 
-## Context、错误和响应
+## 数据、缓存、事务与消息
 
-- HTTP、RPC、Gateway、MQ 入口必须传播 `x-roze-request-id`、`x-roze-trace-id`、tenant、locale、auth subject �?metadata�?
-- 未传�?request id �?trace id 时，由入口生成并回写�?
-- HTTP 错误统一�?`RozeError` �?`roze-result::ApiResponse`�?
-- RPC 错误统一�?`roze_rpc::rpc::status_from_error(err, &request_ctx)`，metadata 必须包含等价 HTTP code、error kind、request id、trace id �?locale�?
-- Gateway fallback 响应和上游透传响应必须保持边界清晰：上游成功响应原样透传，网关自身错误使用标�?fallback�?
+- model generation 保持 page/sort/filter/projection/aggregate、tenant、audit、
+  soft-delete 和 optimistic concurrency 的稳定契约。
+- 复杂 SQL、业务事务边界、领域授权与跨聚合编排属于 application logic。
+- 本地缓存使用 `roze-local-cache`；分布式缓存使用 `roze-cache` /
+  `roze-redis`；热点回源使用 `roze-singleflight`。
+- cache key 必须包含必要 tenant/version scope，写路径遵守失效契约。
+- 可靠事件优先使用 persistent outbox + inbox/idempotency；publisher 使用
+  `roze_mq::Publisher` 抽象。
+- 消费者明确 ack/nack、retry、DLQ、replay 与 duplicate-effect 语义。
+- TCC 是默认分布式事务路径；Saga 是显式可选 workflow。
+- 数据库、Redis、broker 和 search 的“通过”必须来自真实依赖流程。
 
-## 校验和类�?
-
-- 请求 DTO 必须派生验证能力，REST/RPC 生成入口都要执行 `roze-validation`�?
-- `.api` 字段名生�?Rust snake_case 字段，并通过 serde rename 保留 wire 名称�?
-- go-playground validator 常用 tag 应尽量映射到 Rust validator 或自定义请求级校验�?
-- `required`、范围、长度、email/url/ip、跨字段、条件必填、集�?`dive`、map `keys/endkeys` 等行为必须有生成器测试�?
-
-## 指标、日志和追踪
-
-- HTTP 路由指标统一使用 `roze_http_route_*`�?
-- RPC 方法指标统一使用 `roze_rpc_method_*`�?
-- Gateway 路由、retry、upstream 事件统一使用 `roze_gateway_*`�?
-- MQ 指标必须包含 topic、group、partition、offset、attempt �?outcome 等关键标签�?
-- 日志必须包含 request id �?trace id；热更新、重试、熔断、限流、死信、回退等治理事件必须有结构化字段�?
-- 新增生产�?adapter 时，必须�?metrics 标签验证�?trace/context 透传测试�?
-
-## 服务发现、网关和治理
-
-- 服务发现统一�?`roze_rpc::registry`，支�?memory、dns、etcd、consul �?cached resolver�?
-- Gateway upstream 可以来自静�?`upstream` �?registry 动态发现；动态发现优先使�?instance tags、健康状态和 outlier 状态过滤实例，并按实例 `weight` 做加权轮询�?
-- 多条同前缀同方�?Gateway route 可以通过 `weight` 做稳定加权灰度；标签路由必须显式配置 `instance_tags`，避免流量误打到错误版本�?
-- route 级治理优先级高于 service 级和全局配置�?
-- retry 只记录真实发生的重试，不把最后一次失败计�?retry�?
-- 限流、熔断、超时、fallback、健康检查、outlier、registry 行为必须�?crate �?smoke test；可运行 app 级示例脚本作为交付验收�?
-
-## 数据、事务和消息
-
-- ORM 生成默认保持稳定 page/sort/filter/tenant/audit/soft-delete 契约�?
-- 复杂 SQL、事务边界、领域校验、授权校验属于业务逻辑，不由生成器自动实现�?
-- 本地进程缓存统一使用 `roze-local-cache`；该 crate 基于 Moka，提�?TTL、容量淘汰、time-to-idle、命�?未命中统计和 async API�?
-- 分布式缓存统一使用 `roze-cache`/`roze-redis`；缓存回源必须优先使�?`roze-singleflight`，其 key lookup 已用 DashMap 优化，避免热�?miss 击穿�?
-- 内存�?session、WebSocket hub、eventbus �?MQ broker 的高�?lookup/index 路径统一使用 DashMap/DashSet；需要顺序语义的 DLQ 队列继续使用显式锁保护�?
-- 可靠事件发布优先�?outbox relay；可发布到任�?`roze_mq::Publisher`�?
-- MQ 消费必须明确 ack/nack、retry、dead letter �?idempotency 行为�?
-- DTM 默认使用 TCC；Saga 作为可选工作流，不应破坏默�?TCC 状态机�?
-
-## 搜索项目规范
-
-搜索索引�?`rozectl search generate` �?`rozectl search inspect` 生成�?
-面向 Elasticsearch、OpenSearch �?Meilisearch�?
-
-固定结构�?
+## Search 项目
 
 ```text
-src/
-  search/
-    mod.rs
-    <index>.rs
+src/search/mod.rs
+src/search/<index>.rs
 ```
 
-文件归属�?
+- `.search` DSL 或 JSON schema 是事实源。
+- `rozectl search generate` 生成 document 与 repository。
+- `search inspect` 从 Elasticsearch/OpenSearch mapping 或 Meilisearch
+  settings/sample 恢复 schema。
+- serde rename 保留原始 index field。
+- ranking、boost、召回、组合过滤与重排属于应用模块。
+- model 与 search generation 分离；update 只刷新生成文件。
 
-- `src/search/mod.rs`：搜索模块聚合入口，由生成器维护�?
-- `src/search/<index>.rs`：搜索文档结构和 repository，由生成器维护�?
-- 手写 ranking、boosting、过滤组合、召回策略、结果重排和业务级查询编排必须放在应用模块中，再调用生成 repository�?
+## 可观测性与基数
 
-搜索生成策略�?
+- 指标 label 只能来自有界配置枚举，例如 service、operation、boundary、
+  outcome、decision、source。
+- endpoint、instance ID、tenant、subject、request/trace ID、原始 path、offset、
+  partition、错误正文不得进入 Prometheus label。
+- 高基数字段进入受采样 trace event 或脱敏结构化日志。
+- HTTP、RPC、Gateway、MQ、registry、outbox 和 config reload 必须有统一
+  request/trace 关联。
+- state map、watch task、breaker、outlier、retry budget 和缓存必须有容量上限
+  或明确删除路径，并在 soak 报告记录起点、峰值和终点。
 
-- 搜索生成和数据库模型生成分离；数据库�?集合进入 `src/model`，搜索索引进�?`src/search`�?
-- `rozectl search generate <schema> --engine <engine>` �?`.search` DSL �?JSON schema 生成索引模块�?
-- `rozectl search inspect <index> --engine elasticsearch|opensearch` 读取 `/<index>/_mapping`�?
-- `rozectl search inspect <index> --engine meilisearch` 读取 settings、index metadata，并�?`--sample-size` 采样 documents 推断字段类型�?
-- 生成代码必须通过 `serde(rename = "...")` 保留原始索引字段名�?
-- 运行时调用统一�?`roze-search`，包�?health、index document、delete document �?search�?
-- `--update` 刷新生成文件；`--force` 全量重写生成文件。手写扩展不写入生成文件�?
+## 测试与验收
 
-搜索验收要求�?
+按变更范围至少运行：
 
-- 新增搜索引擎行为�?schema 字段时，必须覆盖 DSL/JSON 解析、inspect 结果转换和生成代码断言�?
-- 改动 `roze-search` 时至少运�?`cargo check -p roze-search` �?`cargo test -p rozectl`�?
+```bash
+cargo fmt --all -- --check
+cargo test -p <changed-crate>
+cargo clippy -p <changed-crate> --all-targets -- -D warnings
+```
 
-## 测试和验�?
-
-提交前至少运行相�?crate 测试；涉及生成器时运行：
+生成器变更运行：
 
 ```bash
 cargo test -p rozectl -- --skip postgres --skip mysql --skip mongo
 ```
 
-涉及网关、RPC、配置、MQ 时运行对应测试：
-
-```bash
-cargo test -p roze-gateway -p roze-rpc -p roze-config -p roze-mq
-```
-
-需要真实依赖时使用集成环境�?
-
-```bash
-docker compose -f docker-compose.integration.yml up -d
-```
-
-生产�?adapter 的验收至少覆盖：
-
-- 真实服务集成测试
-- 断线重连测试
-- 重试、超时、取消测�?
-- metrics 标签验证
-- trace/context 透传验证
-- i18n 错误响应验证
+模板或生成依赖变化还要从空目录生成并编译对应工程。真实依赖测试使用仓库
+integration/reference-system 脚本；固定 Linux benchmark、24h/72h soak 与发布
+证据必须保留原始 artifact、revision、dependency digest 和 runner metadata。
 
 ## 文档同步
 
-- 新增或修改公开命令时，同步 `docs/usage` �?README�?
-- 新增运行时契约时，同�?`docs/contracts`�?
-- 新增生成器、SDK、部署或运维能力时，同步对应使用文档和能力矩阵�?
-- 新增配置字段时，同步示例 `config.yaml`、契约文档和测试�?
-- 文档中的能力状态必须以代码和测试为准，不以计划项为准�?
+- 公共命令变化：更新 `docs/usage` 与相关 README。
+- runtime 语义变化：更新 `docs/contracts`。
+- 生成 surface 变化：更新模板说明、能力矩阵与 generated compile fixture。
+- 配置变化：更新示例、契约和测试。
+- 生产结论变化：更新 maturity/evidence，但只有 verifier 通过的对应 revision
+  可以晋级。
+- 所有跟踪的文本文件必须是严格 UTF-8，不得包含 Unicode replacement character。

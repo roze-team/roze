@@ -10716,6 +10716,10 @@ rest:
     #   cool_down_ms: 1000
     # gunzip: true
     # request_body_limit_bytes: 2097152
+    # Routes may be written as "/path", "GET /path", or "/prefix/*".
+    auth_public_routes: ["/healthz", "/readyz", "/startupz", "/metrics"]
+    # Enable only when direct client access is blocked by a trusted proxy.
+    trust_forwarded_identity_headers: false
 registry:
   kind: memory
   endpoints: []
@@ -11565,9 +11569,10 @@ fn upsert_generated_section_at(
 }
 
 fn render_pb(spec: &ApiSpec) -> String {
-    let package = to_snake_case(&spec.service);
+    let package = rpc_proto_package(spec);
+    let module = rpc_proto_module(spec);
     format!(
-        r#"pub mod {package} {{
+        r#"pub mod {module} {{
     roze_grpc::include_proto!("{package}");
 }}
 "#
@@ -11668,7 +11673,7 @@ fn is_rust_keyword(ident: &str) -> bool {
 }
 
 fn render_proto(spec: &ApiSpec) -> anyhow::Result<String> {
-    let package = to_snake_case(&spec.service);
+    let package = rpc_proto_package(spec);
     let known_types = spec
         .types
         .iter()
@@ -11724,6 +11729,16 @@ fn render_proto(spec: &ApiSpec) -> anyhow::Result<String> {
     }
 
     Ok(out)
+}
+
+pub(crate) fn rpc_proto_package(spec: &ApiSpec) -> String {
+    spec.rpc_package
+        .clone()
+        .unwrap_or_else(|| to_snake_case(&spec.service))
+}
+
+pub(crate) fn rpc_proto_module(spec: &ApiSpec) -> String {
+    to_snake_case(&rpc_proto_package(spec).replace('.', "_"))
 }
 
 fn route_name_from_path(path: &str) -> String {

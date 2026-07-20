@@ -1,0 +1,8 @@
+Name: competitive-api
+Host: 127.0.0.1
+Port: 18080
+Timeout: 2000
+CompetitiveRpc:
+  Endpoints:
+    - 127.0.0.1:19090
+  Timeout: 2000

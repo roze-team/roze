@@ -290,3 +290,106 @@ fn admin_request_authorized(req: &IncomingRequest, auth: Option<&AdminAuthConfig
             .is_some_and(|value| value == key),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::Request;
+    use tower::Service;
+
+    fn audit_record(version: u64) -> ConfigReloadAuditRecord {
+        ConfigReloadAuditRecord {
+            version,
+            old_version: version.saturating_sub(1),
+            hash: format!("hash-{version}"),
+            old_hash: format!("hash-{}", version.saturating_sub(1)),
+            ts_millis: version,
+            source: "test".to_string(),
+            namespace: None,
+            app: None,
+            key: None,
+            changed: true,
+            success: true,
+            error: None,
+            diff: Vec::new(),
+            section_signatures: Vec::new(),
+        }
+    }
+
+    fn request(path: &str) -> IncomingRequest {
+        Request::builder()
+            .uri(path)
+            .body(roze_http::body::empty())
+            .expect("admin request")
+    }
+
+    #[test]
+    fn config_reload_history_is_bounded_and_newest_first() {
+        let history = ConfigReloadHistory::new(2);
+        history.push(audit_record(1));
+        history.push(audit_record(2));
+        history.push(audit_record(3));
+
+        let records = history.list(0, 100);
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.version)
+                .collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        assert_eq!(history.list(1, 1)[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn config_reload_endpoint_enforces_bearer_auth() {
+        let history = ConfigReloadHistory::new(2);
+        history.push(audit_record(7));
+        let state = AdminState::new()
+            .with_config_history(history)
+            .with_auth(AdminAuthConfig::bearer("admin-secret"));
+        let mut service = admin_service(state);
+
+        let unauthorized = service
+            .call(request("/admin/config/reloads"))
+            .await
+            .expect("admin response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let mut authorized_request = request("/admin/config/reloads");
+        authorized_request.headers_mut().insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer admin-secret"),
+        );
+        let authorized = service
+            .call(authorized_request)
+            .await
+            .expect("admin response");
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = roze_http::body::to_bytes(authorized.into_body(), 4096)
+            .await
+            .expect("admin JSON body");
+        let records: Vec<ConfigReloadAuditRecord> =
+            serde_json::from_slice(&body).expect("reload audit JSON");
+        assert_eq!(records[0].version, 7);
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_and_unknown_route_are_explicit() {
+        let state = AdminState::new().with_auth(AdminAuthConfig::api_key("service-secret"));
+        let mut service = admin_service(state);
+        let mut authorized_request = request("/admin/unknown");
+        authorized_request.headers_mut().insert(
+            "x-api-key",
+            http::HeaderValue::from_static("service-secret"),
+        );
+
+        let response = service
+            .call(authorized_request)
+            .await
+            .expect("admin response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}

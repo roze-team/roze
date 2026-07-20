@@ -508,13 +508,26 @@ mod tests {
     fn nats_message_round_trips_context_headers() {
         let ctx =
             roze_context::Context::background_with_request_id_and_trace_id("request-1", "trace-1")
-                .with_locale("zh-CN");
+                .with_locale("zh-CN")
+                .with_auth(roze_context::AuthContext {
+                    subject: "user-1".to_string(),
+                    roles: vec!["buyer".to_string()],
+                    tenant: Some("tenant-1".to_string()),
+                })
+                .with_idempotency_key("order-1")
+                .with_retry_budget(2)
+                .with_timeout(std::time::Duration::from_secs(1));
         let msg = NatsMessage::with_context(&ctx, "orders", serde_json::json!({"id": 1}));
         let restored = msg.context();
 
         assert_eq!(restored.request_id(), "request-1");
         assert_eq!(restored.trace_id(), "trace-1");
         assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
+        assert_eq!(restored.subject().as_deref(), Some("user-1"));
+        assert_eq!(restored.tenant().as_deref(), Some("tenant-1"));
+        assert_eq!(restored.idempotency_key().as_deref(), Some("order-1"));
+        assert_eq!(restored.retry_budget_remaining(), Some(2));
+        assert!(restored.remaining_timeout().is_some());
     }
 
     #[test]

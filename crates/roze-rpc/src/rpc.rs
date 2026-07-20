@@ -1,15 +1,20 @@
 use std::{
     collections::BTreeMap,
+    fmt,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
 
+use dashmap::DashMap;
+
 use crate::{
-    balance::{build_balancer, Balancer, BalancerKind},
+    balance::{
+        build_balancer, AttemptLease, AttemptOutcome, Balancer, BalancerKind, EwmaP2cBalancer,
+    },
     registry::{
         registry_config_from_rpc_client_etcd, CachedRegistryResolver, EtcdRegistry, Registry,
         ServiceInstance,
@@ -18,10 +23,10 @@ use crate::{
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_grpc::transport::{
-    Channel, Code, Endpoint, MetadataMap, MetadataValue, Request, Server, Status,
+    Channel, Code, Endpoint, MetadataMap, MetadataValue, Request, Response, Server, Status,
 };
 use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
-use roze_metrics::{record_resilience_decision, record_rpc_method};
+use roze_metrics::{record_resilience_decision, record_rpc_client_attempt, record_rpc_method};
 use roze_resilience::{
     full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary,
     OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
@@ -104,6 +109,262 @@ impl RpcClientOptions {
             ..Self::default()
         }
     }
+}
+
+#[derive(Clone)]
+pub struct DynamicRpcChannels {
+    source: DynamicDiscoverySource,
+    options: RpcClientOptions,
+    balancer: EwmaP2cBalancer,
+    channels: Arc<DashMap<String, Channel>>,
+    cache: Arc<Mutex<Option<DynamicDiscoveryCache>>>,
+    cache_ttl: Duration,
+    watch_started: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+enum DynamicDiscoverySource {
+    Static(Arc<Vec<ServiceInstance>>),
+    Registry(Arc<dyn Registry>),
+}
+
+#[derive(Debug, Clone)]
+struct DynamicDiscoveryCache {
+    discovered_at: Instant,
+    instances: Vec<ServiceInstance>,
+}
+
+pub struct DynamicRpcAttempt {
+    channel: Channel,
+    lease: AttemptLease,
+}
+
+impl fmt::Debug for DynamicRpcChannels {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DynamicRpcChannels")
+            .field(
+                "source",
+                &match &self.source {
+                    DynamicDiscoverySource::Static(_) => "static",
+                    DynamicDiscoverySource::Registry(_) => "registry",
+                },
+            )
+            .field("channel_count", &self.channels.len())
+            .field("cache_ttl", &self.cache_ttl)
+            .finish()
+    }
+}
+
+impl DynamicRpcAttempt {
+    pub fn into_parts(self) -> (Channel, AttemptLease) {
+        (self.channel, self.lease)
+    }
+}
+
+impl DynamicRpcChannels {
+    pub fn from_config(config: &roze_config::RpcClientConfig) -> anyhow::Result<Option<Self>> {
+        validate_rpc_client_config_mode(config)?;
+        if config.balancer != roze_config::RpcClientBalancerKind::PowerOfTwoChoices {
+            return Ok(None);
+        }
+        let source = if rpc_client_has_static_endpoints(config) {
+            let instances = rpc_client_static_instances(config)?;
+            if instances.len() < 2 {
+                return Ok(None);
+            }
+            DynamicDiscoverySource::Static(Arc::new(instances))
+        } else if let Some(etcd) = config.etcd.as_ref() {
+            let registry_config = registry_config_from_rpc_client_etcd(etcd);
+            DynamicDiscoverySource::Registry(Arc::new(EtcdRegistry::new(&registry_config)))
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            source,
+            options: RpcClientOptions::from_config(config),
+            balancer: EwmaP2cBalancer::default(),
+            channels: Arc::new(DashMap::new()),
+            cache: Arc::new(Mutex::new(None)),
+            cache_ttl: Duration::from_secs(5),
+            watch_started: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+
+    pub fn with_cache_ttl(mut self, cache_ttl: Duration) -> Self {
+        self.cache_ttl = cache_ttl;
+        self
+    }
+
+    pub async fn attempt(&self, service: &str) -> Result<DynamicRpcAttempt, Status> {
+        let instances = self.instances(service).await?;
+        let lease = self
+            .balancer
+            .pick_tracked(&instances)
+            .ok_or_else(|| Status::unavailable("no available RPC instances"))?;
+        let addr = lease.instance().addr.clone();
+        if let Some(channel) = self.channels.get(&addr).map(|entry| entry.clone()) {
+            return Ok(DynamicRpcAttempt { channel, lease });
+        }
+        match connect_channel_with_options(&addr, self.options).await {
+            Ok(channel) => {
+                self.channels.insert(addr, channel.clone());
+                Ok(DynamicRpcAttempt { channel, lease })
+            }
+            Err(_) => {
+                lease.finish(AttemptOutcome::Failure);
+                Err(Status::unavailable("RPC endpoint connection failed"))
+            }
+        }
+    }
+
+    /// Establishes the seed channel used to construct a generated tonic client.
+    ///
+    /// Generated clients replace this channel on every real call attempt. Trying
+    /// every discovered address here prevents one dead endpoint from making the
+    /// otherwise healthy dynamic client impossible to construct.
+    pub async fn initial_channel(&self, service: &str) -> anyhow::Result<Channel> {
+        let instances = self
+            .instances(service)
+            .await
+            .map_err(|status| anyhow::anyhow!(status.message().to_owned()))?;
+        let mut last_error = None;
+        for instance in instances {
+            if let Some(channel) = self.channels.get(&instance.addr).map(|entry| entry.clone()) {
+                return Ok(channel);
+            }
+            match connect_channel_with_options(&instance.addr, self.options).await {
+                Ok(channel) => {
+                    self.channels.insert(instance.addr.clone(), channel.clone());
+                    return Ok(channel);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no available RPC instances")))
+    }
+
+    pub fn balancer(&self) -> &EwmaP2cBalancer {
+        &self.balancer
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
+    async fn instances(&self, service: &str) -> Result<Vec<ServiceInstance>, Status> {
+        let instances = match &self.source {
+            DynamicDiscoverySource::Static(instances) => instances.as_ref().clone(),
+            DynamicDiscoverySource::Registry(registry) => {
+                self.ensure_registry_watch(service, registry).await;
+                if let Some(instances) = self.cached_instances(false) {
+                    instances
+                } else {
+                    match registry.discover(service).await {
+                        Ok(instances) if !instances.is_empty() => {
+                            *self.cache.lock().expect("RPC discovery cache poisoned") =
+                                Some(DynamicDiscoveryCache {
+                                    discovered_at: Instant::now(),
+                                    instances: instances.clone(),
+                                });
+                            instances
+                        }
+                        Ok(_) => self.cached_instances(true).ok_or_else(|| {
+                            Status::unavailable("RPC registry returned no instances")
+                        })?,
+                        Err(_) => self
+                            .cached_instances(true)
+                            .ok_or_else(|| Status::unavailable("RPC registry discovery failed"))?,
+                    }
+                }
+            }
+        };
+        let active = instances
+            .iter()
+            .map(|instance| instance.addr.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        self.channels
+            .retain(|addr, _| active.contains(addr.as_str()));
+        Ok(instances)
+    }
+
+    fn cached_instances(&self, allow_stale: bool) -> Option<Vec<ServiceInstance>> {
+        let cache = self.cache.lock().expect("RPC discovery cache poisoned");
+        let entry = cache.as_ref()?;
+        if allow_stale || entry.discovered_at.elapsed() <= self.cache_ttl {
+            Some(entry.instances.clone())
+        } else {
+            None
+        }
+    }
+
+    async fn ensure_registry_watch(&self, service: &str, registry: &Arc<dyn Registry>) {
+        if !registry.supports_watch()
+            || self
+                .watch_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        let mut receiver = match registry.watch(service).await {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.watch_started.store(false, Ordering::Release);
+                tracing::warn!(
+                    service,
+                    error = %error,
+                    "RPC registry watch could not start; TTL discovery remains active"
+                );
+                return;
+            }
+        };
+        let cache = Arc::clone(&self.cache);
+        let watch_started = Arc::clone(&self.watch_started);
+        let service = service.to_string();
+        tokio::spawn(async move {
+            while let Some(instances) = receiver.recv().await {
+                *cache.lock().expect("RPC discovery cache poisoned") =
+                    Some(DynamicDiscoveryCache {
+                        discovered_at: Instant::now(),
+                        instances,
+                    });
+            }
+            watch_started.store(false, Ordering::Release);
+            tracing::warn!(
+                service,
+                "RPC registry watch ended; TTL discovery will restart it"
+            );
+        });
+    }
+}
+
+pub fn finish_attempt_status<T>(lease: AttemptLease, result: &Result<T, Status>) {
+    finish_attempt_status_for("", "", lease, result);
+}
+
+pub fn finish_attempt_status_for<T>(
+    service: &str,
+    method: &str,
+    lease: AttemptLease,
+    result: &Result<T, Status>,
+) {
+    let outcome = match result {
+        Ok(_) => AttemptOutcome::Success,
+        Err(status) if status.code() == Code::DeadlineExceeded => AttemptOutcome::Timeout,
+        Err(status) if status.code() == Code::Cancelled => AttemptOutcome::Cancelled,
+        Err(_) => AttemptOutcome::Failure,
+    };
+    if !service.is_empty() && !method.is_empty() {
+        let outcome_label = match outcome {
+            AttemptOutcome::Success => "success",
+            AttemptOutcome::Failure => "failure",
+            AttemptOutcome::Timeout => "timeout",
+            AttemptOutcome::Cancelled => "cancelled",
+        };
+        record_rpc_client_attempt(service, method, outcome_label);
+    }
+    lease.finish(outcome);
 }
 
 impl RpcServer {
@@ -523,7 +784,7 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
             if let Some(auth) = context_auth_from_tonic(request.metadata()) {
                 ctx = ctx.with_auth(auth);
             }
-            match request
+            let ctx = match request
                 .metadata()
                 .get(roze_context::TIMEOUT_HEADER)
                 .and_then(|value| value.to_str().ok())
@@ -531,6 +792,15 @@ pub fn request_context<T>(request: &Request<T>) -> Context {
                 .map(Duration::from_millis)
             {
                 Some(timeout) => ctx.with_timeout(timeout),
+                None => ctx,
+            };
+            match request
+                .metadata()
+                .get(roze_context::RETRY_BUDGET_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|raw| raw.parse::<usize>().ok())
+            {
+                Some(remaining) => ctx.with_retry_budget(remaining),
                 None => ctx,
             }
         })
@@ -548,11 +818,21 @@ pub fn apply_request_context<T>(request: &mut Request<T>, context: &Context) {
         &context.trace_id(),
     );
     if let Some(timeout) = context.remaining_timeout() {
-        let timeout_ms = timeout.as_millis().to_string();
+        // Preserve a still-live deadline when sub-millisecond precision is
+        // lost at the metadata boundary. Encoding `0` would make the
+        // receiver treat the request as already expired.
+        let timeout_ms = timeout_metadata_millis(timeout);
         insert_metadata(
             request.metadata_mut(),
             roze_context::TIMEOUT_HEADER,
             &timeout_ms,
+        );
+    }
+    if let Some(remaining) = context.retry_budget_remaining() {
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::RETRY_BUDGET_HEADER,
+            &remaining.to_string(),
         );
     }
     if let Some(auth) = context.auth() {
@@ -572,9 +852,84 @@ pub fn apply_request_context<T>(request: &mut Request<T>, context: &Context) {
             );
         }
     }
+    if let Some(idempotency_key) = context.idempotency_key() {
+        insert_metadata(
+            request.metadata_mut(),
+            roze_context::IDEMPOTENCY_KEY_HEADER,
+            &idempotency_key,
+        );
+    }
     for (key, value) in context.metadata() {
         let header = format!("{}{}", roze_context::METADATA_HEADER_PREFIX, key);
         insert_metadata(request.metadata_mut(), &header, &value);
+    }
+}
+
+fn timeout_metadata_millis(timeout: Duration) -> String {
+    timeout.as_millis().max(1).to_string()
+}
+
+pub fn response_with_context<T>(payload: T, context: &Context) -> Response<T> {
+    let mut response = Response::new(payload);
+    if let Some(remaining) = context.retry_budget_remaining() {
+        insert_metadata(
+            response.metadata_mut(),
+            roze_context::RETRY_BUDGET_HEADER,
+            &remaining.to_string(),
+        );
+    }
+    response
+}
+
+pub struct RetryBudgetDelegation {
+    context: Context,
+    allocated: usize,
+}
+
+impl RetryBudgetDelegation {
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub fn allocated(&self) -> usize {
+        self.allocated
+    }
+}
+
+pub fn delegate_retry_budget(context: &Context) -> RetryBudgetDelegation {
+    let available = context.retry_budget_remaining().unwrap_or(0);
+    let allocated = context.take_retry_budget_up_to(available / 2);
+    RetryBudgetDelegation {
+        context: context.with_retry_budget(allocated),
+        allocated,
+    }
+}
+
+pub fn reconcile_delegated_retry_budget<T>(
+    context: &Context,
+    delegation: RetryBudgetDelegation,
+    result: &Result<Response<T>, Status>,
+) {
+    let metadata = match result {
+        Ok(response) => response.metadata(),
+        Err(status) => status.metadata(),
+    };
+    let returned = metadata_value(metadata, roze_context::RETRY_BUDGET_HEADER)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(delegation.allocated);
+    context.restore_retry_budget(returned);
+}
+
+pub fn reconcile_retry_budget<T>(context: &Context, result: &Result<Response<T>, Status>) {
+    let metadata = match result {
+        Ok(response) => response.metadata(),
+        Err(status) => status.metadata(),
+    };
+    if let Some(remaining) = metadata_value(metadata, roze_context::RETRY_BUDGET_HEADER)
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        context.limit_retry_budget(remaining);
     }
 }
 
@@ -600,6 +955,13 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
     );
     if let Some(locale) = locale.as_deref() {
         insert_metadata(&mut metadata, roze_context::LOCALE_HEADER, locale);
+    }
+    if let Some(remaining) = context.retry_budget_remaining() {
+        insert_metadata(
+            &mut metadata,
+            roze_context::RETRY_BUDGET_HEADER,
+            &remaining.to_string(),
+        );
     }
     if let RozeError::Fallback {
         status,
@@ -1162,6 +1524,7 @@ where
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
     let budget_key = OperationKey::new(service, GovernanceBoundary::Rpc, method).to_string();
+    context.ensure_retry_budget(policy.max_retries);
     tracing::debug!(
         protocol = "rpc",
         service,
@@ -1170,6 +1533,7 @@ where
         backoff_ms = policy.backoff.as_millis(),
         max_backoff_ms = policy.max_backoff.as_millis(),
         budget_percent = policy.budget_percent,
+        request_retry_budget_remaining = context.retry_budget_remaining(),
         remaining_deadline_ms = context.remaining_timeout().map(|value| value.as_millis()),
         "RPC retry policy resolved"
     );
@@ -1255,6 +1619,17 @@ where
                             "deadline_exhausted"
                         },
                     );
+                    return Err(status);
+                }
+                if !context.try_consume_retry_budget() {
+                    tracing::debug!(
+                        protocol = "rpc",
+                        service,
+                        method,
+                        decision = "request_budget_exhausted",
+                        "RPC retry stopped by propagated request budget"
+                    );
+                    record_resilience_decision(service, "rpc", "retry", "request_budget_exhausted");
                     return Err(status);
                 }
                 attempt = next_attempt;
@@ -1712,6 +2087,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn propagated_request_budget_caps_real_retry_attempts() {
+        let method = format!("RequestRetryBudget{}", std::process::id());
+        let mut governance = roze_config::GovernanceConfig::default();
+        governance.routes.insert(
+            method.clone(),
+            roze_config::RouteGovernanceConfig {
+                retry: Some(roze_config::RetryConfig {
+                    max_attempts: 4,
+                    backoff_ms: 0,
+                    max_backoff_ms: 0,
+                    budget_percent: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+        let context = Context::background().with_retry_budget(1);
+
+        let error = retry_status_for_method(
+            "catalog",
+            &context,
+            move || {
+                let attempts = Arc::clone(&attempts_clone);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(Status::unavailable("temporary"))
+                }
+            },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect_err("request budget should stop the second retry");
+
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(context.retry_budget_remaining(), Some(0));
+    }
+
+    #[tokio::test]
     async fn retry_status_stops_when_backoff_exceeds_deadline() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_clone = attempts.clone();
@@ -1852,6 +2269,96 @@ mod tests {
     }
 
     #[test]
+    fn timeout_metadata_preserves_live_submillisecond_deadline() {
+        assert_eq!(timeout_metadata_millis(Duration::from_nanos(1)), "1");
+        assert_eq!(timeout_metadata_millis(Duration::from_micros(999)), "1");
+        assert_eq!(timeout_metadata_millis(Duration::from_millis(7)), "7");
+    }
+
+    #[test]
+    fn client_request_round_trips_idempotency_key_across_rpc_boundary() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1")
+            .with_idempotency_key("order-42")
+            .with_locale("zh-CN")
+            .with_retry_budget(3);
+
+        let request = client_request((), &context, RpcClientOptions::default(), None);
+        assert_eq!(
+            request
+                .metadata()
+                .get(roze_context::IDEMPOTENCY_KEY_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("order-42")
+        );
+
+        let restored = request_context(&request);
+        assert_eq!(restored.idempotency_key().as_deref(), Some("order-42"));
+        assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
+        assert_eq!(restored.retry_budget_remaining(), Some(3));
+    }
+
+    #[test]
+    fn response_metadata_tightens_parent_retry_budget_on_success_and_error() {
+        let parent = Context::background().with_retry_budget(4);
+        let downstream = Context::background().with_retry_budget(2);
+        assert!(downstream.try_consume_retry_budget());
+
+        let success = Ok::<_, Status>(response_with_context((), &downstream));
+        reconcile_retry_budget(&parent, &success);
+        assert_eq!(parent.retry_budget_remaining(), Some(1));
+
+        let error = Err::<Response<()>, _>(status_from_error(
+            RozeError::Unavailable("temporary".to_string()),
+            &Context::background().with_retry_budget(0),
+        ));
+        reconcile_retry_budget(&parent, &error);
+        assert_eq!(parent.retry_budget_remaining(), Some(0));
+    }
+
+    #[test]
+    fn delegated_retry_budget_is_conserved_across_concurrent_fanout() {
+        let parent = Context::background().with_retry_budget(8);
+        let first = delegate_retry_budget(&parent);
+        let second = delegate_retry_budget(&parent);
+        let third = delegate_retry_budget(&parent);
+
+        assert_eq!(first.allocated(), 4);
+        assert_eq!(second.allocated(), 2);
+        assert_eq!(third.allocated(), 1);
+        assert_eq!(parent.retry_budget_remaining(), Some(1));
+
+        let first_result = Ok::<_, Status>(response_with_context((), first.context()));
+        reconcile_delegated_retry_budget(&parent, first, &first_result);
+        let second_result = Err::<Response<()>, _>(status_from_error(
+            RozeError::Unavailable("temporary".to_string()),
+            second.context(),
+        ));
+        reconcile_delegated_retry_budget(&parent, second, &second_result);
+        let missing_response = Err::<Response<()>, _>(Status::unavailable("connection lost"));
+        reconcile_delegated_retry_budget(&parent, third, &missing_response);
+
+        assert_eq!(
+            parent.retry_budget_remaining(),
+            Some(7),
+            "only explicitly returned credits may re-enter the parent pool"
+        );
+    }
+
+    #[test]
+    fn downstream_cannot_return_more_retry_budget_than_was_delegated() {
+        let parent = Context::background().with_retry_budget(4);
+        let delegation = delegate_retry_budget(&parent);
+        let forged = Ok::<_, Status>(response_with_context(
+            (),
+            &Context::background().with_retry_budget(usize::MAX),
+        ));
+
+        reconcile_delegated_retry_budget(&parent, delegation, &forged);
+
+        assert_eq!(parent.retry_budget_remaining(), Some(4));
+    }
+
+    #[test]
     fn rpc_client_options_follow_config_defaults() {
         let config = roze_config::RpcClientConfig {
             etcd: None,
@@ -1881,6 +2388,188 @@ mod tests {
         assert_eq!(
             rpc_client_target(&config).expect("target"),
             "127.0.0.1:4000"
+        );
+    }
+
+    #[test]
+    fn dynamic_rpc_channels_enable_per_attempt_default_p2c() {
+        let mut config = roze_config::RpcClientConfig {
+            etcd: None,
+            endpoints: vec!["127.0.0.1:4000".to_string(), "127.0.0.1:4001".to_string()],
+            target: None,
+            app: None,
+            token: None,
+            non_block: false,
+            timeout_ms: 2_000,
+            keepalive_time_secs: 20,
+            balancer: roze_config::RpcClientBalancerKind::PowerOfTwoChoices,
+            middlewares: Default::default(),
+        };
+        let dynamic = DynamicRpcChannels::from_config(&config)
+            .expect("dynamic config")
+            .expect("default P2C should be per-attempt");
+        assert_eq!(dynamic.channel_count(), 0);
+
+        config.balancer = roze_config::RpcClientBalancerKind::RoundRobin;
+        assert!(DynamicRpcChannels::from_config(&config)
+            .expect("round-robin config")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn dynamic_rpc_channels_apply_watch_remove_and_readd() {
+        #[derive(Clone)]
+        struct WatchRegistry {
+            initial: Vec<ServiceInstance>,
+            receiver:
+                Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<ServiceInstance>>>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Registry for WatchRegistry {
+            async fn register(&self, _instance: ServiceInstance) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn deregister(&self, _name: &str, _addr: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn discover(&self, _name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
+                Ok(self.initial.clone())
+            }
+
+            fn supports_watch(&self) -> bool {
+                true
+            }
+
+            fn watch(&self, _name: &str) -> crate::registry::RegistryWatchFuture<'_> {
+                Box::pin(async move {
+                    self.receiver
+                        .lock()
+                        .expect("watch receiver poisoned")
+                        .take()
+                        .ok_or_else(|| anyhow::anyhow!("watch already started"))
+                })
+            }
+        }
+
+        let first = ServiceInstance::new("catalog", "127.0.0.1:4000");
+        let second = ServiceInstance::new("catalog", "127.0.0.1:4001");
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = WatchRegistry {
+            initial: vec![first.clone()],
+            receiver: Arc::new(Mutex::new(Some(receiver))),
+        };
+        let dynamic = DynamicRpcChannels {
+            source: DynamicDiscoverySource::Registry(Arc::new(registry)),
+            options: RpcClientOptions::default(),
+            balancer: EwmaP2cBalancer::default(),
+            channels: Arc::new(DashMap::new()),
+            cache: Arc::new(Mutex::new(None)),
+            cache_ttl: Duration::from_secs(60),
+            watch_started: Arc::new(AtomicBool::new(false)),
+        };
+
+        assert_eq!(
+            dynamic.instances("catalog").await.expect("discover"),
+            vec![first.clone()]
+        );
+        sender.send(vec![second.clone()]).expect("watch update");
+        tokio::task::yield_now().await;
+        assert_eq!(
+            dynamic.instances("catalog").await.expect("watch replace"),
+            vec![second.clone()]
+        );
+
+        sender.send(Vec::new()).expect("watch remove");
+        tokio::task::yield_now().await;
+        assert!(dynamic
+            .instances("catalog")
+            .await
+            .expect("watch remove")
+            .is_empty());
+
+        sender.send(vec![first.clone()]).expect("watch re-add");
+        tokio::task::yield_now().await;
+        assert_eq!(
+            dynamic.instances("catalog").await.expect("watch re-add"),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn finish_attempt_status_settles_timeout_once() {
+        let balancer = EwmaP2cBalancer::default();
+        let instance = ServiceInstance::new("catalog", "127.0.0.1:4000");
+        let lease = balancer
+            .pick_tracked(std::slice::from_ref(&instance))
+            .expect("lease");
+        let result = Err::<(), _>(Status::deadline_exceeded("slow"));
+        finish_attempt_status(lease, &result);
+        let snapshot = balancer.snapshot(&instance).expect("snapshot");
+        assert_eq!(snapshot.inflight, 0);
+        assert_eq!(snapshot.success_per_mille, 0);
+    }
+
+    #[tokio::test]
+    async fn aborting_inflight_attempt_releases_lease() {
+        let balancer = EwmaP2cBalancer::default();
+        let instance = ServiceInstance::new("catalog", "127.0.0.1:4000");
+        let task_balancer = balancer.clone();
+        let task_instance = instance.clone();
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _lease = task_balancer
+                .pick_tracked(std::slice::from_ref(&task_instance))
+                .expect("lease");
+            let _ = acquired_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        acquired_rx.await.expect("attempt acquired");
+        assert_eq!(
+            balancer
+                .snapshot(&instance)
+                .expect("active snapshot")
+                .inflight,
+            1
+        );
+
+        task.abort();
+        let error = task.await.expect_err("task should be cancelled");
+        assert!(error.is_cancelled());
+        assert_eq!(
+            balancer
+                .snapshot(&instance)
+                .expect("released snapshot")
+                .inflight,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_inflight_attempt_releases_lease() {
+        let balancer = EwmaP2cBalancer::default();
+        let instance = ServiceInstance::new("catalog", "127.0.0.1:4000");
+        let task_balancer = balancer.clone();
+        let task_instance = instance.clone();
+        let task = tokio::spawn(async move {
+            let _lease = task_balancer
+                .pick_tracked(std::slice::from_ref(&task_instance))
+                .expect("lease");
+            panic!("simulated RPC attempt panic");
+        });
+
+        let error = task.await.expect_err("task should panic");
+
+        assert!(error.is_panic());
+        assert_eq!(
+            balancer
+                .snapshot(&instance)
+                .expect("released snapshot")
+                .inflight,
+            0
         );
     }
 

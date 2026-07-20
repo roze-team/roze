@@ -80,6 +80,19 @@ jobs:
       - name: Release gate
         run: bash scripts/release-gate.sh
 
+      - name: Archive S6 production release audit
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roze-production-release-audit-${{ github.sha }}
+          path: target/production-release-audit.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Require strict S6 evidence for release tags
+        if: success() && startsWith(github.ref, 'refs/tags/v')
+        run: bash scripts/production-release-audit.sh --require-long-run
+
   reference-systems:
     name: production reference systems
     needs: release-gate
@@ -99,5 +112,26 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate reference-system environment
+        run: bash scripts/reference-systems-preflight.sh
+
       - name: Run real dependency success, failure, and recovery workflows
         run: bash scripts/reference-systems-integration.sh
+
+      - name: Verify reference-system evidence bundle
+        if: always()
+        run: |
+          if [ -f target/reference-systems-integration/run.json ]; then
+            node scripts/reference-systems-evidence-verify.js target/reference-systems-integration
+          else
+            echo "reference-system run.json was not produced (preflight failure)"
+          fi
+
+      - name: Archive reference-system integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roze-reference-systems-${{ github.sha }}
+          path: target/reference-systems-integration
+          if-no-files-found: warn
+          retention-days: 30

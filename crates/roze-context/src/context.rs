@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -13,6 +13,8 @@ use std::{
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const TRACE_ID_HEADER: &str = roze_trace::TRACE_ID_HEADER;
 pub const TIMEOUT_HEADER: &str = "x-roze-timeout-ms";
+pub const RETRY_BUDGET_HEADER: &str = "x-roze-retry-budget-remaining";
+pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 pub const LOCALE_HEADER: &str = "x-roze-locale";
 pub const ACCEPT_LANGUAGE_HEADER: &str = "accept-language";
 pub const SUBJECT_HEADER: &str = "x-roze-subject";
@@ -27,6 +29,7 @@ pub const DEVICE_ID_METADATA_KEY: &str = "device_id";
 pub const SCOPE_METADATA_KEY: &str = "scope";
 pub const PERMISSIONS_METADATA_KEY: &str = "permissions";
 pub const IDEMPOTENCY_KEY_METADATA_KEY: &str = "idempotency_key";
+pub const MAX_PROPAGATED_RETRY_BUDGET: usize = 64;
 
 pub const HULA_TENANT_ID_HEADER: &str = "x-hula-tenant-id";
 pub const HULA_UID_HEADER: &str = "x-hula-uid";
@@ -115,8 +118,9 @@ struct ContextInner {
     auth: Mutex<Option<AuthContext>>,
     metadata: Mutex<BTreeMap<String, String>>,
     deadline: Mutex<Option<Instant>>,
-    cancelled: AtomicBool,
-    cancel_reason: Mutex<Option<CancelReason>>,
+    retry_budget: Mutex<Option<Arc<AtomicUsize>>>,
+    cancelled: Arc<AtomicBool>,
+    cancel_reason: Arc<Mutex<Option<CancelReason>>>,
     error: Mutex<Option<String>>,
     values: Mutex<HashMap<&'static str, Arc<dyn Any + Send + Sync>>>,
 }
@@ -129,8 +133,9 @@ impl ContextInner {
             auth: Mutex::new(None),
             metadata: Mutex::new(BTreeMap::new()),
             deadline: Mutex::new(None),
-            cancelled: AtomicBool::new(false),
-            cancel_reason: Mutex::new(None),
+            retry_budget: Mutex::new(None),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_reason: Arc::new(Mutex::new(None)),
             error: Mutex::new(None),
             values: Mutex::new(HashMap::new()),
         }
@@ -179,6 +184,15 @@ impl std::fmt::Debug for ContextInner {
                     .lock()
                     .expect("context deadline mutex poisoned")
                     .map(|deadline| format!("{deadline:?}")),
+            )
+            .field(
+                "retry_budget_remaining",
+                &self
+                    .retry_budget
+                    .lock()
+                    .expect("context retry budget mutex poisoned")
+                    .as_ref()
+                    .map(|budget| budget.load(Ordering::Acquire)),
             )
             .field("cancelled", &self.cancelled.load(Ordering::SeqCst))
             .field(
@@ -346,6 +360,125 @@ impl Context {
         self.with_metadata(LOCALE_METADATA_KEY, locale)
     }
 
+    pub fn idempotency_key(&self) -> Option<String> {
+        self.metadata_value(IDEMPOTENCY_KEY_METADATA_KEY)
+    }
+
+    pub fn with_idempotency_key(&self, key: impl Into<String>) -> Self {
+        self.with_metadata(IDEMPOTENCY_KEY_METADATA_KEY, key)
+    }
+
+    pub fn with_retry_budget(&self, remaining: usize) -> Self {
+        let next = self.fork();
+        *next
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned") = Some(Arc::new(AtomicUsize::new(
+            remaining.min(MAX_PROPAGATED_RETRY_BUDGET),
+        )));
+        next
+    }
+
+    pub fn ensure_retry_budget(&self, remaining: usize) {
+        let mut budget = self
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned");
+        if budget.is_none() {
+            *budget = Some(Arc::new(AtomicUsize::new(
+                remaining.min(MAX_PROPAGATED_RETRY_BUDGET),
+            )));
+        }
+    }
+
+    pub fn retry_budget_remaining(&self) -> Option<usize> {
+        self.inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned")
+            .as_ref()
+            .map(|budget| budget.load(Ordering::Acquire))
+    }
+
+    pub fn try_consume_retry_budget(&self) -> bool {
+        let budget = self
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned")
+            .clone();
+        let Some(budget) = budget else {
+            return true;
+        };
+        budget
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    pub fn take_retry_budget_up_to(&self, maximum: usize) -> usize {
+        let budget = self
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned")
+            .clone();
+        let Some(budget) = budget else {
+            return 0;
+        };
+        let previous = budget
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(current.min(maximum)))
+            })
+            .expect("retry budget allocation update is infallible");
+        previous.min(maximum)
+    }
+
+    pub fn restore_retry_budget(&self, amount: usize) {
+        if amount == 0 {
+            return;
+        }
+        let budget = self
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned")
+            .clone();
+        match budget {
+            Some(budget) => {
+                let _ = budget.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(
+                        current
+                            .saturating_add(amount)
+                            .min(MAX_PROPAGATED_RETRY_BUDGET),
+                    )
+                });
+            }
+            None => self.ensure_retry_budget(amount),
+        }
+    }
+
+    pub fn limit_retry_budget(&self, remaining: usize) {
+        let remaining = remaining.min(MAX_PROPAGATED_RETRY_BUDGET);
+        let budget = self
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned")
+            .clone();
+        match budget {
+            Some(budget) => {
+                let _ = budget.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(current.min(remaining))
+                });
+            }
+            None => self.ensure_retry_budget(remaining),
+        }
+    }
+
     pub fn with_metadata(&self, key: impl Into<String>, value: impl Into<String>) -> Self {
         let next = self.fork();
         next.inner
@@ -386,6 +519,9 @@ impl Context {
                 timeout.as_millis().max(1).to_string(),
             );
         }
+        if let Some(remaining) = self.retry_budget_remaining() {
+            headers.insert(RETRY_BUDGET_HEADER.to_string(), remaining.to_string());
+        }
         if let Some(auth) = self.auth() {
             headers.insert(SUBJECT_HEADER.to_string(), auth.subject);
             if let Some(tenant) = auth.tenant {
@@ -394,6 +530,9 @@ impl Context {
             if !auth.roles.is_empty() {
                 headers.insert(ROLES_HEADER.to_string(), auth.roles.join(","));
             }
+        }
+        if let Some(idempotency_key) = self.idempotency_key() {
+            headers.insert(IDEMPOTENCY_KEY_HEADER.to_string(), idempotency_key);
         }
         for (key, value) in self.metadata() {
             headers.insert(format!("{METADATA_HEADER_PREFIX}{key}"), value);
@@ -427,6 +566,9 @@ impl Context {
             .map(Duration::from_millis)
         {
             ctx = ctx.with_timeout(timeout);
+        }
+        if let Some(remaining) = retry_budget_from_headers(headers) {
+            ctx = ctx.with_retry_budget(remaining);
         }
         ctx
     }
@@ -463,6 +605,9 @@ impl Context {
             .map(Duration::from_millis)
         {
             ctx = ctx.with_timeout(timeout);
+        }
+        if let Some(remaining) = retry_budget_from_headers(headers) {
+            ctx = ctx.with_retry_budget(remaining);
         }
         ctx
     }
@@ -604,6 +749,12 @@ impl Context {
             .deadline
             .lock()
             .expect("context deadline mutex poisoned");
+        let retry_budget = self
+            .inner
+            .retry_budget
+            .lock()
+            .expect("context retry budget mutex poisoned")
+            .clone();
         let error = self.error();
         let values = self
             .inner
@@ -613,8 +764,8 @@ impl Context {
             .iter()
             .map(|(key, value)| (*key, Arc::clone(value)))
             .collect::<HashMap<_, _>>();
-        let cancelled = self.cancelled();
-        let cancel_reason = self.cancel_reason();
+        let cancelled = Arc::clone(&self.inner.cancelled);
+        let cancel_reason = Arc::clone(&self.inner.cancel_reason);
 
         Self {
             inner: Arc::new(ContextInner {
@@ -623,8 +774,9 @@ impl Context {
                 auth: Mutex::new(auth),
                 metadata: Mutex::new(metadata),
                 deadline: Mutex::new(deadline),
-                cancelled: AtomicBool::new(cancelled),
-                cancel_reason: Mutex::new(cancel_reason),
+                retry_budget: Mutex::new(retry_budget),
+                cancelled,
+                cancel_reason,
                 error: Mutex::new(error),
                 values: Mutex::new(values),
             }),
@@ -651,6 +803,12 @@ fn header_value_with_aliases<'a>(
     })
 }
 
+fn retry_budget_from_headers(headers: &BTreeMap<String, String>) -> Option<usize> {
+    header_value(headers, RETRY_BUDGET_HEADER)
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|remaining| remaining.min(MAX_PROPAGATED_RETRY_BUDGET))
+}
+
 fn metadata_from_headers_with_aliases(
     headers: &BTreeMap<String, String>,
     aliases: HeaderAliases,
@@ -671,6 +829,13 @@ fn metadata_from_headers_with_aliases(
         }
         if let Some(value) = header_value(headers, header).filter(|value| !value.is_empty()) {
             metadata.insert((*metadata_key).to_string(), value.to_string());
+        }
+    }
+    if !metadata.contains_key(IDEMPOTENCY_KEY_METADATA_KEY) {
+        if let Some(value) =
+            header_value(headers, IDEMPOTENCY_KEY_HEADER).filter(|value| !value.is_empty())
+        {
+            metadata.insert(IDEMPOTENCY_KEY_METADATA_KEY.to_string(), value.to_string());
         }
     }
     metadata
@@ -750,10 +915,14 @@ mod tests {
     #[test]
     fn context_cancellation_is_observable() {
         let ctx = Context::background();
+        let forked = ctx.with_locale("zh-CN");
         assert!(!ctx.cancelled());
+        assert!(!forked.cancelled());
         ctx.cancel();
         assert!(ctx.cancelled());
+        assert!(forked.cancelled());
         assert_eq!(ctx.cancel_reason(), Some(CancelReason::Canceled));
+        assert_eq!(forked.cancel_reason(), Some(CancelReason::Canceled));
     }
 
     #[test]
@@ -764,7 +933,9 @@ mod tests {
                 roles: vec!["admin".to_string(), "ops".to_string()],
                 tenant: Some("tenant-1".to_string()),
             })
-            .with_locale("zh-CN");
+            .with_locale("zh-CN")
+            .with_idempotency_key("checkout-42")
+            .with_retry_budget(3);
 
         let restored = Context::from_propagation_headers(&ctx.propagation_headers());
 
@@ -774,6 +945,69 @@ mod tests {
         assert_eq!(restored.tenant().as_deref(), Some("tenant-1"));
         assert_eq!(restored.roles(), vec!["admin", "ops"]);
         assert_eq!(restored.locale().as_deref(), Some("zh-CN"));
+        assert_eq!(restored.idempotency_key().as_deref(), Some("checkout-42"));
+        assert_eq!(restored.retry_budget_remaining(), Some(3));
+        assert_eq!(
+            ctx.propagation_headers()
+                .get(IDEMPOTENCY_KEY_HEADER)
+                .map(String::as_str),
+            Some("checkout-42")
+        );
+    }
+
+    #[test]
+    fn standard_idempotency_header_enters_context_metadata() {
+        let headers = BTreeMap::from([("Idempotency-Key".to_string(), "payment-17".to_string())]);
+
+        let restored = Context::from_propagation_headers(&headers);
+
+        assert_eq!(restored.idempotency_key().as_deref(), Some("payment-17"));
+    }
+
+    #[test]
+    fn retry_budget_is_shared_by_clones_and_forks_and_never_underflows() {
+        let context = Context::background().with_retry_budget(2);
+        let cloned = context.clone();
+        let forked = context.with_locale("zh-CN");
+
+        assert!(cloned.try_consume_retry_budget());
+        assert!(forked.try_consume_retry_budget());
+        assert!(!context.try_consume_retry_budget());
+        assert_eq!(context.retry_budget_remaining(), Some(0));
+        assert_eq!(forked.retry_budget_remaining(), Some(0));
+    }
+
+    #[test]
+    fn retry_budget_header_is_bounded_and_only_tightens() {
+        let headers = BTreeMap::from([(RETRY_BUDGET_HEADER.to_string(), usize::MAX.to_string())]);
+        let context = Context::from_propagation_headers(&headers);
+
+        assert_eq!(
+            context.retry_budget_remaining(),
+            Some(MAX_PROPAGATED_RETRY_BUDGET)
+        );
+        context.limit_retry_budget(5);
+        context.limit_retry_budget(9);
+        assert_eq!(context.retry_budget_remaining(), Some(5));
+    }
+
+    #[test]
+    fn retry_budget_allocation_is_atomic_and_restoration_is_bounded() {
+        let context = Context::background().with_retry_budget(4);
+        let first = context.take_retry_budget_up_to(3);
+        let second = context.take_retry_budget_up_to(3);
+
+        assert_eq!(first, 3);
+        assert_eq!(second, 1);
+        assert_eq!(context.retry_budget_remaining(), Some(0));
+
+        context.restore_retry_budget(first);
+        context.restore_retry_budget(second);
+        context.restore_retry_budget(usize::MAX);
+        assert_eq!(
+            context.retry_budget_remaining(),
+            Some(MAX_PROPAGATED_RETRY_BUDGET)
+        );
     }
 
     #[test]

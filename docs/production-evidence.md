@@ -33,6 +33,8 @@ Every report must include:
 
 - Roze Git revision.
 - Rust toolchain and OS.
+- Fixed-runner snapshot (`runner.json`) containing OS/kernel/architecture,
+  Rust/Cargo/Node/Docker/Compose and checksum-tool versions.
 - Command used to start the run.
 - Dependency versions and topology.
 - Workload shape: RPS, payload size, topic count, consumer count, route count.
@@ -232,3 +234,29 @@ It also runs `scripts/production-evidence-gate.sh`. Areas marked
 `long-run verified` must have a complete passing 24h/72h report; areas still
 marked `long-run pending` may ship stable APIs but cannot make long-run or
 battle-tested claims.
+
+## S6 release audit
+
+The final release audit is a separate, machine-readable predicate over the
+release revision and the maturity matrix:
+
+```bash
+bash scripts/production-release-audit.sh \
+  --revision "$(git rev-parse HEAD)" \
+  --json-out target/production-release-audit.json
+```
+
+Candidate mode succeeds when every S5 area is either `long-run pending` or has
+a report accepted by `production-evidence-gate.sh`; it emits
+`api_stable_long_run_pending` while any area is pending. This makes an API
+release auditable without silently turning missing 24h/72h evidence into a
+pass. A strict publication audit must add `--require-long-run`, which fails
+until all five areas (Gateway, MQ, Config Center, Lifecycle, and generated
+services) are marked `long-run verified` and have promoted reports.
+
+The JSON output records the full Git revision, audit mode, per-area state, and
+counts. It is an S6 artifact and must be retained with the release-gate and
+supply-chain results; changing a maturity label without the corresponding
+promoted report causes the audit to fail. Any `long-run verified` report must
+also carry the exact audited release revision; a report from an older commit
+cannot be reused to close a new S6 candidate.

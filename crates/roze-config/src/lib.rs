@@ -282,6 +282,10 @@ pub struct HttpMiddlewaresConfig {
     pub gunzip: bool,
     #[serde(default)]
     pub request_body_limit_bytes: Option<usize>,
+    #[serde(default = "default_http_auth_public_routes")]
+    pub auth_public_routes: Vec<String>,
+    #[serde(default)]
+    pub trust_forwarded_identity_headers: bool,
 }
 
 impl Default for HttpMiddlewaresConfig {
@@ -298,8 +302,17 @@ impl Default for HttpMiddlewaresConfig {
             shedding: None,
             gunzip: false,
             request_body_limit_bytes: None,
+            auth_public_routes: default_http_auth_public_routes(),
+            trust_forwarded_identity_headers: false,
         }
     }
+}
+
+fn default_http_auth_public_routes() -> Vec<String> {
+    ["/healthz", "/readyz", "/startupz", "/metrics"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

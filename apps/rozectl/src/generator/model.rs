@@ -17685,6 +17685,7 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
     let mut models = Vec::new();
     let mut model_indexes = HashMap::<String, usize>::new();
     let mut pending_comments = Vec::<(String, String, String)>::new();
+    let mut pending_indexes = Vec::<(String, ModelIndex)>::new();
     let lines = source.lines().enumerate().collect::<Vec<_>>();
     let mut i = 0usize;
 
@@ -17699,6 +17700,10 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
 
         let statement_kind = if starts_with_ci(line, "create table") {
             Some(StatementKind::CreateTable)
+        } else if starts_with_ci(line, "create index")
+            || starts_with_ci(line, "create unique index")
+        {
+            Some(StatementKind::CreateIndex)
         } else if starts_with_ci(line, "comment on column") {
             Some(StatementKind::CommentOnColumn)
         } else {
@@ -17706,7 +17711,7 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
         }
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "line {}: expected `CREATE TABLE` or `COMMENT ON COLUMN`",
+                "line {}: expected `CREATE TABLE`, `CREATE INDEX`, or `COMMENT ON COLUMN`",
                 line_no + 1
             )
         })?;
@@ -17724,6 +17729,11 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             StatementKind::CommentOnColumn => {
                 let (table, column, comment) = parse_comment_on_column(&statement, line_no + 1)?;
                 pending_comments.push((table, column, comment));
+            }
+            StatementKind::CreateIndex => {
+                if let Some(index) = parse_create_index(&statement, line_no + 1)? {
+                    pending_indexes.push(index);
+                }
             }
         }
     }
@@ -17744,6 +17754,31 @@ fn parse_sql_models(source: &str) -> anyhow::Result<Vec<ModelSpec>> {
             .find(|field| field.name == column)
             .ok_or_else(|| anyhow::anyhow!("unknown column `{column}` for table `{table}`"))?;
         field.comment = Some(comment);
+    }
+    for (table, index) in pending_indexes {
+        let model_index = model_indexes
+            .get(&table)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("unknown table `{table}` for index `{}`", index.name))?;
+        let model = models.get_mut(model_index).expect("model index valid");
+        validate_indexes(&model.name, std::slice::from_ref(&index), &model.fields)?;
+        if index.unique && index.fields.len() == 1 {
+            let field = index.fields[0].clone();
+            let cacheable = model
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == field)
+                .is_some_and(|candidate| optional_inner_type(&candidate.ty).is_none());
+            if cacheable && !model.cache_keys.contains(&field) {
+                model.cache_keys.push(field);
+            }
+        }
+        model.indexes.push(index);
+        model.indexes = validate_and_normalize_indexes(
+            &model.name,
+            std::mem::take(&mut model.indexes),
+            &model.fields,
+        )?;
     }
 
     normalize_sql_edge_field_types(&mut models);
@@ -17793,7 +17828,98 @@ fn normalize_sql_edge_field_types(models: &mut [ModelSpec]) {
 #[derive(Debug, Clone, Copy)]
 enum StatementKind {
     CreateTable,
+    CreateIndex,
     CommentOnColumn,
+}
+
+fn parse_create_index(
+    statement: &str,
+    start_line: usize,
+) -> anyhow::Result<Option<(String, ModelIndex)>> {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    let unique = starts_with_ci(statement, "create unique index");
+    let prefix = if unique {
+        "create unique index"
+    } else {
+        "create index"
+    };
+    if !starts_with_ci(statement, prefix) {
+        bail!("line {}: expected `CREATE INDEX`", start_line);
+    }
+
+    let mut rest = statement[prefix.len()..].trim();
+    if starts_with_ci(rest, "concurrently") {
+        rest = rest["concurrently".len()..].trim();
+    }
+    if starts_with_ci(rest, "if not exists") {
+        rest = rest["if not exists".len()..].trim();
+    }
+    let (index_name, after_name) = split_identifier(rest)
+        .ok_or_else(|| anyhow::anyhow!("line {}: missing index name", start_line))?;
+    let after_name = after_name.trim();
+    if !starts_with_ci(after_name, "on ") {
+        bail!("line {}: expected `ON` after index name", start_line);
+    }
+    let mut target = after_name["on".len()..].trim();
+    if starts_with_ci(target, "only ") {
+        target = target["only".len()..].trim();
+    }
+    let open = target
+        .find('(')
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `(` in CREATE INDEX", start_line))?;
+    let close = find_matching_paren(target, open)
+        .ok_or_else(|| anyhow::anyhow!("line {}: expected `)` in CREATE INDEX", start_line))?;
+    let table_head = target[..open].trim();
+    let table_ref = split_once_ci(table_head, " using ")
+        .map(|(table, _)| table.trim())
+        .unwrap_or(table_head);
+    let (schema_name, table_name) = split_schema_table_name(table_ref);
+    if table_name.is_empty() {
+        bail!("line {}: missing table name in CREATE INDEX", start_line);
+    }
+
+    let mut fields = Vec::new();
+    for raw in split_sql_items(&target[open + 1..close]) {
+        let tokens = tokenize_sql(raw.trim());
+        let Some(first) = tokens.first() else {
+            continue;
+        };
+        let field = strip_sql_identifier(first);
+        if field.is_empty() || field.contains('(') || field.contains(')') || field.contains("::") {
+            eprintln!(
+                "warning: line {start_line}: index `{index_name}` uses an unsupported expression and will be ignored"
+            );
+            return Ok(None);
+        }
+        fields.push(field);
+    }
+    if fields.is_empty() {
+        bail!(
+            "line {}: index `{}` must include at least one column",
+            start_line,
+            index_name
+        );
+    }
+
+    let tail = target[close + 1..].trim();
+    let annotations = split_once_ci(tail, "where ")
+        .map(|(_, predicate)| {
+            let predicate = predicate.trim();
+            vec![ModelAnnotation {
+                name: "sql.Where".to_string(),
+                expression: format!("sql.Where({})", quote_ent_string(predicate)),
+            }]
+        })
+        .unwrap_or_default();
+    Ok(Some((
+        table_key(schema_name.as_deref(), &table_name),
+        ModelIndex {
+            name: strip_sql_identifier(&index_name),
+            fields,
+            unique,
+            annotations,
+        },
+    )))
 }
 
 fn collect_sql_statement(
@@ -23863,6 +23989,52 @@ mod tests {
         let toasty_models = models_for_orm(&models, ModelOrm::Toasty);
         let toasty = render_toasty_model_module(&toasty_models[0]);
         assert!(toasty.contains("pub config: String"));
+    }
+
+    #[test]
+    fn parses_standalone_sql_indexes() {
+        let source = r#"
+        CREATE TABLE public.users (
+            id bigint NOT NULL PRIMARY KEY,
+            legacy_user_id bigint,
+            tenant_id varchar(64) NOT NULL,
+            email varchar(255) NOT NULL,
+            deleted_at timestamp
+        );
+        CREATE INDEX idx_users_tenant ON public.users (tenant_id);
+        CREATE UNIQUE INDEX idx_users_legacy_user
+            ON public.users (legacy_user_id)
+            WHERE legacy_user_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_users_tenant_email
+            ON public.users USING btree (tenant_id, email);
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse indexes");
+        let user = &models[0];
+        assert_eq!(user.indexes.len(), 3);
+        assert_eq!(user.indexes[0].name, "idx_users_tenant");
+        assert_eq!(user.indexes[0].fields, ["tenant_id"]);
+        assert!(!user.indexes[0].unique);
+        assert_eq!(user.indexes[1].name, "idx_users_legacy_user");
+        assert_eq!(user.indexes[1].fields, ["legacy_user_id"]);
+        assert!(user.indexes[1].unique);
+        assert_eq!(
+            user.indexes[1].annotations,
+            [ModelAnnotation {
+                name: "sql.Where".into(),
+                expression: "sql.Where(\"legacy_user_id IS NOT NULL\")".into(),
+            }]
+        );
+        assert_eq!(
+            user.indexes[2].fields,
+            ["tenant_id".to_string(), "email".to_string()]
+        );
+        assert!(!user.cache_keys.contains(&"legacy_user_id".to_string()));
+
+        let ent = render_ent_schema(&models);
+        let reparsed =
+            parse_models_with_format(&ent, ModelFormat::Ent).expect("partial index round trip");
+        assert_eq!(reparsed[0].indexes, user.indexes);
     }
 
     #[test]

@@ -150,6 +150,10 @@ rdkafka`.
   isolation.
 - `CHANGELOG.md` and upgrade notes are updated.
 - `docs/maturity.md` accurately labels contract stability and evidence state.
+- `bash scripts/production-release-audit.sh --json-out target/production-release-audit.json`
+  records the S6 candidate verdict for the exact release revision. Use
+  `--require-long-run` for a publication that claims battle-tested runtime
+  behavior.
 - Runtime-critical modules marked `stable` have evidence reports that satisfy
   `docs/production-evidence.md`.
 - New evidence reports are generated with `scripts/production-evidence.sh` or

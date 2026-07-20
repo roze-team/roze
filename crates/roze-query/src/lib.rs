@@ -214,10 +214,9 @@ impl QueryComposer {
         let outcomes = match tokio::time::timeout(self.config.total_timeout, collect).await {
             Ok(outcomes) => outcomes,
             Err(_) => {
-                joins.abort_all();
-                return Err(QueryCompositionError::TotalTimeout {
-                    completed: task_count.saturating_sub(joins.len()),
-                });
+                let completed = task_count.saturating_sub(joins.len());
+                joins.shutdown().await;
+                return Err(QueryCompositionError::TotalTimeout { completed });
             }
         };
 
@@ -244,6 +243,22 @@ impl Default for QueryComposer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ActiveQueryGuard(Arc<AtomicUsize>);
+
+    impl ActiveQueryGuard {
+        fn enter(active: Arc<AtomicUsize>) -> Self {
+            active.fetch_add(1, Ordering::SeqCst);
+            Self(active)
+        }
+    }
+
+    impl Drop for ActiveQueryGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 
     #[tokio::test]
     async fn preserves_task_order_while_running_concurrently() {
@@ -339,6 +354,43 @@ mod tests {
         assert_eq!(
             batch.outcomes[0].failure.as_ref().unwrap().kind,
             QueryFailureKind::Timeout
+        );
+    }
+
+    #[tokio::test]
+    async fn total_timeout_waits_for_inflight_tasks_to_release_resources() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let composer = QueryComposer::new(QueryCompositionConfig {
+            total_timeout: Duration::from_millis(20),
+            per_call_timeout: Duration::from_secs(30),
+            max_fanout: 2,
+            max_concurrency: 2,
+            partial_failure: PartialFailurePolicy::Allow,
+        });
+        let tasks = (0..2)
+            .map(|index| {
+                let active = active.clone();
+                let started = started.clone();
+                QueryTask::new(format!("pending-{index}"), move || async move {
+                    let _guard = ActiveQueryGuard::enter(active);
+                    started.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<anyhow::Result<usize>>().await
+                })
+            })
+            .collect();
+
+        let error = composer.execute(tasks).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryCompositionError::TotalTimeout { completed: 0 }
+        ));
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            0,
+            "execute must not return while aborted query resources remain live"
         );
     }
 }

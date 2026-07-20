@@ -1,68 +1,87 @@
-# Roze Admin 控制面契�?
+# Roze Admin 控制面契约
 
-`roze-admin` 提供控制面模型、适配器和可挂载的 roze_http Router。应用可以把这些模型挂到 Gateway、独�?admin API 或内部运维接口�?
+`roze-admin` 提供控制面数据模型、registry/config/MQ 适配器，以及可挂载到
+Roze native HTTP 的 Tower service。它不自动开放公网端口，接入方必须显式选择
+listener、网络策略和鉴权方式。
 
-## HTTP Router
+## HTTP Service
 
-`admin_router(AdminState)` 暴露以下 JSON 端点�?
+使用 `admin_service(AdminState)` 构造 service。当前 HTTP surface 只有：
 
-- `GET /admin/registry/{service}`：查询服务实例�?
-- `GET /admin/config/reloads?offset=0&limit=100`：查询配�?reload 历史�?
-- `GET /admin/mq/stats`：查�?MQ 统计�?
-- `GET /admin/mq/dead-letters?topic=&group=&offset=0&limit=100`：查�?DLQ�?
-- `POST /admin/mq/dead-letters/{id}/replay`：重�?DLQ 消息�?
-- `DELETE /admin/mq/dead-letters/{id}`：删�?DLQ 记录�?
+- `GET /admin/config/reloads`
 
-未配置对应能力时返回 `404`；底层查询失败时返回 `502` �?`{ "error": "..." }`�?
+该端点返回最近 100 条配置 reload 审计记录；未配置
+`ConfigReloadHistory` 时返回空数组。其他 path 返回 404。`RegistryAdmin` 和
+`MqAdminView` 当前是程序化适配器，尚未由这个基础 service 暴露为 HTTP endpoint。
+新增 endpoint 时必须同步本契约、鉴权测试和 OpenAPI/运维说明。
 
-## Auth
+## 鉴权
 
-`AdminState::with_auth(AdminAuthConfig)` 可为所�?`/admin/...` 路由启用统一鉴权�?
+`AdminState::with_auth(AdminAuthConfig)` 为全部 admin path 启用一种鉴权：
 
-- Bearer token：`Authorization: Bearer <token>`
-- API key：默�?header `x-api-key: <key>`，可自定�?header 名称
+- `AdminAuthConfig::bearer(token)`：
+  `Authorization: Bearer <token>`。
+- `AdminAuthConfig::api_key(key)`：固定 header `x-api-key: <key>`。
 
-应用可用环境变量启用�?
+`AdminAuthConfig::from_env()` 按以下优先级读取：
 
-- `ROZE_ADMIN_TOKEN`
-- `ROZE_ADMIN_API_KEY`
-- `ROZE_ADMIN_API_KEY_HEADER`（默�?`x-api-key`�?
+1. `ROZE_ADMIN_BEARER`
+2. `ROZE_ADMIN_API_KEY`
 
-未配�?auth �?admin router 不做鉴权，适合本地开发或由外�?Ingress/Gateway 负责访问控制的部署�?
+两者都未设置且应用未显式调用 `with_auth` 时，service 不鉴权。这只适合本地开发
+或已有强制网络隔离与外层鉴权的内部 listener。生产环境不得把未鉴权的 admin
+service 挂到公网 listener。
 
-## Registry
+## Registry 适配器
 
-- `RegistryAdmin::service(name)`：从 `roze_rpc::registry::Registry` 查询服务实例�?
-- 返回 `RegistryServiceSnapshot`�?
-  - `service`
-  - `instances[].name`
-  - `instances[].addr`
-  - `instances[].weight`
-  - `instances[].metadata`
+`RegistryAdmin::new(Arc<dyn Registry>)` 包装 `roze_rpc::registry::Registry`。
+`service(name)` 返回 `RegistryServiceSnapshot`：
 
-## Config Reload History
+- `service`
+- `instances[].name`
+- `instances[].addr`
+- `instances[].weight`
+- `instances[].metadata`
 
-- `ConfigReloadHistory`：固定容量的 reload 审计环形历史�?
-- `record(&ReloadResult<T>)`：从配置中心 reload 事件提取审计字段，不保存完整 config�?
-- `list(offset, limit)`：按最新优先分页查询�?
-- `ConfigReloadAuditRecord` 包含�?
-  - version / old_version
-  - hash / old_hash
-  - source / namespace / app / key
-  - changed / success / error
-  - diff
+调用方负责校验 service name 来源、限制返回 metadata，并避免把 endpoint 或实例
+标识用作 Prometheus label。
 
-## MQ
+## 配置 reload 历史
 
-- `MqAdminView<A>` 复用 `roze_mq::MqAdmin`�?
-- `snapshot(query)` 返回�?
-  - `stats`
-  - �?`DeadLetterQuery` 过滤后的 `dead_letters`
-- `replay_dead_letter(id)`：重�?DLQ 消息�?
-- `purge_dead_letter(id)`：删�?DLQ 记录�?
+`ConfigReloadHistory` 是固定容量的内存环形历史：
 
-## 当前边界
+- `new(capacity)` 创建有界历史。
+- `record(&ReloadResult<T>)` 提取审计字段，不保存完整配置或 secret。
+- `push(record)` 写入预构造记录。
+- `list(offset, limit)` 按最新优先分页。
 
-- 当前 crate 固化控制面数据、操作语义和基础 HTTP 路由�?
-- 可�?Bearer/API-Key 鉴权已内置；更复杂的 RBAC/OIDC、审计写入、OpenAPI �?UI 由接入方实现�?
-- 后续 Admin API 可以直接复用这些模型，避免每个应用重复定义服务实例、配置历史和 DLQ 管理结构�?
+`ConfigReloadAuditRecord` 包含 version、old_version、hash、old_hash、source、
+namespace、app、key、changed、success、error 和 diff。接入方若需要持久审计，
+应将这些记录写入受保护的审计存储，而不是无限扩大内存容量。
+
+## MQ 适配器
+
+`MqAdminView<A>` 包装实现 `roze_mq::MqAdmin` 的 adapter：
+
+- `snapshot(query)` 返回 `stats` 与按 `DeadLetterQuery` 过滤的
+  `dead_letters`。
+- `replay_dead_letter(id)` 请求重放一条 DLQ 消息。
+
+当前基础 API 不提供 purge 方法，也不自动暴露 MQ HTTP endpoint。重放属于有副
+作用的管理动作；未来接入 HTTP 时必须使用独立权限、幂等审计和防重放保护。
+
+## 安全边界
+
+- admin listener 与业务 listener 默认分离。
+- token/API key 只从 secret 或受保护环境注入，不写入日志、错误正文或指标。
+- 所有写操作必须有主体、权限、request ID、trace ID 和审计结果。
+- 列表 endpoint 必须有有界分页；不得返回未脱敏配置或 broker payload。
+- 更复杂的 RBAC、OIDC、mTLS、持久审计、UI 与 OpenAPI 由接入方显式实现。
+
+## 验证
+
+```bash
+cargo test -p roze-admin
+```
+
+HTTP surface、鉴权方式或审计字段变化时，必须同时更新测试和本契约。

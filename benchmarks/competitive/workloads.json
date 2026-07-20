@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "requiredImplementations": ["roze", "go-zero"],
+  "global": {
+    "sizeBasis": "application-payload",
+    "requestTimeoutMs": 2000,
+    "connectTimeoutMs": 1000,
+    "warmupSeconds": 30,
+    "concurrencySteps": [1, 8, 32, 128, 512],
+    "payloadSeed": 20260718,
+    "errorBudgetRatio": 0.001
+  },
+  "scenarios": [
+    {
+      "id": "rest-json",
+      "weight": 15,
+      "protocol": "http",
+      "method": "POST",
+      "path": "/v1/echo",
+      "requestBytes": 1024,
+      "responseBytes": 1024,
+      "primaryMetric": "throughput_per_core",
+      "sloP99Ms": 100
+    },
+    {
+      "id": "unary-rpc",
+      "weight": 20,
+      "protocol": "grpc",
+      "method": "Echo",
+      "requestBytes": 1024,
+      "responseBytes": 1024,
+      "primaryMetric": "throughput_per_core",
+      "sloP99Ms": 50
+    },
+    {
+      "id": "rest-rpc",
+      "weight": 20,
+      "protocol": "http-grpc",
+      "method": "POST",
+      "path": "/v1/rpc-echo",
+      "requestBytes": 1024,
+      "responseBytes": 1024,
+      "primaryMetric": "p99_latency_ms",
+      "sloP99Ms": 150
+    },
+    {
+      "id": "db-cache-aside",
+      "weight": 15,
+      "protocol": "http-postgres-redis",
+      "method": "GET",
+      "path": "/v1/items/:id",
+      "datasetRows": 100000,
+      "zipfTheta": 0.99,
+      "targetCacheHitRatio": 0.9,
+      "primaryMetric": "p99_latency_ms",
+      "sloP99Ms": 200
+    },
+    {
+      "id": "mq-outbox-inbox",
+      "weight": 15,
+      "protocol": "nats-kafka",
+      "messageBytes": 1024,
+      "messages": 100000,
+      "primaryMetric": "confirmed_throughput",
+      "sloP99Ms": 1000,
+      "requiresZeroDuplicateEffects": true
+    },
+    {
+      "id": "registry-slow-node-fault",
+      "weight": 15,
+      "protocol": "grpc-etcd-consul",
+      "instances": 3,
+      "slowInstanceDelayMs": 500,
+      "faultAfterSeconds": 30,
+      "faultDurationSeconds": 15,
+      "primaryMetric": "recovery_time_ms",
+      "sloP99Ms": 250,
+      "recoveryObjectiveMs": 30000
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roze.dev/schemas/competitive-baseline-v1.json",
+  "title": "Roze competitive benchmark baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "roze",
+    "goZero",
+    "toolchains",
+    "runner",
+    "measurement",
+    "dependencies"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "roze": {
+      "$ref": "#/$defs/source"
+    },
+    "goZero": {
+      "$ref": "#/$defs/source"
+    },
+    "toolchains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rust", "cargo", "go", "node"],
+      "properties": {
+        "rust": { "type": "string", "minLength": 1 },
+        "cargo": { "type": "string", "minLength": 1 },
+        "go": { "type": "string", "minLength": 1 },
+        "node": { "type": "string", "minLength": 1 }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "labels",
+        "os",
+        "arch",
+        "exclusive",
+        "cpuAffinity",
+        "cpuGovernor",
+        "memoryLimitBytes"
+      ],
+      "properties": {
+        "labels": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "os": { "const": "linux" },
+        "arch": { "const": "x86_64" },
+        "exclusive": { "const": true },
+        "cpuAffinity": { "type": "string", "pattern": "^[0-9,-]+$" },
+        "cpuGovernor": { "enum": ["performance"] },
+        "memoryLimitBytes": { "type": "integer", "minimum": 1073741824 }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "warmups",
+        "samples",
+        "sampleSeconds",
+        "maxCoefficientOfVariation",
+        "telemetry"
+      ],
+      "properties": {
+        "warmups": { "type": "integer", "minimum": 1 },
+        "samples": { "type": "integer", "minimum": 5 },
+        "sampleSeconds": { "type": "integer", "minimum": 30 },
+        "maxCoefficientOfVariation": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 0.1
+        },
+        "telemetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["metrics", "tracing", "debugLogs"],
+          "properties": {
+            "metrics": { "const": true },
+            "tracing": { "const": true },
+            "debugLogs": { "const": false }
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/dependency" }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "image", "digestEnvironment"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "image": { "type": "string", "minLength": 1 },
+        "digestEnvironment": {
+          "type": "string",
+          "pattern": "^ROZE_COMPETITIVE_[A-Z0-9_]+_DIGEST$"
+        }
+      }
+    }
+  }
+}

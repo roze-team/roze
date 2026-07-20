@@ -17,6 +17,20 @@ or creates a `roze_context::Context` from incoming headers and inserts it before
 handler extraction, so generated `Extension<Context>` parameters are available
 on public routes as well as authenticated routes.
 
+When service-level `auth` is configured, generated startup passes it to the
+common middleware. All routes require a valid Bearer JWT except entries in
+`rest.middlewares.auth_public_routes`. Verified claims populate subject, tenant,
+roles, permissions, and scopes in `roze_context::Context`. Missing, malformed,
+expired, revoked, wrongly issued, or wrongly targeted tokens return `401` with
+`WWW-Authenticate: Bearer`.
+
+Client-supplied identity propagation headers are stripped before context
+creation by default, including `x-roze-subject`, `x-roze-tenant`,
+`x-roze-roles`, permission/scope metadata, and supported Hula identity aliases.
+Set `trust_forwarded_identity_headers: true` only when the service cannot be
+reached directly and a trusted proxy has authenticated and replaced those
+headers.
+
 ## Service-wide Middleware
 
 ```yaml
@@ -47,6 +61,9 @@ rest:
     #   cool_down_ms: 1000
     # gunzip: true
     # request_body_limit_bytes: 2097152
+    # Exact paths, "METHOD /path", and "/prefix/*" entries are supported.
+    auth_public_routes: ["/healthz", "/readyz", "/startupz", "/metrics"]
+    trust_forwarded_identity_headers: false
 ```
 
 | Field | Default | Behavior |
@@ -62,6 +79,8 @@ rest:
 | `shedding` | unset | Adaptive load shedding. Exceeded concurrency or unhealthy recent windows return `503`. |
 | `gunzip` | `false` | Decompresses gzip request bodies before extraction. |
 | `request_body_limit_bytes` | unset | Reads and enforces the actual request-body size before extraction, including requests without `Content-Length`; oversized bodies return `413 request body too large`, while accepted bodies are rebuilt unchanged for JSON/Form/custom extractors. |
+| `auth_public_routes` | health/readiness/startup/metrics routes | Routes that do not require a Bearer token when service-level `auth` is configured. Entries may be exact paths, method-qualified paths such as `GET /healthz`, or prefix patterns ending in `*`. |
+| `trust_forwarded_identity_headers` | `false` | Accept identity propagation headers from an upstream proxy. Enable only when direct clients cannot reach the service and the proxy replaces those headers after authentication. |
 
 `trace`, `stat`, and `prometheus` share the same request observation path today:
 `trace` creates spans/logs, and the same layer records HTTP metrics. `/metrics`

@@ -58,6 +58,7 @@ fn map_type(ty: &str) -> String {
         "float" => "f32".to_string(),
         "double" => "f64".to_string(),
         "bool" => "bool".to_string(),
+        "bytes" => "Vec<u8>".to_string(),
         other => other.to_string(),
     }
 }
@@ -307,6 +308,7 @@ mod tests {
                 Total uint64 `json:"total"`
                 Score float `json:"score"`
                 Ratio double `json:"ratio"`
+                Payload bytes `json:"payload"`
                 type string `json:"type"`
                 Tags []string `json:"tags"`
                 Scores []int64 `json:"scores"`
@@ -331,6 +333,7 @@ mod tests {
         assert!(rendered.contains("pub total: u64,"));
         assert!(rendered.contains("pub score: f32,"));
         assert!(rendered.contains("pub ratio: f64,"));
+        assert!(rendered.contains("pub payload: Vec<u8>,"));
         assert!(rendered.contains("pub r#type: String,"));
         assert!(rendered.contains("pub tags: Vec<String>,"));
         assert!(rendered.contains("pub scores: Vec<i64>,"));

@@ -347,6 +347,7 @@ Supported SQL input focuses on common MySQL and Postgres DDL:
 - `AUTO_INCREMENT`, `SERIAL`, `BIGSERIAL`, and inline `PRIMARY KEY`
 - `DEFAULT` and column comments, including `COMMENT ON COLUMN ... IS ...`
 - common scalar column types such as integers, booleans, text, JSON, timestamps, UUIDs, and blobs
+- standalone `CREATE INDEX` and `CREATE UNIQUE INDEX`, including composite and PostgreSQL partial indexes
 - unsupported features such as composite keys and foreign keys fail fast with a clear error
 
 Generated RPC service layout:

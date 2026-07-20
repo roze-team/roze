@@ -31,6 +31,9 @@ and recovery evidence.
   that follows [Production Evidence](production-evidence.md).
 - `bash scripts/production-evidence-gate.sh` passes and no stable runtime area
   relies on an incomplete or inconclusive report.
+- `bash scripts/production-release-audit.sh --json-out
+  target/production-release-audit.json` is archived with the release gate; use
+  `--require-long-run` when the release claims battle-tested runtime behavior.
 - Public production-readiness wording follows
   [Stability Commitment](stability-commitment.md).
 
@@ -130,3 +133,28 @@ and recovery evidence.
 - The required `supply-chain` CI job passes RustSec advisory, dependency
   license, and registry/source checks; exceptions are documented in
   `deny.toml` with an owner and review date.
+
+## Capacity, Upgrade, and Disaster Recovery
+
+- A capacity model records expected RPS/concurrency, CPU and memory budgets,
+  connection-pool limits, queue lag, and the load-test threshold for each
+  generated service.
+- Load tests include warm-up, steady state, burst, dependency degradation,
+  and recovery phases; the raw samples and environment digest are archived.
+- API/proto, SQL, and search changes pass compatibility gates.  Dual-read,
+  dual-write, gray rollout, and rollback steps are documented for changes
+  that cannot be made atomically.
+- Backup schedules, encryption, retention, restore verification, RPO, and RTO
+  are explicit.  A restore drill is run on an isolated environment before a
+  release is promoted.
+- Cross-zone or cross-region recovery ownership is assigned, and the runbook
+  records the dependency order for registry, config, database, broker, cache,
+  and object storage recovery.
+
+## Developer Experience and Migration
+
+- The quickstart, `doctor`, environment, upgrade, completion, and template
+  plugin commands are version-pinned and tested from a clean checkout.
+- A go-zero-to-Roze migration sample passes generation, compile, shadow
+  traffic, compatibility, and rollback checks; differences in SDK scope or
+  middleware semantics are recorded in the migration matrix.

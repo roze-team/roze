@@ -11,13 +11,17 @@ fail() {
 
 [[ "$(uname -s)" == "Linux" ]] || fail "the fixed runner must be Linux"
 
-for command_name in cargo rustc node docker; do
+for command_name in cargo rustc node docker sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 ||
     fail "required command is missing: $command_name"
 done
 
 docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+[[ -f docker-compose.integration.yml ]] ||
+  fail "docker-compose.integration.yml is missing"
+docker compose -f docker-compose.integration.yml config --quiet ||
+  fail "docker-compose.integration.yml is not valid Compose configuration"
 
 [[ -r /proc/stat && -r /proc/meminfo ]] ||
   fail "Linux procfs resource counters are unavailable"

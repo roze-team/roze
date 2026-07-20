@@ -23,6 +23,35 @@ STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(date +%s)"
 REVISION="$(git rev-parse HEAD)"
 
+RUNNER_OS="$(uname -s)"
+RUNNER_KERNEL="$(uname -r)"
+RUNNER_ARCH="$(uname -m)"
+RUNNER_RUSTC="$(rustc --version)"
+RUNNER_CARGO="$(cargo --version)"
+RUNNER_NODE="$(node --version)"
+RUNNER_DOCKER="$(docker version --format '{{.Server.Version}}')"
+RUNNER_COMPOSE="$(docker compose version)"
+RUNNER_SHA256SUM="$(sha256sum --version | head -n 1)"
+node - "$OUT/runner.json" "$REVISION" "$RUNNER_OS" "$RUNNER_KERNEL" \
+  "$RUNNER_ARCH" "$RUNNER_RUSTC" "$RUNNER_CARGO" "$RUNNER_NODE" \
+  "$RUNNER_DOCKER" "$RUNNER_COMPOSE" "$RUNNER_SHA256SUM" <<'NODE'
+const fs = require("fs");
+const [out, revision, os, kernel, arch, rustc, cargo, node, docker, compose, sha256sum] = process.argv.slice(2);
+fs.writeFileSync(out, `${JSON.stringify({
+  schema_version: 1,
+  revision,
+  os,
+  kernel,
+  arch,
+  rustc,
+  cargo,
+  node,
+  docker,
+  compose,
+  sha256sum,
+}, null, 2)}\n`);
+NODE
+
 printf '{"schema_version":1,"area":"%s","duration":"%s","revision":"%s","started_at":"%s"}\n' \
   "$AREA" "$DURATION" "$REVISION" "$STARTED_AT" >"$OUT/run.json"
 

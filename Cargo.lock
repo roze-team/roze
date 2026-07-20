@@ -4139,8 +4139,12 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "hmac 0.12.1",
+ "percent-encoding",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "uuid",
 ]

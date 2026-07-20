@@ -1,0 +1,42 @@
+syntax = "v1"
+
+info (
+	title:    "Roze go-zero competitive HTTP contract"
+	desc:     "Shared semantic input. Generated adapters must not implement business behavior."
+	author:   "roze-team"
+	version:  "1.0"
+	response: "raw"
+)
+
+type (
+	EchoRequest {
+		payload string `json:"payload" validate:"required,len=1024"`
+	}
+	EchoResponse {
+		payload string `json:"payload"`
+	}
+	ItemRequest {
+		id uint64 `path:"id" validate:"min=1,max=100000"`
+	}
+	ItemResponse {
+		id      uint64 `json:"id"`
+		version uint64 `json:"version"`
+		name    string `json:"name"`
+		payload string `json:"payload"`
+	}
+)
+
+@server (
+	prefix: /v1
+)
+service competitive-api {
+	@handler Echo
+	post /echo (EchoRequest) returns (EchoResponse)
+
+	@handler RpcEcho
+	post /rpc-echo (EchoRequest) returns (EchoResponse)
+
+	@handler GetItem
+	get /items/:id (ItemRequest) returns (ItemResponse)
+}
+

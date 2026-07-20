@@ -35,6 +35,17 @@ Run the real dependency integration path on a Linux host with Docker:
 bash scripts/reference-systems-integration.sh
 ```
 
+Set `ROZE_REFERENCE_EVIDENCE_DIR` to retain a machine-readable `run.json` and
+summary for the integration attempt. A `passed` status records only the
+success/failure/recovery workflow; it is not a substitute for signed 24h/72h
+long-run evidence.
+
+For a side-effect-free environment check, run:
+
+```bash
+bash scripts/reference-systems-preflight.sh
+```
+
 It verifies generated compilation, Redis and NATS round trips, Etcd and Consul
 registration, PostgreSQL/MySQL migration rollback, Kafka produce/consume,
 Elasticsearch indexing, and explicit Redis/NATS/Etcd disconnect and recovery.

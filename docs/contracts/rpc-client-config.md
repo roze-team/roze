@@ -145,15 +145,33 @@ dropped through the normal service shutdown lifecycle.
 Generated RPC clients pass the inbound `roze_context::Context` into the shared
 retry executor. Retryable failures use exponential full-jitter backoff: attempt
 `n` samples a delay from zero through
-`min(backoff_ms * 2^(n-1), max_backoff_ms)`. The retry budget is isolated by
-service and method.
+`min(backoff_ms * 2^(n-1), max_backoff_ms)`. The process-level retry budget is
+isolated by service and method.
+
+Every logical generated-client call also carries a request-level remaining
+retry budget in `x-roze-retry-budget-remaining`. If an inbound context has no
+budget, the first governed RPC client initializes it from the effective
+`max_attempts - 1`, capped at 64. Clones and forks of the same Context share
+one atomic budget. A credit is consumed only immediately before a real retry;
+the initial attempt, a retry rejected by deadline/cancellation, and a retry
+whose backoff never completes do not consume one.
+
+Generated clients do not copy the full remaining value into concurrent
+downstream calls. Each attempt atomically delegates at most half of the
+currently available credits into an isolated child Context, retaining credits
+for an upstream retry. Generated RPC success responses and Roze error statuses
+return the child's unused credits. The caller restores at most the amount it
+delegated; a missing response loses the delegation conservatively, and a
+malformed or inflated downstream value cannot mint credits. This ownership
+transfer keeps the sum of local and concurrent cross-process budgets bounded.
+Oversized inbound values are capped at 64.
 
 Before sleeping, the executor rejects a retry when its sampled delay would
 consume the remaining deadline. It checks cancellation before and after the
 sleep, and `roze_resilience_decisions_total` records `attempt` only immediately
 before a real retry call. Budget exhaustion, deadline exhaustion, and
 cancellation use the bounded decisions `budget_exhausted`,
-`deadline_exhausted`, and `cancelled`.
+`request_budget_exhausted`, `deadline_exhausted`, and `cancelled`.
 
 The following manual flow remains available for projects that have not adopted
 `roze-service.yaml`:

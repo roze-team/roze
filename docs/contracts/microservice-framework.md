@@ -1,116 +1,119 @@
-# Roze 微服务架构框架能力矩�?
+# Roze 微服务框架能力矩阵
 
-目标：按 Rust 原生方式提供完整的微服务底座�?
+本矩阵记录 Roze 当前代码能力及其证据等级。`已实现` 只表示代码与确定性测试
+存在；`已集成` 要求真实依赖测试；`证据待补` 表示仍缺固定 runner、故障或长稳
+产物。不得把计划项或短时本地 smoke 写成生产通过。
 
 ## 核心边界
 
-| 能力 | 状�?| 入口 |
+| 能力 | 状态 | 入口与证据 |
 | --- | --- | --- |
-| HTTP 统一边界 | 已完�?| `roze-http`, `roze-middleware`, `roze-result`, `roze-error` |
-| RPC 统一边界 | 已完�?| `roze-rpc`, `roze-grpc`, `roze-context` |
-| 统一错误 | 已完�?| HTTP `RozeError`，RPC `status_from_error` metadata |
-| Context 传�?| 已完�?| request id, trace id, auth, tenant, locale, timeout, metadata，统一 propagation headers，可�?HTTP/RPC/MQ |
-| 参数校验 | 已完�?| REST/RPC 生成入口均执�?`roze-validation`，支�?go-playground 风格标签、跨字段、条件必填、集�?`dive`、map key/value 校验 |
-| 错误 i18n | 已完成基础�?| `x-roze-locale`, `Accept-Language`, validator code i18n |
-| 服务注册发现 | 已完成代码层 | memory, dns, etcd lease 注册/续约, consul TTL, etcd watch, cached resolver |
-| 配置中心 | 已完成代码层 | Etcd v3 原生 `/v3/watch`，断线按 revision 恢复 |
-| Gateway | 已完成代码层 | roze_http/tower/tower-http, registry upstream, retry, health, outlier |
-| MQ 抽象 | 已完成治理版 | publish/subscribe, retry, dead letter, idempotency, delay, stats, DLQ list/replay/purge, NATS JetStream, Context carrier |
-| 对象存储 | 已完成基础契约 | local, S3 API, qiniu kodo, aliyun oss, tencent cos config, validation, presign boundary |
-| 一致性工�?| 已完成基础�?| saga, in-memory outbox relay, inbox dedupe，outbox 可发布到任意 `roze_mq::Publisher` |
-| DTM 基础服务 | 已完成基础�?| 默认 TCC，Saga 可选，HTTP 分支调用，分支屏�?|
-| 认证授权 | 已完成基础�?| JWT, RBAC, tenant, ABAC attribute rule |
-| ORM 默认契约 | 已完成基础�?| Toasty 默认生成；`--orm sea-orm` 可切�?SeaORM，通用 page/sort/filter/tenant/audit/soft-delete |
-| 健康探针 | 已完成基础�?| liveness/readiness/startup probe report |
-| 集成测试环境 | 已完成生产闭环入�?| `docker-compose.integration.yml`, `scripts/production-smoke.sh` |
+| HTTP 统一边界 | 已实现 | `roze-http`、`roze-middleware`、`roze-result`、`roze-error` |
+| RPC 统一边界 | 已实现 | `roze-rpc`、`roze-grpc`、`roze-context` |
+| Context 传播 | 已实现 | request/trace、deadline、共享 cancellation、auth、tenant、locale、idempotency、retry budget |
+| 参数校验 | 已实现 | REST/RPC 生成入口使用 `roze-validation` |
+| 错误与 i18n | 已实现 | `RozeError`、RPC error metadata、locale |
+| 服务治理 | 已实现 | timeout、rate limit、breaker、shedding、retry budget、低基数指标 |
+| RPC 数据面 | 已实现 | 每 attempt P2C、EWMA latency/success、in-flight、结果反馈、watch/cache |
+| 配置中心 | 已实现；真实长稳待补 | Etcd watch、revision 恢复、last-known-good reload |
+| 服务发现 | 已集成；故障证据待补 | Memory、DNS、Etcd、Consul、cached resolver |
+| 数据一致性 | 已实现；真实故障待补 | transaction、outbox/inbox、idempotency、Saga/TCC |
+| ORM 生成 | 已实现 | Toasty 默认；`--orm sea-orm` 可选；tenant/audit/soft-delete |
+| MQ | 已实现；真实 broker 长稳待补 | in-memory、NATS、Kafka、retry、DLQ、outbox relay |
+| Gateway | 已实现；长连接长稳待补 | HTTP/WebSocket/SSE、registry、health、outlier、热更新 |
+| Search | 已实现；真实恢复待补 | Elasticsearch、OpenSearch、Meilisearch |
+| 生产生成资产 | 已实现；部署证据待补 | Docker、Kubernetes、Helm、SLO、告警、runbook、证据脚本 |
+
+生产成熟度与功能存在是两个维度。权威缺口和退出条件见
+[go-zero 超越计划](../go-zero-surpass-plan.md)。
 
 ## RPC 错误 metadata
 
-RPC 错误统一使用 gRPC status + metadata�?
+`roze_rpc::rpc::status_from_error` 至少发出：
 
-- `x-roze-error-code`: HTTP 等价错误码，�?`400`, `401`, `404`, `500`
-- `x-roze-error-kind`: `bad_request`, `unauthorized`, `not_found`, `internal`
-- `x-roze-request-id`: 请求 ID
-- `x-roze-trace-id`: Trace ID
-- `x-roze-locale`: 当前 locale
+- `x-roze-error-code`
+- `x-roze-error-kind`
+- `x-request-id`
+- `x-trace-id`
+- `x-roze-locale`（存在 locale 时）
+- `x-roze-retry-budget-remaining`（存在请求预算时）
 
-生成器中的业务错误应通过 `roze_rpc::rpc::status_from_error(err, &request_ctx)` 返回�?
+客户端使用统一解码器恢复 `RozeError` 语义。错误正文、tenant、endpoint 和实例
+地址不得进入 metrics label。
+
+## Retry budget 与下游选址
+
+生成 RPC client 在每个真实 attempt 前重新发现并选择实例。picker 使用实时
+EWMA、in-flight 与成功率；attempt 完成、timeout、cancel、panic 和 connect
+failure 都必须结算或由 RAII Drop 释放。
+
+请求级 retry budget 不是每跳复制的 max retry。生成客户端从共享原子池划拨
+child 额度，下游仅返还未使用且不超过划拨值的 credit；缺失响应保守消耗。
+详细规则见 [RPC Client Config](rpc-client-config.md) 与
+[Context 契约](context.md)。
 
 ## 配置中心 Etcd watch
 
-Etcd source 使用 v3 原生接口�?
-
-- 初次读取：`/v3/kv/range`
-- 热更新：`/v3/watch`
-- 重连恢复：保�?watch event �?`mod_revision` �?header `revision`，重连时设置 `start_revision = last_revision + 1`
-- 解析失败：保留旧配置并通知 reload listener
+- 初次读取使用 Etcd v3 range API。
+- 热更新使用 watch API。
+- 保存 event `mod_revision` 或 response header revision。
+- 重连从 `last_revision + 1` 继续。
+- 解析、校验或 listener 失败时保留最后有效配置并记录 reload failure。
+- listener 必须有 timeout；无关 section 变化不得重建整个 runtime。
 
 ## 服务发现 Etcd watch
 
-服务发现统一�?`roze_rpc::registry`�?
+- 注册通过 lease grant + KV put 写入
+  `{prefix}/{service}/{addr}`。
+- 后台 keepalive 续租；shutdown 停止续租并删除实例 key。
+- `discover(service)` 读取 prefix 快照。
+- `watch(service)` 处理 put/delete 并发布完整实例快照。
+- `CachedRegistryResolver` 优先使用 watch，同时保留 TTL refresh 与有界 stale
+  fallback。
+- 实例 remove/re-add 后，picker 状态只能在 grace period 内保留，不能永久增长。
 
-- 注册：`EtcdRegistry` 使用 `/v3/lease/grant` 获取租约，再�?`/v3/kv/put` 写入 `/roze/services/{service}/{addr}`�?
-- 续约：后台任务按 `renew_interval_secs` 调用 `/v3/lease/keepalive`�?
-- 注销：停止续约任务并删除实例 key�?
-- 发现：`discover(service)` 使用 `/v3/kv/range` 读取 prefix 下所有实例�?
-- 动态刷新：`Registry::watch(service)` �?prefix 调用 `/v3/watch`，收�?put/delete 事件后重�?discover 并推送完整实例快照�?
-- 缓存：`CachedRegistryResolver` 优先接收 watch 快照更新缓存，同时保留周�?refresh 作为兜底�?
+默认 prefix 是 `/roze/services`。可通过 `registry.prefix` 隔离环境或应用。
+RPC server 默认注册 `rpc.addr`；绑定 wildcard/loopback 但客户端需要可路由地址时，
+必须设置 `rpc.advertise_addr`。
 
-## 集成测试环境
+## 连接模式与代理诊断
 
-本地启动�?
+RPC client 必须且只能选择一种连接模式：
+
+- `rpc_client.target`
+- `rpc_client.endpoints`
+- `rpc_client.etcd`
+
+混合配置在连接前拒绝，防止静态 endpoint 无意绕过 registry。
+
+Etcd/Consul 等 HTTP client 遵循 `reqwest` 的 proxy 环境。访问 loopback 或私网
+控制面时，应正确配置 `NO_PROXY`，或清除不适用的 `HTTP_PROXY`、
+`HTTPS_PROXY`、`ALL_PROXY`。Roze 在检测到私网 endpoint 与 proxy 环境组合时
+附加诊断提示，但不会偷偷修改进程环境。
+
+## 集成与证据入口
 
 ```bash
-docker compose -f docker-compose.integration.yml up -d
-```
-
-覆盖组件�?
-
-- Etcd: 配置中心 watch、服务注册发�?
-- Consul: 服务注册发现
-- Kafka/NATS: MQ adapter smoke test
-- Redis: 缓存/限流/幂等状�?
-- Postgres/MySQL: Toasty/SQL adapter smoke test
-- Elasticsearch/OpenSearch/Meilisearch: search runtime �?`rozectl search inspect/generate` 验收
-
-生产闭环 smoke�?
-
-```bash
+# 不启动真实依赖的确定性预检
 bash scripts/production-smoke.sh
+
+# 启动仓库集成依赖后运行
 bash scripts/production-smoke.sh --with-compose
+
+# 从权威输入生成三类参考系统
+bash scripts/generated-reference-systems.sh
+
+# 真实依赖参考系统流程
+bash scripts/reference-systems-integration.sh
 ```
 
-`--with-compose` 会先启动真实依赖；默认只运行本地编译、生成器、crate 级测试和 generated project compile smoke�?
+真实 adapter 的验收至少包含：
 
-## 后续验收要求
+- 成功路径和数据正确性；
+- 断线、重启、timeout、cancel、retry 与恢复；
+- Context 多跳传播和全链路 retry 上限；
+- 资源、task、permit、connection 与状态表回收；
+- 低基数 metrics 与 trace 关联；
+- 固定 revision、依赖 digest、runner metadata 和原始 artifact。
 
-每个生产�?adapter 需要至少具备：
-
-- 真实服务集成测试
-- 断线重连测试
-- 重试/超时/取消测试
-- metrics 标签验证
-- trace/context 透传验证
-- i18n 错误响应验证
-
-## Registry Prefix And Proxy Diagnostics
-
-Etcd registry keys default to `/roze/services/{service}/{addr}`. Set
-`registry.prefix`, for example `/shop/services`, to write/read/watch
-`/shop/services/{service}/{addr}` while preserving the same lease, discover,
-and watch behavior.
-
-RPC servers bind to `rpc.addr` and register that same address by default. Set
-`rpc.advertise_addr` when the process binds to `0.0.0.0` or `127.0.0.1` but
-clients should discover a routable host address.
-
-Registry and config-center HTTP clients use the process proxy environment that
-`reqwest` honors. For private control-plane endpoints such as etcd or Consul on
-`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, loopback, or local hosts,
-include the endpoint host in `NO_PROXY` or clear `HTTP_PROXY`, `HTTPS_PROXY`,
-and `ALL_PROXY`; Roze adds a diagnostic hint to request failures when a proxy
-environment is active and the endpoint is internal.
-
-RPC clients select exactly one connection mode: `rpc_client.target`,
-`rpc_client.endpoints`, or `rpc_client.etcd`. Mixed modes are rejected during
-connection setup so static endpoints cannot silently bypass registry discovery.
+本机无 Docker、凭据或固定 runner 时必须报告为未执行，不能生成通过结论。

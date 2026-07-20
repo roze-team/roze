@@ -1,10 +1,10 @@
 use crate::{
-    generator::{rust_identifier, to_pascal_case, to_snake_case},
+    generator::{rpc_proto_module, rust_identifier, to_pascal_case, to_snake_case},
     parser::{ApiSpec, Field, HttpMethod, RestRoute, RpcMethod, TypeDef},
 };
 
 pub fn render_main(spec: &ApiSpec) -> String {
-    let package = to_snake_case(&spec.service);
+    let package = rpc_proto_module(spec);
     let service = to_pascal_case(&spec.service);
     let server_mod = format!("{}_server", to_snake_case(&service));
 
@@ -117,7 +117,7 @@ pub fn render_lib() -> String {
 }
 
 pub fn render_rpc(spec: &ApiSpec) -> String {
-    let package = to_snake_case(&spec.service);
+    let package = rpc_proto_module(spec);
     let service = to_pascal_case(&spec.service);
     let server_mod = format!("{}_server", to_snake_case(&service));
 
@@ -159,7 +159,7 @@ pub fn render_rpc(spec: &ApiSpec) -> String {
 }
 
 pub fn render_client(spec: &ApiSpec) -> String {
-    let package = to_snake_case(&spec.service);
+    let package = rpc_proto_module(spec);
     let service = to_pascal_case(&spec.service);
     let service_name = &spec.service;
     let client_mod = format!("{}_client", to_snake_case(&service));
@@ -181,6 +181,9 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("    options: roze_rpc::rpc::RpcClientOptions,\n");
     out.push_str("    client_config: Option<roze_config::RpcClientConfig>,\n");
     out.push_str("    governance: Option<roze_config::GovernanceConfig>,\n");
+    out.push_str(
+        "    dynamic_channels: Option<std::sync::Arc<roze_rpc::rpc::DynamicRpcChannels>>,\n",
+    );
     out.push_str("}\n\n");
     out.push_str("impl RpcClient {\n");
     out.push_str("    pub fn new(channel: Channel) -> Self {\n");
@@ -189,6 +192,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("            options: roze_rpc::rpc::RpcClientOptions::default(),\n");
     out.push_str("            client_config: None,\n");
     out.push_str("            governance: None,\n");
+    out.push_str("            dynamic_channels: None,\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -199,6 +203,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("            options,\n");
     out.push_str("            client_config: None,\n");
     out.push_str("            governance: None,\n");
+    out.push_str("            dynamic_channels: None,\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -210,6 +215,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("            options,\n");
     out.push_str("            client_config: Some(config),\n");
     out.push_str("            governance: None,\n");
+    out.push_str("            dynamic_channels: None,\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -233,9 +239,15 @@ pub fn render_client(spec: &ApiSpec) -> String {
         "    pub async fn connect_from_config(config: roze_config::RpcClientConfig) -> anyhow::Result<Self> {\n",
     );
     out.push_str(
-        "        let channel = roze_rpc::rpc::connect_channel_from_config(&config).await?;\n",
+        "        let dynamic_channels = roze_rpc::rpc::DynamicRpcChannels::from_config(&config)?.map(std::sync::Arc::new);\n",
     );
-    out.push_str("        Ok(Self::with_config(channel, config))\n");
+    out.push_str(&format!(
+        "        let channel = match dynamic_channels.as_ref() {{\n            Some(channels) => channels.initial_channel({service_name:?}).await?,\n            None => roze_rpc::rpc::connect_channel_from_config(&config).await?,\n        }};\n",
+        service_name = service_name,
+    ));
+    out.push_str("        let mut client = Self::with_config(channel, config);\n");
+    out.push_str("        client.dynamic_channels = dynamic_channels;\n");
+    out.push_str("        Ok(client)\n");
     out.push_str("    }\n\n");
     out.push_str(
         "    pub async fn connect_via_registry<R, B>(service: &str, registry: &R, balancer: &B) -> anyhow::Result<Self>\n",
@@ -267,7 +279,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
         let handler = resolved_handler_name(route);
         let retry_request_expr = retry_request_template_expr(spec, &route.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            {service_name:?},\n            &context,\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{handler}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {handler}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let dynamic_channels = self.dynamic_channels.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            {service_name:?},\n            &context,\n            || {{\n                let context = context.clone();\n                let inner = inner.clone();\n                let client_config = client_config.clone();\n                let dynamic_channels = dynamic_channels.clone();\n                let retry_budget = roze_rpc::rpc::delegate_retry_budget(&context);\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, retry_budget.context(), options, client_config.as_ref());\n                async move {{\n                    let (mut inner, attempt_lease) = match dynamic_channels {{\n                        Some(channels) => {{\n                            let attempt = channels.attempt({service_name:?}).await?;\n                            let (channel, lease) = attempt.into_parts();\n                            (ProtoClient::new(channel), Some(lease))\n                        }}\n                        None => (inner, None),\n                    }};\n                    let result = inner.{handler}(request).await;\n                    roze_rpc::rpc::reconcile_delegated_retry_budget(&context, retry_budget, &result);\n                    if let Some(lease) = attempt_lease {{\n                        roze_rpc::rpc::finish_attempt_status_for({service_name:?}, {handler:?}, lease, &result);\n                    }}\n                    result\n                }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             handler = handler,
             request = proto_type_name(&route.request),
             response = proto_type_name(&route.response),
@@ -281,7 +293,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
         let method_name = to_snake_case(&method.name);
         let retry_request_expr = retry_request_template_expr(spec, &method.request);
         out.push_str(&format!(
-            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            {service_name:?},\n            &context,\n            || {{\n                let context = context.clone();\n                let mut inner = inner.clone();\n                let client_config = client_config.clone();\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, &context, options, client_config.as_ref());\n                async move {{ inner.{method_name}(request).await }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
+            "\nimpl RpcClient {{\n    pub async fn {method_name}(&mut self, context: &roze_context::Context, req: proto::{request}) -> Result<proto::{response}, Status> {{\n        let options = self.options;\n        let client_config = self.client_config.clone();\n        let governance = self.governance.clone();\n        let dynamic_channels = self.dynamic_channels.clone();\n        let request_template = req;\n        let context = context.clone();\n        let inner = self.inner.clone();\n        let response = roze_rpc::rpc::retry_status_for_method(\n            {service_name:?},\n            &context,\n            || {{\n                let context = context.clone();\n                let inner = inner.clone();\n                let client_config = client_config.clone();\n                let dynamic_channels = dynamic_channels.clone();\n                let retry_budget = roze_rpc::rpc::delegate_retry_budget(&context);\n                let request = roze_rpc::rpc::client_request({retry_request_expr}, retry_budget.context(), options, client_config.as_ref());\n                async move {{\n                    let (mut inner, attempt_lease) = match dynamic_channels {{\n                        Some(channels) => {{\n                            let attempt = channels.attempt({service_name:?}).await?;\n                            let (channel, lease) = attempt.into_parts();\n                            (ProtoClient::new(channel), Some(lease))\n                        }}\n                        None => (inner, None),\n                    }};\n                    let result = inner.{method_name}(request).await;\n                    roze_rpc::rpc::reconcile_delegated_retry_budget(&context, retry_budget, &result);\n                    if let Some(lease) = attempt_lease {{\n                        roze_rpc::rpc::finish_attempt_status_for({service_name:?}, {method_name:?}, lease, &result);\n                    }}\n                    result\n                }}\n            }},\n            options,\n            governance.as_ref(),\n            {governance_key:?},\n        ).await?;\n        Ok(response.into_inner())\n    }}\n}}\n",
             method_name = method_name,
             request = proto_type_name(&method.request),
             response = proto_type_name(&method.response),
@@ -342,7 +354,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
     if uses_idempotency {
         out.push_str(&format!(
-            "        let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req).map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n        match roze_middleware::begin_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))? {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")), &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(Response::new({}));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\"), &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::Conflict => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\"), &request_ctx));\n            }}\n        }}\n",
+            "        let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req).map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n        match roze_middleware::begin_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))? {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")), &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(roze_rpc::rpc::response_with_context({}, &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\"), &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::Conflict => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\"), &request_ctx));\n            }}\n        }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             handler = handler
         ));
@@ -355,7 +367,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     out.push_str("        match result {\n");
     if uses_idempotency {
         out.push_str(&format!(
-            "            Ok(resp) => {{\n                let value = serde_json::to_value(&resp).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")), &request_ctx))?;\n                roze_middleware::complete_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, value).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
+            "            Ok(resp) => {{\n                let value = serde_json::to_value(&resp).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")), &request_ctx))?;\n                roze_middleware::complete_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, value).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(roze_rpc::rpc::response_with_context({}, &request_ctx))\n            }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             handler = handler
         ));
@@ -365,7 +377,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         ));
     } else {
         out.push_str(&format!(
-            "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
+            "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(roze_rpc::rpc::response_with_context({}, &request_ctx))\n            }}\n",
             app_to_proto(spec, resp_ty, "resp")
         ));
         out.push_str(&format!(
@@ -425,7 +437,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     out.push_str(&render_rpc_request_validation_checks(spec, req_ty));
     if uses_idempotency {
         out.push_str(&format!(
-            "        let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req).map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n        match roze_middleware::begin_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))? {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")), &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(Response::new({}));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\"), &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::Conflict => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\"), &request_ctx));\n            }}\n        }}\n",
+            "        let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req).map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n        match roze_middleware::begin_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))? {{\n            roze_middleware::IdempotencyDecision::Execute => {{}}\n            roze_middleware::IdempotencyDecision::Replay(value) => {{\n                let resp = serde_json::from_value(value).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")), &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                return Ok(roze_rpc::rpc::response_with_context({}, &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::InFlight => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\"), &request_ctx));\n            }}\n            roze_middleware::IdempotencyDecision::Conflict => {{\n                roze_rpc::rpc::finish_method(method_guard, \"already_exists\");\n                return Err(roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\"), &request_ctx));\n            }}\n        }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             method = method.name
         ));
@@ -437,7 +449,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
     out.push_str("        match result {\n");
     if uses_idempotency {
         out.push_str(&format!(
-            "            Ok(resp) => {{\n                let value = serde_json::to_value(&resp).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")), &request_ctx))?;\n                roze_middleware::complete_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint, value).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
+            "            Ok(resp) => {{\n                let value = serde_json::to_value(&resp).map_err(|err| roze_rpc::rpc::status_from_error(roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")), &request_ctx))?;\n                roze_middleware::complete_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint, value).await.map_err(|err| roze_rpc::rpc::status_from_error(err, &request_ctx))?;\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(roze_rpc::rpc::response_with_context({}, &request_ctx))\n            }}\n",
             app_to_proto(spec, resp_ty, "resp"),
             method = method.name
         ));
@@ -447,7 +459,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         ));
     } else {
         out.push_str(&format!(
-            "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(Response::new({}))\n            }}\n",
+            "            Ok(resp) => {{\n                roze_rpc::rpc::finish_method(method_guard, \"ok\");\n                Ok(roze_rpc::rpc::response_with_context({}, &request_ctx))\n            }}\n",
             app_to_proto(spec, resp_ty, "resp")
         ));
         out.push_str(&format!(
@@ -1382,6 +1394,18 @@ mod tests {
         let client = render_client(&spec);
         assert!(client.contains("client_config: Option<roze_config::RpcClientConfig>"));
         assert!(client.contains("governance: Option<roze_config::GovernanceConfig>"));
+        assert!(client.contains("dynamic_channels: Option<std::sync::Arc<"));
+        assert!(client.contains("DynamicRpcChannels::from_config(&config)?"));
+        assert!(client.contains("channels.initial_channel(\"user\").await?"));
+        assert!(client.contains("channels.attempt(\"user\").await?"));
+        assert!(client.contains("delegate_retry_budget(&context)"));
+        assert!(client.contains("retry_budget.context()"));
+        assert!(
+            client.contains("reconcile_delegated_retry_budget(&context, retry_budget, &result)")
+        );
+        assert!(
+            client.contains("finish_attempt_status_for(\"user\", \"get_user\", lease, &result)")
+        );
         assert!(client.contains("pub fn with_governance"));
         assert!(client.contains("pub async fn connect_from_config"));
         assert!(client.contains("RpcClientOptions::from_config(&config)"));
@@ -1392,8 +1416,8 @@ mod tests {
         assert!(client.contains("governance.as_ref()"));
         assert!(client.contains("\"GetUser\""));
         assert!(client.contains("let request_template = req;"));
-        assert!(client.contains("client_request(request_template, &context"));
-        assert!(client.contains("client_request(request_template.clone(), &context"));
+        assert!(client.contains("client_request(request_template, retry_budget.context()"));
+        assert!(client.contains("client_request(request_template.clone(), retry_budget.context()"));
     }
 
     #[test]
@@ -1466,7 +1490,7 @@ mod tests {
         assert!(!server.contains("#[derive(Debug, Clone)]"));
         assert!(server.contains("Request<proto::ExpandReq>"));
         assert!(server.contains("Response<proto::ExpandResp>"));
-        assert!(server.contains("Response::new(proto::ExpandResp"));
+        assert!(server.contains("response_with_context(proto::ExpandResp"));
         assert!(!server.contains("proto::expandReq"));
         assert!(!server.contains("proto::expandResp"));
     }

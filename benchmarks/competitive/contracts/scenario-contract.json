@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "contractId": "roze-go-zero-production-competition-v1",
+  "inputs": {
+    "restApi": "competitive.api",
+    "rpcProto": "competitive.proto",
+    "databaseSeed": "items.sql",
+    "eventPersistence": "events.sql",
+    "eventSchema": "event.schema.json",
+    "applicationOverlays": "../overlays/overlay-manifest.json",
+    "grpcEchoProbe": "../probes/grpc-echo/main.go"
+  },
+  "generation": {
+    "roze": {
+      "rest": [
+        "cargo",
+        "run",
+        "-p",
+        "rozectl",
+        "--",
+        "api",
+        "generate",
+        "{restApi}",
+        "--out",
+        "{restOut}",
+        "--roze-source",
+        "path"
+      ],
+      "rpc": [
+        "cargo",
+        "run",
+        "-p",
+        "rozectl",
+        "--",
+        "rpc",
+        "protoc",
+        "{rpcProto}",
+        "--out",
+        "{rpcOut}",
+        "--roze-source",
+        "path"
+      ],
+      "linkRestRpc": [
+        "cargo",
+        "run",
+        "-p",
+        "rozectl",
+        "--",
+        "service",
+        "dependency",
+        "add",
+        "competitive",
+        "--project",
+        "{restOut}",
+        "--crate",
+        "competitive-roze-rpc",
+        "--path",
+        "../competitive-roze-rpc",
+        "--endpoint",
+        "127.0.0.1:19090",
+        "--timeout-ms",
+        "2000"
+      ],
+      "verifyRestRpcLink": [
+        "cargo",
+        "run",
+        "-p",
+        "rozectl",
+        "--",
+        "service",
+        "sync",
+        "--project",
+        "{restOut}",
+        "--check"
+      ]
+    },
+    "go-zero": {
+      "rest": [
+        "goctl",
+        "api",
+        "go",
+        "--api",
+        "{restApi}",
+        "--dir",
+        "{restOut}"
+      ],
+      "rpc": [
+        "goctl",
+        "rpc",
+        "protoc",
+        "{rpcProto}",
+        "--go_out",
+        "{rpcOut}/competitive",
+        "--go-grpc_out",
+        "{rpcOut}/competitive",
+        "--zrpc_out",
+        "{rpcOut}"
+      ]
+    }
+  },
+  "runtime": {
+    "sizeBasis": "application-payload",
+    "httpListen": "127.0.0.1:18080",
+    "rpcListen": "127.0.0.1:19090",
+    "requestTimeoutMs": 2000,
+    "connectTimeoutMs": 1000,
+    "databasePoolSize": 32,
+    "redisPoolSize": 32,
+    "telemetry": {
+      "metrics": true,
+      "tracing": true,
+      "debugLogs": false
+    }
+  },
+  "scenarios": {
+    "rest-json": {
+      "endpoint": "POST /v1/echo",
+      "requestBytes": 1024,
+      "responseBytes": 1024,
+      "semantics": "response.payload must equal request.payload byte-for-byte"
+    },
+    "unary-rpc": {
+      "endpoint": "competitive.v1.Competitive/Echo",
+      "requestBytes": 1024,
+      "responseBytes": 1024,
+      "semantics": "response payload must equal request payload byte-for-byte"
+    },
+    "rest-rpc": {
+      "endpoint": "POST /v1/rpc-echo",
+      "downstream": "competitive.v1.Competitive/Echo",
+      "requestBytes": 1024,
+      "responseBytes": 1024,
+      "semantics": "HTTP adapter must call RPC once on the success path and return the same payload"
+    },
+    "db-cache-aside": {
+      "endpoint": "GET /v1/items/:id",
+      "database": "postgres",
+      "cache": "redis",
+      "datasetRows": 100000,
+      "zipfTheta": 0.99,
+      "targetCacheHitRatio": 0.9,
+      "cacheKey": "competitive:item:{id}:v1",
+      "cacheTtlSeconds": 300,
+      "semantics": "cache miss reads PostgreSQL once, fills Redis, and returns the seeded row"
+    },
+    "mq-outbox-inbox": {
+      "ingressBroker": "nats",
+      "ingressSubject": "competitive.orders.v1",
+      "egressBroker": "kafka",
+      "egressTopic": "competitive.confirmed.v1",
+      "consumerGroup": "competitive-confirmation-v1",
+      "messages": 100000,
+      "messageBytes": 1024,
+      "semantics": "one PostgreSQL transaction inserts a unique inbox event, one pending outbox row, and one unique confirmed effect; duplicate ingress delivery observes the existing inbox row and creates neither another outbox row nor another effect"
+    },
+    "registry-slow-node-fault": {
+      "rpc": "competitive.v1.Competitive/Echo",
+      "registryBackends": ["etcd", "consul"],
+      "instances": 3,
+      "slowInstanceDelayMs": 500,
+      "faultAfterSeconds": 30,
+      "faultDurationSeconds": 15,
+      "semantics": "measure each backend independently and report the worse recovery time without changing retry policy"
+    }
+  },
+  "correctness": {
+    "payloadSeed": 20260718,
+    "errorBudgetRatio": 0.001,
+    "requiresExactEcho": true,
+    "requiresZeroDuplicateEffects": true,
+    "requiresContextRoundTrip": [
+      "requestId",
+      "traceId",
+      "deadline",
+      "idempotencyKey",
+      "retryBudget"
+    ],
+    "forbiddenOptimizations": [
+      "disable metrics or tracing for one implementation",
+      "replace PostgreSQL or Redis with an in-process store",
+      "bypass outbox or inbox persistence",
+      "hard-code benchmark responses",
+      "use different connection pools, timeouts, retry limits, payloads, or datasets"
+    ]
+  }
+}

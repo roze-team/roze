@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "mappings": [
+    {
+      "implementation": "roze",
+      "project": "rest",
+      "scenario": "rest-json",
+      "source": "roze-rest/src/logic/echo/echo.rs",
+      "target": "src/logic/echo/echo.rs"
+    },
+    {
+      "implementation": "roze",
+      "project": "rpc",
+      "scenario": "unary-rpc",
+      "source": "roze-rpc/src/logic/echo.rs",
+      "target": "src/logic/echo.rs"
+    },
+    {
+      "implementation": "roze",
+      "project": "rest",
+      "scenario": "rest-rpc",
+      "source": "roze-rest/src/logic/rpc_echo/rpc_echo.rs",
+      "target": "src/logic/rpc_echo/rpc_echo.rs"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rest",
+      "scenario": "rest-json",
+      "source": "go-zero-rest/internal/logic/echologic.go",
+      "target": "internal/logic/echologic.go"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rpc",
+      "scenario": "unary-rpc",
+      "source": "go-zero-rpc/internal/logic/echologic.go",
+      "target": "internal/logic/echologic.go"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rpc",
+      "scenario": "unary-rpc",
+      "source": "go-zero-rpc/etc/competitive.v1.yaml",
+      "target": "etc/competitive.v1.yaml"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rest",
+      "scenario": "rest-rpc",
+      "source": "go-zero-rest/internal/config/config.go",
+      "target": "internal/config/config.go"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rest",
+      "scenario": "rest-rpc",
+      "source": "go-zero-rest/internal/svc/servicecontext.go",
+      "target": "internal/svc/servicecontext.go"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rest",
+      "scenario": "rest-rpc",
+      "source": "go-zero-rest/internal/logic/rpcechologic.go",
+      "target": "internal/logic/rpcechologic.go"
+    },
+    {
+      "implementation": "go-zero",
+      "project": "rest",
+      "scenario": "rest-rpc",
+      "source": "go-zero-rest/etc/competitive-api.yaml",
+      "target": "etc/competitive-api.yaml"
+    }
+  ],
+  "textReplacements": [
+    {
+      "implementation": "roze",
+      "project": "rest",
+      "scenario": "rest-json",
+      "target": "config.yaml",
+      "from": "rest:\n  addr: 127.0.0.1:3000",
+      "to": "rest:\n  addr: 127.0.0.1:18080"
+    },
+    {
+      "implementation": "roze",
+      "project": "rpc",
+      "scenario": "unary-rpc",
+      "target": "config.yaml",
+      "from": "rpc:\n  addr: 127.0.0.1:4000",
+      "to": "rpc:\n  addr: 127.0.0.1:19090"
+    },
+    {
+      "implementation": "roze",
+      "project": "rpc",
+      "scenario": "unary-rpc",
+      "target": "config.yaml",
+      "from": "# advertise_addr: 127.0.0.1:4000",
+      "to": "# advertise_addr: 127.0.0.1:19090"
+    }
+  ]
+}
