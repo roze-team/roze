@@ -4,6 +4,15 @@ This record captures a verification of the current uncommitted workspace on
 the authorized Linux runner. It is diagnostic evidence, not a passing S3/S4/S5
 promotion report.
 
+## Repository commit anchor
+
+The production-generation, routing, evidence-gate, and competitive-runner
+changes described by this record were committed locally as
+`1f1259e5f` (`feat: harden production generation and evidence gates`). The
+Linux snapshot below remains intentionally identified by its own revision;
+the running 24h diagnostic must finish and be re-run against this commit
+before it can become promotion evidence.
+
 ## Snapshot
 
 - Host: `alion@192.168.1.166`
