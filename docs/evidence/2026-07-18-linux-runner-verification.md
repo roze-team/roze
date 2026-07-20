@@ -116,9 +116,9 @@ names, a minimum 30-second interval, complete elapsed time, and zero failed
 probe samples before writing `status: passed`. A 24h run was launched on the
 Linux server with PID `1485792`, output directory
 `/home/alion/roze-verify-3/target/reference-direct-soak-24h-run-002`, and a
-five-minute interval. Its first six samples have passed (the sixth completed
-at `2026-07-18T15:32:48Z` on the runner); no long-run claim is made until the
-run reaches 86400 seconds and its checksums verify.
+five-minute interval. At the latest checkpoint, 13 samples had passed (the
+thirteenth completed at `2026-07-18T16:08:56Z` on the runner); no long-run
+claim is made until the run reaches 86400 seconds and its checksums verify.
 
 The same run crossed a one-hour diagnostic health checkpoint at runner time
 `2026-07-18T16:08:56Z` (`01:01:11` elapsed, 13 samples, all passed, process
