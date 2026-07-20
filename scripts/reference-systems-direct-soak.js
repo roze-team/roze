@@ -59,6 +59,10 @@ const startedEpoch = Math.floor(Date.now() / 1000);
 const revision = childProcess
   .execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" })
   .trim();
+const expectedRevision = process.env.ROZE_DIRECT_SOAK_EXPECTED_REVISION || "";
+if (expectedRevision && expectedRevision !== revision) {
+  fail(`HEAD ${revision} does not match ROZE_DIRECT_SOAK_EXPECTED_REVISION ${expectedRevision}`);
+}
 const samples = [];
 const children = [];
 let stopping = false;

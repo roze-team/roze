@@ -113,7 +113,9 @@ evidence but does not change the pinned-image promotion boundary.
 
 `scripts/reference-systems-direct-soak.js` enforces `24h`/`72h` duration
 names, a minimum 30-second interval, complete elapsed time, and zero failed
-probe samples before writing `status: passed`. A 24h run was launched on the
+probe samples before writing `status: passed`. Promotion runs should set
+`ROZE_DIRECT_SOAK_EXPECTED_REVISION` to the release commit; the runner now
+fails closed if the checked-out `HEAD` differs. A 24h run was launched on the
 Linux server with PID `1485792`, output directory
 `/home/alion/roze-verify-3/target/reference-direct-soak-24h-run-002`, and a
 five-minute interval. At the latest checkpoint, 13 samples had passed (the
