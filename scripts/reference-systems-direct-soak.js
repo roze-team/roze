@@ -41,18 +41,23 @@ if (dryRun) {
 }
 
 const profile = process.env.ROZE_REFERENCE_DIRECT_PROFILE || "managed-services";
+const minioPort = Number(process.env.ROZE_DIRECT_SOAK_MINIO_PORT || 19000);
+const redisPort = Number(process.env.ROZE_DIRECT_SOAK_REDIS_PORT || 16379);
+if (![minioPort, redisPort].every((port) => Number.isInteger(port) && port >= 1024 && port <= 65535)) {
+  fail("ROZE_DIRECT_SOAK_MINIO_PORT and ROZE_DIRECT_SOAK_REDIS_PORT must be valid ports");
+}
 const env = {
   ...process.env,
   ROZE_REFERENCE_DIRECT_PROFILE: profile,
   ROZE_REFERENCE_DIRECT_EVIDENCE_DIR: path.join(output, "latest-probe"),
 };
 if (process.env.ROZE_DIRECT_SOAK_MINIO_BIN) {
-  env.ROZE_TEST_S3_ENDPOINT = "http://127.0.0.1:19000";
+  env.ROZE_TEST_S3_ENDPOINT = `http://127.0.0.1:${minioPort}`;
   env.ROZE_TEST_S3_ACCESS_KEY = process.env.ROZE_DIRECT_SOAK_S3_ACCESS_KEY || "rozeadmin";
   env.ROZE_TEST_S3_SECRET_KEY = process.env.ROZE_DIRECT_SOAK_S3_SECRET_KEY || "diagnostic-only-secret";
 }
 if (process.env.ROZE_DIRECT_SOAK_REDIS_BIN) {
-  env.ROZE_TEST_REDIS_URL = `redis://:${process.env.ROZE_DIRECT_SOAK_REDIS_PASSWORD || "diagnostic-only-secret"}@127.0.0.1:16379`;
+  env.ROZE_TEST_REDIS_URL = `redis://:${process.env.ROZE_DIRECT_SOAK_REDIS_PASSWORD || "diagnostic-only-secret"}@127.0.0.1:${redisPort}`;
 }
 const startedAt = new Date().toISOString();
 const startedEpoch = Math.floor(Date.now() / 1000);
@@ -85,7 +90,7 @@ startOptional(
     "server",
     process.env.ROZE_DIRECT_SOAK_MINIO_DATA || path.join(output, "minio-data"),
     "--address",
-    "127.0.0.1:19000",
+    `127.0.0.1:${minioPort}`,
     "--console-address",
     "127.0.0.1:19001",
   ],
@@ -103,7 +108,7 @@ startOptional(
     "--bind",
     "127.0.0.1",
     "--port",
-    "16379",
+    String(redisPort),
     "--requirepass",
     process.env.ROZE_DIRECT_SOAK_REDIS_PASSWORD || "diagnostic-only-secret",
     "--appendonly",
@@ -150,7 +155,7 @@ async function main() {
     const bucket = process.env.ROZE_TEST_S3_BUCKET || "roze";
     const bucketResult = childProcess.spawnSync(
       "aws",
-      ["--endpoint-url", "http://127.0.0.1:19000", "s3", "mb", `s3://${bucket}`],
+      ["--endpoint-url", `http://127.0.0.1:${minioPort}`, "s3", "mb", `s3://${bucket}`],
       {
         env: {
           ...process.env,
