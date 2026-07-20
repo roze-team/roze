@@ -42,9 +42,10 @@ if (dryRun) {
 
 const profile = process.env.ROZE_REFERENCE_DIRECT_PROFILE || "managed-services";
 const minioPort = Number(process.env.ROZE_DIRECT_SOAK_MINIO_PORT || 19000);
+const minioConsolePort = Number(process.env.ROZE_DIRECT_SOAK_MINIO_CONSOLE_PORT || 19001);
 const redisPort = Number(process.env.ROZE_DIRECT_SOAK_REDIS_PORT || 16379);
-if (![minioPort, redisPort].every((port) => Number.isInteger(port) && port >= 1024 && port <= 65535)) {
-  fail("ROZE_DIRECT_SOAK_MINIO_PORT and ROZE_DIRECT_SOAK_REDIS_PORT must be valid ports");
+if (![minioPort, minioConsolePort, redisPort].every((port) => Number.isInteger(port) && port >= 1024 && port <= 65535)) {
+  fail("diagnostic service ports must be integers in the 1024-65535 range");
 }
 const env = {
   ...process.env,
@@ -92,7 +93,7 @@ startOptional(
     "--address",
     `127.0.0.1:${minioPort}`,
     "--console-address",
-    "127.0.0.1:19001",
+    `127.0.0.1:${minioConsolePort}`,
   ],
   "ROZE_DIRECT_SOAK_MINIO_BIN",
   {
