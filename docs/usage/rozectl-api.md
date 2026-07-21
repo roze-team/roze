@@ -1841,7 +1841,14 @@ SQL `JSON`/`JSONB` columns normalize to `.ent` `json`; PostgreSQL static default
 such as `'{}'::jsonb` and `'[]'::json` become structured JSON defaults. SeaORM
 output uses `serde_json::Value`, while Toasty uses its JSON-string compatibility
 representation. Ordinary SQL `INT`/`INTEGER` columns generate `i32`, while
-`BIGINT`/`BIGSERIAL` columns generate 64-bit integer types.
+PostgreSQL `BIGINT`/`BIGSERIAL`/`INT8` columns generate signed `i64` fields.
+MySQL `BIGINT` also generates `i64`; only an explicit `BIGINT UNSIGNED`
+generates `u64`.
+PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` preserve their distinction as `.ent`
+`timestamp` and `timestamptz`. SeaORM output uses `DateTime` and `DateTimeUtc`
+respectively, including their nullable forms, and model generation adds the
+`with-chrono` SeaORM feature plus a serde-enabled `chrono` dependency when
+needed. `.ent` `datetime` is accepted as an alias for `timestamp`.
 Model names and field names must generate valid, non-conflicting Rust module,
 type, field, and field-enum identifiers. Names that normalize to a single `_`
 are rejected.

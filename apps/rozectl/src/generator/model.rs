@@ -547,6 +547,8 @@ fn rust_type_to_ent_type(ty: &str) -> String {
     }
     match ty {
         "String" => "string".to_string(),
+        "DateTime" => "timestamp".to_string(),
+        "DateTimeUtc" => "timestamptz".to_string(),
         "serde_json::Value" => "json".to_string(),
         "rust_decimal::Decimal" => "decimal".to_string(),
         other => other.to_string(),
@@ -1035,6 +1037,7 @@ fn write_model_project(
         options.dependency_source,
         ModelDependencyNeeds {
             rust_decimal: models_need_rust_decimal(models),
+            chrono: models_need_chrono(models),
             json: models_need_json(models),
             uuid: models_need_uuid(models),
             regex: models_need_regex(models),
@@ -1060,6 +1063,8 @@ fn models_for_orm(models: &[ModelSpec], orm: ModelOrm) -> Vec<ModelSpec> {
                 field.ty = match field.ty.as_str() {
                     "serde_json::Value" => "String".to_string(),
                     "Option<serde_json::Value>" => "Option<String>".to_string(),
+                    "DateTime" | "DateTimeUtc" => "String".to_string(),
+                    "Option<DateTime>" | "Option<DateTimeUtc>" => "Option<String>".to_string(),
                     _ => continue,
                 };
             }
@@ -1126,6 +1131,7 @@ fn update_main_rs(out: &Path) -> anyhow::Result<()> {
 #[derive(Debug, Clone, Copy)]
 struct ModelDependencyNeeds {
     rust_decimal: bool,
+    chrono: bool,
     json: bool,
     uuid: bool,
     regex: bool,
@@ -1212,6 +1218,11 @@ fn update_model_dependencies(
             ensure_dependency_feature(item, "with-rust_decimal");
         }
     }
+    if orm == ModelOrm::SeaOrm && needs.chrono {
+        if let Some(item) = dependencies.get_mut("sea-orm") {
+            ensure_dependency_feature(item, "with-chrono");
+        }
+    }
     if orm == ModelOrm::SeaOrm && needs.json {
         if let Some(item) = dependencies.get_mut("sea-orm") {
             ensure_dependency_feature(item, "with-json");
@@ -1233,6 +1244,16 @@ fn update_model_dependencies(
                 .expect("valid toml dependency value")
         };
         dependencies.insert("rust_decimal", item);
+    }
+    if needs.chrono && !dependencies.contains_key("chrono") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            r#"{ version = "0.4", features = ["serde"] }"#
+                .parse::<toml_edit::Item>()
+                .expect("valid toml dependency value")
+        };
+        dependencies.insert("chrono", item);
     }
 
     if !dependencies.contains_key("serde_json") {
@@ -1279,6 +1300,17 @@ fn models_need_rust_decimal(models: &[ModelSpec]) -> bool {
             .fields
             .iter()
             .any(|field| type_contains_rust_decimal(&field.ty))
+    })
+}
+
+fn models_need_chrono(models: &[ModelSpec]) -> bool {
+    models.iter().any(|model| {
+        model.fields.iter().any(|field| {
+            matches!(
+                optional_inner_type(&field.ty).unwrap_or(&field.ty),
+                "DateTime" | "DateTimeUtc"
+            )
+        })
     })
 }
 
@@ -12668,6 +12700,8 @@ fn model_fixture_value_expr(model: &ModelSpec, field: &ModelField, ty: &str) -> 
         "rust_decimal::Decimal" => {
             "rust_decimal::Decimal::from(index.saturating_add(1))".to_string()
         }
+        "DateTime" => "chrono::DateTime::<chrono::Utc>::from_timestamp(index.saturating_add(1) as i64, 0).map(|value| value.naive_utc()).unwrap_or_default()".to_string(),
+        "DateTimeUtc" => "chrono::DateTime::<chrono::Utc>::from_timestamp(index.saturating_add(1) as i64, 0).unwrap_or_default()".to_string(),
         "serde_json::Value" => "serde_json::json!({\"fixture\": index})".to_string(),
         _ => "Default::default()".to_string(),
     }
@@ -13251,7 +13285,7 @@ async fn inspect_sqlite_table(
         }
         columns.push(InspectedColumn {
             name,
-            ty: map_sql_type(&ty, pk > 0),
+            ty: map_sql_type(&ty),
             nullable: notnull == 0,
             auto_increment: pk > 0 && ty.to_ascii_lowercase().contains("int"),
             default_value,
@@ -13374,7 +13408,7 @@ async fn inspect_postgres_table(
             .as_deref()
             .map(|value| value.contains("nextval("))
             .unwrap_or(false);
-        let ty = map_sql_type(&format!("{data_type} {udt_name}"), auto_increment);
+        let ty = map_sql_type(&format!("{data_type} {udt_name}"));
         inspected.push(InspectedColumn {
             name,
             ty,
@@ -13501,7 +13535,7 @@ async fn inspect_mysql_table(
         let extra = mysql_string(&row, "extra")?;
         let comment = mysql_optional_string(&row, "column_comment")?;
         let auto_increment = extra.to_ascii_lowercase().contains("auto_increment");
-        let ty = map_sql_type(&format!("{data_type} {column_type}"), auto_increment);
+        let ty = map_sql_type(&format!("{data_type} {column_type}"));
         inspected.push(InspectedColumn {
             name,
             ty,
@@ -14640,6 +14674,8 @@ fn is_copy_filter_type(ty: &str) -> bool {
             | "usize"
             | "f32"
             | "f64"
+            | "DateTime"
+            | "DateTimeUtc"
     )
 }
 
@@ -17406,6 +17442,8 @@ fn ent_type_to_rust_type(ty: &str) -> String {
     match trimmed.to_ascii_lowercase().as_str() {
         "json" | "any" => "serde_json::Value".to_string(),
         "decimal" | "numeric" => "rust_decimal::Decimal".to_string(),
+        "timestamp" | "datetime" => "DateTime".to_string(),
+        "timestamptz" => "DateTimeUtc".to_string(),
         "duration" => "i64".to_string(),
         "int8" => "i8".to_string(),
         "int16" => "i16".to_string(),
@@ -17667,8 +17705,11 @@ fn normalize_dsl_model_type(ty: &str) -> String {
     }
 
     match trimmed.to_ascii_lowercase().as_str() {
-        "string" | "str" | "text" | "varchar" | "char" | "uuid" | "datetime" | "timestamp"
-        | "date" | "time" => "String".to_string(),
+        "string" | "str" | "text" | "varchar" | "char" | "uuid" | "date" | "time" => {
+            "String".to_string()
+        }
+        "datetime" | "timestamp" => "DateTime".to_string(),
+        "timestamptz" => "DateTimeUtc".to_string(),
         "bool" | "boolean" => "bool".to_string(),
         "int" | "integer" => "i32".to_string(),
         "bigint" => "i64".to_string(),
@@ -18206,7 +18247,12 @@ fn parse_sql_field(entry: &str, start_line: usize) -> anyhow::Result<ParsedSqlFi
     let attrs = tokens[i..].to_vec();
     let mut sql_attrs = parse_sql_attrs(&attrs);
     let auto_increment = sql_attrs.auto_increment || raw_ty.to_ascii_lowercase().contains("serial");
-    let ty = map_sql_type(&raw_ty, auto_increment);
+    let mapped_ty = if sql_attrs.unsigned {
+        format!("{raw_ty} unsigned")
+    } else {
+        raw_ty.clone()
+    };
+    let ty = map_sql_type(&mapped_ty);
     if ty == "serde_json::Value" {
         sql_attrs.default_value = sql_attrs
             .default_value
@@ -18255,6 +18301,7 @@ fn normalize_sql_json_default(value: &str) -> String {
 struct SqlAttrs {
     nullable: bool,
     auto_increment: bool,
+    unsigned: bool,
     inline_primary_key: bool,
     default_value: Option<String>,
     comment: Option<String>,
@@ -18285,6 +18332,10 @@ fn parse_sql_attrs(tokens: &[String]) -> SqlAttrs {
             }
             "auto_increment" | "autoincrement" | "identity" => {
                 attrs.auto_increment = true;
+                i += 1;
+            }
+            "unsigned" => {
+                attrs.unsigned = true;
                 i += 1;
             }
             "primary"
@@ -18873,7 +18924,7 @@ fn is_sql_attr_keyword(token: &str) -> bool {
     )
 }
 
-fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
+fn map_sql_type(raw_ty: &str) -> String {
     let normalized = raw_ty.to_ascii_lowercase();
     if normalized.contains("tinyint(1)") || normalized == "bool" || normalized == "boolean" {
         return "bool".to_string();
@@ -18883,8 +18934,11 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         return "serde_json::Value".to_string();
     }
 
-    if normalized.contains("bigserial") || normalized.contains("bigint") {
-        return if normalized.contains("unsigned") || auto_increment {
+    if normalized.contains("bigserial")
+        || normalized.contains("bigint")
+        || normalized.contains("int8")
+    {
+        return if normalized.contains("unsigned") {
             "u64".to_string()
         } else {
             "i64".to_string()
@@ -18947,14 +19001,20 @@ fn map_sql_type(raw_ty: &str, auto_increment: bool) -> String {
         return "Vec<u8>".to_string();
     }
 
+    if normalized.contains("timestamptz") || normalized.contains("timestamp with time zone") {
+        return "DateTimeUtc".to_string();
+    }
+
+    if normalized.contains("timestamp") || normalized.contains("datetime") {
+        return "DateTime".to_string();
+    }
+
     if normalized.contains("char")
         || normalized.contains("text")
         || normalized.contains("enum")
         || normalized.contains("set")
         || normalized.contains("date")
         || normalized.contains("time")
-        || normalized.contains("timestamp")
-        || normalized.contains("timestamptz")
         || normalized.contains("uuid")
         || normalized.contains("cidr")
         || normalized.contains("inet")
@@ -24061,7 +24121,7 @@ mod tests {
         assert!(ent.contains("schema \"shop\""));
         assert!(ent.contains("tenant tenant_id"));
         assert!(ent.contains("soft_delete deleted"));
-        assert!(ent.contains("field id: u64 {"));
+        assert!(ent.contains("field id: i64 {"));
         assert!(ent.contains("primary"));
         assert!(ent.contains("auto_increment"));
         assert!(ent.contains("field email: string {"));
@@ -25105,6 +25165,73 @@ mod tests {
     }
 
     #[test]
+    fn postgres_bigint_and_timestamps_generate_runtime_safe_types() {
+        let source = r#"
+        CREATE TABLE sys_notice (
+            notice_id BIGSERIAL PRIMARY KEY,
+            legacy_id BIGINT NOT NULL,
+            external_id INT8 NULL,
+            notice_title VARCHAR(50) NOT NULL,
+            local_time TIMESTAMP NOT NULL,
+            create_time TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP WITH TIME ZONE NULL
+        );
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let model = &models[0];
+        let field_ty = |name: &str| {
+            model
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.ty.as_str())
+                .expect("field")
+        };
+
+        assert_eq!(field_ty("notice_id"), "i64");
+        assert_eq!(field_ty("legacy_id"), "i64");
+        assert_eq!(field_ty("external_id"), "Option<i64>");
+        assert_eq!(field_ty("local_time"), "DateTime");
+        assert_eq!(field_ty("create_time"), "DateTimeUtc");
+        assert_eq!(field_ty("update_time"), "Option<DateTimeUtc>");
+
+        let ent = render_ent_schema(&models);
+        assert!(ent.contains("field notice_id: i64 {"));
+        assert!(ent.contains("field local_time: timestamp {"));
+        assert!(ent.contains("field create_time: timestamptz {"));
+        assert!(ent.contains("field update_time: timestamptz? {"));
+        let reparsed =
+            parse_models_with_format(&ent, ModelFormat::Ent).expect("time type round trip");
+        assert_eq!(reparsed[0].fields, model.fields);
+
+        let sea_orm = render_model_module(model);
+        assert!(sea_orm.contains("pub notice_id: i64"));
+        assert!(sea_orm.contains("pub local_time: DateTime"));
+        assert!(sea_orm.contains("pub create_time: DateTimeUtc"));
+        assert!(sea_orm.contains("pub update_time: Option<DateTimeUtc>"));
+        assert!(sea_orm.contains("Column::LocalTime.eq(*value)"));
+        assert!(sea_orm.contains("Column::UpdateTime.eq(Some(*value))"));
+        assert!(!sea_orm.contains("pub notice_id: u64"));
+        assert!(!sea_orm.contains("pub create_time: String"));
+    }
+
+    #[test]
+    fn mysql_bigint_unsigned_is_the_only_u64_bigint_mapping() {
+        let source = r#"
+        CREATE TABLE counters (
+            signed_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            unsigned_value BIGINT UNSIGNED NOT NULL
+        );
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let model = &models[0];
+        assert_eq!(model.fields[0].ty, "i64");
+        assert_eq!(model.fields[1].ty, "u64");
+    }
+
+    #[test]
     fn toasty_generation_updates_manifest_dependency() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -25698,7 +25825,9 @@ impl ServiceContext {
             CREATE TABLE users (
                 id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
-                config JSONB NOT NULL DEFAULT '{}'::jsonb
+                config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NULL
             );
             "#,
             &out,
@@ -25711,11 +25840,17 @@ impl ServiceContext {
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains("sea-orm = { workspace = true"));
         assert!(manifest.contains("with-json"));
+        assert!(manifest.contains("with-chrono"));
+        assert!(manifest.contains("chrono = { workspace = true }"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("sea_orm::"));
         assert!(module.contains("pub config: serde_json::Value"));
+        assert!(module.contains("pub created_at: DateTime"));
+        assert!(module.contains("pub updated_at: Option<DateTimeUtc>"));
         let schema = fs::read_to_string(out.join("src/model/schema.ent")).expect("schema read");
         assert!(schema.contains("field config: json {"));
+        assert!(schema.contains("field created_at: timestamp {"));
+        assert!(schema.contains("field updated_at: timestamptz? {"));
         let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("mod read");
         assert!(mod_rs.contains("pub use client::ModelClient;"));
         let client = fs::read_to_string(out.join("src/model/client.rs")).expect("client read");
@@ -25764,6 +25899,52 @@ sea-orm = { version = "1", default-features = false, features = ["macros", "runt
         assert!(manifest.contains(r#"rust_decimal = { version = "1", features = ["serde"] }"#));
         let module = fs::read_to_string(out.join("src/model/coupon.rs")).expect("module read");
         assert!(module.contains("pub amount: rust_decimal::Decimal"));
+    }
+
+    #[test]
+    fn sea_orm_timestamp_generation_updates_standalone_manifest_features() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-sea-orm-time-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "notice-service"
+edition = "2021"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-postgres"] }
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            CREATE TABLE notices (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Sql,
+            ModelOrm::SeaOrm,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains(r#""with-chrono""#));
+        assert!(manifest.contains(r#"chrono = { version = "0.4", features = ["serde"] }"#));
+        let module = fs::read_to_string(out.join("src/model/notice.rs")).expect("module read");
+        assert!(module.contains("pub id: i64"));
+        assert!(module.contains("pub created_at: DateTime"));
+        assert!(module.contains("pub updated_at: Option<DateTimeUtc>"));
     }
 
     #[test]
@@ -26004,7 +26185,9 @@ mod types;
             CREATE TABLE IF NOT EXISTS "{schema}".rozectl_users (
                 id BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
-                nickname TEXT DEFAULT 'guest'
+                nickname TEXT DEFAULT 'guest',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NULL
             )
             "#
         )))
@@ -26034,10 +26217,23 @@ mod types;
         assert_eq!(spec.schema_name.as_deref(), Some(schema.as_str()));
         assert_eq!(spec.table, "rozectl_users");
         assert_eq!(spec.primary, "id");
+        let field_ty = |name: &str| {
+            spec.fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.ty.as_str())
+                .expect("field")
+        };
+        assert_eq!(field_ty("id"), "i64");
+        assert_eq!(field_ty("created_at"), "DateTime");
+        assert_eq!(field_ty("updated_at"), "Option<DateTimeUtc>");
 
         let rendered = render_model_module(&spec);
         assert!(rendered.contains(&format!("schema_name = \"{schema}\"")));
         assert!(rendered.contains("table_name = \"rozectl_users\""));
+        assert!(rendered.contains("pub id: i64"));
+        assert!(rendered.contains("pub created_at: DateTime"));
+        assert!(rendered.contains("pub updated_at: Option<DateTimeUtc>"));
         assert!(out.join("src/model/mod.rs").is_file());
         assert!(out.join("src/model/rozectl_user.rs").is_file());
         let main_rs = fs::read_to_string(out.join("src/main.rs")).expect("main read");
@@ -26204,7 +26400,9 @@ mod types;
             CREATE TABLE IF NOT EXISTS "{schema}".rozectl_users (
                 id BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
-                nickname TEXT NULL
+                nickname TEXT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMPTZ NULL
             )
             "#
         )))
@@ -26217,7 +26415,9 @@ mod types;
             CREATE TABLE "{schema}".rozectl_users (
                 id BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
-                nickname TEXT NULL
+                nickname TEXT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMPTZ NULL
             );
             "#
         );
@@ -27503,6 +27703,10 @@ impl ServiceContext {
                 field score: i32? {
                 }
                 field visits: i32 {
+                }
+                field created_at: timestamp {
+                }
+                field updated_at: timestamptz? {
                 }
                 field required_label: string {
                     nillable

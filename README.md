@@ -350,6 +350,12 @@ Supported SQL input focuses on common MySQL and Postgres DDL:
 - standalone `CREATE INDEX` and `CREATE UNIQUE INDEX`, including composite and PostgreSQL partial indexes
 - unsupported features such as composite keys and foreign keys fail fast with a clear error
 
+PostgreSQL `BIGINT`, `BIGSERIAL`, and `INT8` generate signed `i64` fields;
+unsigned `u64` is reserved for explicitly unsigned types such as MySQL
+`BIGINT UNSIGNED`. PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` remain distinct as
+`.ent` `timestamp` and `timestamptz` fields and generate SeaORM `DateTime` and
+`DateTimeUtc` fields with chrono support enabled automatically.
+
 Generated RPC service layout:
 
 ```text
