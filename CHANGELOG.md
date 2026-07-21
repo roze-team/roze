@@ -93,7 +93,8 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Preserve PostgreSQL `BIGINT`/`BIGSERIAL`/`INT8` as signed `i64` and map
   `TIMESTAMP`/`TIMESTAMPTZ` to SeaORM's native chrono-backed datetime types in
   SQL generation and database inspection. MySQL `BIGINT UNSIGNED` remains
-  `u64`, and generated SeaORM manifests enable `with-chrono` automatically.
+  `u64`, and generated SeaORM manifests enable `with-chrono` plus chrono's
+  `clock` and `serde` features automatically, including existing dependencies.
 - Apply configured service JWT authentication in generated REST common
   middleware, populate request context only from verified claims, strip
   untrusted identity headers by default, and support explicit public-route and

@@ -1249,11 +1249,17 @@ fn update_model_dependencies(
         let item = if uses_workspace {
             workspace_dependency_item()
         } else {
-            r#"{ version = "0.4", features = ["serde"] }"#
+            r#"{ version = "0.4", default-features = false, features = ["clock", "serde"] }"#
                 .parse::<toml_edit::Item>()
                 .expect("valid toml dependency value")
         };
         dependencies.insert("chrono", item);
+    }
+    if needs.chrono {
+        if let Some(item) = dependencies.get_mut("chrono") {
+            ensure_dependency_feature(item, "clock");
+            ensure_dependency_feature(item, "serde");
+        }
     }
 
     if !dependencies.contains_key("serde_json") {
@@ -1350,6 +1356,11 @@ fn type_contains_rust_decimal(ty: &str) -> bool {
 }
 
 fn ensure_dependency_feature(item: &mut toml_edit::Item, feature: &str) {
+    if let Some(version) = item.as_str().map(str::to_owned) {
+        let mut table = toml_edit::InlineTable::new();
+        table.insert("version", version.into());
+        *item = toml_edit::Item::Value(toml_edit::Value::InlineTable(table));
+    }
     let Some(value) = item.as_value_mut() else {
         return;
     };
@@ -25841,7 +25852,9 @@ impl ServiceContext {
         assert!(manifest.contains("sea-orm = { workspace = true"));
         assert!(manifest.contains("with-json"));
         assert!(manifest.contains("with-chrono"));
-        assert!(manifest.contains("chrono = { workspace = true }"));
+        assert!(
+            manifest.contains(r#"chrono = { workspace = true, features = ["clock", "serde"] }"#)
+        );
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("sea_orm::"));
         assert!(module.contains("pub config: serde_json::Value"));
@@ -25940,11 +25953,74 @@ sea-orm = { version = "1", default-features = false, features = ["macros", "runt
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains(r#""with-chrono""#));
-        assert!(manifest.contains(r#"chrono = { version = "0.4", features = ["serde"] }"#));
+        assert!(manifest.contains(
+            r#"chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }"#
+        ));
         let module = fs::read_to_string(out.join("src/model/notice.rs")).expect("module read");
         assert!(module.contains("pub id: i64"));
         assert!(module.contains("pub created_at: DateTime"));
         assert!(module.contains("pub updated_at: Option<DateTimeUtc>"));
+    }
+
+    #[test]
+    fn sea_orm_timestamp_generation_adds_serde_to_existing_chrono_dependency() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-sea-orm-time-serde-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "notice-service"
+edition = "2021"
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-postgres"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+"#,
+        )
+        .expect("manifest");
+
+        generate_model_project(
+            r#"
+            CREATE TABLE notices (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                published_at TIMESTAMP NULL,
+                updated_at TIMESTAMPTZ NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Sql,
+            ModelOrm::SeaOrm,
+        )
+        .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains(
+            r#"chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }"#
+        ));
+        assert!(manifest.contains(r#""with-chrono""#));
+        let module = fs::read_to_string(out.join("src/model/notice.rs")).expect("module read");
+        assert!(module.contains("pub created_at: DateTime"));
+        assert!(module.contains("pub published_at: Option<DateTime>"));
+        assert!(module.contains("pub updated_at: Option<DateTimeUtc>"));
+    }
+
+    #[test]
+    fn dependency_feature_merge_upgrades_string_dependency() {
+        let mut item = r#""0.4""#.parse::<toml_edit::Item>().expect("dependency item");
+        ensure_dependency_feature(&mut item, "clock");
+        ensure_dependency_feature(&mut item, "serde");
+        assert_eq!(
+            item.to_string(),
+            r#"{ version = "0.4", features = ["clock", "serde"] }"#
+        );
     }
 
     #[test]
@@ -27651,6 +27727,7 @@ version = "0.0.0"
 anyhow = "1"
 sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite"] }
 serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 "#,
         );
         add_local_roze_orm_dependency(&out);
@@ -27850,6 +27927,11 @@ impl ServiceContext {
             ModelOrm::SeaOrm,
         )
         .expect("generate");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains(
+            r#"chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }"#
+        ));
 
         fs::write(
             out.join("src/recursive_smoke.rs"),

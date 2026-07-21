@@ -1847,8 +1847,9 @@ generates `u64`.
 PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` preserve their distinction as `.ent`
 `timestamp` and `timestamptz`. SeaORM output uses `DateTime` and `DateTimeUtc`
 respectively, including their nullable forms, and model generation adds the
-`with-chrono` SeaORM feature plus a serde-enabled `chrono` dependency when
-needed. `.ent` `datetime` is accepted as an alias for `timestamp`.
+`with-chrono` SeaORM feature plus `clock` and `serde` to the `chrono` dependency
+when needed, merging the features into an existing dependency if present.
+`.ent` `datetime` is accepted as an alias for `timestamp`.
 Model names and field names must generate valid, non-conflicting Rust module,
 type, field, and field-enum identifiers. Names that normalize to a single `_`
 are rejected.
