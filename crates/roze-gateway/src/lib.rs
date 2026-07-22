@@ -3379,6 +3379,12 @@ mod tests {
             prefix: "/roze/gateway-integration".to_string(),
             ttl_seconds: 10,
             renew_interval_secs: 2,
+            user: None,
+            pass: None,
+            cert_file: None,
+            cert_key_file: None,
+            ca_cert_file: None,
+            insecure_skip_verify: false,
         }
     }
 

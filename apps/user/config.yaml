@@ -8,6 +8,12 @@ registry:
   # prefix: /roze/services
   # ttl_seconds: 10
   # renew_interval_secs: 3
+  # user: roze
+  # pass: change-me
+  # ca_cert_file: certs/etcd-ca.pem
+  # cert_file: certs/etcd-client.pem
+  # cert_key_file: certs/etcd-client.key
+  # insecure_skip_verify: false
 governance:
   timeout_ms: 5000
   rate_limit:

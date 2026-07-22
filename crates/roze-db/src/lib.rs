@@ -8,7 +8,9 @@ use std::{
 
 pub use roze_config::{DatabaseConfig, DatabaseReadPolicy};
 pub use sea_orm::DatabaseConnection;
-use sea_orm::{ConnectOptions, Database, DbErr, TransactionError, TransactionTrait};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DbErr, TransactionError, TransactionTrait,
+};
 
 pub async fn connect(config: &DatabaseConfig) -> Result<DatabaseConnection, DbErr> {
     connect_url(config, &config.url).await
@@ -56,6 +58,14 @@ impl DatabaseConnections {
         };
 
         &self.replicas[index]
+    }
+
+    pub async fn health_check(&self) -> Result<(), DbErr> {
+        self.primary.execute_unprepared("SELECT 1").await?;
+        for replica in &self.replicas {
+            replica.execute_unprepared("SELECT 1").await?;
+        }
+        Ok(())
     }
 }
 

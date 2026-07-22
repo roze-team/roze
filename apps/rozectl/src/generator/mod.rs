@@ -10726,6 +10726,12 @@ registry:
   # prefix: /roze/services
   # ttl_seconds: 10
   # renew_interval_secs: 3
+  # user: roze
+  # pass: change-me
+  # ca_cert_file: certs/etcd-ca.pem
+  # cert_file: certs/etcd-client.pem
+  # cert_key_file: certs/etcd-client.key
+  # insecure_skip_verify: false
 governance:
   timeout_ms: 5000
   rate_limit:
@@ -10818,6 +10824,12 @@ registry:
   # prefix: /roze/services
   # ttl_seconds: 10
   # renew_interval_secs: 3
+  # user: roze
+  # pass: change-me
+  # ca_cert_file: certs/etcd-ca.pem
+  # cert_file: certs/etcd-client.pem
+  # cert_key_file: certs/etcd-client.key
+  # insecure_skip_verify: false
 governance:
   timeout_ms: 5000
   rate_limit:
@@ -11194,11 +11206,17 @@ impl ServiceContext {
             Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
             None => None,
         };
-        if cache.is_some() {
-            health.register_static(roze_health::HealthCheck::healthy("redis"));
+        if let Some(cache) = cache.clone() {
+            health.register_dependency("redis", move || {
+                let cache = cache.clone();
+                async move { cache.health_check().await }
+            });
         }
-        if mq.is_some() {
-            health.register_static(roze_health::HealthCheck::healthy("nats"));
+        if let Some(mq) = mq.clone() {
+            health.register_dependency("nats", move || {
+                let mq = mq.clone();
+                async move { mq.health_check().await }
+            });
         }
         health.mark_ready();
         Ok(Self {
@@ -11325,17 +11343,29 @@ impl ServiceContext {
             Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
             None => None,
         };
-        if db_connections.is_some() {
-            health.register_static(roze_health::HealthCheck::healthy("database"));
+        if let Some(db_connections) = db_connections.clone() {
+            health.register_dependency("database", move || {
+                let db_connections = db_connections.clone();
+                async move { db_connections.health_check().await.map_err(Into::into) }
+            });
         }
-        if mongo.is_some() {
-            health.register_static(roze_health::HealthCheck::healthy("mongo"));
+        if let Some(mongo) = mongo.clone() {
+            health.register_dependency("mongo", move || {
+                let mongo = mongo.clone();
+                async move { mongo.health_check().await }
+            });
         }
-        if cache.is_some() {
-            health.register_static(roze_health::HealthCheck::healthy("redis"));
+        if let Some(cache) = cache.clone() {
+            health.register_dependency("redis", move || {
+                let cache = cache.clone();
+                async move { cache.health_check().await }
+            });
         }
-        if mq.is_some() {
-            health.register_static(roze_health::HealthCheck::healthy("nats"));
+        if let Some(mq) = mq.clone() {
+            health.register_dependency("nats", move || {
+                let mq = mq.clone();
+                async move { mq.health_check().await }
+            });
         }
         health.mark_ready();
         Ok(Self {
@@ -11458,7 +11488,11 @@ fn inject_rpc_clients_into_service_context(
                 .rpc_client_config("{config_name}")
                 .ok_or_else(|| anyhow::anyhow!("rpc client `{config_name}` is not configured"))?;
             let client = {crate_name}::client::RpcClient::connect_from_config(client_config).await?;
-            health.register_static(roze_health::HealthCheck::healthy("rpc:{config_name}"));
+            let health_client = client.clone();
+            health.register_dependency("rpc:{config_name}", move || {{
+                let client = health_client.clone();
+                async move {{ client.health_check().await }}
+            }});
             client
         }};"#,
                 config_name = client.name,
@@ -12724,7 +12758,8 @@ mod tests {
         assert!(
             svc.contains("shop_order_rpc::client::RpcClient::connect_from_config(client_config)")
         );
-        assert!(svc.contains("HealthCheck::healthy(\"rpc:order\")"));
+        assert!(svc.contains("health.register_dependency(\"rpc:order\""));
+        assert!(svc.contains("client.health_check().await"));
         assert!(svc.contains("pub fn payment(&self)"));
         assert!(svc.contains("rpc_client_config(\"payment\")"));
         assert!(!svc.trim_end().ends_with("}\n}\n}"));
@@ -15173,7 +15208,7 @@ mod tests {
         let svc = fs::read_to_string(&svc_path).expect("read updated service context");
         assert!(svc.contains("pub catalog_client: shop_catalog_rpc::client::RpcClient"));
         assert!(svc.contains("rpc_client_config(\"catalog\")"));
-        assert!(svc.contains("HealthCheck::healthy(\"rpc:catalog\")"));
+        assert!(svc.contains("health.register_dependency(\"rpc:catalog\""));
         assert!(svc.contains("catalog_client,"));
         assert!(svc.contains("pub fn catalog(&self) -> shop_catalog_rpc::client::RpcClient"));
         assert!(svc.contains("pub fn custom_dependency(&self)"));

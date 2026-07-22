@@ -212,6 +212,22 @@ holds `Arc<dyn roze_middleware::IdempotencyStore>` and provides
 `with_idempotency_store` for a persistent Redis or database adapter. The
 in-memory default is for local development and tests.
 
+Roze provides `RedisIdempotencyStore` as the production Redis adapter. It uses
+Lua for atomic begin/complete/fail transitions, validates the request
+fingerprint, reclaims expired execution leases, persists completed JSON for
+response replay, and applies a bounded record TTL:
+
+```rust
+let mut config = roze_middleware::RedisIdempotencyConfig::new(&redis_url);
+config.key_prefix = "shop:idempotency:v1".to_string();
+config.record_ttl_millis = 86_400_000;
+let store = roze_middleware::RedisIdempotencyStore::connect(config)?;
+let ctx = ctx.with_idempotency_store(std::sync::Arc::new(store));
+```
+
+Use a service/environment-specific key prefix and load the Redis URL from
+secret configuration. Adapter debug output never includes that URL.
+
 Each record contains the key scope, a canonical request fingerprint, a
 processing lease, and the completed JSON response. A completed matching request
 replays the response, a live processing lease returns conflict, an expired

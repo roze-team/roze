@@ -36,6 +36,11 @@ impl MongoDatabase {
     {
         self.database.collection(name.as_ref())
     }
+
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        self.database.run_command(bson::doc! { "ping": 1 }).await?;
+        Ok(())
+    }
 }
 
 pub async fn connect(config: &MongoConfig) -> anyhow::Result<MongoDatabase> {

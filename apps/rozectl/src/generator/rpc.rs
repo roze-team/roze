@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {{
     let registry = roze_rpc::registry::build_service_registry(&config)?
         .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
     let mut registration = roze_rpc::rpc::ServiceRegistrationGuard::start_with_advertise_addr(
-        registry,
+        registry.clone(),
         config.name.clone(),
         rpc.addr,
         rpc.advertise_addr.unwrap_or(rpc.addr),
@@ -54,6 +54,12 @@ async fn main() -> anyhow::Result<()> {{
     let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
     tracing::info!(service = %service_name, protocol = "rpc", "service context initialized");
     let health = ctx.health.clone();
+    let registry_service = service_name.clone();
+    health.register_dependency("registry", move || {{
+        let registry = registry.clone();
+        let service = registry_service.clone();
+        async move {{ registry.discover(&service).await.map(|_| ()) }}
+    }});
     let (rpc_health, grpc_health_service) =
         roze_rpc::health::RpcHealthReporter::new_for::<{service}Server<server::RpcService>>(
             health,
@@ -178,6 +184,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("pub struct RpcClient {\n");
     out.push_str("    inner: ProtoClient<Channel>,\n");
+    out.push_str("    health_channel: Channel,\n");
     out.push_str("    options: roze_rpc::rpc::RpcClientOptions,\n");
     out.push_str("    client_config: Option<roze_config::RpcClientConfig>,\n");
     out.push_str("    governance: Option<roze_config::GovernanceConfig>,\n");
@@ -188,7 +195,8 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("impl RpcClient {\n");
     out.push_str("    pub fn new(channel: Channel) -> Self {\n");
     out.push_str("        Self {\n");
-    out.push_str("            inner: ProtoClient::new(channel),\n");
+    out.push_str("            inner: ProtoClient::new(channel.clone()),\n");
+    out.push_str("            health_channel: channel,\n");
     out.push_str("            options: roze_rpc::rpc::RpcClientOptions::default(),\n");
     out.push_str("            client_config: None,\n");
     out.push_str("            governance: None,\n");
@@ -199,7 +207,8 @@ pub fn render_client(spec: &ApiSpec) -> String {
         "    pub fn with_options(channel: Channel, options: roze_rpc::rpc::RpcClientOptions) -> Self {\n",
     );
     out.push_str("        Self {\n");
-    out.push_str("            inner: ProtoClient::new(channel),\n");
+    out.push_str("            inner: ProtoClient::new(channel.clone()),\n");
+    out.push_str("            health_channel: channel,\n");
     out.push_str("            options,\n");
     out.push_str("            client_config: None,\n");
     out.push_str("            governance: None,\n");
@@ -211,7 +220,8 @@ pub fn render_client(spec: &ApiSpec) -> String {
     );
     out.push_str("        let options = roze_rpc::rpc::RpcClientOptions::from_config(&config);\n");
     out.push_str("        Self {\n");
-    out.push_str("            inner: ProtoClient::new(channel),\n");
+    out.push_str("            inner: ProtoClient::new(channel.clone()),\n");
+    out.push_str("            health_channel: channel,\n");
     out.push_str("            options,\n");
     out.push_str("            client_config: Some(config),\n");
     out.push_str("            governance: None,\n");
@@ -227,6 +237,10 @@ pub fn render_client(spec: &ApiSpec) -> String {
     out.push_str("    pub fn inner_mut(&mut self) -> &mut ProtoClient<Channel> {\n");
     out.push_str("        &mut self.inner\n");
     out.push_str("    }\n\n");
+    out.push_str(&format!(
+        "    pub async fn health_check(&self) -> anyhow::Result<()> {{\n        let channel = match self.dynamic_channels.as_ref() {{\n            Some(channels) => channels.initial_channel({service_name:?}).await?,\n            None => self.health_channel.clone(),\n        }};\n        roze_rpc::health::check_channel(channel, \"\").await\n    }}\n\n",
+        service_name = service_name,
+    ));
     out.push_str("    pub async fn connect(addr: impl AsRef<str>) -> anyhow::Result<Self> {\n");
     out.push_str("        let url = roze_rpc::rpc::normalize_endpoint(addr.as_ref())?;\n");
     out.push_str("        let options = roze_rpc::rpc::RpcClientOptions::default();\n");
@@ -1395,6 +1409,8 @@ mod tests {
         assert!(client.contains("client_config: Option<roze_config::RpcClientConfig>"));
         assert!(client.contains("governance: Option<roze_config::GovernanceConfig>"));
         assert!(client.contains("dynamic_channels: Option<std::sync::Arc<"));
+        assert!(client.contains("health_channel: Channel"));
+        assert!(client.contains("pub async fn health_check(&self)"));
         assert!(client.contains("DynamicRpcChannels::from_config(&config)?"));
         assert!(client.contains("channels.initial_channel(\"user\").await?"));
         assert!(client.contains("channels.attempt(\"user\").await?"));

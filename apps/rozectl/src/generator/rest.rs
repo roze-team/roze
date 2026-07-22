@@ -34,25 +34,33 @@ async fn main() -> anyhow::Result<()> {
         register = rest.register,
         "service configuration loaded"
     );
-    let mut registration = if rest.register {
+    let (mut registration, registry_health) = if rest.register {
         let registry = roze_rpc::registry::build_service_registry(&config)?
             .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
         let registration = roze_rpc::rpc::ServiceRegistrationGuard::start(
-            registry,
+            registry.clone(),
             config.name.clone(),
             rest.addr,
         )
         .await?;
         tracing::info!(service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
-        Some(registration)
+        (Some(registration), Some(registry))
     } else {
-        None
+        (None, None)
     };
     let service_name = config.name.clone();
     let auth_config = config.auth.clone();
     let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
     tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
     let health = ctx.health.clone();
+    if let Some(registry) = registry_health {
+        let registry_service = service_name.clone();
+        health.register_dependency("registry", move || {
+            let registry = registry.clone();
+            let service = registry_service.clone();
+            async move { registry.discover(&service).await.map(|_| ()) }
+        });
+    }
     let middleware_config = roze_middleware::CommonMiddlewareConfig::from_service(
         &rest.middlewares,
         auth_config.as_ref(),

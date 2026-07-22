@@ -16,6 +16,7 @@ roze-metrics = { path = "../roze-metrics" }
 roze-resilience = { path = "../roze-resilience" }
 roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
+redis.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 serde.workspace = true

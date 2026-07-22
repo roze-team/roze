@@ -1462,14 +1462,10 @@ fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Re
         })
         .unwrap_or(updated);
     }
-    if !updated.contains("if toasty_db.is_some()") {
-        updated = insert_before_module(
-            &updated,
-            "        health.mark_ready();\n",
-            "        if toasty_db.is_some() {\n            health.register_static(roze_health::HealthCheck::healthy(\"toasty\"));\n        }\n",
-        )
-        .unwrap_or(updated);
-    }
+    updated = updated.replace(
+        "        if toasty_db.is_some() {\n            health.register_static(roze_health::HealthCheck::healthy(\"toasty\"));\n        }\n",
+        "",
+    );
     let accessor = r#"    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
         self.toasty_db
             .clone()

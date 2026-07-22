@@ -987,6 +987,165 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisIdempotencyConfig {
+    pub url: String,
+    pub key_prefix: String,
+    pub record_ttl_millis: u64,
+}
+
+impl RedisIdempotencyConfig {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            key_prefix: "roze:idempotency:v1".to_string(),
+            record_ttl_millis: 86_400_000,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RedisIdempotencyStore {
+    client: redis::Client,
+    key_prefix: String,
+    record_ttl_millis: u64,
+}
+
+impl std::fmt::Debug for RedisIdempotencyStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RedisIdempotencyStore")
+            .field("key_prefix", &self.key_prefix)
+            .field("record_ttl_millis", &self.record_ttl_millis)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RedisIdempotencyStore {
+    pub fn connect(config: RedisIdempotencyConfig) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !config.key_prefix.trim().is_empty(),
+            "Redis idempotency key prefix must not be empty"
+        );
+        anyhow::ensure!(
+            config.record_ttl_millis > 0,
+            "Redis idempotency record TTL must be positive"
+        );
+        Ok(Self {
+            client: redis::Client::open(config.url)?,
+            key_prefix: config.key_prefix.trim_end_matches(':').to_string(),
+            record_ttl_millis: config.record_ttl_millis,
+        })
+    }
+
+    fn storage_key(&self, scope: &str, key: &str) -> String {
+        format!("{}:{}:{}:{key}", self.key_prefix, scope.len(), scope)
+    }
+
+    async fn connection(&self) -> anyhow::Result<redis::aio::MultiplexedConnection> {
+        Ok(self.client.get_multiplexed_async_connection().await?)
+    }
+}
+
+const REDIS_IDEMPOTENCY_BEGIN: &str = r#"
+local fingerprint = redis.call('HGET', KEYS[1], 'fingerprint')
+if fingerprint then
+  if fingerprint ~= ARGV[1] then return {'conflict', ''} end
+  local response = redis.call('HGET', KEYS[1], 'response')
+  if response then return {'replay', response} end
+  local lease = tonumber(redis.call('HGET', KEYS[1], 'lease_until') or '0')
+  if lease > tonumber(ARGV[2]) then return {'in_flight', ''} end
+else
+  redis.call('HSET', KEYS[1], 'fingerprint', ARGV[1])
+end
+redis.call('HSET', KEYS[1], 'lease_until', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return {'execute', ''}
+"#;
+
+const REDIS_IDEMPOTENCY_COMPLETE: &str = r#"
+local fingerprint = redis.call('HGET', KEYS[1], 'fingerprint')
+if not fingerprint then return 0 end
+if fingerprint ~= ARGV[1] then return -1 end
+redis.call('HSET', KEYS[1], 'response', ARGV[2])
+redis.call('HDEL', KEYS[1], 'lease_until')
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
+"#;
+
+const REDIS_IDEMPOTENCY_FAIL: &str = r#"
+local fingerprint = redis.call('HGET', KEYS[1], 'fingerprint')
+if fingerprint == ARGV[1] and redis.call('HEXISTS', KEYS[1], 'response') == 0 then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"#;
+
+#[async_trait]
+impl IdempotencyStore for RedisIdempotencyStore {
+    async fn begin(
+        &self,
+        scope: &str,
+        key: &str,
+        fingerprint: &str,
+        now_millis: u64,
+        policy: IdempotencyPolicy,
+    ) -> anyhow::Result<IdempotencyDecision> {
+        let mut connection = self.connection().await?;
+        let lease_until = now_millis.saturating_add(policy.lease_millis);
+        let (decision, response): (String, String) = redis::Script::new(REDIS_IDEMPOTENCY_BEGIN)
+            .key(self.storage_key(scope, key))
+            .arg(fingerprint)
+            .arg(now_millis)
+            .arg(lease_until)
+            .arg(self.record_ttl_millis)
+            .invoke_async(&mut connection)
+            .await?;
+        match decision.as_str() {
+            "execute" => Ok(IdempotencyDecision::Execute),
+            "in_flight" => Ok(IdempotencyDecision::InFlight),
+            "conflict" => Ok(IdempotencyDecision::Conflict),
+            "replay" => Ok(IdempotencyDecision::Replay(serde_json::from_str(
+                &response,
+            )?)),
+            other => anyhow::bail!("unknown Redis idempotency decision: {other}"),
+        }
+    }
+
+    async fn complete(
+        &self,
+        scope: &str,
+        key: &str,
+        fingerprint: &str,
+        response: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.connection().await?;
+        let result: i64 = redis::Script::new(REDIS_IDEMPOTENCY_COMPLETE)
+            .key(self.storage_key(scope, key))
+            .arg(fingerprint)
+            .arg(serde_json::to_string(&response)?)
+            .arg(self.record_ttl_millis)
+            .invoke_async(&mut connection)
+            .await?;
+        match result {
+            1 => Ok(()),
+            0 => anyhow::bail!("idempotency request was not started"),
+            -1 => anyhow::bail!("idempotency request fingerprint changed"),
+            other => anyhow::bail!("unknown Redis idempotency completion result: {other}"),
+        }
+    }
+
+    async fn fail(&self, scope: &str, key: &str, fingerprint: &str) -> anyhow::Result<()> {
+        let mut connection = self.connection().await?;
+        let _: i64 = redis::Script::new(REDIS_IDEMPOTENCY_FAIL)
+            .key(self.storage_key(scope, key))
+            .arg(fingerprint)
+            .invoke_async(&mut connection)
+            .await?;
+        Ok(())
+    }
+}
+
 pub const IDEMPOTENCY_MISSING_KEY: &str = "IDEMPOTENCY_MISSING_KEY";
 pub const IDEMPOTENCY_IN_FLIGHT: &str = "IDEMPOTENCY_IN_FLIGHT";
 pub const IDEMPOTENCY_KEY_REUSED: &str = "IDEMPOTENCY_KEY_REUSED";
@@ -1613,6 +1772,89 @@ mod tests {
                 .unwrap(),
             IdempotencyDecision::Execute
         );
+    }
+
+    #[test]
+    fn redis_idempotency_configuration_is_validated_and_debug_is_redacted() {
+        let mut config = RedisIdempotencyConfig::new("redis://user:secret@127.0.0.1/");
+        config.key_prefix = "test:idempotency".into();
+        let store = RedisIdempotencyStore::connect(config).expect("store");
+        assert_eq!(store.storage_key("ab", "c:d"), "test:idempotency:2:ab:c:d");
+        let debug = format!("{store:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("test:idempotency"));
+
+        let mut invalid = RedisIdempotencyConfig::new("redis://127.0.0.1/");
+        invalid.record_ttl_millis = 0;
+        assert!(RedisIdempotencyStore::connect(invalid).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_REDIS_URL"]
+    async fn redis_idempotency_store_runs_atomic_state_machine() {
+        let url = std::env::var("ROZE_TEST_REDIS_URL").expect("ROZE_TEST_REDIS_URL is required");
+        let mut config = RedisIdempotencyConfig::new(url);
+        config.key_prefix = format!("roze:test:idempotency:{}", std::process::id());
+        config.record_ttl_millis = 60_000;
+        let store = RedisIdempotencyStore::connect(config).expect("store");
+        let scope = "create-order";
+        let key = format!("key-{}", idempotency_now_millis());
+        let policy = IdempotencyPolicy { lease_millis: 10 };
+
+        assert_eq!(
+            store
+                .begin(scope, &key, "body-1", 100, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::Execute
+        );
+        assert_eq!(
+            store
+                .begin(scope, &key, "body-1", 109, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::InFlight
+        );
+        assert_eq!(
+            store
+                .begin(scope, &key, "body-2", 110, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::Conflict
+        );
+        assert_eq!(
+            store
+                .begin(scope, &key, "body-1", 110, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::Execute
+        );
+        store
+            .complete(scope, &key, "body-1", serde_json::json!({"id": 1}))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .begin(scope, &key, "body-1", 111, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::Replay(serde_json::json!({"id": 1}))
+        );
+
+        let failed_key = format!("{key}-failed");
+        store
+            .begin(scope, &failed_key, "body", 100, policy)
+            .await
+            .unwrap();
+        store.fail(scope, &failed_key, "body").await.unwrap();
+        assert_eq!(
+            store
+                .begin(scope, &failed_key, "body", 101, policy)
+                .await
+                .unwrap(),
+            IdempotencyDecision::Execute
+        );
+        store.fail(scope, &failed_key, "body").await.unwrap();
     }
 
     #[test]

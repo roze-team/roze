@@ -3,12 +3,32 @@ use std::{future::Future, time::Duration};
 use roze_grpc::transport::NamedService;
 use roze_health::{HealthRegistry, HealthReport};
 use tonic_health::{
-    pb::health_server::HealthServer,
+    pb::{
+        health_check_response::ServingStatus as WireServingStatus, health_client::HealthClient,
+        health_server::HealthServer, HealthCheckRequest,
+    },
     server::{HealthReporter, HealthService},
     ServingStatus,
 };
 
 pub type GrpcHealthService = HealthServer<HealthService>;
+
+pub async fn check_channel(
+    channel: roze_grpc::transport::Channel,
+    service: impl Into<String>,
+) -> anyhow::Result<()> {
+    let response = HealthClient::new(channel)
+        .check(roze_grpc::transport::Request::new(HealthCheckRequest {
+            service: service.into(),
+        }))
+        .await?
+        .into_inner();
+    anyhow::ensure!(
+        WireServingStatus::try_from(response.status).ok() == Some(WireServingStatus::Serving),
+        "RPC dependency is not serving"
+    );
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub struct RpcHealthReporter {

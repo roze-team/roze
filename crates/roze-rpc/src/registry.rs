@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt,
     future::Future,
     net::ToSocketAddrs,
     pin::Pin,
@@ -12,7 +13,10 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::{sync::mpsc, time::interval};
+use tokio::{
+    sync::{mpsc, Mutex as AsyncMutex},
+    time::interval,
+};
 
 use crate::balance::{self, AttemptLease, Balancer, EwmaP2cBalancer};
 use roze_config::{RegistryConfig, RegistryKind, RpcClientEtcdConfig, ServiceConfig};
@@ -127,26 +131,100 @@ impl Registry for DnsRegistry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EtcdRegistry {
     endpoints: Vec<String>,
     prefix: String,
     ttl_seconds: u64,
     renew_interval_secs: u64,
     client: reqwest::Client,
+    auth: Option<Arc<EtcdAuth>>,
+    auth_token: Arc<AsyncMutex<Option<String>>>,
     leases: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+}
+
+#[derive(Clone)]
+struct EtcdAuth {
+    user: String,
+    pass: String,
+}
+
+impl fmt::Debug for EtcdRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EtcdRegistry")
+            .field("endpoints", &self.endpoints)
+            .field("prefix", &self.prefix)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("renew_interval_secs", &self.renew_interval_secs)
+            .field("authenticated", &self.auth.is_some())
+            .field("leases", &self.leases)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EtcdRegistry {
     pub fn new(config: &RegistryConfig) -> Self {
-        Self {
+        Self::try_new(config).expect("invalid etcd registry TLS or authentication configuration")
+    }
+
+    pub fn try_new(config: &RegistryConfig) -> anyhow::Result<Self> {
+        let auth = match (&config.user, &config.pass) {
+            (Some(user), Some(pass)) if !user.is_empty() => Some(Arc::new(EtcdAuth {
+                user: user.clone(),
+                pass: pass.clone(),
+            })),
+            (None, None) => None,
+            _ => anyhow::bail!("etcd registry user and pass must be configured together"),
+        };
+        if config.cert_file.is_some() != config.cert_key_file.is_some() {
+            anyhow::bail!("etcd registry cert_file and cert_key_file must be configured together");
+        }
+
+        let mut client = reqwest::Client::builder();
+        if let Some(path) = &config.ca_cert_file {
+            let pem = std::fs::read(path)
+                .map_err(|error| anyhow::anyhow!("read etcd CA certificate {path}: {error}"))?;
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|error| anyhow::anyhow!("parse etcd CA certificate {path}: {error}"))?;
+            if certificates.is_empty() {
+                anyhow::bail!("etcd CA certificate {path} contains no certificates");
+            }
+            for certificate in certificates {
+                client = client.add_root_certificate(certificate);
+            }
+        }
+        if let (Some(cert_path), Some(key_path)) = (&config.cert_file, &config.cert_key_file) {
+            let mut identity_pem = std::fs::read(cert_path).map_err(|error| {
+                anyhow::anyhow!("read etcd client certificate {cert_path}: {error}")
+            })?;
+            identity_pem.push(b'\n');
+            identity_pem.extend(std::fs::read(key_path).map_err(|error| {
+                anyhow::anyhow!("read etcd client private key {key_path}: {error}")
+            })?);
+            let identity = reqwest::Identity::from_pem(&identity_pem).map_err(|error| {
+                anyhow::anyhow!("parse etcd client certificate and private key: {error}")
+            })?;
+            client = client.identity(identity);
+        }
+        if config.insecure_skip_verify {
+            tracing::warn!(
+                registry = "etcd",
+                "etcd TLS certificate verification is disabled"
+            );
+            client = client.danger_accept_invalid_certs(true);
+        }
+
+        Ok(Self {
             endpoints: config.endpoints.clone(),
             prefix: normalize_etcd_registry_prefix(&config.prefix),
             ttl_seconds: config.ttl_seconds.max(1),
             renew_interval_secs: config.renew_interval_secs.max(1),
-            client: reqwest::Client::new(),
+            client: client.build()?,
+            auth,
+            auth_token: Arc::new(AsyncMutex::new(None)),
             leases: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     fn endpoints(&self) -> &[String] {
@@ -161,14 +239,7 @@ impl EtcdRegistry {
         let body = serde_json::json!({
             "TTL": self.ttl_seconds,
         });
-        let resp = self
-            .client
-            .post(format!("{}/v3/lease/grant", endpoint))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| with_proxy_diagnostic(err.into(), endpoint))?
-            .error_for_status()?;
+        let resp = self.post_json(endpoint, "/v3/lease/grant", &body).await?;
         let value: serde_json::Value = resp.json().await?;
         extract_json_field(&value, "ID")
             .ok_or_else(|| anyhow::anyhow!("missing etcd lease id in response"))
@@ -184,13 +255,7 @@ impl EtcdRegistry {
                     "value": STANDARD.encode(payload),
                     "lease": lease_id,
                 });
-                self.client
-                    .post(format!("{}/v3/kv/put", endpoint))
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
-                    .error_for_status()?;
+                self.post_json(&endpoint, "/v3/kv/put", &body).await?;
                 Ok::<_, anyhow::Error>(lease_id)
             }
             .await;
@@ -200,6 +265,76 @@ impl EtcdRegistry {
             }
         }
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("etcd registry endpoint list is empty")))
+    }
+
+    async fn post_json(
+        &self,
+        endpoint: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<reqwest::Response> {
+        let token = self.token(endpoint).await?;
+        let response = self
+            .send_json(endpoint, path, body, token.as_deref())
+            .await?;
+        if !matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) || self.auth.is_none()
+        {
+            return Ok(response.error_for_status()?);
+        }
+
+        let mut cached = self.auth_token.lock().await;
+        if cached.as_ref() == token.as_ref() {
+            *cached = None;
+        }
+        drop(cached);
+        let refreshed = self.token(endpoint).await?;
+        Ok(self
+            .send_json(endpoint, path, body, refreshed.as_deref())
+            .await?
+            .error_for_status()?)
+    }
+
+    async fn token(&self, endpoint: &str) -> anyhow::Result<Option<String>> {
+        let Some(auth) = self.auth.as_ref() else {
+            return Ok(None);
+        };
+        let mut token = self.auth_token.lock().await;
+        if token.is_none() {
+            let body = serde_json::json!({
+                "name": &auth.user,
+                "password": &auth.pass,
+            });
+            let response = self
+                .send_json(endpoint, "/v3/auth/authenticate", &body, None)
+                .await?
+                .error_for_status()?;
+            let value: serde_json::Value = response.json().await?;
+            *token = Some(
+                extract_json_field(&value, "token")
+                    .ok_or_else(|| anyhow::anyhow!("missing etcd authentication token"))?,
+            );
+        }
+        Ok(token.clone())
+    }
+
+    async fn send_json(
+        &self,
+        endpoint: &str,
+        path: &str,
+        body: &serde_json::Value,
+        token: Option<&str>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut request = self.client.post(format!("{endpoint}{path}")).json(body);
+        if let Some(token) = token {
+            request = request.header(reqwest::header::AUTHORIZATION, token);
+        }
+        request
+            .send()
+            .await
+            .map_err(|error| with_proxy_diagnostic(error.into(), endpoint))
     }
 }
 
@@ -296,15 +431,9 @@ impl Registry for EtcdRegistry {
                 ticker.tick().await;
                 let body = serde_json::json!({ "ID": lease });
                 let result = registry
-                    .client
-                    .post(format!("{}/v3/lease/keepalive", endpoint))
-                    .json(&body)
-                    .send()
+                    .post_json(&endpoint, "/v3/lease/keepalive", &body)
                     .await;
-                let keepalive_ok = match result {
-                    Ok(response) => response.error_for_status().is_ok(),
-                    Err(_) => false,
-                };
+                let keepalive_ok = result.is_ok();
                 if keepalive_ok {
                     continue;
                 }
@@ -359,17 +488,14 @@ impl Registry for EtcdRegistry {
             "key": STANDARD.encode(key.as_bytes()),
         });
 
+        let mut last_error = None;
         for endpoint in registry_endpoints(self.endpoints(), "http://127.0.0.1:2379") {
-            self.client
-                .post(format!("{}/v3/kv/deleterange", endpoint))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|err| with_proxy_diagnostic(err.into(), &endpoint))?
-                .error_for_status()?;
+            match self.post_json(&endpoint, "/v3/kv/deleterange", &body).await {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
         }
-
-        Ok(())
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("etcd registry endpoint list is empty")))
     }
 
     async fn discover(&self, name: &str) -> anyhow::Result<Vec<ServiceInstance>> {
@@ -381,20 +507,15 @@ impl Registry for EtcdRegistry {
         });
 
         for endpoint in registry_endpoints(self.endpoints(), "http://127.0.0.1:2379") {
-            let resp = self
-                .client
-                .post(format!("{}/v3/kv/range", endpoint))
-                .json(&body)
-                .send()
-                .await;
+            let resp = self.post_json(&endpoint, "/v3/kv/range", &body).await;
 
             let resp = match resp {
-                Ok(resp) => resp.error_for_status()?,
+                Ok(resp) => resp,
                 Err(err) => {
                     tracing::warn!(
                         service = %name,
                         endpoint = %endpoint,
-                        error = %with_proxy_diagnostic(err.into(), &endpoint),
+                        error = %with_proxy_diagnostic(err, &endpoint),
                         "etcd registry discover request failed"
                     );
                     continue;
@@ -675,14 +796,7 @@ async fn stream_etcd_registry_watch(
             "range_end": STANDARD.encode(range_end),
         }
     });
-    let response = registry
-        .client
-        .post(format!("{}/v3/watch", endpoint))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|err| with_proxy_diagnostic(err.into(), endpoint))?
-        .error_for_status()?;
+    let response = registry.post_json(endpoint, "/v3/watch", &body).await?;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
@@ -765,7 +879,7 @@ pub fn build_registry(config: &RegistryConfig) -> anyhow::Result<Arc<dyn Registr
     match config.kind {
         RegistryKind::Memory => Ok(Arc::new(MemoryRegistry::default())),
         RegistryKind::Dns => Ok(Arc::new(DnsRegistry::new(config.endpoints.clone()))),
-        RegistryKind::Etcd => Ok(Arc::new(EtcdRegistry::new(config))),
+        RegistryKind::Etcd => Ok(Arc::new(EtcdRegistry::try_new(config)?)),
         RegistryKind::Consul => Ok(Arc::new(ConsulRegistry::new(config))),
     }
 }
@@ -784,6 +898,12 @@ pub fn registry_from_kind(kind: RegistryKind) -> anyhow::Result<Arc<dyn Registry
         prefix: "/roze/services".to_string(),
         ttl_seconds: 10,
         renew_interval_secs: 3,
+        user: None,
+        pass: None,
+        cert_file: None,
+        cert_key_file: None,
+        ca_cert_file: None,
+        insecure_skip_verify: false,
     })
 }
 
@@ -794,6 +914,12 @@ pub fn registry_config_from_rpc_client_etcd(config: &RpcClientEtcdConfig) -> Reg
         prefix: "/roze/services".to_string(),
         ttl_seconds: 10,
         renew_interval_secs: 3,
+        user: config.user.clone(),
+        pass: config.pass.clone(),
+        cert_file: config.cert_file.clone(),
+        cert_key_file: config.cert_key_file.clone(),
+        ca_cert_file: config.ca_cert_file.clone(),
+        insecure_skip_verify: config.insecure_skip_verify,
     }
 }
 
@@ -1142,7 +1268,11 @@ pub fn pick_with_strategy(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::RwLock;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::RwLock,
+    };
 
     use super::*;
 
@@ -1252,6 +1382,12 @@ mod tests {
         let config = RpcClientEtcdConfig {
             hosts: vec!["127.0.0.1:2379".to_string()],
             key: "order.rpc".to_string(),
+            user: Some("roze".to_string()),
+            pass: Some("secret".to_string()),
+            cert_file: Some("client.pem".to_string()),
+            cert_key_file: Some("client.key".to_string()),
+            ca_cert_file: Some("ca.pem".to_string()),
+            insecure_skip_verify: true,
             ..Default::default()
         };
         let registry = registry_config_from_rpc_client_etcd(&config);
@@ -1261,6 +1397,148 @@ mod tests {
         assert_eq!(registry.prefix, "/roze/services");
         assert_eq!(registry.ttl_seconds, 10);
         assert_eq!(registry.renew_interval_secs, 3);
+        assert_eq!(registry.user, config.user);
+        assert_eq!(registry.pass, config.pass);
+        assert_eq!(registry.cert_file, config.cert_file);
+        assert_eq!(registry.cert_key_file, config.cert_key_file);
+        assert_eq!(registry.ca_cert_file, config.ca_cert_file);
+        assert!(registry.insecure_skip_verify);
+    }
+
+    #[test]
+    fn etcd_registry_rejects_incomplete_security_configuration() {
+        let mut config = external_registry_config(RegistryKind::Etcd, "localhost:2379".into());
+        config.user = Some("roze".into());
+        assert!(EtcdRegistry::try_new(&config)
+            .expect_err("password must be required")
+            .to_string()
+            .contains("user and pass"));
+
+        config.pass = Some("secret".into());
+        config.cert_file = Some("client.pem".into());
+        assert!(EtcdRegistry::try_new(&config)
+            .expect_err("client key must be required")
+            .to_string()
+            .contains("cert_file and cert_key_file"));
+    }
+
+    #[tokio::test]
+    async fn etcd_registry_authenticates_and_refreshes_rejected_token() {
+        let (endpoint, requests, server) = spawn_http_sequence(vec![
+            (200, r#"{"token":"token-1"}"#),
+            (401, r#"{"error":"invalid auth token"}"#),
+            (200, r#"{"token":"token-2"}"#),
+            (200, r#"{"kvs":[]}"#),
+        ]);
+        let mut config = external_registry_config(RegistryKind::Etcd, endpoint);
+        config.user = Some("roze".into());
+        config.pass = Some("secret".into());
+        let registry = EtcdRegistry::try_new(&config).expect("registry");
+
+        assert!(registry
+            .discover("orders")
+            .await
+            .expect("discover")
+            .is_empty());
+        server.join().expect("mock etcd server");
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("POST /v3/auth/authenticate "));
+        assert!(requests[0].contains(r#"{"name":"roze","password":"secret"}"#));
+        assert!(requests[1].starts_with("POST /v3/kv/range "));
+        assert!(requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization: token-1"));
+        assert!(requests[2].starts_with("POST /v3/auth/authenticate "));
+        assert!(requests[3]
+            .to_ascii_lowercase()
+            .contains("authorization: token-2"));
+    }
+
+    #[tokio::test]
+    async fn etcd_registry_authentication_fails_over_to_next_endpoint() {
+        let (endpoint, requests, server) = spawn_http_sequence(vec![
+            (200, r#"{"token":"cluster-token"}"#),
+            (200, r#"{"kvs":[]}"#),
+        ]);
+        let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable endpoint");
+        let unavailable_endpoint = format!(
+            "http://{}",
+            unavailable.local_addr().expect("unavailable addr")
+        );
+        drop(unavailable);
+        let mut config = external_registry_config(RegistryKind::Etcd, unavailable_endpoint);
+        config.endpoints.push(endpoint);
+        config.user = Some("roze".into());
+        config.pass = Some("secret".into());
+        let registry = EtcdRegistry::try_new(&config).expect("registry");
+
+        assert!(registry
+            .discover("orders")
+            .await
+            .expect("discover")
+            .is_empty());
+        server.join().expect("mock etcd server");
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /v3/auth/authenticate "));
+        assert!(requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization: cluster-token"));
+    }
+
+    fn spawn_http_sequence(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock etcd");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept mock request");
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).expect("read mock request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                tx.send(String::from_utf8(request).expect("UTF-8 HTTP request"))
+                    .expect("capture request");
+                let reason = if status == 200 { "OK" } else { "Unauthorized" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("write mock response");
+                stream.flush().expect("flush mock response");
+            }
+        });
+        (endpoint, rx, handle)
     }
 
     #[test]
@@ -1490,6 +1768,12 @@ mod tests {
             prefix: "/roze/services".to_string(),
             ttl_seconds: 10,
             renew_interval_secs: 2,
+            user: None,
+            pass: None,
+            cert_file: None,
+            cert_key_file: None,
+            ca_cert_file: None,
+            insecure_skip_verify: false,
         }
     }
 

@@ -176,7 +176,7 @@ impl DynamicRpcChannels {
             DynamicDiscoverySource::Static(Arc::new(instances))
         } else if let Some(etcd) = config.etcd.as_ref() {
             let registry_config = registry_config_from_rpc_client_etcd(etcd);
-            DynamicDiscoverySource::Registry(Arc::new(EtcdRegistry::new(&registry_config)))
+            DynamicDiscoverySource::Registry(Arc::new(EtcdRegistry::try_new(&registry_config)?))
         } else {
             return Ok(None);
         };
@@ -552,7 +552,7 @@ pub async fn connect_channel_from_config(
 
     if let Some(etcd) = config.etcd.as_ref() {
         let registry_config = registry_config_from_rpc_client_etcd(etcd);
-        let registry = EtcdRegistry::new(&registry_config);
+        let registry = EtcdRegistry::try_new(&registry_config)?;
         info!(
             mode = "etcd",
             service = %etcd.key,

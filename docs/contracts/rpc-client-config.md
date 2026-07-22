@@ -97,8 +97,18 @@ rpc_client:
     hosts:
       - http://127.0.0.1:2379
     key: user-rpc
+    user: roze
+    pass: ${ETCD_PASSWORD}
+    ca_cert_file: certs/etcd-ca.pem
+    cert_file: certs/etcd-client.pem
+    cert_key_file: certs/etcd-client.key
   timeout_ms: 2000
 ```
+
+The same Etcd TLS, mTLS, authentication, token refresh, and certificate
+verification behavior is used by both RPC-client discovery and the service
+registry. Certificate and key fields must be configured together. Keep
+`insecure_skip_verify` false outside controlled diagnostics.
 
 Use `rpc_clients.<name>` for REST or RPC services that aggregate multiple RPC
 services:

@@ -216,6 +216,11 @@ impl NatsJetStream {
         &self.config
     }
 
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        self.jetstream.query_account().await?;
+        Ok(())
+    }
+
     async fn ensure_stream(&self) -> anyhow::Result<async_nats::jetstream::stream::Stream> {
         let subjects = if self.config.jetstream.subjects.is_empty() {
             vec![format!(

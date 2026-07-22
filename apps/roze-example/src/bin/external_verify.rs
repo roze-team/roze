@@ -171,8 +171,15 @@ async fn verify_registry(
     let registry = roze_rpc::registry::build_registry(&roze_config::RegistryConfig {
         kind,
         endpoints: vec![endpoint],
+        prefix: "/roze/services".to_string(),
         ttl_seconds: 10,
         renew_interval_secs: 2,
+        user: None,
+        pass: None,
+        cert_file: None,
+        cert_key_file: None,
+        ca_cert_file: None,
+        insecure_skip_verify: false,
     })?;
     let name = format!("roze-example-{label}-{}", std::process::id());
     let mut instance = roze_rpc::registry::ServiceInstance::new(&name, addr);

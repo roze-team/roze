@@ -412,7 +412,7 @@ pub enum RpcClientBalancerKind {
     HealthAware,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct RpcClientEtcdConfig {
     #[serde(default)]
     pub hosts: Vec<String>,
@@ -431,6 +431,23 @@ pub struct RpcClientEtcdConfig {
     pub ca_cert_file: Option<String>,
     #[serde(default)]
     pub insecure_skip_verify: bool,
+}
+
+impl fmt::Debug for RpcClientEtcdConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RpcClientEtcdConfig")
+            .field("hosts", &self.hosts)
+            .field("key", &self.key)
+            .field("id", &self.id)
+            .field("user", &self.user)
+            .field("pass", &self.pass.as_ref().map(|_| "[REDACTED]"))
+            .field("cert_file", &self.cert_file)
+            .field("cert_key_file", &self.cert_key_file)
+            .field("ca_cert_file", &self.ca_cert_file)
+            .field("insecure_skip_verify", &self.insecure_skip_verify)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -459,7 +476,7 @@ impl Default for RpcClientMiddlewaresConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RegistryConfig {
     pub kind: RegistryKind,
     #[serde(default)]
@@ -470,6 +487,37 @@ pub struct RegistryConfig {
     pub ttl_seconds: u64,
     #[serde(default = "default_registry_renew_interval_secs")]
     pub renew_interval_secs: u64,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub pass: Option<String>,
+    #[serde(default)]
+    pub cert_file: Option<String>,
+    #[serde(default)]
+    pub cert_key_file: Option<String>,
+    #[serde(default)]
+    pub ca_cert_file: Option<String>,
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
+}
+
+impl fmt::Debug for RegistryConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegistryConfig")
+            .field("kind", &self.kind)
+            .field("endpoints", &self.endpoints)
+            .field("prefix", &self.prefix)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("renew_interval_secs", &self.renew_interval_secs)
+            .field("user", &self.user)
+            .field("pass", &self.pass.as_ref().map(|_| "[REDACTED]"))
+            .field("cert_file", &self.cert_file)
+            .field("cert_key_file", &self.cert_key_file)
+            .field("ca_cert_file", &self.ca_cert_file)
+            .field("insecure_skip_verify", &self.insecure_skip_verify)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1786,6 +1834,42 @@ prefix = "/shop/services"
             config.registry.as_ref().expect("registry").prefix,
             "/shop/services"
         );
+    }
+
+    #[test]
+    fn registry_loads_etcd_tls_and_authentication() {
+        let source = r#"
+name = "demo"
+
+[registry]
+kind = "etcd"
+endpoints = ["https://etcd.internal:2379"]
+user = "roze"
+pass = "secret"
+cert_file = "certs/client.pem"
+cert_key_file = "certs/client.key"
+ca_cert_file = "certs/ca.pem"
+insecure_skip_verify = true
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        let registry = config.registry.expect("registry");
+        assert_eq!(registry.user.as_deref(), Some("roze"));
+        assert_eq!(registry.pass.as_deref(), Some("secret"));
+        assert_eq!(registry.cert_file.as_deref(), Some("certs/client.pem"));
+        assert_eq!(registry.cert_key_file.as_deref(), Some("certs/client.key"));
+        assert_eq!(registry.ca_cert_file.as_deref(), Some("certs/ca.pem"));
+        assert!(registry.insecure_skip_verify);
+        let debug = format!("{registry:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

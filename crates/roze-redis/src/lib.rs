@@ -32,6 +32,13 @@ impl RedisClient {
     pub async fn connection(&self) -> anyhow::Result<redis::aio::MultiplexedConnection> {
         Ok(self.client.get_multiplexed_async_connection().await?)
     }
+
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        let mut connection = self.connection().await?;
+        let response: String = redis::cmd("PING").query_async(&mut connection).await?;
+        anyhow::ensure!(response == "PONG", "unexpected Redis PING response");
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +78,10 @@ impl NamespacedRedisClient {
         let mut conn = self.client.connection().await?;
         let _: () = conn.del(self.key(key)).await?;
         Ok(())
+    }
+
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        self.client.health_check().await
     }
 }
 

@@ -3863,6 +3863,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "redis",
  "roze-auth",
  "roze-config",
  "roze-context",

@@ -76,6 +76,17 @@ child 额度，下游仅返还未使用且不超过划拨值的 credit；缺失�
 RPC server 默认注册 `rpc.addr`；绑定 wildcard/loopback 但客户端需要可路由地址时，
 必须设置 `rpc.advertise_addr`。
 
+Etcd registry 的 `registry.user` / `registry.pass` 启用用户认证；
+`registry.ca_cert_file` 配置私有 CA，`registry.cert_file` 与
+`registry.cert_key_file` 成对启用 mTLS。注册、发现、watch、续租、摘除与重注册
+共用同一 TLS 客户端和认证 token；服务端返回 401/403 时 token 会被清除、重新获取
+并将原请求重试一次。`insecure_skip_verify` 只用于受控诊断，启用时会记录警告。
+
+生成服务将数据库、MongoDB、Redis、NATS、registry 和托管 RPC client 注册为
+带统一超时的动态 readiness check。`/healthz` 只反映进程 liveness，`/readyz`
+并发执行依赖检查，`/startupz` 只反映 startup/draining 阶段；运行期间依赖失联
+会立即使 readiness 失败，但不会把进程 liveness 误报为失败。
+
 ## 连接模式与代理诊断
 
 RPC client 必须且只能选择一种连接模式：

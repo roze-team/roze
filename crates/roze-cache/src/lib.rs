@@ -133,6 +133,10 @@ impl RedisCache {
         self.client.key(key)
     }
 
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        self.client.health_check().await
+    }
+
     pub async fn get_json<T>(&self, key: &str) -> anyhow::Result<Option<T>>
     where
         T: DeserializeOwned,
