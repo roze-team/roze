@@ -76,6 +76,10 @@ The phase-by-phase work packages, exit gates, and evidence checklist are in
 - Keep `roze-config` as the only global/scoped policy resolver for
   REST/RPC/Gateway/MQ/Job; Gateway explicit route fields remain highest
   priority.
+- Close the mall-system validation backlog for authenticated TLS etcd registry
+  clients, dynamic generated dependency readiness, and persistent idempotency
+  and outbox adapters. See
+  [Mall Validation Backlog - 2026-07-22](evidence/2026-07-22-mall-validation-backlog.md).
 - Complete deadline, cancellation, trace, tenant, idempotency-key, and retry
   budget propagation across every generated downstream call.
 - Add optional persistent state for breaker and rate limiter.
