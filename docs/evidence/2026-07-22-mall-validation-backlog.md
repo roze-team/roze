@@ -1,108 +1,112 @@
-# Mall Validation Backlog - 2026-07-22
+# Roze Upstream Issue Tracking - 2026-07-22
 
-This note records issues and follow-up optimization requests verified while
-upgrading a mall system with Roze-generated REST, RPC, SQL model, OpenAPI, and
-TypeScript SDK boundaries.
+This file tracks only issues that are still reproducible in the current Roze
+revision and require upstream work. Generator compatibility issues already
+verified as fixed are not kept in the active backlog.
 
-## Verified Fixes
+## Verification Environment
 
-- PostgreSQL `BIGINT`, `BIGSERIAL`, and `INT8` now generate signed `i64`
-  fields instead of PostgreSQL-unsupported `u64` SQLx/SeaORM mappings.
-- PostgreSQL `TIMESTAMPTZ` now generates SeaORM `DateTimeUtc` fields, and
-  generated manifests include the required `chrono` serde support.
-- REST, five RPC services, SQL models, OpenAPI, and the TypeScript SDK were
-  regenerated with the updated `rozectl --update` flow and passed workspace
-  compilation in the mall system.
+- Verification date: 2026-07-22
+- Roze revision: `4e20455305fd295361ce0a22887527953cd54801`
+- CLI: `rozectl 1.0.0`
+- CLI path: `C:\Users\xFc\.cargo\bin\rozectl.exe`
 
-## Upstream Optimization Backlog
+## Reproducible Issues
 
-### 1. Etcd TLS and Authentication Are Not Passed Into Registry
+### 1. Registry Does Not Use Etcd TLS And Authentication Configuration
 
 Severity: high.
 
-`RpcClientEtcdConfig` contains `user`, `pass`, `cert_file`,
-`cert_key_file`, `ca_cert_file`, and `insecure_skip_verify`, but these fields
-are not carried into `RegistryConfig`. `EtcdRegistry` also builds a fixed
-`reqwest::Client::new()`, so services cannot connect directly to etcd
-deployments that require TLS and authentication.
+`RpcClientEtcdConfig` contains user, password, CA, client certificate, and
+certificate verification options, but `RegistryConfig` keeps only endpoints,
+prefix, TTL, and keepalive interval. `EtcdRegistry::new` still builds a fixed
+`reqwest::Client::new()`, and requests do not include token acquisition or
+refresh.
 
-Impact: production deployments are limited to unauthenticated HTTP etcd unless
-they add a local proxy that terminates TLS and injects authentication. The mall
-system currently compensates with a `127.0.0.1:2379` proxy.
+Expected native Roze support:
 
-Requested improvements:
+- TLS, CA, and mTLS client configuration.
+- Etcd user authentication and automatic token refresh.
+- A shared authenticated client for register, discover, watch, keepalive, and
+  re-registration paths.
+- Leader failover regression tests against a three-node TLS plus authenticated
+  etcd cluster.
 
-- Move authentication, CA, client certificate, and verification policy into
-  `RegistryConfig`.
-- Build the etcd HTTP client from registry configuration.
-- Attach etcd auth tokens to every request.
-- Refresh tokens automatically when they expire or the etcd auth revision
-  changes by calling `/v3/auth/authenticate` again.
-- Share the same authenticated client across register, discover, watch,
-  keepalive, and re-register paths.
-- Add a three-node TLS plus authenticated etcd integration test covering watch,
-  leader failover, and token refresh.
+Current project state: deployment uses a loopback-only TLS verification and
+authentication proxy to access etcd, so applications do not directly access an
+unauthenticated etcd endpoint.
 
-### 2. Generated Dependency Readiness Uses Static Healthy Markers
+### 2. Generated Dependency Health Is Still Static
 
 Severity: high.
 
-Generated `ServiceContext::new` currently marks dependencies healthy after
-initialization succeeds. If PostgreSQL, MySQL, Redis, NATS, etcd, or an RPC
-dependency later becomes unavailable, `/readyz` can continue reporting healthy
-state because it is no longer probing the dependency.
+Generated `ServiceContext::new` still calls
+`register_static(healthy(...))` after Redis or NATS initialization succeeds,
+then calls `mark_ready()`. When dependencies become unavailable at runtime, the
+generated code itself does not keep `/readyz` updated.
 
-Requested improvements:
+Expected Roze behavior: generate timeout-bound dynamic dependency probes for
+databases, Redis, NATS, etcd, and RPC dependencies, with liveness, readiness,
+and startup represented as distinct states.
 
-- Generate dynamic readiness dependencies with
-  `HealthRegistry::register_dependency`.
-- Probe databases with `SELECT 1`.
-- Probe Redis with `PING`.
-- Probe NATS through connection state or server info.
-- Probe etcd through an authenticated health endpoint.
-- Probe RPC dependencies through gRPC health where available, or at least by
-  validating service discovery and connection establishment.
-- Generate standard HTTP `/healthz`, `/readyz`, and `/startupz` for RPC
-  services and share the same `HealthRegistry` with gRPC health.
-- Keep readiness probes timeout-bound, concurrent, labeled, and summarized;
-  liveness and readiness must remain separate states.
+Current project state: `runtime-ops::readiness` continuously probes databases,
+Redis, NATS, etcd, and all RPC dependencies concurrently, and each service's
+`/readyz` returns the real-time result.
 
-### 3. Persistent IdempotencyStore and OutboxStore Adapters Are Missing
+### 3. Official Persistent Idempotency And Outbox Adapters Are Missing
 
 Severity: medium.
 
-Roze provides `InMemoryIdempotencyStore` and `InMemoryOutbox`, but the default
-framework does not yet include a Redis-backed idempotency adapter or SQL-backed
-outbox adapter. After a service restart, the default adapters cannot preserve
-idempotency records or pending events.
+The generator still wires `InMemoryIdempotencyStore` and `InMemoryOutbox` by
+default. Roze currently does not provide a production-ready Redis idempotency
+store or SQL outbox implementation.
 
-Mall-system compensation:
+Expected Roze support:
 
-- The management API uses Redis Lua scripts for atomic begin, complete, fail,
-  request-fingerprint conflict detection, execution leases, and response
-  replay.
-- A shared runtime SQL outbox supports PostgreSQL and MySQL, `FOR UPDATE SKIP
-  LOCKED`, lease recovery, exponential backoff, and dead-lettering after ten
-  failures.
+- Redis atomic begin, complete, and fail operations; request fingerprint
+  validation; execution leases; and response replay.
+- PostgreSQL/MySQL outbox storage, claim leases, exponential backoff, maximum
+  retries, dead-letter query, and dead-letter replay.
+- Matching migrations, metrics, and integration tests.
 
-Requested improvements:
+Current project state: the management API uses Redis Lua scripts for persistent
+idempotency. `runtime-ops::outbox::SqlOutboxStore` implements PostgreSQL/MySQL
+persistence, failure retry, lease recovery, and dead-letter handling.
 
-- Add an official Redis idempotency store.
-- Add an official SQL outbox store under the transaction/runtime stack.
-- Include schema migrations, maximum retry policy, dead-letter query and
-  replay APIs, and monitoring metrics.
+## Fixed Items Removed From This Tracking File
 
-## Regression Baseline For Roze Upgrades
+- PostgreSQL `BIGINT`, `BIGSERIAL`, and `INT8` generate `i64`.
+- PostgreSQL `TIMESTAMPTZ` generates `DateTimeUtc` and includes the required
+  dependencies.
+- REST, RPC, SQL Model, OpenAPI, and TypeScript SDK generation can be refreshed
+  with `rozectl 1.0.0`.
 
-After upgrading Roze or `rozectl`, the mall system should run at least:
+These items have been verified as fixed and are no longer maintained as active
+upstream work. Complete generation and deployment results are carried by
+project tests and release records.
 
-- `make generate` twice to verify deterministic generation and preservation of
-  application-owned files.
-- `make artifacts`.
-- `cargo check --workspace`.
-- `cargo test --workspace`.
-- Frontend `npm run check`.
-- PostgreSQL and MySQL migrations, real CRUD, outbox, and idempotency E2E
-  tests.
-- Etcd watch, instance removal, lease expiry, re-registration, dual-instance
-  load balancing, and leader failover fault injection.
+## Verification Result
+
+- `make generate` succeeded twice consecutively.
+- `cargo check --workspace` passed.
+- `cargo test --workspace -j 1` passed. Parallel Windows test builds failed
+  earlier because of local memory pressure, so regression uses serial
+  compilation on that machine.
+- The project has been updated and locked to Roze revision
+  `4e20455305fd295361ce0a22887527953cd54801`.
+
+## Upgrade Regression Gate
+
+After every Roze or `rozectl` upgrade:
+
+1. Run `make generate` twice and confirm generation is deterministic and
+   application-owned files are not overwritten.
+2. Run `make artifacts`, `cargo check --workspace`, and
+   `cargo test --workspace`.
+3. Run frontend `npm run check`.
+4. Verify PostgreSQL/MySQL migrations, real CRUD, Redis idempotency, and SQL
+   outbox E2E.
+5. Verify etcd watch, instance removal, lease expiry, re-registration,
+   dual-instance load balancing, and leader failover.
+6. Re-check the three issues above; remove an item from this file only after
+   upstream implementation and integration tests are complete.
