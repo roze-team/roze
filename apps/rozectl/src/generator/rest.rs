@@ -50,6 +50,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let service_name = config.name.clone();
     let auth_config = config.auth.clone();
+    let mut group = ServiceGroup::new();
+    let service_shutdown = group.shutdown_listener();
     let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
     tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
     let health = ctx.health.clone();
@@ -75,13 +77,14 @@ async fn main() -> anyhow::Result<()> {
         body_limit_bytes = ?middleware_config.body_limit_bytes,
         "REST middleware plan resolved"
     );
-    let app = route::router(ctx.clone());
+    let app = route::router(ctx.clone()).layer(roze_http::middleware::AddExtensionLayer::new(
+        roze_http::ws::WebSocketShutdown::new(service_shutdown),
+    ));
     tracing::debug!(protocol = "rest", "REST router constructed");
     let app = middleware::app::apply(app, ctx);
     tracing::debug!(protocol = "rest", "application middleware hook applied");
     let app = roze_middleware::apply_common_with_config(app, middleware_config);
     tracing::debug!(protocol = "rest", "Roze common middleware applied");
-    let mut group = ServiceGroup::new();
     group.add(RestService::new(
         service_name.clone(),
         RestServer::new(rest.addr, app),
@@ -963,36 +966,8 @@ pub fn render_logic(spec: &ApiSpec) -> String {
     out.push_str("use crate::types::*;\n\n");
 
     for route in &spec.rest_routes {
-        let handler = resolved_handler_name(route);
-        match route.method {
-            HttpMethod::Get | HttpMethod::Head | HttpMethod::Delete => {
-                out.push_str(&format!(
-                    "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
-                    handler = handler,
-                    request = route.request,
-                    response = route.response
-                ));
-                out.push_str("    let _ = ctx;\n");
-                out.push_str("    let _ = request_ctx;\n");
-                out.push_str("    let _ = req;\n");
-            }
-            HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
-                out.push_str(&format!(
-                    "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
-                    handler = handler,
-                    request = route.request,
-                    response = route.response
-                ));
-                out.push_str("    let _ = ctx;\n");
-                out.push_str("    let _ = request_ctx;\n");
-                out.push_str("    let _ = req;\n");
-            }
-        }
-        out.push_str(&format!(
-            "    Ok({response}::default())\n",
-            response = route.response
-        ));
-        out.push_str("}\n\n");
+        out.push_str(&render_logic_fn(route));
+        out.push('\n');
     }
 
     out
@@ -1001,6 +976,26 @@ pub fn render_logic(spec: &ApiSpec) -> String {
 fn render_logic_fn(route: &RestRoute) -> String {
     let handler = resolved_handler_name(route);
     let mut out = String::new();
+    if route.websocket {
+        out.push_str(&format!(
+            "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, mut socket: roze_http::ws::WebSocket) -> Result<(), RozeError> {{\n",
+            handler = handler,
+        ));
+        out.push_str("    let _ = ctx;\n");
+        out.push_str("    let _ = request_ctx;\n");
+        out.push_str("    while let Some(message) = socket.recv().await.map_err(|error| RozeError::Internal(error.to_string()))? {\n");
+        out.push_str("        match message {\n");
+        out.push_str("            roze_http::ws::Message::Text(text) => socket.send(roze_http::ws::Message::Text(text)).await.map_err(|error| RozeError::Internal(error.to_string()))?,\n");
+        out.push_str("            roze_http::ws::Message::Binary(bytes) => socket.send(roze_http::ws::Message::Binary(bytes)).await.map_err(|error| RozeError::Internal(error.to_string()))?,\n");
+        out.push_str("            roze_http::ws::Message::Ping(bytes) => socket.send(roze_http::ws::Message::Pong(bytes)).await.map_err(|error| RozeError::Internal(error.to_string()))?,\n");
+        out.push_str("            roze_http::ws::Message::Close(frame) => { socket.close(frame).await.map_err(|error| RozeError::Internal(error.to_string()))?; break; }\n");
+        out.push_str("            roze_http::ws::Message::Pong(_) => {}\n");
+        out.push_str("        }\n");
+        out.push_str("    }\n");
+        out.push_str("    Ok(())\n");
+        out.push_str("}\n");
+        return out;
+    }
     out.push_str(&format!(
         "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
         handler = handler,
@@ -1067,7 +1062,7 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
     let needs_jwt = spec
         .rest_routes
         .iter()
-        .any(|route| route_has_jwt(spec, route));
+        .any(|route| !route.websocket && route_has_jwt(spec, route));
     let mut out = String::from(
         "use std::collections::BTreeMap;\n\nuse roze_openapi::{OpenApiBuilder, Schema, HttpMethod, Operation",
     );
@@ -1141,6 +1136,9 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
     out.push_str(&render_report_chart_openapi(spec));
 
     for route in &spec.rest_routes {
+        if route.websocket {
+            continue;
+        }
         let route_spec = route_request_spec(spec, route).expect("request spec");
         let operation_id = route
             .handler
@@ -1325,6 +1323,9 @@ fn render_report_chart_openapi(spec: &ApiSpec) -> String {
 }
 
 fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> String {
+    if route.websocket {
+        return render_websocket_route_handler(spec, route);
+    }
     let request_ty = spec
         .types
         .iter()
@@ -1498,6 +1499,67 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     }
     out.push_str("}\n\n");
 
+    out
+}
+
+fn render_websocket_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> String {
+    let handler = resolved_handler_name(route);
+    let middlewares = route_middlewares(spec, route);
+    let plan = roze_middleware::resolve_middleware_plan(&middlewares);
+    let uses_auth = route_uses_auth(spec, route);
+    let custom = plan
+        .custom
+        .into_iter()
+        .map(|name| to_snake_case(&name))
+        .collect::<Vec<_>>();
+
+    let mut out = String::new();
+    if let Some(doc) = &route.doc {
+        out.push_str(&format!("/// {}\n", escape_doc(doc)));
+    }
+    let mut params = vec![
+        "State(ctx): State<ServiceContext>".to_string(),
+        "Extension(request_ctx): Extension<Context>".to_string(),
+        "Extension(websocket_shutdown): Extension<roze_http::ws::WebSocketShutdown>".to_string(),
+    ];
+    if uses_auth {
+        params.push("headers: HeaderMap".to_string());
+    }
+    params.push("upgrade: roze_http::ws::WebSocketUpgrade".to_string());
+    out.push_str(&format!(
+        "pub(crate) async fn {handler}({params}) -> Result<roze_http::Response, RozeError> {{\n",
+        handler = handler,
+        params = params.join(", "),
+    ));
+    out.push_str(&format!(
+        "    let (request_ctx, route_guard) = roze_middleware::begin_route(ctx.config.name.clone(), {:?}, \"GET\", request_ctx, Some(&ctx.config.governance))?;\n",
+        handler,
+    ));
+    if uses_auth {
+        out.push_str("    let request_ctx = match authorize(&headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
+    }
+    if !route.permissions.is_empty() {
+        out.push_str(&format!(
+            "    if let Err(err) = roze_middleware::enforce_permissions(&request_ctx, &[{}]) {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
+            route
+                .permissions
+                .iter()
+                .map(|permission| format!("{permission:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for name in custom {
+        out.push_str(&format!(
+            "    if let Err(err) = crate::middleware::{name}(&ctx, &request_ctx).await {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n"
+        ));
+    }
+    out.push_str("    roze_middleware::finish_route(route_guard, true, \"101\");\n");
+    out.push_str(&format!(
+        "    Ok(upgrade.with_shutdown(websocket_shutdown.listener()).on_upgrade(move |socket| async move {{\n        if let Err(error) = crate::logic::{handler}(ctx, request_ctx, socket).await {{\n            tracing::warn!(handler = {handler:?}, code = %error.code(), \"WebSocket application handler failed\");\n        }}\n    }}))\n",
+        handler = handler,
+    ));
+    out.push_str("}\n\n");
     out
 }
 
@@ -2975,7 +3037,8 @@ mod tests {
         .expect("valid api");
 
         let main = render_rest_main(&spec);
-        assert!(main.contains("let app = route::router(ctx.clone());"));
+        assert!(main.contains("let app = route::router(ctx.clone()).layer("));
+        assert!(main.contains("roze_http::ws::WebSocketShutdown::new(service_shutdown)"));
         assert!(main.contains("middleware::app::apply(app, ctx)"));
         assert!(main.contains("CommonMiddlewareConfig::from_service("));
         assert!(main.contains("let auth_config = config.auth.clone();"));
@@ -3323,5 +3386,40 @@ mod tests {
         assert!(handlers.contains("struct GetAllUserStateUserBatchReqJson"));
         assert!(handlers.contains("Json(body): Json<GetAllUserStateUserBatchReqJson>"));
         assert!(!handlers.contains("struct UserBatchReqJson"));
+    }
+
+    #[test]
+    fn websocket_routes_generate_preserved_logic_and_skip_openapi() {
+        let spec = crate::parser::parse_api(
+            r#"
+            service realtime-api {
+                @websocket
+                @handler realtime
+                get /ws
+            }
+            "#,
+        )
+        .expect("valid WebSocket API");
+
+        let routes = render_route_group_mods(&spec);
+        assert!(routes[0]
+            .1
+            .contains(".route(\"/ws\", get(handler::ws::realtime))"));
+
+        let handlers = render_handler_files(&spec);
+        assert!(handlers[0]
+            .2
+            .contains("upgrade: roze_http::ws::WebSocketUpgrade"));
+        assert!(handlers[0]
+            .2
+            .contains("upgrade.with_shutdown(websocket_shutdown.listener())"));
+        assert!(handlers[0].2.contains("crate::logic::realtime"));
+
+        let logic = render_logic_files(&spec);
+        assert!(logic[0].2.contains("mut socket: roze_http::ws::WebSocket"));
+        assert!(logic[0].2.contains("roze_http::ws::Message::Ping"));
+
+        let openapi = render_openapi(&spec);
+        assert!(!openapi.contains("builder.add_operation(\"/ws\""));
     }
 }

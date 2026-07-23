@@ -1137,12 +1137,17 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     if spec.rest_routes.is_empty() {
         writeln!(&mut out, "- No REST routes declared.").unwrap();
     } else {
-        writeln!(&mut out, "| Method | Path | Handler | Request | Response |").unwrap();
-        writeln!(&mut out, "| --- | --- | --- | --- | --- |").unwrap();
+        writeln!(
+            &mut out,
+            "| Transport | Method | Path | Handler | Request | Response |"
+        )
+        .unwrap();
+        writeln!(&mut out, "| --- | --- | --- | --- | --- | --- |").unwrap();
         for route in &spec.rest_routes {
             writeln!(
                 &mut out,
-                "| {} | `{}` | `{}` | `{}` | `{}` |",
+                "| {} | {} | `{}` | `{}` | `{}` | `{}` |",
+                if route.websocket { "WebSocket" } else { "HTTP" },
                 http_method_name(&route.method),
                 route.path,
                 route.handler.as_deref().unwrap_or("-"),
@@ -1364,7 +1369,8 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
         for route in &spec.rest_routes {
             writeln!(
                 &mut out,
-                "  - {} `{}` -> `{}`",
+                "  - [{}] {} `{}` -> `{}`",
+                if route.websocket { "WebSocket" } else { "HTTP" },
                 http_method_name(&route.method),
                 route.path,
                 route.response
@@ -1416,11 +1422,16 @@ fn render_mock_main(spec: &ApiSpec) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "#[tokio::main]").unwrap();
     writeln!(&mut out, "async fn main() {{").unwrap();
-    if spec.rest_routes.is_empty() {
+    if spec.rest_routes.iter().all(|route| route.websocket) {
         writeln!(&mut out, "    let app = Router::new();").unwrap();
     } else {
         writeln!(&mut out, "    let app = Router::new()").unwrap();
-        for (idx, route) in spec.rest_routes.iter().enumerate() {
+        for (idx, route) in spec
+            .rest_routes
+            .iter()
+            .enumerate()
+            .filter(|(_, route)| !route.websocket)
+        {
             let path = mock_roze_http_path(&rest::full_route_path_for_route(spec, route));
             let method = mock_roze_http_method(&route.method);
             let handler = mock_handler_ident(route, idx);
@@ -1448,7 +1459,12 @@ fn render_mock_main(spec: &ApiSpec) -> String {
     writeln!(&mut out, "}}").unwrap();
     writeln!(&mut out).unwrap();
 
-    for (idx, route) in spec.rest_routes.iter().enumerate() {
+    for (idx, route) in spec
+        .rest_routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| !route.websocket)
+    {
         let handler = mock_handler_ident(route, idx);
         let value = mock_json_for_type(spec, &route.response);
         let json = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
@@ -1491,9 +1507,10 @@ fn render_mock_readme(spec: &ApiSpec, api: &Path) -> String {
         writeln!(&mut out, "- No REST routes declared.").unwrap();
     } else {
         for route in &spec.rest_routes {
+            let transport = if route.websocket { "WebSocket" } else { "HTTP" };
             writeln!(
                 &mut out,
-                "- `{}` `{}` -> `{}`",
+                "- [{transport}] `{}` `{}` -> `{}`",
                 http_method_name(&route.method),
                 rest::full_route_path_for_route(spec, route),
                 route.response
@@ -1624,7 +1641,12 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
 
     render_framework_http_smoke_tests(&mut out, spec);
 
-    for (idx, route) in spec.rest_routes.iter().enumerate() {
+    for (idx, route) in spec
+        .rest_routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| !route.websocket)
+    {
         let test_name = http_smoke_test_name(route, idx);
         let method = http_method_name(&route.method).to_ascii_lowercase();
         let path = http_smoke_sample_path(spec, route);
@@ -2313,6 +2335,9 @@ fn quote_yaml_string(value: &str) -> String {
 pub fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
     let mut paths = serde_json::Map::<String, serde_json::Value>::new();
     for route in &spec.rest_routes {
+        if route.websocket {
+            continue;
+        }
         let path = openapi_path(&rest::full_route_path_for_openapi(spec, route));
         let method = openapi_method_name(&route.method);
         let path_item = paths
@@ -2334,7 +2359,7 @@ pub fn openapi_document(spec: &ApiSpec) -> serde_json::Value {
     if spec
         .rest_routes
         .iter()
-        .any(|route| route_has_jwt(spec, route))
+        .any(|route| !route.websocket && route_has_jwt(spec, route))
     {
         components.insert(
             "securitySchemes".to_string(),
@@ -13362,6 +13387,62 @@ mod tests {
     }
 
     #[test]
+    fn websocket_route_and_logic_survive_two_updates() {
+        let spec = parse_api(
+            r#"
+            service realtime-api {
+                @websocket
+                @handler realtime
+                get /ws
+            }
+            "#,
+        )
+        .expect("valid WebSocket API");
+        let root = temp_test_root("rozectl-websocket-update");
+        let out = root.join("realtime-api");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("initial generation");
+        let logic = out.join("src/logic/ws/realtime.rs");
+        fs::write(&logic, "// application-owned WebSocket logic\n")
+            .expect("customize WebSocket logic");
+
+        for _ in 0..2 {
+            generate_rest_project(
+                &spec,
+                &out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            )
+            .expect("update generation");
+        }
+
+        assert_eq!(
+            fs::read_to_string(&logic).expect("read preserved logic"),
+            "// application-owned WebSocket logic\n"
+        );
+        assert!(fs::read_to_string(out.join("src/route/ws.rs"))
+            .expect("read route")
+            .contains(".route(\"/ws\", get(handler::ws::realtime))"));
+        assert!(!openapi_document(&spec)["paths"]
+            .as_object()
+            .expect("OpenAPI paths")
+            .contains_key("/ws"));
+        assert!(!client::render_ts_client(&spec).contains("/ws"));
+        assert!(!client::render_js_client(&spec).contains("/ws"));
+        assert!(!render_mock_main(&spec).contains("/ws"));
+        assert!(!render_http_smoke_tests(&spec, "http://127.0.0.1:3000").contains("/ws"));
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
     #[ignore = "compile-smoke: generates a REST project and runs cargo check/clippy"]
     fn generated_rest_project_compiles_with_model_and_search() {
         let root = generated_compile_workspace("rozectl-rest-compile-smoke");
@@ -13380,6 +13461,9 @@ mod tests {
                 get /users/:id (GetUserReq) returns (UserResp)
                 @handler createUser
                 post /users (CreateUserReq) returns (UserResp)
+                @websocket
+                @handler realtime
+                get /ws
             }
 
             type (
@@ -15830,6 +15914,7 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         let route = crate::parser::RestRoute {
             handler: None,
             doc: None,
+            websocket: false,
             middlewares: Vec::new(),
             permissions: Vec::new(),
             server: None,

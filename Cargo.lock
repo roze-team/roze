@@ -3761,7 +3761,9 @@ name = "roze-http"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -3769,13 +3771,17 @@ dependencies = [
  "matchit",
  "percent-encoding",
  "roze-error",
+ "roze-metrics",
  "roze-result",
  "roze-service",
  "roze-shutdown",
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha1 0.10.6",
+ "thiserror",
  "tokio",
+ "tokio-websockets",
  "tower",
  "tracing",
 ]

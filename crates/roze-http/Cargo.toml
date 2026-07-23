@@ -6,7 +6,9 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 bytes.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -14,12 +16,19 @@ hyper-util.workspace = true
 matchit.workspace = true
 percent-encoding.workspace = true
 roze-error = { path = "../roze-error" }
+roze-metrics = { path = "../roze-metrics" }
 roze-result = { path = "../roze-result" }
 roze-service = { path = "../roze-service" }
 roze-shutdown = { path = "../roze-shutdown" }
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
+tokio-websockets.workspace = true
 tower.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio-websockets = { workspace = true, features = ["client", "rand"] }

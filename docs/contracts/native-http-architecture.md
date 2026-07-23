@@ -34,6 +34,9 @@ Axum and must not expose Axum types in generated services or framework crates.
 
 - `roze-http` owns HTTP request/response/body types exposed to applications.
   Hyper body types are an implementation detail of `RestServer`.
+- `roze_http::ws` owns application-facing WebSocket upgrade, frame, close,
+  limit, timeout, subprotocol, and shutdown types. Hyper upgrades and the frame
+  codec remain implementation details. See [Native HTTP WebSocket Contract](websocket.md).
 - `roze_http::body` is the stable body utility namespace for generated code
   and applications, exporting `Body`, `Bytes`, `empty`, `full`, and
   limit-aware `to_bytes` without exposing Hyper request bodies.
@@ -100,6 +103,10 @@ let app = Router::new()
 - both native `RestServer` connection loops enable Hyper upgrades, allowing
   Tower services such as `roze-gateway` to take ownership of WebSocket and
   other HTTP/1.1 upgraded connections without exposing Hyper bodies publicly
+- normal application routes can extract `roze_http::ws::WebSocketUpgrade`,
+  return its `on_upgrade` response, and exchange framework-owned messages on
+  the same listener; generated `@websocket` routes preserve application logic
+  across updates
 - connect-info make services wrap Router, MethodRouter, or Handler services in
   `ConnectInfoService` and inject connection metadata at request entry; they do
   not apply a state layer to every route or copy the route graph per connection;

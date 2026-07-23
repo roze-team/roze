@@ -1436,6 +1436,7 @@ fn route_json(route: &RestRoute) -> serde_json::Value {
     serde_json::json!({
         "handler": route.handler,
         "doc": route.doc,
+        "websocket": route.websocket,
         "middlewares": route.middlewares,
         "permissions": route.permissions,
         "server": route.server.as_ref().map(server_json),

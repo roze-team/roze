@@ -523,8 +523,12 @@ fn api_routes(spec: &ApiSpec) -> BTreeMap<String, String> {
                 generator::rest::full_route_path_for_route(spec, route)
             );
             let value = format!(
-                "{} -> {}; permissions={:?}; middleware={:?}",
-                route.request, route.response, route.permissions, route.middlewares
+                "transport={}; {} -> {}; permissions={:?}; middleware={:?}",
+                if route.websocket { "websocket" } else { "http" },
+                route.request,
+                route.response,
+                route.permissions,
+                route.middlewares
             );
             (key, value)
         })

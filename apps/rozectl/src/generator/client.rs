@@ -97,6 +97,9 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("}\n\n");
 
     for route in &spec.rest_routes {
+        if route.websocket {
+            continue;
+        }
         out.push_str(&render_route_function(spec, route));
         out.push('\n');
     }
@@ -199,6 +202,9 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str("}\n\n");
 
     for route in &spec.rest_routes {
+        if route.websocket {
+            continue;
+        }
         out.push_str(&render_js_route_function(spec, route));
         out.push('\n');
     }

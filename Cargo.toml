@@ -119,6 +119,7 @@ matchit = "=0.8.4"
 percent-encoding = "2.3"
 serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-websockets = { version = "0.10.1", default-features = false, features = ["server", "ring"] }
 tonic = { version = "0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
 tonic-build = "0.14.6"
 tonic-health = "0.14.6"

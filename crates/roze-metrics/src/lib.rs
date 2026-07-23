@@ -18,6 +18,7 @@ static GATEWAY_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static QUEUE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RESILIENCE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static REPORT_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static WEBSOCKET_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 const LATENCY_BUCKETS: usize = 65;
 
 /// Fixed-memory, power-of-two latency histogram for long-running evidence.
@@ -453,6 +454,13 @@ pub fn record_chart_query(
     );
 }
 
+pub fn record_websocket_event(route: impl Into<String>, outcome: impl Into<String>) {
+    let labels = MetricLabels::new()
+        .insert("route", route.into())
+        .insert("outcome", outcome.into());
+    websocket_metrics_registry().inc_counter("roze_websocket_events_total", labels, 1);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -482,6 +490,7 @@ pub fn http_metrics() -> String {
     out.push_str(&queue_metrics_registry().render());
     out.push_str(&resilience_metrics_registry().render());
     out.push_str(&report_metrics_registry().render());
+    out.push_str(&websocket_metrics_registry().render());
     out
 }
 
@@ -511,6 +520,10 @@ pub fn resilience_metrics_registry() -> &'static MetricRegistry {
 
 pub fn report_metrics_registry() -> &'static MetricRegistry {
     REPORT_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn websocket_metrics_registry() -> &'static MetricRegistry {
+    WEBSOCKET_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -550,6 +563,13 @@ mod tests {
         let metrics = http_metrics();
         assert!(metrics.contains("roze_http_requests_total"));
         assert!(metrics.contains("roze_http_requests_failed_total"));
+    }
+
+    #[test]
+    fn renders_websocket_lifecycle_metrics() {
+        record_websocket_event("/ws", "opened");
+        let metrics = http_metrics();
+        assert!(metrics.contains("roze_websocket_events_total{outcome=\"opened\",route=\"/ws\"}"));
     }
 
     #[test]

@@ -163,6 +163,28 @@ Generated glue such as route registration, handler module indexes, DTOs,
 OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`, and
 `proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.
 
+## WebSocket routes
+
+Use `@websocket` on a bodyless GET route to host WebSocket and HTTP endpoints
+on the generated REST listener:
+
+```text
+service realtime-api {
+    @websocket
+    @handler realtime
+    get /ws
+}
+```
+
+The generated handler uses `roze_http::ws::WebSocketUpgrade` and connects the
+socket to the service group's shutdown signal. Application-owned frame
+handling is generated in `src/logic/<group>/realtime.rs`; two or more
+`rozectl api generate --update` runs preserve that file and rebuild route
+registration from the `.api` contract. WebSocket routes are excluded from
+OpenAPI and normal HTTP client SDKs. They must use `EmptyReq`/`EmptyResp` and
+cannot use idempotency middleware. See the
+[native HTTP WebSocket contract](../contracts/websocket.md).
+
 ## Permission annotations and request context
 
 Use `@permission` immediately before a REST route or RPC method to declare all

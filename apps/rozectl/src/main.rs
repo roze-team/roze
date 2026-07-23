@@ -2072,7 +2072,12 @@ fn contract_rest_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
         .iter()
         .map(|route| {
             let key = format!("{} {}", contract_http_method(&route.method), route.path);
-            let value = format!("{} -> {}", route.request, route.response);
+            let value = format!(
+                "{}; {} -> {}",
+                if route.websocket { "WebSocket" } else { "HTTP" },
+                route.request,
+                route.response
+            );
             (key, value)
         })
         .collect()
@@ -2560,6 +2565,9 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
         for permission in &route.permissions {
             out.push_str(&format!("    @permission {}\n", permission));
         }
+        if route.websocket {
+            out.push_str("    @websocket\n");
+        }
         if let Some(handler) = &route.handler {
             out.push_str(&format!("    @handler {}\n", handler));
         }
@@ -2691,7 +2699,40 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_generated_middleware_identifiers(spec, &mut issues);
     validate_referenced_types(spec, &mut issues);
     validate_route_path_params(spec, &mut issues);
+    validate_websocket_routes(spec, &mut issues);
     issues
+}
+
+fn validate_websocket_routes(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    for route in spec.rest_routes.iter().filter(|route| route.websocket) {
+        if route.method != parser::HttpMethod::Get {
+            issues.push(api_validation_issue(format!(
+                "WebSocket route {} must use GET",
+                rest_route_key(spec, route)
+            )));
+        }
+        if route.request != "EmptyReq" {
+            issues.push(api_validation_issue(format!(
+                "WebSocket route {} cannot declare an HTTP request body; use EmptyReq",
+                rest_route_key(spec, route)
+            )));
+        }
+        if route.response != "EmptyResp" {
+            issues.push(api_validation_issue(format!(
+                "WebSocket route {} cannot declare an HTTP response body; use EmptyResp",
+                rest_route_key(spec, route)
+            )));
+        }
+        if validation_route_middlewares(spec, route)
+            .iter()
+            .any(|middleware| middleware.eq_ignore_ascii_case("idempotency"))
+        {
+            issues.push(api_validation_issue(format!(
+                "WebSocket route {} cannot use idempotency middleware",
+                rest_route_key(spec, route)
+            )));
+        }
+    }
 }
 
 fn validate_unique_types(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
@@ -3328,6 +3369,21 @@ fn check_rest_routes(
             issues.push(breaking(format!(
                 "REST route {key} response type changed: {} -> {}",
                 old_route.response, new_route.response
+            )));
+        }
+        if old_route.websocket != new_route.websocket {
+            issues.push(breaking(format!(
+                "REST route {key} transport changed: {} -> {}",
+                if old_route.websocket {
+                    "WebSocket"
+                } else {
+                    "HTTP"
+                },
+                if new_route.websocket {
+                    "WebSocket"
+                } else {
+                    "HTTP"
+                }
             )));
         }
     }

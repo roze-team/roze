@@ -11,7 +11,8 @@ deployment has inherited Roze's test environment or operational evidence.
 Roze is a Rust service framework with:
 
 - `crates/roze-core`: base types, errors, results, and shared response helpers.
-- `crates/roze-http`: Roze native HTTP server helpers and graceful shutdown wrappers.
+- `crates/roze-http`: Roze native HTTP server, routing, extractors, responses,
+  application-facing WebSocket upgrades/frames, and graceful shutdown.
 - `crates/roze-middleware`: HTTP middleware helpers; route rate-limit and breaker state use DashMap for concurrent hot paths.
 - `crates/roze-validation`: request parameter validation helpers.
 - `crates/roze-config`: YAML/TOML/env configuration loading.

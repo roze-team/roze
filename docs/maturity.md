@@ -33,7 +33,7 @@ Status legend:
 | Transactions/outbox/DTM | stable | integration | TCC, Saga, migration, inbox, transactional outbox, relay, recovery, and idempotency contracts are production APIs; complete reference-system long-run evidence remains pending. |
 | Auth/JWT/permission/session | stable | verified | OIDC/OAuth2, mTLS identity, JWT rotation/revocation, RBAC/ABAC, tenant scope, session, and audit contracts are implemented. |
 | Reporting/charts | stable | verified | Bounded chart queries and asynchronous CSV/XLSX exports include tenant/auth binding, cancellation, expiry, object storage, audit, and Web projection. |
-| WebSocket | stable | verified | Session hub and Gateway tunneling have stable lifecycle, capacity, and TLS boundaries. |
+| WebSocket | stable | verified | Native REST upgrades/frames, generated `@websocket` routes, session hub, and Gateway tunneling have stable lifecycle, bounds, shutdown, and TLS boundaries. |
 | Observability | stable | verified | Structured tracing, bounded metrics, Prometheus/OpenTelemetry export, dashboards, alerts, and generated queries are supported. |
 | Docker/Kubernetes generation | stable | verified | Immutable deployment, probes, resources, HPA, PDB, NetworkPolicy, service identity, Helm, and offline validation assets are generated. |
 | Production smoke | stable | long-run pending | Release gates run the generated target matrix and runtime smoke; signed generated-system 24h/72h artifacts remain pending. |

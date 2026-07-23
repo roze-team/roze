@@ -56,6 +56,7 @@ pub struct Field {
 pub struct RestRoute {
     pub handler: Option<String>,
     pub doc: Option<String>,
+    pub websocket: bool,
     pub middlewares: Vec<String>,
     pub permissions: Vec<String>,
     pub server: Option<ServerSpec>,
@@ -187,6 +188,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                 service = Some(service_name);
                 let mut current_handler = None;
                 let mut current_doc = None;
+                let mut current_websocket = false;
                 let mut current_middlewares: Vec<String> = Vec::new();
                 let mut current_permissions: Vec<String> = Vec::new();
                 let mut current_server = None;
@@ -226,7 +228,17 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         current_permissions.extend(parse_name_list(permission));
                         continue;
                     }
+                    if matches!(svc_line, "@websocket" | "@websocket()") {
+                        current_websocket = true;
+                        continue;
+                    }
                     if let Some(method) = svc_line.strip_prefix("rpc ") {
+                        if current_websocket {
+                            return invalid(
+                                svc_line_no,
+                                "`@websocket` can only annotate an HTTP GET route",
+                            );
+                        }
                         let mut method = parse_rpc_method(method, svc_line_no)?;
                         method.middlewares = std::mem::take(&mut current_middlewares);
                         method.permissions = std::mem::take(&mut current_permissions);
@@ -236,6 +248,10 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                     if let Some(mut route) = parse_rest_route(svc_line, svc_line_no)? {
                         route.handler = current_handler.take();
                         route.doc = current_doc.take();
+                        route.websocket = std::mem::take(&mut current_websocket);
+                        if route.websocket && route.method != HttpMethod::Get {
+                            return invalid(svc_line_no, "`@websocket` requires an HTTP GET route");
+                        }
                         route.middlewares = std::mem::take(&mut current_middlewares);
                         route.permissions = std::mem::take(&mut current_permissions);
                         route.server = current_server.clone();
@@ -245,7 +261,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
 
                     return invalid(
                         svc_line_no,
-                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, RPC method or route declaration",
+                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, `@websocket`, RPC method or route declaration",
                     );
                 }
 
@@ -374,6 +390,7 @@ fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, Par
     Ok(Some(RestRoute {
         handler: None,
         doc: None,
+        websocket: false,
         middlewares: Vec::new(),
         permissions: Vec::new(),
         server: None,
@@ -1214,5 +1231,41 @@ mod tests {
         assert!(req.fields[1].embedded);
         assert_eq!(req.fields[2].name, "name");
         assert!(!req.fields[2].embedded);
+    }
+
+    #[test]
+    fn parses_websocket_route_annotation() {
+        let spec = parse_api(
+            r#"
+            service realtime-api {
+                @doc "Realtime connection"
+                @websocket
+                @handler realtime
+                get /ws
+            }
+            "#,
+        )
+        .expect("valid WebSocket API");
+
+        let route = &spec.rest_routes[0];
+        assert!(route.websocket);
+        assert_eq!(route.handler.as_deref(), Some("realtime"));
+        assert_eq!(route.request, "EmptyReq");
+        assert_eq!(route.response, "EmptyResp");
+    }
+
+    #[test]
+    fn rejects_websocket_annotation_on_non_get_route() {
+        let error = parse_api(
+            r#"
+            service realtime-api {
+                @websocket
+                post /ws
+            }
+            "#,
+        )
+        .expect_err("POST WebSocket route must fail");
+
+        assert!(error.to_string().contains("requires an HTTP GET route"));
     }
 }

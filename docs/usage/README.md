@@ -25,6 +25,8 @@ services.
   governance, MQ, observability, and security checklist.
 - [Middleware contract](../contracts/middleware.md): REST middleware config,
   Roze built-in names, adaptive shedding, and generated file ownership.
+- [Native HTTP WebSocket contract](../contracts/websocket.md): stable upgrade,
+  frame, limits, shutdown, metrics, and `@websocket` generation behavior.
 - [rozectl generator](./rozectl-api.md): `.api` syntax, REST/RPC generation,
   SQL/Mongo model generation and inspection, Elasticsearch/OpenSearch/
   Meilisearch search generation and inspection, client SDKs, OpenAPI output,

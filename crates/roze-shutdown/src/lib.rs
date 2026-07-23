@@ -1,12 +1,12 @@
 use tokio::sync::watch;
 use tokio::time::{timeout, Duration};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShutdownHandle {
     tx: watch::Sender<bool>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShutdownListener {
     rx: watch::Receiver<bool>,
 }
