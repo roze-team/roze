@@ -13,6 +13,7 @@ pub fn render_main(spec: &ApiSpec) -> String {
 mod config;
 mod client;
 mod logic;
+mod model;
 mod pb;
 mod server;
 mod svc;
@@ -51,7 +52,8 @@ async fn main() -> anyhow::Result<()> {{
     tracing::info!(service = %config.name, protocol = "rpc", addr = %rpc.advertise_addr.unwrap_or(rpc.addr), "service registered");
     let service_name = config.name.clone();
     let rpc_addr = rpc.addr;
-    let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
+    let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;
+    let ctx = application::configure_context(ctx).await?;
     tracing::info!(service = %service_name, protocol = "rpc", "service context initialized");
     let health = ctx.health.clone();
     let registry_service = service_name.clone();
@@ -487,12 +489,11 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
 }
 
 pub fn render_logic_mod(spec: &ApiSpec) -> String {
-    let mut out = String::from("#![allow(dead_code)]\n\nuse roze_error::RozeError;\n\n");
+    let mut out =
+        String::from("#![allow(dead_code, unused_imports)]\n\nuse roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
-    out.push_str(
-        "#[allow(unused_imports)]\nmod prelude;\n#[allow(unused_imports)]\npub use prelude::*;\n\n",
-    );
+    out.push_str("include!(\"prelude.rs\");\n\n");
     out.push_str(render_auth_context_helpers());
     out.push_str("// <roze:generated-rpc-logic>\n");
     for method in rpc_logic_methods(spec) {
@@ -1461,6 +1462,11 @@ mod tests {
 
         let rendered = render_main(&spec);
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
+        assert!(rendered.contains("mod model;"));
+        assert!(rendered.contains(
+            "let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;"
+        ));
+        assert!(rendered.contains("let ctx = application::configure_context(ctx).await?;"));
         assert!(rendered.contains("let health = ctx.health.clone();"));
         assert!(rendered.contains("RpcHealthReporter::new_for"));
         assert!(rendered.contains("rpc_health.refresh().await;"));

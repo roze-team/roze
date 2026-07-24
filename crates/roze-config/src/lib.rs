@@ -737,9 +737,14 @@ pub struct CacheConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
+    #[serde(default)]
+    pub mode: DatabaseMode,
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub replicas: Vec<String>,
+    #[serde(default)]
+    pub topology: Option<DatabaseTopologyConfig>,
     #[serde(default)]
     pub policy: DatabaseReadPolicy,
     #[serde(default = "default_max_connections")]
@@ -752,6 +757,36 @@ pub struct DatabaseConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_sqlx_logging")]
     pub sqlx_logging: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DatabaseMode {
+    #[default]
+    Direct,
+    Proxy,
+    Sharded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseTopologyConfig {
+    pub name: String,
+    pub routing: DatabaseRouting,
+    pub shards: Vec<DatabaseShardConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DatabaseRouting {
+    Fnv1a64JumpV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseShardConfig {
+    pub id: String,
+    pub primary: String,
+    #[serde(default)]
+    pub replicas: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2334,6 +2369,40 @@ insecure_skip_verify = true
         let debug = format!("{registry:?}");
         assert!(!debug.contains("secret"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn database_sharding_topology_deserializes_explicitly() {
+        let source = r#"
+name: demo
+database:
+  mode: sharded
+  topology:
+    name: commerce
+    routing: fnv1a64-jump-v1
+    shards:
+      - id: shard-00
+        primary: postgres://db-00/commerce
+        replicas:
+          - postgres://db-00-replica/commerce
+      - id: shard-01
+        primary: postgres://db-01/commerce
+governance: {}
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+        let database = config.database.expect("database");
+        assert_eq!(database.mode, DatabaseMode::Sharded);
+        assert!(database.url.is_empty());
+        let topology = database.topology.expect("topology");
+        assert_eq!(topology.name, "commerce");
+        assert_eq!(topology.routing, DatabaseRouting::Fnv1a64JumpV1);
+        assert_eq!(topology.shards.len(), 2);
+        assert_eq!(topology.shards[0].id, "shard-00");
     }
 
     #[test]

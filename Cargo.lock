@@ -3559,6 +3559,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "roze-config",
+ "roze-metrics",
  "sea-orm",
  "tokio",
 ]

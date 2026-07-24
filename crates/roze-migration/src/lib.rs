@@ -362,6 +362,109 @@ impl_lifecycle!(
     MySqlPool
 );
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShardMigrationOutcome {
+    pub shard: String,
+    pub plan: MigrationPlan,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShardMigrationReport {
+    pub outcomes: Vec<ShardMigrationOutcome>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("migration failed on shard `{failed_shard}` after {} shard(s) completed: {source}", completed.len())]
+pub struct ShardMigrationError {
+    pub failed_shard: String,
+    pub completed: Vec<ShardMigrationOutcome>,
+    #[source]
+    pub source: anyhow::Error,
+}
+
+macro_rules! impl_shard_lifecycle {
+    (
+        $migrate_fn:ident,
+        $rollback_fn:ident,
+        $pool:ty,
+        $single_migrate_fn:ident,
+        $single_rollback_fn:ident
+    ) => {
+        pub async fn $migrate_fn(
+            shards: &[(String, $pool)],
+            migrations: &[SqlMigration],
+        ) -> Result<ShardMigrationReport, ShardMigrationError> {
+            let mut completed = Vec::with_capacity(shards.len());
+            for (shard, pool) in shards {
+                match $single_migrate_fn(pool, migrations).await {
+                    Ok(plan) => completed.push(ShardMigrationOutcome {
+                        shard: shard.clone(),
+                        plan,
+                    }),
+                    Err(source) => {
+                        return Err(ShardMigrationError {
+                            failed_shard: shard.clone(),
+                            completed,
+                            source,
+                        });
+                    }
+                }
+            }
+            Ok(ShardMigrationReport {
+                outcomes: completed,
+            })
+        }
+
+        pub async fn $rollback_fn(
+            shards: &[(String, $pool)],
+            migrations: &[SqlMigration],
+            target: i64,
+        ) -> Result<ShardMigrationReport, ShardMigrationError> {
+            let mut completed = Vec::with_capacity(shards.len());
+            for (shard, pool) in shards {
+                match $single_rollback_fn(pool, migrations, target).await {
+                    Ok(plan) => completed.push(ShardMigrationOutcome {
+                        shard: shard.clone(),
+                        plan,
+                    }),
+                    Err(source) => {
+                        return Err(ShardMigrationError {
+                            failed_shard: shard.clone(),
+                            completed,
+                            source,
+                        });
+                    }
+                }
+            }
+            Ok(ShardMigrationReport {
+                outcomes: completed,
+            })
+        }
+    };
+}
+
+impl_shard_lifecycle!(
+    migrate_sqlite_shards,
+    rollback_sqlite_shards,
+    SqlitePool,
+    migrate_sqlite,
+    rollback_sqlite
+);
+impl_shard_lifecycle!(
+    migrate_postgres_shards,
+    rollback_postgres_shards,
+    PgPool,
+    migrate_postgres,
+    rollback_postgres
+);
+impl_shard_lifecycle!(
+    migrate_mysql_shards,
+    rollback_mysql_shards,
+    MySqlPool,
+    migrate_mysql,
+    rollback_mysql
+);
+
 pub fn sort_migrations(migrations: &mut [SqlMigration]) {
     migrations.sort_by_key(|migration| migration.version);
 }
@@ -640,5 +743,53 @@ mod tests {
             .unwrap()
             .iter()
             .any(|record| record.version == 900001));
+    }
+
+    #[tokio::test]
+    async fn shard_migration_fanout_reports_each_database() {
+        let first = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let second = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let shards = vec![
+            ("shard-00".to_string(), first),
+            ("shard-01".to_string(), second),
+        ];
+        let migrations = vec![SqlMigration::new(
+            1,
+            "create_orders",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY)",
+            Some("DROP TABLE orders"),
+        )];
+
+        let applied = migrate_sqlite_shards(&shards, &migrations)
+            .await
+            .expect("migrate shards");
+        assert_eq!(
+            applied
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.shard.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shard-00", "shard-01"]
+        );
+        assert!(applied
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.plan.steps.len() == 1));
+
+        let rolled_back = rollback_sqlite_shards(&shards, &migrations, 0)
+            .await
+            .expect("rollback shards");
+        assert!(rolled_back
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.plan.steps.len() == 1));
     }
 }

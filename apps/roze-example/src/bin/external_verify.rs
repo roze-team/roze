@@ -9,8 +9,10 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn database_config(url: String) -> roze_db::DatabaseConfig {
     roze_db::DatabaseConfig {
+        mode: roze_db::DatabaseMode::Direct,
         url,
         replicas: Vec::new(),
+        topology: None,
         policy: roze_db::DatabaseReadPolicy::RoundRobin,
         max_connections: 5,
         min_connections: 1,

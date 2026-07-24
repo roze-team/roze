@@ -1242,7 +1242,7 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "- Business behavior belongs in generated logic stubs; shared declarations and imports belong in `src/logic/prelude.rs`."
+        "- Business behavior belongs in generated logic stubs; shared declarations and imports belong in `src/logic/prelude.rs` or a REST group's `prelude.rs`."
     )
     .unwrap();
     writeln!(&mut out).unwrap();
@@ -1318,6 +1318,13 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
         "| `src/logic/prelude.rs` | application | preserved during `--update` |"
     )
     .unwrap();
+    if !spec.rest_routes.is_empty() {
+        writeln!(
+            &mut out,
+            "| `src/logic/<group>/prelude.rs` | application | preserved during REST `--update` |"
+        )
+        .unwrap();
+    }
     writeln!(
         &mut out,
         "| `src/logic/<handler>.rs` | application | preserved during `--update` |"
@@ -1378,7 +1385,7 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "- Prefer editing generated logic stubs, `src/logic/prelude.rs`, and application-owned extension files."
+        "- Prefer editing generated logic stubs, root/group logic preludes, and application-owned extension files."
     )
     .unwrap();
     writeln!(
@@ -1415,6 +1422,9 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "- generated REST/RPC logic handler files").unwrap();
     writeln!(&mut out, "- `src/logic/prelude.rs`").unwrap();
+    if !spec.rest_routes.is_empty() {
+        writeln!(&mut out, "- `src/logic/<group>/prelude.rs`").unwrap();
+    }
     writeln!(&mut out, "- `src/middleware/app.rs`").unwrap();
     writeln!(&mut out, "- `src/application.rs`").unwrap();
     writeln!(&mut out, "- `src/middleware/<custom>.rs`").unwrap();
@@ -3608,6 +3618,11 @@ fn generate_rest_project_in_place(
         let dir = out.join("src/logic").join(&group);
         fs::create_dir_all(&dir)?;
         fs::write(dir.join("mod.rs"), content)?;
+        write_preserved(
+            &dir.join("prelude.rs"),
+            logic_group_prelude_rs(&group),
+            options.mode,
+        )?;
     }
     for (group, handler, content) in rest::render_logic_files(spec) {
         let dir = out.join("src/logic").join(&group);
@@ -4045,33 +4060,24 @@ fn is_default_stub_field_line(line: &str) -> bool {
 
 fn ensure_model_module(out: &Path) -> anyhow::Result<()> {
     let model_dir = out.join("src/model");
-    if !model_dir.exists() {
+    fs::create_dir_all(&model_dir)
+        .with_context(|| format!("failed to create {}", model_dir.display()))?;
+    let module = model_dir.join("mod.rs");
+    if module.is_file() {
         return Ok(());
     }
+    fs::write(
+        &module,
+        r#"//! Generated model context hook.
 
-    let main_path = out.join("src/main.rs");
-    if !main_path.is_file() {
-        return Ok(());
-    }
+use crate::svc::ServiceContext;
 
-    let content = fs::read_to_string(&main_path)
-        .with_context(|| format!("failed to read {}", main_path.display()))?;
-    if content.contains("mod model;") {
-        return Ok(());
-    }
-
-    let updated = if let Some(idx) = content.find("mod types;\n") {
-        let mut updated = String::with_capacity(content.len() + "mod model;\n".len());
-        updated.push_str(&content[..idx + "mod types;\n".len()]);
-        updated.push_str("mod model;\n");
-        updated.push_str(&content[idx + "mod types;\n".len()..]);
-        updated
-    } else {
-        format!("mod model;\n{content}")
-    };
-
-    fs::write(&main_path, updated)
-        .with_context(|| format!("failed to write {}", main_path.display()))
+pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {
+    Ok(ctx)
+}
+"#,
+    )
+    .with_context(|| format!("failed to write {}", module.display()))
 }
 
 fn write_cargo_toml_with_rpc_clients(
@@ -8113,7 +8119,8 @@ fn regeneration_policy_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
     - src/config/mod.rs
     - src/application.rs
     - src/logic/prelude.rs
-    - src/logic/*/*.rs
+    - src/logic/<group>/prelude.rs
+    - src/logic/<group>/<handler>.rs
     - src/middleware/app.rs
     - src/middleware/<custom>.rs
     - src/handler/*/*.rs
@@ -10738,6 +10745,7 @@ governance:
 #     prometheus: true
 #     breaker: true
 # database:
+#   mode: direct # direct, proxy, or sharded
 #   url: env://DATABASE_URL
 # cache:
 #   url: env://REDIS_URL
@@ -10833,6 +10841,7 @@ governance:
   routes:
 {}
 # database:
+#   mode: direct # direct, proxy, or sharded
 #   url: env://DATABASE_URL
 #   # policy: round-robin # round-robin or random
 #   # replicas:
@@ -11221,12 +11230,23 @@ pub fn register_services(
 }
 
 fn logic_prelude_rs() -> String {
-    r#"//! Application-owned logic prelude.
-//!
-//! Declare shared helper modules, imports, and re-exports in this file.
-//! `rozectl ... generate --update` preserves it while rebuilding `logic/mod.rs`.
+    r#"// Application-owned logic prelude.
+//
+// Declare shared helper modules, imports, and re-exports in this file.
+// Its contents are included at the `logic` module level.
+// `rozectl ... generate --update` preserves it while rebuilding `logic/mod.rs`.
 "#
     .to_string()
+}
+
+fn logic_group_prelude_rs(group: &str) -> String {
+    format!(
+        "// Application-owned `{group}` logic prelude.\n\
+         //\n\
+         // Declare group-local helper modules, imports, and re-exports in this file.\n\
+         // Its contents are included at the `{group}` module level.\n\
+         // `rozectl api generate --update` preserves it while rebuilding this group's `mod.rs`.\n"
+    )
 }
 
 pub(super) fn field_is_optional(field: &crate::parser::Field) -> bool {
@@ -11275,7 +11295,9 @@ const USES_IDEMPOTENCY: bool = __USES_IDEMPOTENCY__;
 pub struct ServiceContext {
     pub config: Config,
     pub health: roze_health::HealthRegistry,
+    pub extensions: roze_service::ApplicationExtensions,
     pub db_connections: Option<roze_db::DatabaseConnections>,
+    pub db_shards: Option<roze_db::ShardedDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
@@ -11288,7 +11310,15 @@ pub struct ServiceContext {
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let health = roze_health::HealthRegistry::new();
-        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
+        let database_runtime = roze_db::connect_runtime_optional(config.database.as_ref()).await?;
+        let db_connections = database_runtime
+            .as_ref()
+            .and_then(roze_db::DatabaseRuntime::direct)
+            .cloned();
+        let db_shards = database_runtime
+            .as_ref()
+            .and_then(roze_db::DatabaseRuntime::sharded)
+            .cloned();
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
@@ -11308,10 +11338,10 @@ impl ServiceContext {
             Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
             None => None,
         };
-        if let Some(db_connections) = db_connections.clone() {
+        if let Some(database_runtime) = database_runtime.clone() {
             health.register_dependency("database", move || {
-                let db_connections = db_connections.clone();
-                async move { db_connections.health_check().await.map_err(Into::into) }
+                let database_runtime = database_runtime.clone();
+                async move { database_runtime.health_check().await.map_err(Into::into) }
             });
         }
         if let Some(cache) = cache.clone() {
@@ -11341,7 +11371,10 @@ impl ServiceContext {
                         .as_ref()
                         .map(|connections| connections.write().clone())
                         .ok_or_else(|| {
-                            anyhow::anyhow!("SQL outbox requires database.url configuration")
+                            anyhow::anyhow!(
+                                "SQL outbox requires a direct/proxy database; sharded services \
+                                 must install an application-routed OutboxStore explicitly"
+                            )
                         })?;
                     let store = Arc::new(roze_transaction_sql::SqlOutboxStore::with_config(
                         database,
@@ -11413,7 +11446,9 @@ impl ServiceContext {
         Ok(Self {
             config,
             health,
+            extensions: roze_service::ApplicationExtensions::new(),
             db_connections,
+            db_shards,
             cache,
             mq,
             storage,
@@ -11422,6 +11457,34 @@ impl ServiceContext {
             sql_outbox,
             idempotency,
         })
+    }
+
+    pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
+        self.db_connections
+            .as_ref()
+            .map(|connections| connections.read())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "direct database connection is not configured; route sharded models explicitly"
+                )
+            })
+    }
+
+    pub fn write_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {
+        self.db_connections
+            .as_ref()
+            .map(|connections| connections.write())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "direct database connection is not configured; route sharded models explicitly"
+                )
+            })
+    }
+
+    pub fn sharded_db(&self) -> anyhow::Result<&roze_db::ShardedDatabase> {
+        self.db_shards
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sharded database topology is not configured"))
     }
 
     pub fn with_outbox_store(
@@ -11494,6 +11557,35 @@ impl ServiceContext {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("nats jetstream is not configured"))
     }
+
+    pub fn with_extension<T>(self, value: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.insert(value);
+        self
+    }
+
+    pub fn insert_extension<T>(&self, value: T) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.insert(value)
+    }
+
+    pub fn extension<T>(&self) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.get::<T>()
+    }
+
+    pub fn require_extension<T>(&self) -> anyhow::Result<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.require::<T>()
+    }
 "#
     .replace("__USES_IDEMPOTENCY__", &uses_idempotency.to_string());
     out.push_str("}\n");
@@ -11513,7 +11605,9 @@ const USES_IDEMPOTENCY: bool = __USES_IDEMPOTENCY__;
 pub struct ServiceContext {
     pub config: Config,
     pub health: roze_health::HealthRegistry,
+    pub extensions: roze_service::ApplicationExtensions,
     pub db_connections: Option<roze_db::DatabaseConnections>,
+    pub db_shards: Option<roze_db::ShardedDatabase>,
     pub mongo: Option<roze_mongo::MongoDatabase>,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
@@ -11527,7 +11621,15 @@ pub struct ServiceContext {
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let health = roze_health::HealthRegistry::new();
-        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
+        let database_runtime = roze_db::connect_runtime_optional(config.database.as_ref()).await?;
+        let db_connections = database_runtime
+            .as_ref()
+            .and_then(roze_db::DatabaseRuntime::direct)
+            .cloned();
+        let db_shards = database_runtime
+            .as_ref()
+            .and_then(roze_db::DatabaseRuntime::sharded)
+            .cloned();
         let mongo = roze_mongo::connect_optional(config.mongo.as_ref()).await?;
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
@@ -11548,10 +11650,10 @@ impl ServiceContext {
             Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
             None => None,
         };
-        if let Some(db_connections) = db_connections.clone() {
+        if let Some(database_runtime) = database_runtime.clone() {
             health.register_dependency("database", move || {
-                let db_connections = db_connections.clone();
-                async move { db_connections.health_check().await.map_err(Into::into) }
+                let database_runtime = database_runtime.clone();
+                async move { database_runtime.health_check().await.map_err(Into::into) }
             });
         }
         if let Some(mongo) = mongo.clone() {
@@ -11587,7 +11689,10 @@ impl ServiceContext {
                         .as_ref()
                         .map(|connections| connections.write().clone())
                         .ok_or_else(|| {
-                            anyhow::anyhow!("SQL outbox requires database.url configuration")
+                            anyhow::anyhow!(
+                                "SQL outbox requires a direct/proxy database; sharded services \
+                                 must install an application-routed OutboxStore explicitly"
+                            )
                         })?;
                     let store = Arc::new(roze_transaction_sql::SqlOutboxStore::with_config(
                         database,
@@ -11659,7 +11764,9 @@ impl ServiceContext {
         Ok(Self {
             config,
             health,
+            extensions: roze_service::ApplicationExtensions::new(),
             db_connections,
+            db_shards,
             mongo,
             cache,
             mq,
@@ -11746,6 +11853,12 @@ impl ServiceContext {
             .ok_or_else(|| anyhow::anyhow!("database connection is not configured"))
     }
 
+    pub fn sharded_db(&self) -> anyhow::Result<&roze_db::ShardedDatabase> {
+        self.db_shards
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sharded database topology is not configured"))
+    }
+
     pub fn jwt_config(&self) -> Option<roze_jwt::JwtConfig> {
         self.config.auth.as_ref().map(Into::into)
     }
@@ -11754,6 +11867,35 @@ impl ServiceContext {
         self.mq
             .clone()
             .ok_or_else(|| anyhow::anyhow!("nats jetstream is not configured"))
+    }
+
+    pub fn with_extension<T>(self, value: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.insert(value);
+        self
+    }
+
+    pub fn insert_extension<T>(&self, value: T) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.insert(value)
+    }
+
+    pub fn extension<T>(&self) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.get::<T>()
+    }
+
+    pub fn require_extension<T>(&self) -> anyhow::Result<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.require::<T>()
     }
 }
 "#
@@ -12220,6 +12362,11 @@ mod tests {
             assert!(rendered.contains("Arc<dyn roze_report::ReportDataSource>"));
             assert!(rendered.contains("pub fn with_report_source"));
             assert!(rendered.contains("pub fn report_source"));
+            assert!(rendered.contains("pub extensions: roze_service::ApplicationExtensions"));
+            assert!(rendered.contains("pub fn with_extension<T>"));
+            assert!(rendered.contains("pub fn insert_extension<T>"));
+            assert!(rendered.contains("pub fn extension<T>"));
+            assert!(rendered.contains("pub fn require_extension<T>"));
         }
     }
 
@@ -13528,7 +13675,8 @@ mod tests {
         assert!(!cargo.contains("toasty"));
         let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("read svc");
         assert!(svc.contains("DatabaseConnections"));
-        assert!(svc.contains("connect_connections_optional"));
+        assert!(svc.contains("connect_runtime_optional"));
+        assert!(svc.contains("db_shards"));
         assert!(svc.contains("sql_outbox"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
         assert!(config.contains("database:"));
@@ -13825,11 +13973,20 @@ mod tests {
             "pub fn shared_value() -> u64 { 1 }\n",
         )
         .expect("write REST logic support");
-        let prelude = r#"#[path = "support.rs"]
-mod support;
+        let prelude = r#"mod support;
 pub use support::shared_value;
 "#;
         fs::write(out.join("src/logic/prelude.rs"), prelude).expect("write REST logic prelude");
+        fs::write(
+            out.join("src/logic/users/admin_map.rs"),
+            "pub fn mapped_value() -> u64 { 2 }\n",
+        )
+        .expect("write REST group logic support");
+        let group_prelude = r#"pub mod admin_map;
+pub use admin_map::mapped_value;
+"#;
+        fs::write(out.join("src/logic/users/prelude.rs"), group_prelude)
+            .expect("write REST group logic prelude");
         for _ in 0..2 {
             registry()
                 .dispatch(GeneratorCommand::ApiGenerate {
@@ -13842,6 +13999,11 @@ pub use support::shared_value;
         assert_eq!(
             fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read REST logic prelude"),
             prelude
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/users/prelude.rs"))
+                .expect("read REST group logic prelude"),
+            group_prelude
         );
         model::generate_model_project(
             &fs::read_to_string(&model).expect("read model"),
@@ -13920,8 +14082,7 @@ pub use support::shared_value;
             "pub fn shared_value() -> u64 { 1 }\n",
         )
         .expect("write RPC logic support");
-        let prelude = r#"#[path = "support.rs"]
-mod support;
+        let prelude = r#"mod support;
 pub use support::shared_value;
 "#;
         fs::write(out.join("src/logic/prelude.rs"), prelude).expect("write RPC logic prelude");
@@ -13938,6 +14099,35 @@ pub use support::shared_value;
             fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read RPC logic prelude"),
             prelude
         );
+        let model_source = r#"
+            CREATE TABLE users (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL
+            );
+            "#;
+        model::generate_model_project(
+            model_source,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("generate Toasty model in RPC project");
+        registry()
+            .dispatch(GeneratorCommand::RpcGenerate {
+                api: api.clone(),
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            })
+            .expect("update RPC project after model generation");
+        model::generate_model_project(
+            model_source,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("repeat Toasty model generation after RPC update");
 
         cargo_check_generated(&out.join("Cargo.toml"));
         cargo_clippy_generated(&out.join("Cargo.toml"));
@@ -15019,6 +15209,7 @@ pub use support::shared_value;
         assert!(rest_regeneration_policy.contains("boundary: rest"));
         assert!(rest_regeneration_policy.contains("src/openapi/mod.rs"));
         assert!(rest_regeneration_policy.contains("src/logic/prelude.rs"));
+        assert!(rest_regeneration_policy.contains("src/logic/<group>/prelude.rs"));
         assert!(rest_regeneration_policy.contains("src/logic/*/mod.rs"));
         assert!(rest_regeneration_policy.contains("drift_classification:"));
         assert!(rest_regeneration_policy.contains("breaking_change_without_migration_plan"));
@@ -15453,14 +15644,23 @@ pub use support::shared_value;
             "pub struct SupportMarker;\n",
         )
         .expect("write custom logic support module");
-        let logic_prelude = r#"#[path = "support.rs"]
-mod support;
+        let logic_prelude = r#"mod support;
 #[allow(unused_imports)]
 use support::*;
 pub use support::SupportMarker;
 "#;
         fs::write(out.join("src/logic/prelude.rs"), logic_prelude)
             .expect("write custom logic prelude");
+        fs::write(
+            out.join("src/logic/users/admin_map.rs"),
+            "pub struct AdminMap;\n",
+        )
+        .expect("write group-local custom logic module");
+        let group_logic_prelude = r#"pub mod admin_map;
+pub use admin_map::AdminMap;
+"#;
+        fs::write(out.join("src/logic/users/prelude.rs"), group_logic_prelude)
+            .expect("write group-local logic prelude");
         let svc_path = out.join("src/svc/mod.rs");
         fs::write(
             &svc_path,
@@ -15534,7 +15734,20 @@ pub use support::SupportMarker;
         );
         assert!(fs::read_to_string(out.join("src/logic/mod.rs"))
             .expect("read generated logic mod")
-            .contains("pub use prelude::*;"));
+            .contains("include!(\"prelude.rs\");"));
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/users/prelude.rs"))
+                .expect("read preserved group logic prelude"),
+            group_logic_prelude
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/users/admin_map.rs"))
+                .expect("read preserved group logic module"),
+            "pub struct AdminMap;\n"
+        );
+        let group_logic_mod = fs::read_to_string(out.join("src/logic/users/mod.rs"))
+            .expect("read generated group logic mod");
+        assert!(group_logic_mod.contains("include!(\"prelude.rs\");"));
         let refreshed_svc =
             fs::read_to_string(out.join("src/svc/mod.rs")).expect("read refreshed svc");
         assert!(!refreshed_svc.contains("obsolete_customization"));
@@ -15895,9 +16108,8 @@ pub fn register_services(
     }
 
     #[test]
-    fn rpc_update_refreshes_service_context_after_model_generation() {
-        let spec = parse_api(
-            r#"
+    fn rpc_and_model_updates_keep_independent_context_ownership() {
+        let api_source = r#"
             service system-rpc {
                 rpc GetAdmin (GetAdminReq) returns (GetAdminResp)
             }
@@ -15909,14 +16121,23 @@ pub fn register_services(
             type GetAdminResp {
                 id: u64
             }
-            "#,
-        )
-        .expect("valid api");
+            "#;
+        let spec = parse_api(api_source).expect("valid api");
+        let model_source = r#"
+            CREATE TABLE admin_tokens (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                token VARCHAR(255) NOT NULL
+            );
+            "#;
         let root = temp_test_root("rozectl-rpc-update-model-composition-test");
         let out = root.join("system");
+        let api = root.join("system.api");
+        let schema = root.join("admin_tokens.sql");
         fs::create_dir_all(&root).expect("create test workspace");
         fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
             .expect("write workspace manifest");
+        fs::write(&api, api_source).expect("write rpc contract");
+        fs::write(&schema, model_source).expect("write model schema");
 
         generate_rpc_project(
             &spec,
@@ -15925,21 +16146,19 @@ pub fn register_services(
         )
         .expect("initial rpc generation");
         model::generate_model_project(
-            r#"
-            CREATE TABLE admin_tokens (
-                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                token VARCHAR(255) NOT NULL
-            );
-            "#,
+            model_source,
             &out,
             GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
             model::ModelFormat::Sql,
             model::ModelOrm::Toasty,
         )
         .expect("model generation");
-        assert!(fs::read_to_string(out.join("src/main.rs"))
-            .expect("read composed main")
-            .contains("mod model;"));
+        let model_module =
+            fs::read_to_string(out.join("src/model/mod.rs")).expect("read model context");
+        assert!(model_module.contains("pub fn model(&self) -> ModelClient<'_>"));
+        assert!(model_module.contains("toasty::models!(crate::model::AdminToken)"));
+        let service_context =
+            fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
 
         generate_rpc_project(
             &spec,
@@ -15951,10 +16170,39 @@ pub fn register_services(
         let main = fs::read_to_string(out.join("src/main.rs")).expect("read updated main");
         assert!(main.contains("mod model;"));
         assert_eq!(main.matches("mod model;").count(), 1);
+        assert!(main.contains("model::configure_context"));
         assert!(out.join("src/model/admin_token.rs").is_file());
         let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
-        assert!(!svc.contains("pub fn model(&self) -> crate::model::ModelClient<'_>"));
-        assert!(!svc.contains("toasty::models!(crate::model::AdminToken)"));
+        assert_eq!(svc, service_context);
+        assert_eq!(
+            fs::read_to_string(out.join("src/model/mod.rs")).expect("read preserved model context"),
+            model_module
+        );
+        let registry = registry();
+        assert!(diff_project(
+            &out,
+            GeneratorCommand::RpcGenerate {
+                api,
+                out: PathBuf::new(),
+                options: GenerateOptions::new(GenerateMode::Update, DependencySource::Git,),
+            },
+            &registry,
+        )
+        .expect("diff stable rpc project")
+        .is_empty());
+        assert!(diff_project(
+            &out,
+            GeneratorCommand::ModelGenerate {
+                schema,
+                out: PathBuf::new(),
+                options: GenerateOptions::new(GenerateMode::Update, DependencySource::Path,),
+                format: model::ModelFormat::Sql,
+                orm: model::ModelOrm::Toasty,
+            },
+            &registry,
+        )
+        .expect("diff stable model project")
+        .is_empty());
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -16014,8 +16262,7 @@ pub fn register_services(
         .expect("initial generation");
         fs::write(out.join("src/logic/coupon_map.rs"), "// custom helper\n")
             .expect("write custom helper");
-        let logic_prelude = r#"#[path = "coupon_map.rs"]
-mod coupon_map;
+        let logic_prelude = r#"mod coupon_map;
 #[allow(unused_imports)]
 use coupon_map::*;
 "#;
@@ -16036,7 +16283,7 @@ use coupon_map::*;
         assert!(logic_mod.contains("pub use list_coupons::list_coupons;"));
         assert!(!logic_mod.contains("get_dashboard"));
         assert!(logic_mod.contains("// <roze:generated-rpc-logic>"));
-        assert!(logic_mod.contains("pub use prelude::*;"));
+        assert!(logic_mod.contains("include!(\"prelude.rs\");"));
         assert_eq!(
             fs::read_to_string(out.join("src/logic/prelude.rs"))
                 .expect("read preserved logic prelude"),
@@ -16363,6 +16610,9 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(
             content.contains("`src/logic/prelude.rs` | application | preserved during `--update`")
         );
+        assert!(content.contains(
+            "`src/logic/<group>/prelude.rs` | application | preserved during REST `--update`"
+        ));
         assert!(content.contains("`src/logic/**/mod.rs` | framework | refreshed during `--update`"));
         assert!(content.contains(
             "`src/svc/mod.rs` | framework/dependencies | refreshed by `rozectl ... generate --update`"

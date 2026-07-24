@@ -11,6 +11,7 @@ mod config;
 mod handler;
 mod logic;
 mod middleware;
+mod model;
 mod openapi;
 mod route;
 mod svc;
@@ -52,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
     let auth_config = config.auth.clone();
     let mut group = ServiceGroup::new();
     let service_shutdown = group.shutdown_listener();
-    let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
+    let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;
+    let ctx = application::configure_context(ctx).await?;
     tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
     application::register_services(&mut group, &ctx)?;
     let health = ctx.health.clone();
@@ -1057,12 +1059,11 @@ fn render_logic_fn(route: &RestRoute) -> String {
 }
 
 pub fn render_logic_mod(spec: &ApiSpec) -> String {
-    let mut out = String::from("#![allow(dead_code)]\n\nuse roze_error::RozeError;\n\n");
+    let mut out =
+        String::from("#![allow(dead_code, unused_imports)]\n\nuse roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
-    out.push_str(
-        "#[allow(unused_imports)]\nmod prelude;\n#[allow(unused_imports)]\npub use prelude::*;\n\n",
-    );
+    out.push_str("include!(\"prelude.rs\");\n\n");
     out.push_str(render_auth_context_helpers());
 
     for group in route_groups(spec).keys() {
@@ -1081,7 +1082,7 @@ pub fn render_logic_group_mods(spec: &ApiSpec) -> Vec<(String, String)> {
     route_groups(spec)
         .into_iter()
         .map(|(group, routes)| {
-            let mut out = String::new();
+            let mut out = String::from("include!(\"prelude.rs\");\n\n");
             for route in routes {
                 let handler = resolved_handler_name(route);
                 out.push_str(&format!("mod {handler};\n"));
@@ -3293,6 +3294,11 @@ mod tests {
 
         let rendered = render_rest_main(&spec);
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
+        assert!(rendered.contains("mod model;"));
+        assert!(rendered.contains(
+            "let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;"
+        ));
+        assert!(rendered.contains("let ctx = application::configure_context(ctx).await?;"));
         assert!(rendered.contains("let health = ctx.health.clone();"));
         assert!(rendered.contains("application::register_services(&mut group, &ctx)?;"));
         assert!(rendered.contains("RestService::new("));

@@ -1,10 +1,12 @@
 use std::{
-    collections::BTreeMap,
+    any::{type_name, Any, TypeId},
+    collections::{BTreeMap, HashMap},
+    fmt,
     future::Future,
     pin::Pin,
     sync::{
         atomic::{AtomicU8, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     time::{Duration, Instant},
 };
@@ -12,6 +14,107 @@ use std::{
 use anyhow::Context;
 use roze_shutdown::{channel, ShutdownHandle, ShutdownListener};
 use tokio::task::JoinSet;
+
+type ExtensionValue = Arc<dyn Any + Send + Sync>;
+
+/// Cloneable, type-safe storage for application resources bound to a service context.
+///
+/// Clones share the same values. Inserting through one clone is immediately visible
+/// through every other clone, which makes the store suitable for generated
+/// `ServiceContext` values shared by REST handlers, RPC methods, and background tasks.
+#[derive(Clone, Default)]
+pub struct ApplicationExtensions {
+    values: Arc<RwLock<HashMap<TypeId, ExtensionValue>>>,
+}
+
+impl fmt::Debug for ApplicationExtensions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplicationExtensions")
+            .field("len", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ApplicationExtensions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert<T>(&self, value: T) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.insert_arc(Arc::new(value))
+    }
+
+    pub fn insert_arc<T>(&self, value: Arc<T>) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.values
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(TypeId::of::<T>(), value)
+            .and_then(|previous| previous.downcast::<T>().ok())
+    }
+
+    pub fn get<T>(&self) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.values
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&TypeId::of::<T>())
+            .cloned()
+            .and_then(|value| value.downcast::<T>().ok())
+    }
+
+    pub fn require<T>(&self) -> anyhow::Result<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.get::<T>().ok_or_else(|| {
+            anyhow::anyhow!(
+                "application extension `{}` is not configured",
+                type_name::<T>()
+            )
+        })
+    }
+
+    pub fn contains<T>(&self) -> bool
+    where
+        T: Send + Sync + 'static,
+    {
+        self.values
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&TypeId::of::<T>())
+    }
+
+    pub fn remove<T>(&self) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.values
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&TypeId::of::<T>())
+            .and_then(|value| value.downcast::<T>().ok())
+    }
+
+    pub fn len(&self) -> usize {
+        self.values
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AppState<C> {
@@ -680,6 +783,24 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Config(u32);
+
+    #[test]
+    fn application_extensions_are_typed_and_shared_across_clones() {
+        let extensions = ApplicationExtensions::new();
+        let clone = extensions.clone();
+
+        assert!(extensions.insert(String::from("captcha")).is_none());
+        assert_eq!(clone.require::<String>().unwrap().as_str(), "captcha");
+        assert!(clone.contains::<String>());
+        assert_eq!(extensions.len(), 1);
+
+        let previous = clone.insert(String::from("merchant")).unwrap();
+        assert_eq!(previous.as_str(), "captcha");
+        assert_eq!(extensions.get::<String>().unwrap().as_str(), "merchant");
+        assert_eq!(extensions.remove::<String>().unwrap().as_str(), "merchant");
+        assert!(clone.is_empty());
+        assert!(extensions.require::<String>().is_err());
+    }
 
     #[test]
     fn builds_state() {

@@ -24,6 +24,7 @@ governance:
     reset_timeout_ms: 30000
   routes: {}
 # database:
+#   mode: direct # direct, proxy, or sharded
 #   url: sqlite://data/user-api.db?mode=rwc
 #   # policy: round-robin # round-robin or random
 #   # replicas:

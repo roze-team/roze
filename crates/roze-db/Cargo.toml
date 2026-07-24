@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 roze-config = { path = "../roze-config" }
+roze-metrics = { path = "../roze-metrics" }
 sea-orm.workspace = true
 
 [dev-dependencies]

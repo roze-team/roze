@@ -89,6 +89,13 @@ pub struct ModelAnnotation {
     pub expression: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelShardSpec {
+    key: String,
+    topology: String,
+    group: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelGenerationGraph {
     pub models: Vec<ModelSpec>,
@@ -1041,15 +1048,11 @@ fn write_model_project(
             json: models_need_json(models),
             uuid: models_need_uuid(models),
             regex: models_need_regex(models),
+            sharding: models
+                .iter()
+                .any(|model| model_shard_spec(model).is_ok_and(|shard| shard.is_some())),
         },
     )?;
-    update_model_service_context(out)?;
-    if orm == ModelOrm::Toasty {
-        update_toasty_service_context(out, models)?;
-    }
-    if include_client {
-        generated_rust_files.push(out.join("src/svc/mod.rs"));
-    }
     super::format_generated_rust_files(out, &generated_rust_files)?;
     update_main_rs(out)?;
     Ok(())
@@ -1135,6 +1138,7 @@ struct ModelDependencyNeeds {
     json: bool,
     uuid: bool,
     regex: bool,
+    sharding: bool,
 }
 
 fn update_model_dependencies(
@@ -1212,6 +1216,25 @@ fn update_model_dependencies(
             }
         };
         dependencies.insert("roze-orm", item);
+    }
+    if needs.sharding && !dependencies.contains_key("roze-db") {
+        let item = if uses_workspace {
+            workspace_dependency_item()
+        } else {
+            match source {
+                DependencySource::Git => {
+                    format!(r#"{{ git = "{ROZE_GIT_URL}" }}"#).parse::<toml_edit::Item>()?
+                }
+                DependencySource::Path => {
+                    let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
+                        anyhow::anyhow!("--roze-source path requires output inside a Cargo workspace containing Roze crates")
+                    })?;
+                    let prefix = local_crates_prefix(logical_out, &workspace_root)?;
+                    format!(r#"{{ path = "{prefix}/roze-db" }}"#).parse::<toml_edit::Item>()?
+                }
+            }
+        };
+        dependencies.insert("roze-db", item);
     }
     if orm == ModelOrm::SeaOrm && needs.rust_decimal {
         if let Some(item) = dependencies.get_mut("sea-orm") {
@@ -1390,181 +1413,12 @@ fn workspace_dependency_item() -> toml_edit::Item {
     toml_edit::Item::Value(toml_edit::Value::InlineTable(table))
 }
 
-fn update_toasty_service_context(out: &Path, models: &[ModelSpec]) -> anyhow::Result<()> {
-    let svc_path = out.join("src/svc/mod.rs");
-    if !svc_path.is_file() {
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&svc_path)
-        .with_context(|| format!("failed to read {}", svc_path.display()))?;
-    if !content.contains("pub struct ServiceContext") {
-        return Ok(());
-    }
-    let mut updated = content.replace("#[derive(Clone, Debug)]", "#[derive(Clone)]");
-
-    let model_list = models
-        .iter()
-        .map(|model| format!("crate::model::{}", to_pascal_case(&model.name)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if model_list.is_empty() {
-        return Ok(());
-    }
-
-    if !updated.contains("pub toasty_db: Option<toasty::Db>") {
-        updated = insert_after_module(
-            &updated,
-            "    pub db_connections: Option<roze_db::DatabaseConnections>,\n",
-            "    pub toasty_db: Option<toasty::Db>,\n",
-        )
-        .or_else(|| {
-            insert_after_module(
-                &updated,
-                "    pub health: roze_health::HealthRegistry,\n",
-                "    pub toasty_db: Option<toasty::Db>,\n",
-            )
-        })
-        .unwrap_or(updated);
-    }
-    if !updated.contains("let toasty_db = match config.database.as_ref()") {
-        updated = insert_after_module(
-            &updated,
-            "        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;\n",
-            &format!(
-                "        let toasty_db = match config.database.as_ref() {{\n            Some(database) => Some(toasty::Db::builder().models(toasty::models!({model_list})).connect(&database.url).await?),\n            None => None,\n        }};\n"
-            ),
-        )
-        .or_else(|| {
-            insert_after_module(
-                &updated,
-                "        let health = roze_health::HealthRegistry::new();\n",
-                &format!(
-                    "        let toasty_db = match config.database.as_ref() {{\n            Some(database) => Some(toasty::Db::builder().models(toasty::models!({model_list})).connect(&database.url).await?),\n            None => None,\n        }};\n"
-                ),
-            )
-        })
-        .unwrap_or(updated);
-    }
-    updated = synchronize_toasty_model_registry(updated, &model_list);
-    if !updated.contains("            toasty_db,\n") {
-        updated = insert_after_module(
-            &updated,
-            "            db_connections,\n",
-            "            toasty_db,\n",
-        )
-        .or_else(|| {
-            insert_after_module(
-                &updated,
-                "            health,\n",
-                "            toasty_db,\n",
-            )
-        })
-        .unwrap_or(updated);
-    }
-    updated = updated.replace(
-        "        if toasty_db.is_some() {\n            health.register_static(roze_health::HealthCheck::healthy(\"toasty\"));\n        }\n",
-        "",
-    );
-    let accessor = r#"    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
-        self.toasty_db
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("toasty database connection is not configured"))
-    }
-
-"#;
-    if !updated.contains("pub fn toasty_db(&self)") {
-        updated = insert_after_read_db_method(&updated, accessor)
-            .or_else(|| insert_before_module(&updated, "    pub fn jwt_config", accessor))
-            .unwrap_or(updated);
-    }
-
-    fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
-}
-
-fn synchronize_toasty_model_registry(mut content: String, model_list: &str) -> String {
-    const REGISTRY_START: &str = ".models(toasty::models!(";
-    let Some(start) = content.find(REGISTRY_START) else {
-        return content;
-    };
-    let models_start = start + REGISTRY_START.len();
-    let Some(models_end) = content[models_start..].find("))") else {
-        return content;
-    };
-    content.replace_range(models_start..models_start + models_end, model_list);
-    content
-}
-
-fn update_model_service_context(out: &Path) -> anyhow::Result<()> {
-    let svc_path = out.join("src/svc/mod.rs");
-    if !svc_path.is_file() {
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&svc_path)
-        .with_context(|| format!("failed to read {}", svc_path.display()))?;
-    if content.contains("pub fn model(&self)") || !content.contains("pub struct ServiceContext") {
-        return Ok(());
-    }
-
-    let accessor = r#"    pub fn model(&self) -> crate::model::ModelClient<'_> {
-        crate::model::ModelClient::new(self)
-    }
-
-"#;
-    let updated = insert_after_read_db_method(&content, accessor).unwrap_or(content);
-    fs::write(&svc_path, updated).with_context(|| format!("failed to write {}", svc_path.display()))
-}
-
-fn insert_after_read_db_method(content: &str, insert: &str) -> Option<String> {
-    let start = content.find("    pub fn read_db(")?;
-    let body_start = content[start..].find('{')? + start;
-    let mut depth = 0usize;
-    for (offset, ch) in content[body_start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    let end = body_start + offset + ch.len_utf8();
-                    let newline_end = content[end..]
-                        .strip_prefix("\r\n")
-                        .map(|_| end + 2)
-                        .or_else(|| content[end..].strip_prefix('\n').map(|_| end + 1))
-                        .unwrap_or(end);
-                    let mut updated = String::with_capacity(content.len() + insert.len());
-                    updated.push_str(&content[..newline_end]);
-                    if !content[..newline_end].ends_with("\n\n")
-                        && !content[..newline_end].ends_with("\r\n\r\n")
-                    {
-                        updated.push('\n');
-                    }
-                    updated.push_str(insert);
-                    updated.push_str(&content[newline_end..]);
-                    return Some(updated);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<String> {
     let idx = content.find(needle)?;
     let mut updated = String::with_capacity(content.len() + insert.len());
     updated.push_str(&content[..idx + needle.len()]);
     updated.push_str(insert);
     updated.push_str(&content[idx + needle.len()..]);
-    Some(updated)
-}
-
-fn insert_before_module(content: &str, needle: &str, insert: &str) -> Option<String> {
-    let idx = content.find(needle)?;
-    let mut updated = String::with_capacity(content.len() + insert.len());
-    updated.push_str(&content[..idx]);
-    updated.push_str(insert);
-    updated.push_str(&content[idx..]);
     Some(updated)
 }
 
@@ -1621,6 +1475,7 @@ fn cleanup_stale_generated_model_files(
 fn render_model_mod(models: &[ModelSpec], orm: ModelOrm, include_client: bool) -> String {
     let mut out = format!("{MODEL_GENERATED_MARKER}\n#![allow(dead_code, unused_imports)]\n\n");
     if include_client {
+        out.push_str("use crate::svc::ServiceContext;\n\n");
         out.push_str("pub mod client;\n");
         out.push_str("pub use client::ModelClient;\n");
     }
@@ -1644,6 +1499,109 @@ fn render_model_mod(models: &[ModelSpec], orm: ModelOrm, include_client: bool) -
                 "pub use {module}::{{{pascal}, {pascal}Create, {pascal}Delete, {pascal}DeleteMany, {pascal}MutationHooks, {pascal}Order, {pascal}Page, {pascal}Predicate, {pascal}Query, {pascal}Repository, {pascal}Update, {pascal}UpdateMany}};\n"
             )),
         }
+    }
+    if include_client {
+        out.push('\n');
+        match orm {
+            ModelOrm::SeaOrm => {
+                out.push_str(
+                    r#"pub async fn configure_context(
+    ctx: ServiceContext,
+) -> anyhow::Result<ServiceContext> {
+    Ok(ctx)
+}
+"#,
+                );
+            }
+            ModelOrm::Toasty => {
+                let model_list = models
+                    .iter()
+                    .map(|model| format!("crate::model::{}", to_pascal_case(&model.name)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    r#"#[derive(Clone)]
+struct ToastyModelRuntime {{
+    db: Option<toasty::Db>,
+    shards: std::collections::BTreeMap<String, toasty::Db>,
+}}
+
+pub async fn configure_context(
+    ctx: ServiceContext,
+) -> anyhow::Result<ServiceContext> {{
+    let mut db = None;
+    let mut shards = std::collections::BTreeMap::new();
+    if let Some(database) = ctx.config.database.as_ref() {{
+        match database.mode {{
+            roze_config::DatabaseMode::Direct | roze_config::DatabaseMode::Proxy => {{
+                db = Some(
+                    toasty::Db::builder()
+                        .models(toasty::models!({model_list}))
+                        .connect(&database.url)
+                        .await?,
+                );
+            }}
+            roze_config::DatabaseMode::Sharded => {{
+                let topology = database.topology.as_ref().ok_or_else(|| {{
+                    anyhow::anyhow!("database.mode=sharded requires database.topology")
+                }})?;
+                for shard in &topology.shards {{
+                    let connection = toasty::Db::builder()
+                        .models(toasty::models!({model_list}))
+                        .connect(&shard.primary)
+                        .await?;
+                    if shards.insert(shard.id.clone(), connection).is_some() {{
+                        anyhow::bail!("duplicate Toasty shard id `{{}}`", shard.id);
+                    }}
+                }}
+            }}
+        }}
+    }}
+    ctx.insert_extension(ToastyModelRuntime {{ db, shards }});
+    Ok(ctx)
+}}
+"#
+                ));
+            }
+        }
+        out.push_str(
+            r#"
+impl ServiceContext {
+    pub fn model(&self) -> ModelClient<'_> {
+        ModelClient::new(self)
+    }
+"#,
+        );
+        if orm == ModelOrm::Toasty {
+            out.push_str(
+                r#"
+    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db> {
+        self.require_extension::<ToastyModelRuntime>()?
+            .db
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("toasty database connection is not configured"))
+    }
+
+    pub fn toasty_db_for_key<K>(&self, key: &K) -> anyhow::Result<toasty::Db>
+    where
+        K: roze_db::ShardKey + ?Sized,
+    {
+        let route = self.sharded_db()?.route(key);
+        self.require_extension::<ToastyModelRuntime>()?
+            .shards
+            .get(route.shard_id().as_str())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Toasty database connection for shard `{}` is not configured",
+                    route.shard_id()
+                )
+            })
+    }
+"#,
+            );
+        }
+        out.push_str("}\n");
     }
     out
 }
@@ -1705,6 +1663,36 @@ fn render_model_client(models: &[ModelSpec], orm: ModelOrm) -> String {
                 .unwrap();
                 writeln!(out, "        self.{method}_mutation_hooks.iter().fold({pascal}Repository::new(self.ctx), |repository, hooks| repository.with_mutation_hooks(*hooks))").unwrap();
                 writeln!(out, "    }}").unwrap();
+                if let Some(shard) =
+                    model_shard_spec(model).expect("validated model shard annotation")
+                {
+                    writeln!(out).unwrap();
+                    writeln!(
+                        out,
+                        "    pub fn {method}_for_key<K>(&self, key: &K) -> anyhow::Result<{pascal}Repository<'a>>"
+                    )
+                    .unwrap();
+                    writeln!(out, "    where").unwrap();
+                    writeln!(out, "        K: roze_db::ShardKey + ?Sized,").unwrap();
+                    writeln!(out, "    {{").unwrap();
+                    writeln!(out, "        let database = self.ctx.sharded_db()?;").unwrap();
+                    writeln!(
+                        out,
+                        "        if database.topology() != {:?} {{",
+                        shard.topology
+                    )
+                    .unwrap();
+                    writeln!(
+                        out,
+                        "            anyhow::bail!(\"model `{}` requires database topology `{}`, configured topology is `{{}}`\", database.topology());",
+                        model.name, shard.topology
+                    )
+                    .unwrap();
+                    writeln!(out, "        }}").unwrap();
+                    writeln!(out, "        let route = database.route(key);").unwrap();
+                    writeln!(out, "        Ok(self.{method}_mutation_hooks.iter().fold({pascal}Repository::new(self.ctx).with_shard_route(route), |repository, hooks| repository.with_mutation_hooks(*hooks)))").unwrap();
+                    writeln!(out, "    }}").unwrap();
+                }
             }
             ModelOrm::Toasty => {
                 writeln!(out, "    pub fn {method}(&self) -> {pascal}Repository {{").unwrap();
@@ -1760,6 +1748,17 @@ fn render_model_client(models: &[ModelSpec], orm: ModelOrm) -> String {
         )
         .unwrap();
         writeln!(out, "        self.ctx.toasty_db()").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "    pub fn toasty_db_for_key<K>(&self, key: &K) -> anyhow::Result<toasty::Db>"
+        )
+        .unwrap();
+        writeln!(out, "    where").unwrap();
+        writeln!(out, "        K: roze_db::ShardKey + ?Sized,").unwrap();
+        writeln!(out, "    {{").unwrap();
+        writeln!(out, "        self.ctx.toasty_db_for_key(key)").unwrap();
         writeln!(out, "    }}").unwrap();
     }
     writeln!(out, "}}").unwrap();
@@ -2565,6 +2564,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         .unwrap_or_else(|| (cache_ttl_secs / 6).clamp(5, 60));
     let cache_prefix = model.cache_prefix.as_deref().unwrap_or(table_name);
     let cache_fields = cache_lookup_fields(model);
+    let shard_spec = model_shard_spec(model).expect("validated model shard annotation");
     let mut out = String::new();
     use std::fmt::Write as _;
 
@@ -2697,6 +2697,9 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
+    if shard_spec.is_some() {
+        writeln!(&mut out, "    shard_route: Option<roze_db::ShardRoute>,").unwrap();
+    }
     writeln!(
         &mut out,
         "    mutation_hooks: Vec<&'a dyn {pascal}MutationHooks>,"
@@ -2710,13 +2713,32 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "    pub fn new(ctx: &'a ServiceContext) -> Self {{"
     )
     .unwrap();
-    writeln!(
-        &mut out,
-        "        Self {{ ctx, mutation_hooks: Vec::new() }}"
-    )
-    .unwrap();
+    if shard_spec.is_some() {
+        writeln!(
+            &mut out,
+            "        Self {{ ctx, shard_route: None, mutation_hooks: Vec::new() }}"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            &mut out,
+            "        Self {{ ctx, mutation_hooks: Vec::new() }}"
+        )
+        .unwrap();
+    }
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    if shard_spec.is_some() {
+        writeln!(
+            &mut out,
+            "    pub fn with_shard_route(mut self, route: roze_db::ShardRoute) -> Self {{"
+        )
+        .unwrap();
+        writeln!(&mut out, "        self.shard_route = Some(route);").unwrap();
+        writeln!(&mut out, "        self").unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+    }
     writeln!(
         &mut out,
         "    pub fn with_mutation_hooks(mut self, hooks: &'a dyn {pascal}MutationHooks) -> Self {{"
@@ -2731,7 +2753,17 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "    fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
     )
     .unwrap();
-    writeln!(&mut out, "        self.ctx.read_db()").unwrap();
+    if shard_spec.is_some() {
+        writeln!(
+            &mut out,
+            "        self.shard_route.as_ref().map(roze_db::ShardRoute::read).ok_or_else(|| anyhow::anyhow!(\"sharded model `{}` requires explicit routing with `ctx.model().{}_for_key(...)`\"))",
+            model.name,
+            model_field_ident_by_name(&to_snake_case(&model.name))
+        )
+        .unwrap();
+    } else {
+        writeln!(&mut out, "        self.ctx.read_db()").unwrap();
+    }
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -2739,7 +2771,17 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "    fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
     )
     .unwrap();
-    writeln!(&mut out, "        self.ctx.write_db()").unwrap();
+    if shard_spec.is_some() {
+        writeln!(
+            &mut out,
+            "        self.shard_route.as_ref().map(roze_db::ShardRoute::write).ok_or_else(|| anyhow::anyhow!(\"sharded model `{}` requires explicit routing with `ctx.model().{}_for_key(...)`\"))",
+            model.name,
+            model_field_ident_by_name(&to_snake_case(&model.name))
+        )
+        .unwrap();
+    } else {
+        writeln!(&mut out, "        self.ctx.write_db()").unwrap();
+    }
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     render_sea_orm_transaction_method(&mut out);
@@ -13829,11 +13871,37 @@ fn validate_model_specs(models: Vec<ModelSpec>) -> anyhow::Result<Vec<ModelSpec>
     let mut generated_modules = HashMap::<String, String>::new();
     let mut generated_types = HashMap::<String, String>::new();
     let mut model_indexes = HashMap::<String, &ModelSpec>::new();
+    let mut shard_groups = HashMap::<String, (String, String, String)>::new();
 
     for model in &models {
         validate_model_generated_names(model)?;
         validate_ent_field_invariants(model)?;
         validate_model_field_validations(model)?;
+        if let Some(shard) = model_shard_spec(model)? {
+            validate_model_shard_spec(model, &shard)?;
+            let key_type = model
+                .fields
+                .iter()
+                .find(|field| field.name == shard.key)
+                .expect("validated shard key")
+                .ty
+                .clone();
+            if let Some((topology, key, existing_type)) = shard_groups.insert(
+                shard.group.clone(),
+                (shard.topology.clone(), shard.key.clone(), key_type.clone()),
+            ) {
+                if topology != shard.topology || key != shard.key || existing_type != key_type {
+                    bail!(
+                        "shard group `{}` must use one topology and shard-key contract; model `{}` declares topology `{}`, key `{}` ({}) but the group already uses topology `{topology}`, key `{key}` ({existing_type})",
+                        shard.group,
+                        model.name,
+                        shard.topology,
+                        shard.key,
+                        key_type
+                    );
+                }
+            }
+        }
 
         let module = to_snake_case(&model.name);
         if let Some(previous) = generated_modules.insert(module.clone(), model.name.clone()) {
@@ -13864,7 +13932,95 @@ fn validate_model_spec(model: ModelSpec) -> anyhow::Result<ModelSpec> {
     validate_model_generated_names(&model)?;
     validate_ent_field_invariants(&model)?;
     validate_model_field_validations(&model)?;
+    if let Some(shard) = model_shard_spec(&model)? {
+        validate_model_shard_spec(&model, &shard)?;
+    }
     Ok(model)
+}
+
+fn model_shard_spec(model: &ModelSpec) -> anyhow::Result<Option<ModelShardSpec>> {
+    let mut matches = model.annotations.iter().filter(|annotation| {
+        annotation
+            .name
+            .rsplit('.')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("RozeShard"))
+    });
+    let Some(annotation) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        bail!("model `{}` declares RozeShard more than once", model.name);
+    }
+    let (name, arguments, rest) = parse_ent_call_prefix(&annotation.expression, 0)?;
+    if !name
+        .rsplit('.')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("RozeShard"))
+        || !rest.trim().is_empty()
+    {
+        bail!(
+            "model `{}` has invalid RozeShard annotation `{}`",
+            model.name,
+            annotation.expression
+        );
+    }
+    let values = parse_ent_value_list(&arguments, 0)?;
+    if values.len() != 3 {
+        bail!(
+            "model `{}` RozeShard requires exactly three arguments: key, topology, group",
+            model.name
+        );
+    }
+    Ok(Some(ModelShardSpec {
+        key: values[0].clone(),
+        topology: values[1].clone(),
+        group: values[2].clone(),
+    }))
+}
+
+fn validate_model_shard_spec(model: &ModelSpec, shard: &ModelShardSpec) -> anyhow::Result<()> {
+    let field = model
+        .fields
+        .iter()
+        .find(|field| field.name == shard.key)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "model `{}` shard key field `{}` not found",
+                model.name,
+                shard.key
+            )
+        })?;
+    if is_optional_type(&field.ty) {
+        bail!(
+            "model `{}` shard key field `{}` cannot be optional",
+            model.name,
+            shard.key
+        );
+    }
+    if !field.immutable {
+        bail!(
+            "model `{}` shard key field `{}` must be immutable",
+            model.name,
+            shard.key
+        );
+    }
+    for (label, value) in [
+        ("topology", shard.topology.as_str()),
+        ("group", shard.group.as_str()),
+    ] {
+        if value.is_empty()
+            || !value.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            bail!(
+                "model `{}` shard {label} `{value}` must contain only ASCII letters, digits, `-`, or `_`",
+                model.name
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_ent_field_invariants(model: &ModelSpec) -> anyhow::Result<()> {
@@ -25340,22 +25496,16 @@ impl ServiceContext {
         assert!(mod_rs.contains("pub mod user_fields;"));
         assert!(mod_rs.contains("pub use user_fields::{UserField, USER_TABLE};"));
         assert!(mod_rs.contains("pub mod user_ext;"));
+        assert!(mod_rs.contains("struct ToastyModelRuntime"));
+        assert!(mod_rs.contains("pub async fn configure_context("));
+        assert!(mod_rs.contains("toasty::models!(crate::model::User)"));
+        assert!(mod_rs.contains("pub fn model(&self) -> ModelClient<'_>"));
+        assert!(mod_rs.contains("pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
         let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("svc read");
-        assert!(svc.contains("#[derive(Clone)]"));
-        assert!(!svc.contains("#[derive(Clone, Debug)]"));
-        assert!(svc.contains("pub toasty_db: Option<toasty::Db>"));
-        assert!(svc.contains("toasty::models!(crate::model::User)"));
-        assert!(svc.contains("pub fn model(&self) -> crate::model::ModelClient<'_>"));
-        assert!(svc.contains("crate::model::ModelClient::new(self)"));
-        assert!(svc.contains("pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
-        assert!(
-            svc.find("pub fn read_db").expect("read_db")
-                < svc.find("pub fn toasty_db").expect("toasty_db")
-        );
-        assert!(svc.contains("    }\n\n    pub fn toasty_db(&self) -> anyhow::Result<toasty::Db>"));
-        assert!(!svc.contains(
-            "pub fn read_db(&self) -> anyhow::Result<&roze_db::DatabaseConnection> {\n\n    pub fn toasty_db"
-        ));
+        assert!(svc.contains("#[derive(Clone, Debug)]"));
+        assert!(!svc.contains("pub toasty_db: Option<toasty::Db>"));
+        assert!(!svc.contains("toasty::models!("));
+        assert!(!svc.contains("pub fn model(&self)"));
         let client = fs::read_to_string(out.join("src/model/client.rs")).expect("client read");
         assert!(client.contains("pub struct ModelClient<'a>"));
         assert!(client.contains("pub fn user(&self) -> UserRepository"));
@@ -25377,6 +25527,7 @@ impl ServiceContext {
             ),
         )
         .expect("write custom service context extension");
+        let custom_svc = fs::read_to_string(&svc_path).expect("custom svc before model update");
 
         generate_model_project(
             r#"
@@ -25398,18 +25549,10 @@ impl ServiceContext {
         .expect("update generate");
 
         let svc = fs::read_to_string(&svc_path).expect("updated svc read");
-        assert!(svc.contains("crate::model::User"));
-        assert!(svc.contains("crate::model::AdminToken"));
-        assert!(svc.contains("pub fn custom_dependency(&self) -> bool"));
-        let status = Command::new("rustfmt")
-            .args(["--edition", "2021", "--check"])
-            .arg(&svc_path)
-            .status()
-            .expect("check model-updated service context formatting");
-        assert!(
-            status.success(),
-            "model-updated service context must pass rustfmt"
-        );
+        assert_eq!(svc, custom_svc);
+        let mod_rs = fs::read_to_string(out.join("src/model/mod.rs")).expect("updated model mod");
+        assert!(mod_rs.contains("crate::model::User"));
+        assert!(mod_rs.contains("crate::model::AdminToken"));
     }
 
     #[test]
@@ -27750,6 +27893,10 @@ impl ServiceContext {
     pub fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {
         Ok(&self.write)
     }
+
+    pub fn sharded_db(&self) -> anyhow::Result<&roze_db::ShardedDatabase> {
+        anyhow::bail!("compile-only fixture has no sharded runtime")
+    }
 }
 "#,
         )
@@ -27803,8 +27950,12 @@ impl ServiceContext {
             entity Order {
                 table "orders"
                 cache false
+                Annotations(RozeShard("tenant_id", "commerce", "order"))
                 field id: i64 {
                     primary
+                }
+                field tenant_id: i64 {
+                    immutable
                 }
                 field user_id: i64 {
                 }
@@ -28026,11 +28177,16 @@ pub async fn load_three_levels<'ctx>(
     fn add_local_roze_orm_dependency(out: &Path) {
         let manifest = out.join("Cargo.toml");
         let mut content = fs::read_to_string(&manifest).expect("read generated manifest");
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/roze-orm")
-            .to_string_lossy()
-            .replace('\\', "/");
-        content.push_str(&format!("roze-orm = {{ path = {path:?} }}\n"));
+            .parent()
+            .expect("Roze crates directory")
+            .to_path_buf();
+        let orm_path = crates.join("roze-orm").to_string_lossy().replace('\\', "/");
+        let db_path = crates.join("roze-db").to_string_lossy().replace('\\', "/");
+        content.push_str(&format!(
+            "roze-orm = {{ path = {orm_path:?} }}\nroze-db = {{ path = {db_path:?} }}\n"
+        ));
         fs::write(manifest, content).expect("add local roze-orm dependency");
     }
 
@@ -28228,6 +28384,67 @@ version = "0.0.0"
             status.success(),
             "generated model must pass rustfmt --check"
         );
+    }
+
+    #[test]
+    fn ent_shard_annotation_generates_explicit_repository_routing() {
+        let source = r#"
+entity Order {
+  table "orders"
+  Annotations(RozeShard("tenant_id", "commerce", "order"))
+
+  field id: i64 {
+    primary
+  }
+  field tenant_id: i64 {
+    immutable
+  }
+}
+"#;
+        let models =
+            parse_models_with_format(source, ModelFormat::Ent).expect("parse sharded model");
+        let shard = model_shard_spec(&models[0])
+            .expect("parse shard annotation")
+            .expect("shard annotation");
+        assert_eq!(shard.key, "tenant_id");
+        assert_eq!(shard.topology, "commerce");
+        assert_eq!(shard.group, "order");
+
+        let repository = render_model_module(&models[0]);
+        assert!(repository.contains("shard_route: Option<roze_db::ShardRoute>"));
+        assert!(repository.contains("pub fn with_shard_route"));
+        assert!(repository.contains("requires explicit routing"));
+
+        let client = render_model_client(&models, ModelOrm::SeaOrm);
+        assert!(client.contains("pub fn order_for_key<K>"));
+        assert!(client.contains("database.topology() != \"commerce\""));
+        assert!(client.contains("database.route(key)"));
+    }
+
+    #[test]
+    fn ent_shard_key_must_exist_be_required_and_immutable() {
+        for (field, expected) in [
+            (
+                "field tenant_id: i64? {\n    immutable\n  }",
+                "cannot be optional",
+            ),
+            ("field tenant_id: i64 {\n  }", "must be immutable"),
+        ] {
+            let source = format!(
+                r#"
+entity Order {{
+  Annotations(RozeShard("tenant_id", "commerce", "order"))
+  field id: i64 {{
+    primary
+  }}
+  {field}
+}}
+"#
+            );
+            let error = parse_models_with_format(&source, ModelFormat::Ent)
+                .expect_err("invalid shard key must fail");
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
     }
 
     fn write_generated_crate_manifest(out: &std::path::Path, manifest: &str) {

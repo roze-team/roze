@@ -14,6 +14,16 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Added preserved API/RPC `src/application.rs` hooks for attaching report data
   sources and other application resources without editing generated context or
   bootstrap files.
+- Added a typed, cloneable application extension store to generated REST/RPC
+  service contexts, and moved model context wiring under `src/model` so RPC,
+  REST, and model updates no longer compete for `src/svc/mod.rs`.
+- Added preserved root and REST group logic preludes. Custom module
+  declarations now keep their original module level while generated logic
+  indexes remain fully generator-owned.
+- Added explicit ent database sharding with deterministic Jump Hash routing,
+  per-shard primary/replica pools, pinned single-shard transactions, generated
+  SeaORM/Toasty routing entry points, migration fan-out reports, readiness, and
+  bounded shard metrics.
 - Bound passing long-run evidence reports to verified fixed-runner artifacts,
   portable SHA-256 manifests, real elapsed duration, and GitHub provenance.
 - Added promotion smoke coverage that rejects modified artifacts and shortened

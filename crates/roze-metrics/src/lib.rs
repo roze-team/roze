@@ -20,6 +20,7 @@ static RESILIENCE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static REPORT_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static WEBSOCKET_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static OUTBOX_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static DATABASE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 const LATENCY_BUCKETS: usize = 65;
 
 /// Fixed-memory, power-of-two latency histogram for long-running evidence.
@@ -469,6 +470,25 @@ pub fn record_outbox_event(driver: impl Into<String>, outcome: impl Into<String>
     outbox_metrics_registry().inc_counter("roze_outbox_events_total", labels, 1);
 }
 
+pub fn record_database_shard_route(topology: impl Into<String>, shard: impl Into<String>) {
+    let labels = MetricLabels::new()
+        .insert("topology", topology)
+        .insert("shard", shard);
+    database_metrics_registry().inc_counter("roze_database_shard_routes_total", labels, 1);
+}
+
+pub fn record_database_shard_health(
+    topology: impl Into<String>,
+    shard: impl Into<String>,
+    outcome: impl Into<String>,
+) {
+    let labels = MetricLabels::new()
+        .insert("topology", topology)
+        .insert("shard", shard)
+        .insert("outcome", outcome);
+    database_metrics_registry().inc_counter("roze_database_shard_health_checks_total", labels, 1);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -500,6 +520,7 @@ pub fn http_metrics() -> String {
     out.push_str(&report_metrics_registry().render());
     out.push_str(&websocket_metrics_registry().render());
     out.push_str(&outbox_metrics_registry().render());
+    out.push_str(&database_metrics_registry().render());
     out
 }
 
@@ -537,6 +558,10 @@ pub fn websocket_metrics_registry() -> &'static MetricRegistry {
 
 pub fn outbox_metrics_registry() -> &'static MetricRegistry {
     OUTBOX_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn database_metrics_registry() -> &'static MetricRegistry {
+    DATABASE_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -592,6 +617,18 @@ mod tests {
         assert!(
             metrics.contains("roze_outbox_events_total{driver=\"postgres\",outcome=\"claimed\"}")
         );
+    }
+
+    #[test]
+    fn renders_bounded_database_shard_metrics() {
+        record_database_shard_route("commerce", "shard-00");
+        record_database_shard_health("commerce", "shard-00", "ok");
+        let metrics = http_metrics();
+        assert!(metrics.contains("roze_database_shard_routes_total"));
+        assert!(metrics.contains("roze_database_shard_health_checks_total"));
+        assert!(metrics.contains(r#"topology="commerce""#));
+        assert!(metrics.contains(r#"shard="shard-00""#));
+        assert!(metrics.contains(r#"outcome="ok""#));
     }
 
     #[test]

@@ -87,10 +87,20 @@ This keeps route registration, handler adaptation, business logic, context,
 validation, errors, tracing, and response contracts uniform across teams.
 `src/svc/mod.rs` is framework-owned and refreshed on REST/RPC updates;
 application resources and background services belong in the preserved
-`src/application.rs` hooks.
+`src/application.rs` hooks. `ServiceContext` includes a cloneable, type-safe
+application extension store, so custom resources remain bound to the service
+instance instead of process-global singletons.
 Generated services also include optional NATS/outbox slots in `ServiceContext`,
 so reliable event publishing follows the same convention in API and RPC
 projects.
+Model generation owns its context hook and `ServiceContext::model()` extension
+under `src/model`; REST/RPC and model `--update` commands can therefore run in
+either order without rewriting each other's files.
+Ent models can opt into explicit database sharding with a `RozeShard`
+annotation. Roze provides deterministic Jump Hash routing, per-shard
+primary/replica pools, single-shard transactions, migration fan-out, health
+checks, and bounded metrics; cross-shard queries remain application-owned. See
+[Database Sharding Contract](docs/contracts/database-sharding.md).
 
 `rozectl` generates the scaffold and glue code: API projects, RPC projects,
 model modules, search repositories, documentation, client SDKs, Dockerfiles,
@@ -208,12 +218,13 @@ cargo run -p rozectl -- api generate example/user.api \
 ```
 
 `--update` preserves `src/logic/prelude.rs`, REST
-`src/logic/<group>/<method>.rs`, RPC `src/logic/<method>.rs`, custom REST
-middleware files under `src/middleware/`, and `config.yaml`. Put shared logic
-module declarations, attributes, imports, and re-exports in the prelude;
-generated `logic/mod.rs` indexes are refreshed. Generated glue such as
-`src/route/`, `src/handler/`, `src/server/`, `src/client/`, DTOs, OpenAPI, and
-proto/build files is refreshed.
+`src/logic/<group>/prelude.rs`, REST `src/logic/<group>/<method>.rs`, RPC
+`src/logic/<method>.rs`, custom REST middleware files under `src/middleware/`,
+and `config.yaml`. Put service-wide logic declarations and imports in the root
+prelude, and REST group-local helper declarations and re-exports in the matching
+group prelude; generated `logic/mod.rs` indexes are refreshed. Generated glue
+such as `src/route/`, `src/handler/`, `src/server/`, `src/client/`, DTOs,
+OpenAPI, and proto/build files is refreshed.
 Use `--force` only for a full rebuild. New projects use
 `https://github.com/roze-team/roze.git` dependencies by default; pass
 `--roze-source path` for projects inside this repository.

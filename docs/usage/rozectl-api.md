@@ -133,6 +133,7 @@ cargo run -p rozectl -- api generate example/user.api \
 - REST `src/config/mod.rs`
 - REST `src/handler/<group>/<method>.rs`
 - REST/RPC `src/logic/prelude.rs`
+- REST `src/logic/<group>/prelude.rs`
 - REST/RPC `src/application.rs`
 - REST service-wide middleware hook `src/middleware/app.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
@@ -164,8 +165,9 @@ Generated glue such as route registration, handler and logic module indexes,
 DTOs, OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`,
 and `proto/service.proto` is refreshed. Put application-owned logic module
 attributes, declarations, imports, and re-exports in
-`src/logic/prelude.rs`; it is imported by generated logic and preserved
-verbatim. Use `--force` when you want a full rebuild.
+`src/logic/prelude.rs`. For REST helpers scoped to one route group, use
+`src/logic/<group>/prelude.rs`. Both prelude forms are imported by generated
+logic and preserved verbatim. Use `--force` when you want a full rebuild.
 
 ## WebSocket routes
 
@@ -646,6 +648,29 @@ pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceCon
     Ok(ctx.with_report_source(std::sync::Arc::new(reports)))
 }
 ```
+
+Application-specific resources can use the same preserved hook without adding
+fields to generated `src/svc/mod.rs`:
+
+```rust
+#[derive(Clone)]
+struct CaptchaProvider {
+    // provider clients and policy
+}
+
+pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {
+    Ok(ctx.with_extension(CaptchaProvider {
+        // initialize from ctx.config
+    }))
+}
+
+// Application logic:
+let provider = ctx.require_extension::<CaptchaProvider>()?;
+```
+
+`ApplicationExtensions` is type-safe and shared by every clone of
+`ServiceContext`. It supports inserting owned values or `Arc<T>`, lookup,
+required lookup, replacement, and removal without a process-global singleton.
 
 Handlers receive the authenticated subject, tenant, cancellation signal, and
 bounded structured query rather than client-supplied SQL. The shared executor
@@ -1261,13 +1286,13 @@ are parsed and validated normally. Their OpenAPI parameters use
 During `--update`, generated REST and RPC projects replace `src/svc/mod.rs`
 with the current framework template. Do not put application-owned fields,
 initialization, or methods in that file; attach custom resources from
-`src/application.rs`. Projects generated before this ownership rule must move
-such code before upgrading. If the project also uses generated models, run
-model generation after REST/RPC generation so model-specific context wiring is
-applied to the refreshed service context. Root and group-level logic module
-indexes are generator-owned and refreshed. Keep custom module declarations,
-attributes, imports, and re-exports in the preserved
-`src/logic/prelude.rs`.
+`src/application.rs` through the typed application extension store. Projects
+generated before this ownership rule must move such code before upgrading.
+Generated model context wiring lives under `src/model`; model and REST/RPC
+updates may run in either order without changing `src/svc/mod.rs`. Root and
+group-level logic module indexes are generator-owned and refreshed. Keep
+service-wide custom declarations in the preserved `src/logic/prelude.rs`, and
+REST group-local declarations in `src/logic/<group>/prelude.rs`.
 
 ## Type mapping
 
@@ -1988,6 +2013,21 @@ compatibility method queries by every primary-key field and then inserts or
 updates; callers that require concurrent atomicity must wrap the operation in
 an appropriate transaction or use a database-specific implementation.
 
+### Explicit database sharding
+
+Use the ent annotation
+`Annotations(RozeShard("<key>", "<topology>", "<group>"))` for models that
+must be routed to a native Roze database topology. The key field must be
+non-null and immutable. Generated SeaORM clients expose
+`<model>_for_key(&key)`; Toasty clients expose `toasty_db_for_key(&key)`.
+Unrouted access to a sharded SeaORM repository fails before SQL execution.
+
+Roze uses one versioned Jump Consistent Hash route, pins transactions to the
+resolved shard, and deliberately does not scatter queries or emulate
+cross-shard transactions. Configuration, migration fan-out, metrics, proxy
+mode, and topology-change constraints are defined by the
+[Database Sharding Contract](../contracts/database-sharding.md).
+
 SQL repositories additionally generate:
 
 - `<model>_fields.rs` files with table-name constants, `{Model}Field` enums,
@@ -2056,11 +2096,10 @@ SQL repositories additionally generate:
   files before the transactional generation plan commits. Stream generation
   applies the same rule in create, `--update`, and `--force` modes while
   preserving its application-owned consumer during updates. Model extension
-  files, logic, config, and custom middleware remain untouched. When generated
-  model registries or managed RPC-client sections update `src/svc/mod.rs`,
-  rozectl formats that mixed-ownership file while preserving application-owned
-  declarations. Rustfmt child-module traversal is disabled so formatting cost
-  is bounded by the explicitly touched files
+  files, logic, config, and custom middleware remain untouched. Model runtime
+  and accessors are formatted under `src/model`; managed RPC-client sections
+  remain in generator-owned `src/svc/mod.rs`. Rustfmt child-module traversal is
+  disabled so formatting cost is bounded by the explicitly touched files
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - filtered SeaORM queries over numeric fields, including nullable numeric
@@ -2136,8 +2175,9 @@ SQL repositories additionally generate:
 - create, update, and update-many builders get `clear_<field>()` helpers for
   nullable fields, for example `.clear_nickname()`
 - service projects with `src/svc/mod.rs` also get `src/model/client.rs`,
-  `ModelClient`, and `ServiceContext::model()` as the ent-style model entry
-  point
+  `ModelClient`, a generated model initialization hook, and
+  `ServiceContext::model()` under `src/model`. Model generation does not modify
+  `src/svc/mod.rs`
 - Toasty and SeaORM query generation count with the filter-only query and apply
   `ORDER BY`, `LIMIT`, and `OFFSET` only to the list query
 - composite-index helpers such as `find_by_tenant_id_and_name` for unique

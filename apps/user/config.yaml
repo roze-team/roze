@@ -52,6 +52,7 @@ governance:
 #  topic_regex: "^user\\."
 #  consumer_workers: 1
 # database:
+#   mode: direct # direct, proxy, or sharded
 #   url: sqlite://data/user.db?mode=rwc
 #   # policy: round-robin # round-robin or random
 #   # replicas:
