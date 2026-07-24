@@ -312,6 +312,10 @@ The generated entrypoint constructs Kafka through
 `roze_mq::Subscriber` trait. `--broker` selects the generated Cargo feature and
 initial `kafka.provider` value. `config.yaml` and
 `src/stream/consumer.rs` remain application-owned during `--update`.
+Create, `--update`, and `--force` generation format framework-owned Rust files
+inside the transactional staging directory before replacing the target, so a
+successful command is immediately clean under `cargo fmt --all -- --check`.
+Update formatting never rewrites the application-owned consumer or config.
 
 `rust-native` uses rskafka and is experimental/publish-only because upstream
 does not implement Consumer Groups or Offset Commit. A generated consuming
@@ -397,6 +401,12 @@ bounded retry policy. Automatic retries are restricted to GET and HEAD,
 hard-capped at five attempts, and use `Retry-After` or full-jitter exponential
 backoff for HTTP 429/502/503/504 and transport failures. Mutating methods are
 never replayed automatically.
+
+TypeScript interfaces preserve declared nested API types recursively, including
+custom objects, custom-object arrays, `Option<T>`, and JSON field renames.
+Fields marked with `validate:"optional"` or `validate:"omitempty"` are emitted
+as optional properties. Type resolution uses the complete API type graph and
+does not depend on declaration order.
 
 ```bash
 rozectl contract diff \
@@ -1989,11 +1999,14 @@ SQL repositories additionally generate:
   `into_query()`. Both preserve generated predicates, soft-delete scope,
   ordering, limit, and offset before returning the native query object
 - create and `--update` generation run rustfmt only over framework-owned Rust
-  files. Model extension files, logic, config, and custom middleware remain
-  untouched. When generated model registries or managed RPC-client sections
-  update `src/svc/mod.rs`, rozectl formats that mixed-ownership file while
-  preserving application-owned declarations. Rustfmt child-module traversal
-  is disabled so formatting cost is bounded by the explicitly touched files
+  files before the transactional generation plan commits. Stream generation
+  applies the same rule in create, `--update`, and `--force` modes while
+  preserving its application-owned consumer during updates. Model extension
+  files, logic, config, and custom middleware remain untouched. When generated
+  model registries or managed RPC-client sections update `src/svc/mod.rs`,
+  rozectl formats that mixed-ownership file while preserving application-owned
+  declarations. Rustfmt child-module traversal is disabled so formatting cost
+  is bounded by the explicitly touched files
 - update-many and delete-many mutation builders also support the same
   `where_all`, `where_any`, `where_not`, and `where_none` predicate groups
 - filtered SeaORM queries over numeric fields, including nullable numeric

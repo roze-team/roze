@@ -692,6 +692,7 @@ pub fn write_stream_worker_project_with_broker(
 
     let plan = plan::GenerationPlan::prepare(out, options.mode)?;
     write_stream_worker_project_in_place(&spec, api, plan.staged(), out, options, broker)?;
+    format_new_project_rust(plan.staged(), options.mode)?;
     plan.commit()?;
     register_workspace_member(out)?;
     Ok(())
@@ -3891,6 +3892,12 @@ fn is_framework_owned_rust_file(out: &Path, path: &Path) -> bool {
         return true;
     }
     if normalized == "src/svc/mod.rs" {
+        return true;
+    }
+    if matches!(
+        normalized.as_str(),
+        "src/stream/mod.rs" | "src/stream/envelope.rs" | "src/stream/producer.rs"
+    ) {
         return true;
     }
     false
@@ -12988,6 +12995,10 @@ mod tests {
         );
     }
 
+    fn cargo_fmt_generated(manifest: &Path) {
+        cargo_generated(manifest, "fmt", &["--all", "--", "--check"]);
+    }
+
     fn cargo_generated(manifest: &Path, command: &str, args: &[&str]) {
         let output = std::process::Command::new("cargo")
             .arg(command)
@@ -14332,6 +14343,80 @@ mod tests {
         let native_readme =
             fs::read_to_string(root.join("rust-native/README.md")).expect("read native readme");
         assert!(native_readme.contains("experimental and publish-only"));
+
+        fs::remove_dir_all(root).expect("remove stream root");
+    }
+
+    #[test]
+    fn stream_generation_is_rustfmt_clean_in_every_mode_and_preserves_business_code() {
+        let root = temp_test_root("rozectl-stream-rustfmt-matrix");
+        fs::create_dir_all(&root).expect("create stream root");
+        let api = root.join("events.api");
+        fs::write(
+            &api,
+            r#"
+            service events {
+                rpc EventCreated (EventCreatedReq) returns (EventCreatedResp)
+            }
+            type (
+                EventCreatedReq {
+                    id: u64
+                    labels: []string
+                }
+                EventCreatedResp {
+                    accepted: bool
+                }
+            )
+            "#,
+        )
+        .expect("write stream api");
+
+        for broker in [
+            StreamBroker::Memory,
+            StreamBroker::Rdkafka,
+            StreamBroker::RustNative,
+        ] {
+            let out = root.join(broker.provider_name());
+            write_stream_worker_project_with_broker(
+                &api,
+                &out,
+                GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+                broker,
+            )
+            .expect("create stream project");
+            cargo_fmt_generated(&out.join("Cargo.toml"));
+
+            let consumer = out.join("src/stream/consumer.rs");
+            let custom_consumer = fs::read_to_string(&consumer)
+                .expect("read generated stream consumer")
+                + "\n// Application-owned stream behavior.\n";
+            fs::write(&consumer, &custom_consumer).expect("customize stream consumer");
+            write_stream_worker_project_with_broker(
+                &api,
+                &out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+                broker,
+            )
+            .expect("update stream project");
+            assert_eq!(
+                fs::read_to_string(&consumer).expect("read preserved stream consumer"),
+                custom_consumer
+            );
+            cargo_fmt_generated(&out.join("Cargo.toml"));
+
+            write_stream_worker_project_with_broker(
+                &api,
+                &out,
+                GenerateOptions::new(GenerateMode::Force, DependencySource::Git),
+                broker,
+            )
+            .expect("force stream project");
+            assert_ne!(
+                fs::read_to_string(&consumer).expect("read replaced stream consumer"),
+                custom_consumer
+            );
+            cargo_fmt_generated(&out.join("Cargo.toml"));
+        }
 
         fs::remove_dir_all(root).expect("remove stream root");
     }

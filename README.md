@@ -220,7 +220,9 @@ explicit package metadata and dependency versions.
 `rozectl api client ts example/user.api --out sdk/user.ts` generates a typed
 TypeScript `fetch` client from REST routes and request/response types. The
 generated SDK supports `baseUrl`, per-call headers, injected `fetch`, path
-parameters, query parameters, headers, and JSON bodies.
+parameters, query parameters, headers, and JSON bodies. Declared custom object
+types, nested arrays, optional fields, and JSON field renames remain typed
+across the generated interface graph.
 Use `rozectl api client js example/user.api --out sdk/user.js` for a plain ESM
 JavaScript client with JSDoc typedefs and the same request-building behavior.
 

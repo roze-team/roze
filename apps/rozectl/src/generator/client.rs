@@ -299,10 +299,12 @@ fn render_interface(spec: &ApiSpec, ty: &TypeDef) -> String {
     let mut out = String::new();
     out.push_str(&format!("export interface {} {{\n", ty.name));
     for field in fields {
+        let optional = if field_is_optional(field) { "?" } else { "" };
         out.push_str(&format!(
-            "  {}: {};\n",
+            "  {}{}: {};\n",
             ts_property(field_property_name(field)),
-            ts_type(&field.ty)
+            optional,
+            ts_type(spec, &field.ty)
         ));
     }
     out.push_str("}\n");
@@ -317,7 +319,7 @@ fn render_js_typedef(spec: &ApiSpec, ty: &TypeDef) -> String {
     for field in fields {
         out.push_str(&format!(
             " * @property {{{}}} {}\n",
-            ts_type(&field.ty),
+            ts_type(spec, &field.ty),
             field_property_name(field)
         ));
     }
@@ -604,14 +606,65 @@ fn ts_property(property: String) -> String {
     }
 }
 
-fn ts_type(ty: &str) -> &'static str {
-    match ty {
-        "String" | "string" => "string",
-        "bool" | "boolean" => "boolean",
-        "int" | "uint" | "i32" | "i64" | "u32" | "u64" | "int32" | "int64" | "uint32"
-        | "uint64" | "float" | "double" | "f32" | "f64" => "number",
-        _ => "unknown",
+fn ts_type(spec: &ApiSpec, ty: &str) -> String {
+    let ty = ty.trim().trim_start_matches('*').trim();
+    if let Some(inner) = ty.strip_prefix("[]") {
+        return format!("{}[]", ts_array_element_type(spec, inner));
     }
+    if let Some(inner) = generic_inner(ty, "Vec").or_else(|| generic_inner(ty, "Array")) {
+        return format!("{}[]", ts_array_element_type(spec, inner));
+    }
+    if let Some(inner) = generic_inner(ty, "Option") {
+        return format!("{} | null", ts_type(spec, inner));
+    }
+    if let Some((_, value)) = map_key_value_types(ty) {
+        return format!("Record<string, {}>", ts_type(spec, value));
+    }
+
+    match ty {
+        "String" | "string" => "string".to_string(),
+        "bool" | "boolean" => "boolean".to_string(),
+        "int" | "uint" | "i32" | "i64" | "u32" | "u64" | "int32" | "int64" | "uint32"
+        | "uint64" | "float" | "double" | "f32" | "f64" => "number".to_string(),
+        "bytes" => "number[]".to_string(),
+        _ if spec.types.iter().any(|candidate| candidate.name == ty) => ty.to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn ts_array_element_type(spec: &ApiSpec, ty: &str) -> String {
+    let mapped = ts_type(spec, ty);
+    if mapped.contains(" | ") {
+        format!("({mapped})")
+    } else {
+        mapped
+    }
+}
+
+fn generic_inner<'a>(ty: &'a str, wrapper: &str) -> Option<&'a str> {
+    ty.strip_prefix(wrapper)?
+        .strip_prefix('<')?
+        .strip_suffix('>')
+        .map(str::trim)
+}
+
+fn map_key_value_types(ty: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = ty.strip_prefix("map[") {
+        let (key, value) = rest.split_once(']')?;
+        return Some((key.trim(), value.trim()));
+    }
+    let inner = generic_inner(ty, "HashMap")?;
+    let (key, value) = inner.split_once(',')?;
+    Some((key.trim(), value.trim()))
+}
+
+fn field_is_optional(field: &Field) -> bool {
+    field.validate.as_deref().is_some_and(|rules| {
+        rules
+            .split(',')
+            .map(str::trim)
+            .any(|rule| matches!(rule, "optional" | "omitempty"))
+    })
 }
 
 fn http_method(method: &HttpMethod) -> &'static str {
@@ -768,6 +821,46 @@ mod tests {
         assert!(client.contains("name: req.name"));
         assert!(!client.contains("baseReq:"));
         assert!(!client.contains("req.baseReq"));
+    }
+
+    #[test]
+    fn preserves_nested_custom_types_in_typescript_clients() {
+        let spec = parse_api(
+            r#"
+            service auth-api {
+                @handler authenticate
+                post /auth (AuthReq) returns (AuthResp)
+            }
+            type (
+                AuthResp {
+                    identity AuthIdentity `json:"auth_identity"`
+                    identities []AuthIdentity `json:"identities"`
+                    fallback Option<AuthIdentity> `json:"fallback" validate:"optional"`
+                }
+                AuthReq {
+                    token string `json:"token"`
+                }
+                AuthIdentity {
+                    profile IdentityProfile `json:"profile"`
+                }
+                IdentityProfile {
+                    displayName string `json:"display_name"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let client = render_ts_client(&spec);
+
+        assert!(client.contains("auth_identity: AuthIdentity;"));
+        assert!(client.contains("identities: AuthIdentity[];"));
+        assert!(client.contains("fallback?: AuthIdentity | null;"));
+        assert!(client.contains("profile: IdentityProfile;"));
+        assert!(client.contains("display_name: string;"));
+        assert!(!client.contains("auth_identity: unknown;"));
+        assert!(!client.contains("identities: unknown;"));
+        assert_eq!(client, render_ts_client(&spec));
     }
 
     #[test]
