@@ -235,6 +235,12 @@ selects Redis whenever `cache.url` is configured. A production service with
 an idempotent generated route refuses to start with a memory store. The
 in-memory implementation remains available for local development and tests.
 
+Generated TypeScript clients expose `IdempotentRequestOptions` and require its
+`idempotencyKey` property when calling an idempotent route. JavaScript clients
+document the same required option with JSDoc. The client forwards the value as
+`Idempotency-Key`; callers must retain and reuse it when retrying the same
+logical mutation, and must create a new value for a different mutation.
+
 Roze provides `RedisIdempotencyStore` as the production Redis adapter. It uses
 Lua for atomic begin/complete/fail transitions, validates the request
 fingerprint, reclaims expired execution leases, persists completed JSON for
@@ -407,6 +413,10 @@ custom objects, custom-object arrays, `Option<T>`, and JSON field renames.
 Fields marked with `validate:"optional"` or `validate:"omitempty"` are emitted
 as optional properties. Type resolution uses the complete API type graph and
 does not depend on declaration order.
+
+Routes using the idempotency middleware additionally require
+`IdempotentRequestOptions` at compile time. Its `idempotencyKey` is sent as the
+`Idempotency-Key` request header and can be reused explicitly for a safe retry.
 
 ```bash
 rozectl contract diff \
@@ -707,6 +717,30 @@ tasks mark the shared `HealthRegistry` as draining, so REST `/readyz` stops
 reporting ready while the process exits through the unified shutdown path.
 Generated stream consumers listen to the same shutdown signal and stop worker
 tasks before returning.
+
+REST and RPC projects preserve `src/application.rs` and call its
+`register_services` hook before starting generated servers. Register
+application-owned workers there so they share the standard shutdown signal and
+failure propagation:
+
+```rust
+pub fn register_services(
+    group: &mut roze_service::ServiceGroup,
+    ctx: &ServiceContext,
+) -> anyhow::Result<()> {
+    let worker_ctx = ctx.clone();
+    group.add_fn("outbox-relay", move |shutdown| {
+        let worker_ctx = worker_ctx.clone();
+        async move { run_outbox_relay(worker_ctx, shutdown).await }
+    });
+    Ok(())
+}
+```
+
+`src/application.rs` is application-owned and is never rewritten during
+`--update`. Projects generated before this hook existed must add the current
+hook signature explicitly before upgrading; the generator does not inject a
+legacy compatibility shim.
 
 Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/governance-baseline.yaml`, `ops/prometheus-rules.yaml`, and
@@ -1194,6 +1228,7 @@ type GetUserReq {
   id u64 `path:"id"`
   q string `query:"q"`
   token string `header:"X-Token"`
+  origin string `header:"Origin" validate:"omitempty,max=2048"`
   name string `form:"name"`
   profile Profile `json:"profile"`
 }
@@ -1209,11 +1244,20 @@ field, so omitted filters deserialize to Rust defaults such as `None`, `0`,
 deserialization; use `validate:"required"` or a nonzero range rule when a query
 parameter must be present.
 
-During `--update`, generated REST projects preserve existing `src/svc/mod.rs`
-so application-owned service clients and dependency accessors are not
-overwritten. Group-level logic module indexes such as `src/logic/admin/mod.rs`
-are refreshed for generated handlers while preserving extra app-owned
-`mod ...;` declarations.
+Header fields marked `validate:"optional"` or `validate:"omitempty"` generate
+as `Option<T>`. Missing values reach application logic as `None`; present values
+are parsed and validated normally. Their OpenAPI parameters use
+`required: false`. Header fields without either rule remain required.
+
+During `--update`, generated REST and RPC projects replace `src/svc/mod.rs`
+with the current framework template. Do not put application-owned fields,
+initialization, or methods in that file; attach custom resources from
+`src/application.rs`. Projects generated before this ownership rule must move
+such code before upgrading. If the project also uses generated models, run
+model generation after REST/RPC generation so model-specific context wiring is
+applied to the refreshed service context. Group-level logic module indexes such
+as `src/logic/admin/mod.rs` are refreshed for generated handlers while
+preserving extra app-owned `mod ...;` declarations.
 
 ## Type mapping
 

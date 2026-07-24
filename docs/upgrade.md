@@ -77,6 +77,11 @@ This upgrade intentionally has no compatibility adapters:
   they return `503`.
 - Config admin publish/restore now requires a signing policy and bound
   signature. Partial rollout versions require explicit promotion.
+- `src/svc/mod.rs` is now fully generator-owned and is replaced during REST/RPC
+  `--update`. Move custom resources and initialization into
+  `src/application.rs` before upgrading. No legacy context merger is provided.
+  Run model generation after REST/RPC generation when a service uses generated
+  model context wiring.
 
 Run `rozectl gate check --manifest roze-gate.yaml` before regeneration or
 deployment. Breaking API/Search/SQL changes require a non-expired,

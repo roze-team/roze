@@ -85,6 +85,9 @@ Generated REST services always expose the same Rust project shape:
 `src/pb/mod.rs`, `src/svc/mod.rs`, `src/types/mod.rs`, and `src/logic/`.
 This keeps route registration, handler adaptation, business logic, context,
 validation, errors, tracing, and response contracts uniform across teams.
+`src/svc/mod.rs` is framework-owned and refreshed on REST/RPC updates;
+application resources and background services belong in the preserved
+`src/application.rs` hooks.
 Generated services also include optional NATS/outbox slots in `ServiceContext`,
 so reliable event publishing follows the same convention in API and RPC
 projects.
@@ -222,7 +225,8 @@ TypeScript `fetch` client from REST routes and request/response types. The
 generated SDK supports `baseUrl`, per-call headers, injected `fetch`, path
 parameters, query parameters, headers, and JSON bodies. Declared custom object
 types, nested arrays, optional fields, and JSON field renames remain typed
-across the generated interface graph.
+across the generated interface graph. Idempotent routes require a typed,
+reusable `idempotencyKey` option and forward it as `Idempotency-Key`.
 Use `rozectl api client js example/user.api --out sdk/user.js` for a plain ESM
 JavaScript client with JSDoc typedefs and the same request-building behavior.
 

@@ -46,8 +46,9 @@ Roze 1.x uses Semantic Versioning:
   and test hardening.
 
 Generated code is part of the public contract. A change is breaking if it
-requires users to rewrite preserved `src/logic/**`, `src/svc/mod.rs`, custom
-middleware, config files, or CI/deployment wiring.
+requires users to rewrite preserved `src/logic/**`, `src/application.rs`,
+custom middleware, config files, or CI/deployment wiring. `src/svc/mod.rs` is
+generator-owned and refreshed during REST/RPC updates.
 
 ## MSRV
 

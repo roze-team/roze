@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
-    generator::{rust_identifier, to_pascal_case, to_snake_case},
+    generator::{field_is_optional, rust_identifier, to_pascal_case, to_snake_case},
     parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute, TypeDef},
 };
 
@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let service_shutdown = group.shutdown_listener();
     let ctx = application::configure_context(svc::ServiceContext::new(config).await?).await?;
     tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
+    application::register_services(&mut group, &ctx)?;
     let health = ctx.health.clone();
     if let Some(registry) = registry_health {
         let registry_service = service_name.clone();
@@ -209,9 +210,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
             || route_uses_auth(spec, route)
             || route_uses_idempotency(spec, route)
     }) {
-        out.push_str(
-            "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
-        );
+        out.push_str(header_extractors_rs());
     }
     if spec
         .rest_routes
@@ -230,6 +229,42 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
     out
 }
 
+fn header_extractors_rs() -> &'static str {
+    r#"fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let raw = headers
+        .get(name)
+        .ok_or_else(|| RozeError::BadRequest(format!("missing header `{name}`")))?;
+    let raw = raw
+        .to_str()
+        .map_err(|err| RozeError::BadRequest(format!("invalid header `{name}`: {err}")))?;
+    raw.parse::<T>()
+        .map_err(|err| RozeError::BadRequest(format!("invalid header `{name}`: {err}")))
+}
+
+#[allow(dead_code)]
+fn optional_header_value<T>(headers: &HeaderMap, name: &str) -> Result<Option<T>, RozeError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let Some(raw) = headers.get(name) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|err| RozeError::BadRequest(format!("invalid header `{name}`: {err}")))?;
+    raw.parse::<T>()
+        .map(Some)
+        .map_err(|err| RozeError::BadRequest(format!("invalid header `{name}`: {err}")))
+}
+
+"#
+}
+
 pub fn render_handler_mod(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(unused_imports)]\n\n");
     for group in route_groups(spec).keys() {
@@ -246,9 +281,7 @@ pub fn render_handler_mod(spec: &ApiSpec) -> String {
             || route_uses_auth(spec, route)
             || route_uses_idempotency(spec, route)
     }) {
-        out.push_str(
-            "fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<T, RozeError>\nwhere\n    T: std::str::FromStr,\n    T::Err: std::fmt::Display,\n{\n    let raw = headers\n        .get(name)\n        .ok_or_else(|| RozeError::BadRequest(format!(\"missing header `{name}`\")))?;\n    let raw = raw\n        .to_str()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))?;\n    raw.parse::<T>()\n        .map_err(|err| RozeError::BadRequest(format!(\"invalid header `{name}`: {err}\")))\n}\n\n",
-        );
+        out.push_str(header_extractors_rs());
     }
     if spec
         .rest_routes
@@ -1129,7 +1162,9 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
                 field_wire_name(field),
                 openapi_schema_expr(&field.ty)
             ));
-            required.push(field_wire_name(field));
+            if !field_is_optional(field) {
+                required.push(field_wire_name(field));
+            }
         }
         out.push_str(&format!(
             "        builder = builder.component_schema({:?}, Schema::object(properties, vec![{}]));\n",
@@ -1190,21 +1225,18 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
                         }
                     };
                     out.push_str(&format!(
-                        ".parameter({:?}, {}, {:?}, true)",
+                        ".parameter({:?}, {}, {:?}, {})",
                         field_wire_name(field),
                         location,
-                        map_type(&field.ty)
+                        map_type(&field.ty),
+                        source == FieldSource::Path || !field_is_optional(field)
                     ));
                 }
             }
         }
 
         if route_spec.groups.contains_key(&FieldSource::Json)
-            || (!route_spec.groups.is_empty()
-                && matches!(
-                    route.method,
-                    HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch
-                ))
+            || route_spec.groups.contains_key(&FieldSource::Form)
         {
             out.push_str(&format!(".request_body({:?})", route.request));
         }
@@ -2152,6 +2184,11 @@ fn field_value_expr(
         FieldSource::Query => format!("query.{}", rust_field_name(field)),
         FieldSource::Form => format!("form.{}", rust_field_name(field)),
         FieldSource::Json => format!("body.{}", rust_field_name(field)),
+        FieldSource::Header if field_is_optional(field) => format!(
+            "optional_header_value::<{}>(&headers, \"{}\")?",
+            optional_type_inner(&map_type(&field.ty)),
+            field_wire_name(field)
+        ),
         FieldSource::Header => format!(
             "header_value::<{}>(&headers, \"{}\")?",
             map_type(&field.ty),
@@ -2159,6 +2196,13 @@ fn field_value_expr(
         ),
         FieldSource::Auto => unreachable!(),
     }
+}
+
+fn optional_type_inner(mapped: &str) -> &str {
+    mapped
+        .strip_prefix("Option<")
+        .and_then(|inner| inner.strip_suffix('>'))
+        .unwrap_or(mapped)
 }
 
 fn serde_rename(field: &Field) -> Option<&str> {
@@ -2194,9 +2238,8 @@ fn route_request_spec<'a>(
         );
         if source == FieldSource::Header {
             has_header = true;
-        } else {
-            groups.entry(source).or_default().push(field);
         }
+        groups.entry(source).or_default().push(field);
     }
 
     Some(RouteRequestSpec {
@@ -2954,6 +2997,41 @@ mod tests {
     }
 
     #[test]
+    fn optional_headers_use_option_extraction_and_openapi_optional_parameters() {
+        let spec = parse_api(
+            r#"
+            service public-api {
+                @handler publicConfig
+                get /config (PublicConfigReq) returns (PublicConfigResp)
+            }
+            type (
+                PublicConfigReq {
+                    origin string `header:"origin" validate:"omitempty,max=2048"`
+                    requiredToken string `header:"x-required-token"`
+                }
+                PublicConfigResp {
+                    ok bool `json:"ok"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let handlers = render_handlers(&spec);
+        assert!(handlers.contains("origin: optional_header_value::<String>(&headers, \"origin\")?"));
+        assert!(handlers
+            .contains("required_token: header_value::<String>(&headers, \"x-required-token\")?"));
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi.contains(
+            ".parameter(\"origin\", roze_openapi::ParameterLocation::Header, \"String\", false)"
+        ), "{openapi}");
+        assert!(openapi.contains(
+            ".parameter(\"x-required-token\", roze_openapi::ParameterLocation::Header, \"String\", true)"
+        ));
+    }
+
+    #[test]
     fn renders_route_without_request() {
         let spec = parse_api(
             r#"
@@ -3213,6 +3291,7 @@ mod tests {
         let rendered = render_rest_main(&spec);
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
         assert!(rendered.contains("let health = ctx.health.clone();"));
+        assert!(rendered.contains("application::register_services(&mut group, &ctx)?;"));
         assert!(rendered.contains("RestService::new("));
         assert!(rendered.contains("health.mark_draining();"));
         assert!(rendered.contains("\"service configuration loaded\""));

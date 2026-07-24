@@ -1304,7 +1304,7 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "| `src/svc/mod.rs` | application/dependencies | preserved during `--update` |"
+        "| `src/svc/mod.rs` | framework/dependencies | refreshed by `rozectl ... generate --update` |"
     )
     .unwrap();
     writeln!(
@@ -3586,11 +3586,9 @@ fn generate_rest_project_in_place(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
     )?;
-    write_service_context(
-        &out.join("src/svc/mod.rs"),
+    fs::write(
+        out.join("src/svc/mod.rs"),
         rest_service_context_rs(rpc_clients, spec_uses_idempotency(spec)),
-        options.mode,
-        rpc_clients,
     )?;
     fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
     ensure_model_module(out)?;
@@ -3794,11 +3792,9 @@ fn generate_rpc_project_in_place(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
     )?;
-    write_service_context(
-        &out.join("src/svc/mod.rs"),
+    fs::write(
+        out.join("src/svc/mod.rs"),
         rpc_service_context_rs(rpc_clients, spec_uses_idempotency(spec)),
-        options.mode,
-        rpc_clients,
     )?;
     write_preserved(
         &out.join("src/application.rs"),
@@ -3938,22 +3934,6 @@ fn write_preserved(path: &Path, content: String, mode: GenerateMode) -> anyhow::
         return Ok(());
     }
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn write_service_context(
-    path: &Path,
-    content: String,
-    mode: GenerateMode,
-    rpc_clients: &[RpcClientBinding],
-) -> anyhow::Result<()> {
-    if mode != GenerateMode::Update || !path.exists() {
-        return fs::write(path, content)
-            .with_context(|| format!("failed to write {}", path.display()));
-    }
-    let existing =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let updated = inject_rpc_clients_into_service_context(existing, rpc_clients);
-    fs::write(path, updated).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn write_preserved_logic(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
@@ -11314,8 +11294,30 @@ fn application_context_rs() -> String {
 pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {
     Ok(ctx)
 }
+
+/// Registers application-owned workers and background services.
+///
+/// Every registered service shares Roze's shutdown signal and failure propagation.
+/// This file and the hook body are preserved by `rozectl ... generate --update`.
+pub fn register_services(
+    group: &mut roze_service::ServiceGroup,
+    ctx: &ServiceContext,
+) -> anyhow::Result<()> {
+    let _ = group;
+    let _ = ctx;
+    Ok(())
+}
 "#
     .to_string()
+}
+
+pub(super) fn field_is_optional(field: &crate::parser::Field) -> bool {
+    field.validate.as_deref().is_some_and(|rules| {
+        rules
+            .split(',')
+            .map(str::trim)
+            .any(|rule| matches!(rule, "optional" | "omitempty"))
+    })
 }
 
 fn spec_uses_idempotency(spec: &ApiSpec) -> bool {
@@ -15445,7 +15447,7 @@ mod tests {
         .expect("write application middleware hook");
         fs::write(
             out.join("src/application.rs"),
-            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    // attach application report source\n    Ok(ctx)\n}\n",
+            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    // attach application report source\n    Ok(ctx)\n}\n\npub fn register_services(\n    group: &mut roze_service::ServiceGroup,\n    ctx: &ServiceContext,\n) -> anyhow::Result<()> {\n    let _ = group;\n    let _ = ctx;\n    Ok(())\n}\n",
         )
         .expect("write application context hook");
         fs::write(
@@ -15454,14 +15456,11 @@ mod tests {
         )
         .expect("write custom logic group mod");
         let svc_path = out.join("src/svc/mod.rs");
-        let svc = fs::read_to_string(&svc_path).expect("read svc");
         fs::write(
             &svc_path,
-            format!(
-                "{svc}\nimpl ServiceContext {{\n    pub fn catalog(&self) -> anyhow::Result<()> {{\n        Ok(())\n    }}\n}}\n"
-            ),
+            "pub struct ServiceContext;\n\nimpl ServiceContext {\n    pub fn obsolete_customization(&self) {}\n}\n",
         )
-        .expect("write custom svc extension");
+        .expect("write legacy service context");
         fs::write(out.join("config.yaml"), "name: custom\n").expect("write custom config");
         fs::write(out.join("src/handler/mod.rs"), "// stale handler\n")
             .expect("write stale handler");
@@ -15497,12 +15496,18 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/application.rs"))
             .expect("read application context hook")
             .contains("attach application report source"));
+        assert!(fs::read_to_string(out.join("src/application.rs"))
+            .expect("read preserved application lifecycle hook")
+            .contains("pub fn register_services("));
         assert!(fs::read_to_string(out.join("src/main.rs"))
             .expect("read generated main")
             .contains("middleware::app::apply(app, ctx)"));
         assert!(fs::read_to_string(out.join("src/main.rs"))
             .expect("read generated main")
             .contains("application::configure_context"));
+        assert!(fs::read_to_string(out.join("src/main.rs"))
+            .expect("read generated lifecycle registration")
+            .contains("application::register_services(&mut group, &ctx)?;"));
         assert_eq!(
             fs::read_to_string(out.join("config.yaml")).expect("read config"),
             "name: custom\n"
@@ -15522,14 +15527,88 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/logic/users/mod.rs"))
             .expect("read logic group mod")
             .contains("pub use get_user::{get_user, AdminTokenReq};"));
-        assert!(fs::read_to_string(out.join("src/svc/mod.rs"))
-            .expect("read svc")
-            .contains("pub fn catalog(&self)"));
+        let refreshed_svc =
+            fs::read_to_string(out.join("src/svc/mod.rs")).expect("read refreshed svc");
+        assert!(!refreshed_svc.contains("obsolete_customization"));
+        assert!(refreshed_svc.contains("pub sql_outbox:"));
+        assert!(refreshed_svc.contains("RedisIdempotencyStore::connect"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));
         assert!(cargo.contains("custom.workspace = true"));
 
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_application_services_survive_repeated_updates() {
+        let spec = parse_api(
+            r#"
+            service captcha-rpc {
+                rpc Verify (VerifyReq) returns (VerifyResp)
+            }
+            type VerifyReq {
+                token string
+            }
+            type VerifyResp {
+                accepted bool
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let root = temp_test_root("rozectl-rpc-application-services");
+        let out = root.join("captcha-rpc");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+        let application = out.join("src/application.rs");
+        let custom = r#"use crate::svc::ServiceContext;
+
+pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {
+    Ok(ctx)
+}
+
+pub fn register_services(
+    group: &mut roze_service::ServiceGroup,
+    ctx: &ServiceContext,
+) -> anyhow::Result<()> {
+    let worker_ctx = ctx.clone();
+    group.add_fn("captcha-verification-outbox", move |shutdown| {
+        let worker_ctx = worker_ctx.clone();
+        async move {
+            let _ = worker_ctx;
+            shutdown.wait().await;
+            Ok(())
+        }
+    });
+    Ok(())
+}
+"#;
+        fs::write(&application, custom).expect("write application lifecycle hook");
+
+        for _ in 0..2 {
+            generate_rpc_project(
+                &spec,
+                &out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            )
+            .expect("update generation");
+        }
+
+        assert_eq!(
+            fs::read_to_string(&application).expect("read preserved application hook"),
+            custom
+        );
+        assert!(fs::read_to_string(out.join("src/main.rs"))
+            .expect("read generated main")
+            .contains("application::register_services(&mut group, &ctx)?;"));
         fs::remove_dir_all(root).expect("remove test output");
     }
 
@@ -15768,10 +15847,10 @@ mod tests {
         fs::write(
             &svc_path,
             format!(
-                "{svc}\nimpl ServiceContext {{\n    pub fn custom_dependency(&self) {{}}\n}}\n"
+                "{svc}\nimpl ServiceContext {{\n    pub fn obsolete_customization(&self) {{}}\n}}\n"
             ),
         )
-        .expect("write custom service extension");
+        .expect("write unsupported service context customization");
 
         generate_rpc_project(
             &spec,
@@ -15792,7 +15871,7 @@ mod tests {
         assert!(svc.contains("health.register_dependency(\"rpc:catalog\""));
         assert!(svc.contains("catalog_client,"));
         assert!(svc.contains("pub fn catalog(&self) -> shop_catalog_rpc::client::RpcClient"));
-        assert!(svc.contains("pub fn custom_dependency(&self)"));
+        assert!(!svc.contains("obsolete_customization"));
         assert_eq!(svc.matches("<roze:generated-rpc-client-fields>").count(), 1);
         let status = Command::new("rustfmt")
             .args(["--edition", "2021", "--check"])
@@ -15808,7 +15887,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_update_preserves_existing_generated_model_module() {
+    fn rpc_update_refreshes_service_context_after_model_generation() {
         let spec = parse_api(
             r#"
             service system-rpc {
@@ -15866,8 +15945,8 @@ mod tests {
         assert_eq!(main.matches("mod model;").count(), 1);
         assert!(out.join("src/model/admin_token.rs").is_file());
         let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
-        assert!(svc.contains("pub fn model(&self) -> crate::model::ModelClient<'_>"));
-        assert!(svc.contains("toasty::models!(crate::model::AdminToken)"));
+        assert!(!svc.contains("pub fn model(&self) -> crate::model::ModelClient<'_>"));
+        assert!(!svc.contains("toasty::models!(crate::model::AdminToken)"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -16209,8 +16288,9 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(content.contains("| GET | `/users/:id` | `getUser` | `GetUserReq` | `UserResp` |"));
         assert!(content.contains("| `Ping` | `PingReq` | `PingResp` |"));
         assert!(content.contains("`src/logic/**` | application | preserved during `--update`"));
-        assert!(content
-            .contains("`src/svc/mod.rs` | application/dependencies | preserved during `--update`"));
+        assert!(content.contains(
+            "`src/svc/mod.rs` | framework/dependencies | refreshed by `rozectl ... generate --update`"
+        ));
         assert!(content.contains("rozectl diff api"));
         assert!(write_service_markdown_doc(&api, &out, false).is_err());
         write_service_markdown_doc(&api, &out, true).expect("force service doc");

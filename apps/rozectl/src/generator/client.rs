@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    generator::{rest, to_snake_case},
+    generator::{field_is_optional, rest, to_snake_case},
     parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute, TypeDef},
 };
 
@@ -21,6 +21,10 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str(
         "  afterResponse?: (response: Response, attempt: number) => void | Promise<void>;\n",
     );
+    out.push_str("}\n\n");
+    out.push_str("export interface IdempotentRequestOptions extends RequestOptions {\n");
+    out.push_str("  /** Stable key to reuse when safely retrying the same mutation. */\n");
+    out.push_str("  idempotencyKey: string;\n");
     out.push_str("}\n\n");
     out.push_str("export class RozeApiError extends Error {\n");
     out.push_str("  constructor(public readonly status: number, public readonly code: string, message: string, public readonly traceId?: string, public readonly details?: unknown, public readonly retryAfter?: string) { super(message); this.name = 'RozeApiError'; }\n");
@@ -124,6 +128,11 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str(" * @property {number} [retryBaseDelayMs]\n");
     out.push_str(" * @property {(url: string, init: RequestInit) => RequestInit|Promise<RequestInit>} [beforeRequest]\n");
     out.push_str(" * @property {(response: Response, attempt: number) => void|Promise<void>} [afterResponse]\n");
+    out.push_str(" */\n\n");
+    out.push_str("/**\n");
+    out.push_str(
+        " * @typedef {RequestOptions & {idempotencyKey: string}} IdempotentRequestOptions\n",
+    );
     out.push_str(" */\n\n");
     out.push_str("export class RozeApiError extends Error {\n");
     out.push_str("  constructor(status, code, message, traceId, details, retryAfter) { super(message); this.name = 'RozeApiError'; this.status = status; this.code = code; this.traceId = traceId; this.details = details; this.retryAfter = retryAfter; }\n");
@@ -336,17 +345,23 @@ fn render_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     let function_name = lower_camel(&resolved_handler_name(route));
     let path = render_path_template(spec, route, request_ty);
     let query = render_object(spec, request_ty, route, FieldSource::Query);
-    let headers = render_object(spec, request_ty, route, FieldSource::Header);
+    let uses_idempotency = route_uses_idempotency(spec, route);
+    let headers = render_headers(spec, request_ty, route, uses_idempotency);
     let body = render_body(spec, request_ty, route);
-    let req_param = if expanded_client_fields(spec, request_ty).is_empty() {
+    let req_param = if expanded_client_fields(spec, request_ty).is_empty() && !uses_idempotency {
         format!("req: {} = {{}}", route.request)
     } else {
         format!("req: {}", route.request)
     };
+    let options = if uses_idempotency {
+        "options: IdempotentRequestOptions"
+    } else {
+        "options: RequestOptions = {}"
+    };
 
     let mut out = String::new();
     out.push_str(&format!(
-        "export async function {function_name}({req_param}, options: RequestOptions = {{}}): Promise<{response}> {{\n",
+        "export async function {function_name}({req_param}, {options}): Promise<{response}> {{\n",
         response = route.response,
     ));
     out.push_str(&format!(
@@ -371,9 +386,10 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     let function_name = lower_camel(&resolved_handler_name(route));
     let path = render_path_template(spec, route, request_ty);
     let query = render_object(spec, request_ty, route, FieldSource::Query);
-    let headers = render_object(spec, request_ty, route, FieldSource::Header);
+    let uses_idempotency = route_uses_idempotency(spec, route);
+    let headers = render_headers(spec, request_ty, route, uses_idempotency);
     let body = render_body(spec, request_ty, route);
-    let req_param = if expanded_client_fields(spec, request_ty).is_empty() {
+    let req_param = if expanded_client_fields(spec, request_ty).is_empty() && !uses_idempotency {
         "req = {}"
     } else {
         "req"
@@ -386,11 +402,20 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     } else {
         out.push_str(&format!(" * @param {{{}}} req\n", route.request));
     }
-    out.push_str(" * @param {RequestOptions} [options]\n");
+    if uses_idempotency {
+        out.push_str(" * @param {IdempotentRequestOptions} options Stable key must be reused for retries of the same mutation.\n");
+    } else {
+        out.push_str(" * @param {RequestOptions} [options]\n");
+    }
     out.push_str(&format!(" * @returns {{Promise<{}>}}\n", route.response));
     out.push_str(" */\n");
+    let options = if uses_idempotency {
+        "options"
+    } else {
+        "options = {}"
+    };
     out.push_str(&format!(
-        "export async function {function_name}({req_param}, options = {{}}) {{\n"
+        "export async function {function_name}({req_param}, {options}) {{\n"
     ));
     out.push_str(&format!(
         "  return requestJson({}, {}, {}, {}, {}, options);\n",
@@ -632,6 +657,32 @@ fn ts_type(spec: &ApiSpec, ty: &str) -> String {
     }
 }
 
+fn render_headers(
+    spec: &ApiSpec,
+    request_ty: &TypeDef,
+    route: &RestRoute,
+    uses_idempotency: bool,
+) -> String {
+    let mut entries = Vec::new();
+    for field in expanded_client_fields(spec, request_ty) {
+        if resolve_field_source(field, route) == FieldSource::Header {
+            entries.push(format!(
+                "{}: {}",
+                ts_property(field_wire_name(field)),
+                req_access(field_property_name(field))
+            ));
+        }
+    }
+    if uses_idempotency {
+        entries.push("\"Idempotency-Key\": options.idempotencyKey".to_string());
+    }
+    if entries.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", entries.join(", "))
+    }
+}
+
 fn ts_array_element_type(spec: &ApiSpec, ty: &str) -> String {
     let mapped = ts_type(spec, ty);
     if mapped.contains(" | ") {
@@ -658,13 +709,16 @@ fn map_key_value_types(ty: &str) -> Option<(&str, &str)> {
     Some((key.trim(), value.trim()))
 }
 
-fn field_is_optional(field: &Field) -> bool {
-    field.validate.as_deref().is_some_and(|rules| {
-        rules
-            .split(',')
-            .map(str::trim)
-            .any(|rule| matches!(rule, "optional" | "omitempty"))
-    })
+fn route_uses_idempotency(spec: &ApiSpec, route: &RestRoute) -> bool {
+    spec.server
+        .iter()
+        .flat_map(|server| &server.middlewares)
+        .chain(route.server.iter().flat_map(|server| &server.middlewares))
+        .chain(&route.middlewares)
+        .any(|middleware| {
+            roze_middleware::BuiltInMiddleware::parse(middleware)
+                == Some(roze_middleware::BuiltInMiddleware::Idempotency)
+        })
 }
 
 fn http_method(method: &HttpMethod) -> &'static str {
@@ -861,6 +915,42 @@ mod tests {
         assert!(!client.contains("auth_identity: unknown;"));
         assert!(!client.contains("identities: unknown;"));
         assert_eq!(client, render_ts_client(&spec));
+    }
+
+    #[test]
+    fn idempotent_routes_require_and_forward_a_reusable_client_key() {
+        let spec = parse_api(
+            r#"
+            service merchant-api {
+                @middleware idempotency
+                @handler createApplication
+                post /applications (CreateApplicationReq) returns (ApplicationResp)
+            }
+            type (
+                CreateApplicationReq {
+                    name string `json:"name"`
+                }
+                ApplicationResp {
+                    id string `json:"id"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let ts = render_ts_client(&spec);
+        assert!(ts.contains("export interface IdempotentRequestOptions extends RequestOptions"));
+        assert!(ts.contains("idempotencyKey: string;"));
+        assert!(ts.contains(
+            "createApplication(req: CreateApplicationReq, options: IdempotentRequestOptions)"
+        ));
+        assert!(ts.contains("\"Idempotency-Key\": options.idempotencyKey"));
+
+        let js = render_js_client(&spec);
+        assert!(js.contains("@typedef {RequestOptions & {idempotencyKey: string}}"));
+        assert!(js.contains("@param {IdempotentRequestOptions} options"));
+        assert!(js.contains("createApplication(req, options)"));
+        assert!(js.contains("\"Idempotency-Key\": options.idempotencyKey"));
     }
 
     #[test]

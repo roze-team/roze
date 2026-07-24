@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {{
         );
     rpc_health.refresh().await;
     let mut group = ServiceGroup::new();
+    application::register_services(&mut group, &ctx)?;
     group.add_fn(service_name.clone(), move |shutdown| {{
         let ctx = ctx.clone();
             let grpc_health_service = grpc_health_service.clone();
@@ -1460,6 +1461,7 @@ mod tests {
         assert!(rendered.contains("let health = ctx.health.clone();"));
         assert!(rendered.contains("RpcHealthReporter::new_for"));
         assert!(rendered.contains("rpc_health.refresh().await;"));
+        assert!(rendered.contains("application::register_services(&mut group, &ctx)?;"));
         assert!(rendered.contains("group.add_fn(service_name"));
         assert!(rendered.contains("RpcServer::new(rpc_addr)"));
         assert!(rendered.contains("roze_grpc::GrpcRouter::new(grpc_health_service)"));

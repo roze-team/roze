@@ -1,5 +1,5 @@
 use crate::{
-    generator::{rust_identifier, to_snake_case},
+    generator::{field_is_optional, rust_identifier, to_snake_case},
     parser::{Field, FieldSource, TypeDef},
 };
 
@@ -23,13 +23,25 @@ pub fn render_types(types: &[TypeDef]) -> String {
             out.push_str(&format!(
                 "    pub {}: {},\n",
                 rust_field_name(field),
-                map_type(&field.ty)
+                field_type(field)
             ));
         }
         out.push_str("}\n\n");
     }
 
     out
+}
+
+fn field_type(field: &Field) -> String {
+    let mapped = map_type(&field.ty);
+    if matches!(field.source, FieldSource::Header)
+        && field_is_optional(field)
+        && !mapped.starts_with("Option<")
+    {
+        format!("Option<{mapped}>")
+    } else {
+        mapped
+    }
 }
 
 fn map_type(ty: &str) -> String {
@@ -375,6 +387,25 @@ mod tests {
         assert!(rendered.contains("#[validate(range(min = 1))]"));
         assert!(rendered.contains("#[validate(range(min = 1, max = 1000))]"));
         assert!(rendered.contains("#[validate(length(min = 1, max = 3))]"));
+    }
+
+    #[test]
+    fn optional_header_fields_render_as_options() {
+        let spec = parse_api(
+            r#"
+            service public-api
+
+            type PublicConfigReq {
+                origin string `header:"origin" validate:"omitempty,max=2048"`
+                requiredToken string `header:"x-required-token"`
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let rendered = render_types(&spec.types);
+        assert!(rendered.contains("pub origin: Option<String>,"));
+        assert!(rendered.contains("pub required_token: String,"));
     }
 
     #[test]
