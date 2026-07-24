@@ -74,7 +74,8 @@ const RPC_ROZE_CRATES: [&str; 23] = [
     "roze-validation",
 ];
 
-const STREAM_ROZE_CRATES: [&str; 4] = [
+const STREAM_ROZE_CRATES: [&str; 5] = [
+    "roze-kafka",
     "roze-mq",
     "roze-service",
     "roze-shutdown",
@@ -113,6 +114,32 @@ pub enum GenerateMode {
 pub enum DependencySource {
     Git,
     Path,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StreamBroker {
+    #[default]
+    Memory,
+    Rdkafka,
+    RustNative,
+}
+
+impl StreamBroker {
+    const fn provider_name(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Rdkafka => "rdkafka",
+            Self::RustNative => "rust-native",
+        }
+    }
+
+    const fn cargo_feature(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Rdkafka => "rdkafka",
+            Self::RustNative => "rskafka",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -644,6 +671,15 @@ pub fn write_stream_worker_project(
     out: &Path,
     options: GenerateOptions,
 ) -> anyhow::Result<()> {
+    write_stream_worker_project_with_broker(api, out, options, StreamBroker::Memory)
+}
+
+pub fn write_stream_worker_project_with_broker(
+    api: &Path,
+    out: &Path,
+    options: GenerateOptions,
+    broker: StreamBroker,
+) -> anyhow::Result<()> {
     let source = read_api_source(api)?;
     let spec = crate::parser::parse_api(&source)
         .with_context(|| format!("failed to parse api file {}", api.display()))?;
@@ -655,7 +691,7 @@ pub fn write_stream_worker_project(
     }
 
     let plan = plan::GenerationPlan::prepare(out, options.mode)?;
-    write_stream_worker_project_in_place(&spec, api, plan.staged(), out, options)?;
+    write_stream_worker_project_in_place(&spec, api, plan.staged(), out, options, broker)?;
     plan.commit()?;
     register_workspace_member(out)?;
     Ok(())
@@ -667,6 +703,7 @@ fn write_stream_worker_project_in_place(
     out: &Path,
     logical_out: &Path,
     options: GenerateOptions,
+    broker: StreamBroker,
 ) -> anyhow::Result<()> {
     ensure_output(out, options.mode)?;
     fs::create_dir_all(out.join("src/config"))
@@ -676,12 +713,15 @@ fn write_stream_worker_project_in_place(
     fs::create_dir_all(out.join("src/types"))
         .with_context(|| format!("failed to create {}", out.join("src/types").display()))?;
 
-    write_stream_cargo_toml(spec, out, logical_out, options)?;
-    fs::write(out.join("README.md"), render_stream_readme(spec, api))
-        .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
+    write_stream_cargo_toml(spec, out, logical_out, options, broker)?;
+    fs::write(
+        out.join("README.md"),
+        render_stream_readme(spec, api, broker),
+    )
+    .with_context(|| format!("failed to write {}", out.join("README.md").display()))?;
     write_preserved(
         &out.join("config.yaml"),
-        render_stream_config_yaml(spec),
+        render_stream_config_yaml(spec, broker),
         options.mode,
     )?;
     fs::write(out.join("src/main.rs"), render_stream_main(spec))
@@ -758,6 +798,7 @@ fn write_stream_cargo_toml(
     out: &Path,
     logical_out: &Path,
     options: GenerateOptions,
+    broker: StreamBroker,
 ) -> anyhow::Result<()> {
     let workspace_root = find_workspace_root(logical_out)?;
     let local_crates_prefix = match options.dependency_source {
@@ -779,6 +820,7 @@ fn write_stream_cargo_toml(
             options.dependency_source,
             local_crates_prefix.as_deref(),
             workspace_root.is_some(),
+            broker,
         ),
     )
     .with_context(|| format!("failed to write {}", out.join("Cargo.toml").display()))
@@ -790,6 +832,7 @@ fn render_stream_cargo_toml(
     dependency_source: DependencySource,
     local_crates_prefix: Option<&str>,
     in_workspace: bool,
+    broker: StreamBroker,
 ) -> String {
     let package_name = package_name_from_output(out, spec);
     let package = if in_workspace {
@@ -820,8 +863,27 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 validator = { version = "0.20", features = ["derive"] }"#
     };
-    let roze_dependencies =
+    let mut roze_dependencies =
         roze_dependencies(dependency_source, local_crates_prefix, &STREAM_ROZE_CRATES);
+    let plain_kafka = match dependency_source {
+        DependencySource::Git => format!(r#"roze-kafka = {{ git = "{ROZE_GIT_URL}" }}"#),
+        DependencySource::Path => format!(
+            r#"roze-kafka = {{ path = "{}/roze-kafka" }}"#,
+            local_crates_prefix.expect("local crates prefix")
+        ),
+    };
+    let configured_kafka = match dependency_source {
+        DependencySource::Git => format!(
+            r#"roze-kafka = {{ git = "{ROZE_GIT_URL}", default-features = false, features = ["{}"] }}"#,
+            broker.cargo_feature()
+        ),
+        DependencySource::Path => format!(
+            r#"roze-kafka = {{ path = "{}/roze-kafka", default-features = false, features = ["{}"] }}"#,
+            local_crates_prefix.expect("local crates prefix"),
+            broker.cargo_feature()
+        ),
+    };
+    roze_dependencies = roze_dependencies.replace(&plain_kafka, &configured_kafka);
 
     format!(
         r#"[package]
@@ -835,12 +897,21 @@ name = "{package_name}"
     )
 }
 
-fn render_stream_readme(spec: &ApiSpec, api: &Path) -> String {
+fn render_stream_readme(spec: &ApiSpec, api: &Path, broker: StreamBroker) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(&mut out, "# {} Stream Worker", spec.service).unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "Generated by `rozectl stream gen`.").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "- Kafka provider: `{}`", broker.provider_name()).unwrap();
+    if broker == StreamBroker::RustNative {
+        writeln!(
+            &mut out,
+            "- `rust-native` is experimental and publish-only; stream consumption fails fast because rskafka does not implement consumer groups or offset commits."
+        )
+        .unwrap();
+    }
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "## Source").unwrap();
     writeln!(&mut out).unwrap();
@@ -878,10 +949,32 @@ fn render_stream_readme(spec: &ApiSpec, api: &Path) -> String {
     out
 }
 
-fn render_stream_config_yaml(spec: &ApiSpec) -> String {
+fn render_stream_config_yaml(spec: &ApiSpec, broker: StreamBroker) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(&mut out, "name: {}-stream", to_snake_case(&spec.service)).unwrap();
+    writeln!(&mut out, "kafka:").unwrap();
+    writeln!(&mut out, "  provider: {}", broker.provider_name()).unwrap();
+    writeln!(&mut out, "  brokers: [\"127.0.0.1:9092\"]").unwrap();
+    writeln!(
+        &mut out,
+        "  group: {}-workers",
+        to_snake_case(&spec.service)
+    )
+    .unwrap();
+    writeln!(&mut out, "  enable_manual_ack: true").unwrap();
+    writeln!(
+        &mut out,
+        "  retry_topic: {}.retry",
+        to_snake_case(&spec.service)
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "  dead_letter_topic: {}.dlq",
+        to_snake_case(&spec.service)
+    )
+    .unwrap();
     writeln!(&mut out, "stream:").unwrap();
     writeln!(
         &mut out,
@@ -911,6 +1004,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub name: String,
+    pub kafka: roze_kafka::KafkaConfig,
     pub stream: StreamConfig,
 }
 
@@ -945,7 +1039,6 @@ mod types;
 
 use std::path::PathBuf;
 
-use roze_mq::InMemoryBroker;
 use roze_service::ServiceGroup;
 
 #[tokio::main]
@@ -955,16 +1048,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::load(config_path())?;
-    let broker = InMemoryBroker::new();
-    tracing::info!(service = %config.name, protocol = "stream", group = %config.stream.consumer_group, topics = config.stream.topics.len(), "service configuration loaded");
+    let kafka = roze_kafka::build_runtime(&config.kafka).await?;
+    tracing::info!(service = %config.name, protocol = "stream", provider = %kafka.provider, group = %config.stream.consumer_group, topics = config.stream.topics.len(), "service configuration loaded");
     let service_name = config.name.clone();
     let stream_config = config.stream.clone();
+    let subscriber = kafka.subscriber;
     let mut group = ServiceGroup::new();
     group.add_fn(service_name.clone(), move |shutdown| {
-        let broker = broker.clone();
+        let subscriber = subscriber.clone();
         let stream_config = stream_config.clone();
         async move {
-            stream::consumer::run(&broker, &stream_config, shutdown).await
+            stream::consumer::run(subscriber.as_ref(), &stream_config, shutdown).await
         }
     });
     tracing::info!(service = %service_name, protocol = "stream", "service starting");
@@ -1045,7 +1139,7 @@ fn render_stream_producer(spec: &ApiSpec) -> String {
         let fn_name = format!("publish_{}", to_snake_case(&method.name));
         writeln!(
             &mut out,
-            "pub async fn {fn_name}<P>(publisher: &P, payload: {request}) -> anyhow::Result<()>\nwhere\n    P: Publisher,\n{{\n    let payload = serde_json::to_value(payload)?;\n    let idempotency_key = format!(\"{{}}:{{}}\", {topic_const}, payload);\n    let message = Message::new({topic_const}, payload)\n        .with_event_contract({event_type:?}, 1, \"1\", {producer:?})\n        .with_dead_letter_topic({dlq_const})\n        .with_idempotency_key(idempotency_key);\n    publisher.publish(message).await\n}}\n",
+            "pub async fn {fn_name}<P>(publisher: &P, payload: {request}) -> anyhow::Result<()>\nwhere\n    P: Publisher + ?Sized,\n{{\n    let payload = serde_json::to_value(payload)?;\n    let idempotency_key = format!(\"{{}}:{{}}\", {topic_const}, payload);\n    let message = Message::new({topic_const}, payload)\n        .with_event_contract({event_type:?}, 1, \"1\", {producer:?})\n        .with_dead_letter_topic({dlq_const})\n        .with_idempotency_key(idempotency_key);\n    publisher.publish(message).await\n}}\n",
             request = method.request,
             topic_const = stream_topic_const(method),
             dlq_const = stream_dlq_const(method),
@@ -1060,7 +1154,7 @@ fn render_stream_producer(spec: &ApiSpec) -> String {
 fn render_stream_consumer(spec: &ApiSpec) -> String {
     use std::fmt::Write as _;
     let mut out = String::from(
-        "use roze_mq::{Delivery, Subscriber};\nuse roze_shutdown::ShutdownListener;\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig, shutdown: ShutdownListener) -> anyhow::Result<()>\nwhere\n    S: Subscriber,\n{\n    tracing::info!(protocol = \"stream\", group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        tracing::info!(protocol = \"stream\", topic = %topic, \"stream subscription ready\");\n        let worker_shutdown = shutdown.clone();\n        workers.push(tokio::spawn(async move {\n            loop {\n                tokio::select! {\n                    _ = worker_shutdown.clone().wait() => {\n                        tracing::info!(protocol = \"stream\", topic = %topic, \"stream worker stopping\");\n                        break;\n                    },\n                    received = rx.recv() => {\n                        match received {\n                            Ok(delivery) => {\n                                if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"stream message failed\");\n                                    if let Err(error) = delivery.nack().await {\n                                        tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"failed to nack stream message\");\n                                    }\n                                } else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"failed to ack stream message\");\n                                }\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                                tracing::warn!(protocol = \"stream\", topic = %topic, skipped, \"stream receiver lagged\");\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                        }\n                    }\n                }\n            }\n        }));\n    }\n\n    shutdown.wait().await;\n    tracing::info!(protocol = \"stream\", workers = workers.len(), \"stream shutdown requested\");\n    for worker in workers {\n        worker.await?;\n    }\n    tracing::info!(protocol = \"stream\", \"stream workers stopped\");\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
+        "use roze_mq::{Delivery, Subscriber};\nuse roze_shutdown::ShutdownListener;\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig, shutdown: ShutdownListener) -> anyhow::Result<()>\nwhere\n    S: Subscriber + ?Sized,\n{\n    tracing::info!(protocol = \"stream\", group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        tracing::info!(protocol = \"stream\", topic = %topic, \"stream subscription ready\");\n        let worker_shutdown = shutdown.clone();\n        workers.push(tokio::spawn(async move {\n            loop {\n                tokio::select! {\n                    _ = worker_shutdown.clone().wait() => {\n                        tracing::info!(protocol = \"stream\", topic = %topic, \"stream worker stopping\");\n                        break;\n                    },\n                    received = rx.recv() => {\n                        match received {\n                            Ok(delivery) => {\n                                if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"stream message failed\");\n                                    if let Err(error) = delivery.nack().await {\n                                        tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"failed to nack stream message\");\n                                    }\n                                } else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(protocol = \"stream\", topic = %topic, ?error, \"failed to ack stream message\");\n                                }\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                                tracing::warn!(protocol = \"stream\", topic = %topic, skipped, \"stream receiver lagged\");\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                        }\n                    }\n                }\n            }\n        }));\n    }\n\n    shutdown.wait().await;\n    tracing::info!(protocol = \"stream\", workers = workers.len(), \"stream shutdown requested\");\n    for worker in workers {\n        worker.await?;\n    }\n    tracing::info!(protocol = \"stream\", \"stream workers stopped\");\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
     );
     out = out.replace(
         "        let topic = binding.topic;\n",
@@ -13878,7 +13972,6 @@ mod tests {
     fn generated_stream_project_compiles() {
         let root = generated_compile_workspace("rozectl-stream-compile-smoke");
         let api = root.join("user-stream.api");
-        let out = root.join("apps/user-stream");
         fs::write(
             &api,
             r#"
@@ -13909,15 +14002,22 @@ mod tests {
         )
         .expect("write stream api");
 
-        write_stream_worker_project(
-            &api,
-            &out,
-            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
-        )
-        .expect("generate stream project");
+        for (name, broker) in [
+            ("user-stream-memory", StreamBroker::Memory),
+            ("user-stream-rust-native", StreamBroker::RustNative),
+        ] {
+            let out = root.join("apps").join(name);
+            write_stream_worker_project_with_broker(
+                &api,
+                &out,
+                GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+                broker,
+            )
+            .expect("generate stream project");
 
-        cargo_check_generated(&out.join("Cargo.toml"));
-        cargo_clippy_generated(&out.join("Cargo.toml"));
+            cargo_check_generated(&out.join("Cargo.toml"));
+            cargo_clippy_generated(&out.join("Cargo.toml"));
+        }
         fs::remove_dir_all(root).expect("remove compile workspace");
     }
 
@@ -14168,7 +14268,10 @@ mod tests {
         let main = fs::read_to_string(out.join("src/main.rs")).expect("read main");
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
         assert!(main.contains("use roze_service::ServiceGroup;"));
-        assert!(main.contains("stream::consumer::run(&broker, &stream_config, shutdown).await"));
+        assert!(main.contains("roze_kafka::build_runtime(&config.kafka).await?"));
+        assert!(main.contains(
+            "stream::consumer::run(subscriber.as_ref(), &stream_config, shutdown).await"
+        ));
         assert!(main.contains("\"service configuration loaded\""));
         assert!(main.contains("\"service starting\""));
         assert!(main.contains("\"service stopped\""));
@@ -14184,9 +14287,51 @@ mod tests {
         assert!(consumer.contains("handle_user_created"));
         assert!(manifest.contains("roze-service"));
         assert!(manifest.contains("roze-shutdown"));
+        assert!(manifest.contains(r#"features = ["memory"]"#));
         assert!(fs::read_to_string(out.join("README.md"))
             .expect("read readme")
             .contains("`user.user_created.dlq`"));
+
+        for (broker, feature, provider) in [
+            (StreamBroker::Rdkafka, "rdkafka", "rdkafka"),
+            (StreamBroker::RustNative, "rskafka", "rust-native"),
+        ] {
+            let provider_out = root.join(provider);
+            write_stream_worker_project_with_broker(
+                &api,
+                &provider_out,
+                GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+                broker,
+            )
+            .expect("write provider stream project");
+            let first_main =
+                fs::read_to_string(provider_out.join("src/main.rs")).expect("read provider main");
+            let first_manifest = fs::read_to_string(provider_out.join("Cargo.toml"))
+                .expect("read provider manifest");
+            for _ in 0..2 {
+                write_stream_worker_project_with_broker(
+                    &api,
+                    &provider_out,
+                    GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+                    broker,
+                )
+                .expect("update provider stream project");
+            }
+            let manifest = fs::read_to_string(provider_out.join("Cargo.toml"))
+                .expect("read provider manifest");
+            let config =
+                fs::read_to_string(provider_out.join("config.yaml")).expect("read provider config");
+            assert_eq!(
+                fs::read_to_string(provider_out.join("src/main.rs")).expect("reread provider main"),
+                first_main
+            );
+            assert_eq!(manifest, first_manifest);
+            assert!(manifest.contains(&format!(r#"features = ["{feature}"]"#)));
+            assert!(config.contains(&format!("provider: {provider}")));
+        }
+        let native_readme =
+            fs::read_to_string(root.join("rust-native/README.md")).expect("read native readme");
+        assert!(native_readme.contains("experimental and publish-only"));
 
         fs::remove_dir_all(root).expect("remove stream root");
     }

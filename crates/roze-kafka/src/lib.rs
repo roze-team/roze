@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "rskafka")]
+use std::collections::BTreeMap;
+use std::fmt;
 #[cfg(feature = "rdkafka")]
 use std::time::Duration;
 use std::{
@@ -29,12 +32,113 @@ use regex::Regex;
 
 #[cfg(feature = "rdkafka")]
 use rdkafka::message::OwnedHeaders;
+#[cfg(feature = "rskafka")]
+use rskafka::{
+    client::{
+        partition::{Compression, UnknownTopicHandling},
+        Client, ClientBuilder,
+    },
+    record::Record as RustNativeRecord,
+};
 
 type DeliveryActionFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 type DeliveryAction = Arc<dyn Fn() -> DeliveryActionFuture + Send + Sync + 'static>;
 
+/// Selects the Kafka implementation used by the framework runtime.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum KafkaProvider {
+    #[default]
+    Memory,
+    Rdkafka,
+    #[serde(alias = "rskafka")]
+    RustNative,
+}
+
+impl fmt::Display for KafkaProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Memory => "memory",
+            Self::Rdkafka => "rdkafka",
+            Self::RustNative => "rust-native",
+        })
+    }
+}
+
+/// Declares provider behavior that applications may validate before startup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KafkaCapabilities {
+    pub publish: bool,
+    pub subscribe: bool,
+    pub consumer_groups: bool,
+    pub manual_ack: bool,
+    pub offset_commit: bool,
+    pub rebalance: bool,
+    pub transactions: bool,
+}
+
+impl KafkaProvider {
+    pub const fn capabilities(self) -> KafkaCapabilities {
+        match self {
+            Self::Memory => KafkaCapabilities {
+                publish: true,
+                subscribe: true,
+                consumer_groups: false,
+                manual_ack: true,
+                offset_commit: false,
+                rebalance: false,
+                transactions: false,
+            },
+            Self::Rdkafka => KafkaCapabilities {
+                publish: true,
+                subscribe: true,
+                consumer_groups: true,
+                manual_ack: true,
+                offset_commit: true,
+                rebalance: true,
+                transactions: false,
+            },
+            Self::RustNative => KafkaCapabilities {
+                publish: true,
+                subscribe: false,
+                consumer_groups: false,
+                manual_ack: false,
+                offset_commit: false,
+                rebalance: false,
+                transactions: false,
+            },
+        }
+    }
+}
+
+/// Fail-fast errors returned while selecting or constructing a Kafka provider.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum KafkaRuntimeError {
+    #[error(
+        "Kafka provider `{provider}` requires Cargo feature `{feature}`; enable it on `roze-kafka`"
+    )]
+    FeatureDisabled {
+        provider: KafkaProvider,
+        feature: &'static str,
+    },
+    #[error("Kafka provider `{provider}` does not support required capability `{capability}`")]
+    UnsupportedCapability {
+        provider: KafkaProvider,
+        capability: &'static str,
+    },
+    #[error("Kafka provider `{provider}` failed to initialize: {message}")]
+    Initialization {
+        provider: KafkaProvider,
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KafkaConfig {
+    /// Explicit provider selection. When omitted, enabled Cargo features retain
+    /// the legacy memory-first selection behavior.
+    #[serde(default)]
+    pub provider: Option<KafkaProvider>,
     #[serde(default)]
     pub brokers: Vec<String>,
     #[serde(default, alias = "bootstrap")]
@@ -88,6 +192,7 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             brokers: Vec::new(),
             bootstrap: None,
             bootstrap_servers: None,
@@ -181,6 +286,10 @@ fn split_csv(raw: &str) -> Vec<String> {
 }
 
 impl KafkaConfig {
+    pub fn resolved_provider(&self) -> KafkaProvider {
+        self.provider.unwrap_or_else(default_compiled_provider)
+    }
+
     pub fn normalized_brokers(&self) -> Vec<String> {
         if !self.brokers.is_empty() {
             return self.brokers.clone();
@@ -224,6 +333,31 @@ impl KafkaConfig {
     pub fn should_retry(&self, message_attempt: u32) -> bool {
         self.max_retries != 0 && message_attempt < self.max_retries
     }
+}
+
+fn default_compiled_provider() -> KafkaProvider {
+    if cfg!(feature = "rdkafka") {
+        KafkaProvider::Rdkafka
+    } else if cfg!(feature = "rskafka") {
+        KafkaProvider::RustNative
+    } else {
+        KafkaProvider::Memory
+    }
+}
+
+const fn provider_feature(provider: KafkaProvider) -> (&'static str, bool) {
+    match provider {
+        KafkaProvider::Memory => ("memory", cfg!(feature = "memory")),
+        KafkaProvider::Rdkafka => ("rdkafka", cfg!(feature = "rdkafka")),
+        KafkaProvider::RustNative => ("rskafka", cfg!(feature = "rskafka")),
+    }
+}
+
+#[cfg(feature = "rskafka")]
+fn stable_partition_hash(key: &[u8]) -> u64 {
+    key.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 #[cfg(any(feature = "rdkafka", test))]
@@ -488,6 +622,42 @@ pub trait Subscriber: Send + Sync + 'static {
     async fn subscribe(&self, topic: &str) -> anyhow::Result<broadcast::Receiver<Delivery>>;
 }
 
+fn bridge_mq_deliveries(
+    mut receiver: broadcast::Receiver<Delivery>,
+) -> broadcast::Receiver<roze_mq::Delivery> {
+    let (sender, output) = broadcast::channel(256);
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(delivery) => {
+                    let message = delivery.message().to_mq_message();
+                    let ack_delivery = delivery.clone();
+                    let nack_delivery = delivery;
+                    let adapted = roze_mq::Delivery::from_handlers(
+                        message,
+                        move || {
+                            let delivery = ack_delivery.clone();
+                            async move { delivery.ack().await }
+                        },
+                        move || {
+                            let delivery = nack_delivery.clone();
+                            async move { delivery.nack().await }
+                        },
+                    );
+                    if sender.send(adapted).is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(protocol = "kafka", skipped, "Kafka delivery adapter lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    output
+}
+
 #[derive(Debug, Clone)]
 pub struct InMemoryKafkaBroker {
     topics: Arc<Mutex<HashMap<String, broadcast::Sender<Delivery>>>>,
@@ -687,6 +857,24 @@ impl Subscriber for InMemoryKafkaBroker {
 }
 
 #[async_trait::async_trait]
+impl roze_mq::Publisher for InMemoryKafkaBroker {
+    async fn publish(&self, message: roze_mq::Message) -> anyhow::Result<()> {
+        <Self as Publisher>::publish(self, KafkaRecord::from_mq_message(message)).await
+    }
+}
+
+#[async_trait::async_trait]
+impl roze_mq::Subscriber for InMemoryKafkaBroker {
+    async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> anyhow::Result<broadcast::Receiver<roze_mq::Delivery>> {
+        let receiver = <Self as Subscriber>::subscribe(self, topic).await?;
+        Ok(bridge_mq_deliveries(receiver))
+    }
+}
+
+#[async_trait::async_trait]
 impl roze_mq::MqAdmin for InMemoryKafkaBroker {
     async fn stats(&self) -> anyhow::Result<roze_mq::MqStats> {
         Ok(roze_mq::MqStats {
@@ -867,6 +1055,14 @@ impl Publisher for RdkafkaProducer {
                 Err(anyhow::anyhow!(error.to_string()))
             }
         }
+    }
+}
+
+#[cfg(feature = "rdkafka")]
+#[async_trait::async_trait]
+impl roze_mq::Publisher for RdkafkaProducer {
+    async fn publish(&self, message: roze_mq::Message) -> anyhow::Result<()> {
+        <Self as Publisher>::publish(self, KafkaRecord::from_mq_message(message)).await
     }
 }
 
@@ -1185,6 +1381,295 @@ impl Subscriber for RdkafkaSubscriber {
     }
 }
 
+#[cfg(feature = "rdkafka")]
+#[async_trait::async_trait]
+impl roze_mq::Subscriber for RdkafkaSubscriber {
+    async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> anyhow::Result<broadcast::Receiver<roze_mq::Delivery>> {
+        let receiver = <Self as Subscriber>::subscribe(self, topic).await?;
+        Ok(bridge_mq_deliveries(receiver))
+    }
+}
+
+#[cfg(feature = "rskafka")]
+/// Experimental pure-Rust Kafka publisher backed by rskafka.
+///
+/// rskafka does not provide consumer groups or offset commits, so this type is
+/// intentionally publisher-only.
+#[derive(Clone)]
+pub struct RustNativeProducer {
+    client: Arc<Client>,
+    config: KafkaConfig,
+}
+
+#[cfg(feature = "rskafka")]
+impl RustNativeProducer {
+    pub async fn connect(config: impl Into<KafkaConfig>) -> anyhow::Result<Self> {
+        let config = config.into();
+        let brokers = config.normalized_brokers();
+        if brokers.is_empty() {
+            return Err(anyhow::anyhow!("kafka broker list is empty"));
+        }
+        let client = ClientBuilder::new(brokers)
+            .client_id(config.client_id_or_default())
+            .build()
+            .await?;
+        Ok(Self {
+            client: Arc::new(client),
+            config,
+        })
+    }
+
+    pub fn config(&self) -> &KafkaConfig {
+        &self.config
+    }
+
+    async fn resolve_partition(&self, topic: &str, message: &KafkaRecord) -> anyhow::Result<i32> {
+        let topics = self.client.list_topics().await?;
+        let metadata = topics
+            .into_iter()
+            .find(|metadata| metadata.name == topic)
+            .ok_or_else(|| anyhow::anyhow!("Kafka topic `{topic}` was not found"))?;
+        if metadata.partitions.is_empty() {
+            return Err(anyhow::anyhow!("Kafka topic `{topic}` has no partitions"));
+        }
+        if let Some(partition) = message.partition {
+            if metadata.partitions.contains(&partition) {
+                return Ok(partition);
+            }
+            return Err(anyhow::anyhow!(
+                "Kafka topic `{topic}` does not contain partition {partition}"
+            ));
+        }
+        if let Some(key) = message.key.as_deref() {
+            let index = stable_partition_hash(key.as_bytes()) as usize % metadata.partitions.len();
+            return metadata
+                .partitions
+                .iter()
+                .nth(index)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("Kafka topic `{topic}` has no partitions"));
+        }
+        metadata
+            .partitions
+            .iter()
+            .next()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Kafka topic `{topic}` has no partitions"))
+    }
+}
+
+#[cfg(feature = "rskafka")]
+#[async_trait::async_trait]
+impl Publisher for RustNativeProducer {
+    async fn publish(&self, message: KafkaRecord) -> anyhow::Result<()> {
+        self.publish_with_result(message).await.map(|_| ())
+    }
+
+    async fn publish_with_result(&self, mut message: KafkaRecord) -> anyhow::Result<PublishResult> {
+        message.ensure_trace_id();
+        let topic = self.config.topic_name(&message.topic);
+        let partition = self.resolve_partition(&topic, &message).await?;
+        let timestamp_millis = if message.timestamp_millis == 0 {
+            current_millis()
+        } else {
+            message.timestamp_millis
+        };
+        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            timestamp_millis.min(i64::MAX as u64) as i64,
+        )
+        .unwrap_or_else(chrono::Utc::now);
+        let mut headers = message
+            .headers
+            .into_iter()
+            .map(|(key, value)| (key, value.into_bytes()))
+            .collect::<BTreeMap<_, _>>();
+        headers.insert(
+            "roze-attempt".to_string(),
+            message.attempt.to_string().into_bytes(),
+        );
+        let record = RustNativeRecord {
+            key: message.key.map(String::into_bytes),
+            value: Some(serde_json::to_vec(&message.payload)?),
+            headers,
+            timestamp,
+        };
+        let partition_client = self
+            .client
+            .partition_client(topic.clone(), partition, UnknownTopicHandling::Retry)
+            .await?;
+        match partition_client
+            .produce(vec![record], Compression::NoCompression)
+            .await
+        {
+            Ok(offsets) => {
+                let offset = offsets.into_iter().next();
+                let result = PublishResult {
+                    topic,
+                    partition: Some(partition),
+                    offset,
+                    timestamp_millis,
+                };
+                record_kafka_event(&result.topic, message.group.as_deref(), "published");
+                record_kafka_offset(&result);
+                Ok(result)
+            }
+            Err(error) => {
+                record_kafka_event(&topic, message.group.as_deref(), "publish_failed");
+                Err(anyhow::Error::new(error))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "rskafka")]
+#[async_trait::async_trait]
+impl roze_mq::Publisher for RustNativeProducer {
+    async fn publish(&self, message: roze_mq::Message) -> anyhow::Result<()> {
+        <Self as Publisher>::publish(self, KafkaRecord::from_mq_message(message)).await
+    }
+}
+
+/// A complete Kafka publisher/subscriber pair using stable `roze_mq` traits.
+pub struct KafkaRuntime {
+    pub provider: KafkaProvider,
+    pub capabilities: KafkaCapabilities,
+    pub publisher: Arc<dyn roze_mq::Publisher>,
+    pub subscriber: Arc<dyn roze_mq::Subscriber>,
+}
+
+/// Builds a provider runtime that satisfies publish, subscribe, and settlement semantics.
+///
+/// Publish-only providers are rejected with [`KafkaRuntimeError::UnsupportedCapability`].
+pub async fn build_runtime(config: &KafkaConfig) -> Result<KafkaRuntime, KafkaRuntimeError> {
+    let provider = config.resolved_provider();
+    let (feature, enabled) = provider_feature(provider);
+    if !enabled {
+        return Err(KafkaRuntimeError::FeatureDisabled { provider, feature });
+    }
+    let capabilities = provider.capabilities();
+    if !capabilities.subscribe {
+        return Err(KafkaRuntimeError::UnsupportedCapability {
+            provider,
+            capability: "consumer-groups-and-offset-commit",
+        });
+    }
+
+    match provider {
+        KafkaProvider::Memory => {
+            #[cfg(feature = "memory")]
+            {
+                let broker = Arc::new(InMemoryKafkaBroker::new());
+                Ok(KafkaRuntime {
+                    provider,
+                    capabilities,
+                    publisher: broker.clone(),
+                    subscriber: broker,
+                })
+            }
+            #[cfg(not(feature = "memory"))]
+            {
+                Err(KafkaRuntimeError::FeatureDisabled {
+                    provider,
+                    feature: "memory",
+                })
+            }
+        }
+        KafkaProvider::Rdkafka => {
+            #[cfg(feature = "rdkafka")]
+            {
+                let publisher = RdkafkaProducer::new(config.clone()).map_err(|error| {
+                    KafkaRuntimeError::Initialization {
+                        provider,
+                        message: error.to_string(),
+                    }
+                })?;
+                let subscriber = RdkafkaSubscriber::new(config.clone());
+                Ok(KafkaRuntime {
+                    provider,
+                    capabilities,
+                    publisher: Arc::new(publisher),
+                    subscriber: Arc::new(subscriber),
+                })
+            }
+            #[cfg(not(feature = "rdkafka"))]
+            {
+                Err(KafkaRuntimeError::FeatureDisabled {
+                    provider,
+                    feature: "rdkafka",
+                })
+            }
+        }
+        KafkaProvider::RustNative => Err(KafkaRuntimeError::UnsupportedCapability {
+            provider,
+            capability: "consumer-groups-and-offset-commit",
+        }),
+    }
+}
+
+/// Builds only the configured publisher.
+///
+/// This is the supported entrypoint for the experimental `rust-native` provider.
+pub async fn build_publisher(
+    config: &KafkaConfig,
+) -> Result<Arc<dyn roze_mq::Publisher>, KafkaRuntimeError> {
+    let provider = config.resolved_provider();
+    match provider {
+        KafkaProvider::Memory => {
+            #[cfg(feature = "memory")]
+            {
+                Ok(Arc::new(InMemoryKafkaBroker::new()))
+            }
+            #[cfg(not(feature = "memory"))]
+            {
+                Err(KafkaRuntimeError::FeatureDisabled {
+                    provider,
+                    feature: "memory",
+                })
+            }
+        }
+        KafkaProvider::Rdkafka => {
+            #[cfg(feature = "rdkafka")]
+            {
+                RdkafkaProducer::new(config.clone())
+                    .map(|producer| Arc::new(producer) as Arc<dyn roze_mq::Publisher>)
+                    .map_err(|error| KafkaRuntimeError::Initialization {
+                        provider,
+                        message: error.to_string(),
+                    })
+            }
+            #[cfg(not(feature = "rdkafka"))]
+            {
+                Err(KafkaRuntimeError::FeatureDisabled {
+                    provider,
+                    feature: "rdkafka",
+                })
+            }
+        }
+        KafkaProvider::RustNative => {
+            #[cfg(feature = "rskafka")]
+            {
+                RustNativeProducer::connect(config.clone())
+                    .await
+                    .map(|producer| Arc::new(producer) as Arc<dyn roze_mq::Publisher>)
+                    .map_err(|error| KafkaRuntimeError::Initialization {
+                        provider,
+                        message: error.to_string(),
+                    })
+            }
+            #[cfg(not(feature = "rskafka"))]
+            {
+                Err(KafkaRuntimeError::FeatureDisabled {
+                    provider,
+                    feature: "rskafka",
+                })
+            }
+        }
+    }
+}
+
 pub async fn publish_json<P>(
     publisher: &P,
     topic: impl Into<String>,
@@ -1311,6 +1796,164 @@ mod tests {
     #[test]
     fn message_timeout_is_bounded_by_default() {
         assert_eq!(KafkaConfig::default().message_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn provider_configuration_and_capabilities_are_explicit() {
+        let native: KafkaConfig =
+            serde_json::from_value(serde_json::json!({"provider": "rust-native"}))
+                .expect("deserialize rust-native provider");
+        assert_eq!(native.resolved_provider(), KafkaProvider::RustNative);
+        assert_eq!(
+            native.resolved_provider().capabilities(),
+            KafkaCapabilities {
+                publish: true,
+                subscribe: false,
+                consumer_groups: false,
+                manual_ack: false,
+                offset_commit: false,
+                rebalance: false,
+                transactions: false,
+            }
+        );
+
+        let alias: KafkaConfig = serde_json::from_value(serde_json::json!({"provider": "rskafka"}))
+            .expect("deserialize rskafka alias");
+        assert_eq!(alias.resolved_provider(), KafkaProvider::RustNative);
+        assert!(KafkaProvider::Rdkafka.capabilities().consumer_groups);
+        assert!(KafkaProvider::Rdkafka.capabilities().offset_commit);
+        assert!(!KafkaProvider::Rdkafka.capabilities().transactions);
+    }
+
+    #[test]
+    #[cfg(feature = "rskafka")]
+    fn rust_native_partition_hash_is_stable() {
+        assert_eq!(
+            stable_partition_hash(b"order-42"),
+            9_015_620_992_513_762_004
+        );
+        assert_eq!(
+            stable_partition_hash(b"order-42"),
+            stable_partition_hash(b"order-42")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "memory")]
+    async fn memory_runtime_implements_stable_mq_contract() {
+        let runtime = build_runtime(&KafkaConfig {
+            provider: Some(KafkaProvider::Memory),
+            ..Default::default()
+        })
+        .await
+        .expect("build memory runtime");
+        let mut receiver = runtime
+            .subscriber
+            .subscribe("orders")
+            .await
+            .expect("subscribe through roze-mq");
+        runtime
+            .publisher
+            .publish(roze_mq::Message::new(
+                "orders",
+                serde_json::json!({"id": 42}),
+            ))
+            .await
+            .expect("publish through roze-mq");
+
+        let delivery = receiver.recv().await.expect("receive adapted delivery");
+        assert_eq!(delivery.message().payload["id"], 42);
+        delivery.ack().await.expect("ack adapted delivery");
+        assert!(delivery.is_acked());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "rskafka")]
+    async fn rust_native_stream_runtime_fails_before_connecting() {
+        let result = build_runtime(&KafkaConfig {
+            provider: Some(KafkaProvider::RustNative),
+            brokers: vec!["127.0.0.1:9092".to_string()],
+            ..Default::default()
+        })
+        .await;
+        let Err(error) = result else {
+            panic!("rskafka cannot satisfy stream consumer semantics");
+        };
+        assert_eq!(
+            error,
+            KafkaRuntimeError::UnsupportedCapability {
+                provider: KafkaProvider::RustNative,
+                capability: "consumer-groups-and-offset-commit",
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "integration: requires ROZE_KAFKA_BROKERS and an existing ROZE_KAFKA_TOPIC"]
+    #[cfg(feature = "rskafka")]
+    async fn rust_native_publish_round_trips_against_real_broker() {
+        let brokers = std::env::var("ROZE_KAFKA_BROKERS")
+            .expect("ROZE_KAFKA_BROKERS is required")
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let topic = std::env::var("ROZE_KAFKA_TOPIC").expect("ROZE_KAFKA_TOPIC is required");
+        let producer = RustNativeProducer::connect(KafkaConfig {
+            provider: Some(KafkaProvider::RustNative),
+            brokers,
+            ..Default::default()
+        })
+        .await
+        .expect("connect rskafka producer");
+        let payload = serde_json::json!({
+            "provider": "rust-native",
+            "test": uuid::Uuid::now_v7().to_string()
+        });
+        let result = producer
+            .publish_with_result(KafkaRecord::new(topic.clone(), payload.clone()))
+            .await
+            .expect("publish through rskafka");
+        let offset = result.offset.expect("published offset");
+        let partition = result.partition.expect("published partition");
+        let partition_client = producer
+            .client
+            .partition_client(topic, partition, UnknownTopicHandling::Error)
+            .await
+            .expect("open published partition");
+        let (records, _) = partition_client
+            .fetch_records(offset, 1..1_000_000, 1_000)
+            .await
+            .expect("fetch published record");
+        let record = records
+            .into_iter()
+            .find(|record| record.offset == offset)
+            .expect("find published offset");
+        let restored: serde_json::Value =
+            serde_json::from_slice(record.record.value.as_deref().expect("record value"))
+                .expect("decode published JSON");
+        assert_eq!(restored, payload);
+    }
+
+    #[tokio::test]
+    #[cfg(not(feature = "rskafka"))]
+    async fn selecting_uncompiled_provider_reports_required_feature() {
+        let result = build_runtime(&KafkaConfig {
+            provider: Some(KafkaProvider::RustNative),
+            ..Default::default()
+        })
+        .await;
+        let Err(error) = result else {
+            panic!("uncompiled provider must fail");
+        };
+        assert_eq!(
+            error,
+            KafkaRuntimeError::FeatureDisabled {
+                provider: KafkaProvider::RustNative,
+                feature: "rskafka",
+            }
+        );
     }
 
     #[tokio::test]

@@ -240,6 +240,7 @@ fn serialize_signature(config: &roze_kafka::KafkaConfig) -> String {
 
 fn map_kafka_config(config: &crate::config::Config) -> Option<roze_kafka::KafkaConfig> {
     config.kafka.as_ref().map(|k| roze_kafka::KafkaConfig {
+        provider: Some(roze_kafka::KafkaProvider::Rdkafka),
         brokers: k.brokers.clone(),
         bootstrap: k.bootstrap.clone(),
         bootstrap_servers: k.bootstrap_servers.clone(),

@@ -1,5 +1,23 @@
 # Roze 队列收口（Kafka，阶段1+2）
 
+## Kafka Provider 与能力矩阵
+
+`roze-kafka` 通过 `KafkaConfig.provider` 选择 `memory`、`rdkafka` 或
+`rust-native`，并由 `build_runtime` 返回统一的
+`Arc<dyn roze_mq::Publisher>` / `Arc<dyn roze_mq::Subscriber>`。
+
+| Provider | Feature | 发布 | Consumer Group | 手工 ACK / Offset Commit | Rebalance | 事务 | 定位 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| memory | `memory` | 是 | 否 | 仅进程内 | 否 | 否 | 本地开发、单测 |
+| rdkafka | `rdkafka` | 是 | 是 | 是 | 是 | Roze 暂未暴露 | 生产推荐 |
+| rdkafka | `rdkafka-cmake` | 是 | 是 | 是 | 是 | Roze 暂未暴露 | 使用 CMake 构建 librdkafka |
+| rust-native | `rskafka` | 是 | 否 | 否 | 否 | 否 | Experimental、仅发布 |
+
+`rskafka` 上游不支持 Consumer Group、Offset Tracking、Rebalance 或事务。
+Roze 不模拟这些语义：`build_runtime` 选择 `rust-native` 时会在连接 Broker
+之前 fail-fast；仅发布服务可使用 `build_publisher`。`rskafka` 关闭默认压缩
+Feature，避免间接引入 LZ4/Zstandard 原生库。
+
 ## 原生配置前提
 - `Publisher`/`Subscriber` 接口保持稳定。
 - `KafkaConfig` 使用 Roze 原生字段；配置解析统一走标准字段归一化。

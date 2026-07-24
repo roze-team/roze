@@ -363,6 +363,24 @@ impl Delivery {
             nack_fn,
         }
     }
+
+    /// Builds a delivery backed by provider-owned asynchronous settlement callbacks.
+    ///
+    /// Provider crates should use this constructor when adapting their native delivery
+    /// handles to the stable `roze_mq::Delivery` contract.
+    pub fn from_handlers<A, AF, N, NF>(message: Message, ack_fn: A, nack_fn: N) -> Self
+    where
+        A: Fn() -> AF + Send + Sync + 'static,
+        AF: Future<Output = anyhow::Result<()>> + Send + 'static,
+        N: Fn() -> NF + Send + Sync + 'static,
+        NF: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        Self::external(
+            message,
+            Arc::new(move || Box::pin(ack_fn())),
+            Arc::new(move || Box::pin(nack_fn())),
+        )
+    }
 }
 
 #[async_trait]

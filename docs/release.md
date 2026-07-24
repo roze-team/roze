@@ -131,7 +131,9 @@ rdkafka`.
   removed when the upstream dependency provides a safe path.
 - `cargo test --workspace`
 - `cargo check --workspace`
-- `cargo check -p roze-kafka --features rdkafka`
+- `cargo check -p roze-kafka --no-default-features --features rdkafka`
+- Windows: `cargo check -p roze-kafka --no-default-features --features rdkafka-cmake`
+- `cargo check -p roze-kafka --no-default-features --features rskafka`
 - `cargo test -p rozectl -- --skip postgres --skip mysql --skip mongo`
 - `bash scripts/production-smoke.sh`
 - `bash scripts/rozectl-smoke.sh`

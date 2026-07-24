@@ -299,6 +299,25 @@ writing or previewing generated files, including `api generate`, `rpc generate`,
 `diff api`, `diff rpc`, client generation, OpenAPI, mock servers, smoke tests,
 stream workers, docs, and API plugins.
 
+Generate a Stream worker with an explicit Kafka provider:
+
+```bash
+rozectl stream gen --api example/events.api --out workers/events --broker memory
+rozectl stream gen --api example/events.api --out workers/events --broker rdkafka
+rozectl stream gen --api example/events.api --out workers/events --broker rust-native
+```
+
+The generated entrypoint constructs Kafka through
+`roze_kafka::build_runtime` and gives business code only the stable
+`roze_mq::Subscriber` trait. `--broker` selects the generated Cargo feature and
+initial `kafka.provider` value. `config.yaml` and
+`src/stream/consumer.rs` remain application-owned during `--update`.
+
+`rust-native` uses rskafka and is experimental/publish-only because upstream
+does not implement Consumer Groups or Offset Commit. A generated consuming
+worker therefore fails fast during startup instead of silently weakening ACK
+semantics. Use `rdkafka` for production Stream consumers.
+
 Format an API contract:
 
 ```bash

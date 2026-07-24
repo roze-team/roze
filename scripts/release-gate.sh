@@ -57,6 +57,8 @@ cargo test -p roze-gateway
 bash scripts/gateway-smoke.sh
 cargo test -p roze-config config_center
 cargo test -p roze-mq
+cargo check -p roze-kafka --no-default-features --features rdkafka
+cargo check -p roze-kafka --no-default-features --features rskafka
 cargo test -p roze-service -p roze-bootstrap -p roze-shutdown
 cargo test -p roze-job
 cargo test -p roze-report

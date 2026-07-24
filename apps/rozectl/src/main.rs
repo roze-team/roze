@@ -34,6 +34,25 @@ enum RozeSource {
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum StreamBroker {
+    #[default]
+    Memory,
+    Rdkafka,
+    #[value(name = "rust-native", alias = "rskafka")]
+    RustNative,
+}
+
+impl From<StreamBroker> for generator::StreamBroker {
+    fn from(value: StreamBroker) -> Self {
+        match value {
+            StreamBroker::Memory => Self::Memory,
+            StreamBroker::Rdkafka => Self::Rdkafka,
+            StreamBroker::RustNative => Self::RustNative,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum ModelFormat {
     #[default]
     Auto,
@@ -1041,6 +1060,8 @@ enum StreamCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
+        #[arg(long, value_enum, default_value_t)]
+        broker: StreamBroker,
     },
 }
 
@@ -1503,12 +1524,14 @@ fn run() -> anyhow::Result<()> {
                 force,
                 update,
                 roze_source,
+                broker,
             } => {
                 validate_api_for_generation(&api)?;
-                generator::write_stream_worker_project(
+                generator::write_stream_worker_project_with_broker(
                     &api,
                     &out,
                     options(force, update, roze_source),
+                    broker.into(),
                 )?
             }
         },
@@ -6173,12 +6196,17 @@ envFrom: []
             "--update",
             "--roze-source",
             "path",
+            "--broker",
+            "rust-native",
         ])
         .expect("parse stream gen");
         assert!(matches!(
             stream.command,
             Commands::Stream {
-                command: StreamCommands::Gen { .. }
+                command: StreamCommands::Gen {
+                    broker: StreamBroker::RustNative,
+                    ..
+                }
             }
         ));
 
