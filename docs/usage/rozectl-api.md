@@ -132,7 +132,8 @@ cargo run -p rozectl -- api generate example/user.api \
 - REST `src/logic/<group>/<method>.rs`
 - REST `src/config/mod.rs`
 - REST `src/handler/<group>/<method>.rs`
-- REST/RPC `src/svc/mod.rs`
+- REST/RPC `src/logic/prelude.rs`
+- REST/RPC `src/application.rs`
 - REST service-wide middleware hook `src/middleware/app.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
 - RPC `src/config/mod.rs`
@@ -153,15 +154,18 @@ rozectl service sync --project services/payment --check
 ```
 
 This synchronizes Cargo, `config/roze-dependencies.yaml`, and the generated
-RPC-client sections inside the preserved `ServiceContext`. The main
+RPC-client sections inside `ServiceContext`. The main
 `config.yaml` and `ROZE__...` environment variables override generated
 dependency defaults. The manifest records `kind: api` or `kind: rpc`, and sync
 rejects a mismatch with the generated project boundaries. See
 [RPC Client Configuration](../contracts/rpc-client-config.md).
 
-Generated glue such as route registration, handler module indexes, DTOs,
-OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`, and
-`proto/service.proto` is refreshed. Use `--force` when you want a full rebuild.
+Generated glue such as route registration, handler and logic module indexes,
+DTOs, OpenAPI, RPC server/client adapters, protobuf include modules, `build.rs`,
+and `proto/service.proto` is refreshed. Put application-owned logic module
+attributes, declarations, imports, and re-exports in
+`src/logic/prelude.rs`; it is imported by generated logic and preserved
+verbatim. Use `--force` when you want a full rebuild.
 
 ## WebSocket routes
 
@@ -322,6 +326,11 @@ Create, `--update`, and `--force` generation format framework-owned Rust files
 inside the transactional staging directory before replacing the target, so a
 successful command is immediately clean under `cargo fmt --all -- --check`.
 Update formatting never rewrites the application-owned consumer or config.
+If the target matches a parent Cargo workspace `exclude` entry, Stream
+generation emits standalone package metadata and explicit dependency versions.
+It also emits an empty local `[workspace]` boundary, does not add the project to
+the parent workspace members, and keeps the manifest directly usable with
+`cargo check --manifest-path` across repeated updates.
 
 `rust-native` uses rskafka and is experimental/publish-only because upstream
 does not implement Consumer Groups or Offset Commit. A generated consuming
@@ -1255,9 +1264,10 @@ initialization, or methods in that file; attach custom resources from
 `src/application.rs`. Projects generated before this ownership rule must move
 such code before upgrading. If the project also uses generated models, run
 model generation after REST/RPC generation so model-specific context wiring is
-applied to the refreshed service context. Group-level logic module indexes such
-as `src/logic/admin/mod.rs` are refreshed for generated handlers while
-preserving extra app-owned `mod ...;` declarations.
+applied to the refreshed service context. Root and group-level logic module
+indexes are generator-owned and refreshed. Keep custom module declarations,
+attributes, imports, and re-exports in the preserved
+`src/logic/prelude.rs`.
 
 ## Type mapping
 

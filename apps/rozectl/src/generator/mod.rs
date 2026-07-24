@@ -801,7 +801,12 @@ fn write_stream_cargo_toml(
     options: GenerateOptions,
     broker: StreamBroker,
 ) -> anyhow::Result<()> {
-    let workspace_root = find_workspace_root(logical_out)?;
+    let workspace_root = find_parent_workspace_root(logical_out)?;
+    let in_workspace = if let Some(root) = workspace_root.as_deref() {
+        !workspace_excludes_path(root, logical_out)?
+    } else {
+        false
+    };
     let local_crates_prefix = match options.dependency_source {
         DependencySource::Git => None,
         DependencySource::Path => Some(local_crates_prefix(
@@ -820,7 +825,7 @@ fn write_stream_cargo_toml(
             logical_out,
             options.dependency_source,
             local_crates_prefix.as_deref(),
-            workspace_root.is_some(),
+            in_workspace,
             broker,
         ),
     )
@@ -864,6 +869,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 validator = { version = "0.20", features = ["derive"] }"#
     };
+    let workspace_boundary = if in_workspace { "" } else { "\n[workspace]\n" };
     let mut roze_dependencies =
         roze_dependencies(dependency_source, local_crates_prefix, &STREAM_ROZE_CRATES);
     let plain_kafka = match dependency_source {
@@ -894,6 +900,7 @@ name = "{package_name}"
 [dependencies]
 {common_dependencies}
 {roze_dependencies}
+{workspace_boundary}
 "#
     )
 }
@@ -945,6 +952,11 @@ fn render_stream_readme(spec: &ApiSpec, api: &Path, broker: StreamBroker) -> Str
     writeln!(
         &mut out,
         "- `config.yaml` owns deploy-time stream settings and is preserved during `--update`."
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "- Targets excluded by a parent Cargo workspace use standalone package metadata and explicit dependency versions."
     )
     .unwrap();
     out
@@ -1228,7 +1240,11 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
         api.display()
     )
     .unwrap();
-    writeln!(&mut out, "- Business behavior belongs in `src/logic/**`.").unwrap();
+    writeln!(
+        &mut out,
+        "- Business behavior belongs in generated logic stubs; shared declarations and imports belong in `src/logic/prelude.rs`."
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "## API Surface").unwrap();
     writeln!(&mut out).unwrap();
@@ -1299,7 +1315,17 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
-        "| `src/logic/**` | application | preserved during `--update` |"
+        "| `src/logic/prelude.rs` | application | preserved during `--update` |"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "| `src/logic/<handler>.rs` | application | preserved during `--update` |"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "| `src/logic/**/mod.rs` | framework | refreshed during `--update` |"
     )
     .unwrap();
     writeln!(
@@ -1352,7 +1378,7 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "- Prefer editing `src/logic/**` and application-owned extension files."
+        "- Prefer editing generated logic stubs, `src/logic/prelude.rs`, and application-owned extension files."
     )
     .unwrap();
     writeln!(
@@ -1387,7 +1413,8 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "## Editable Paths").unwrap();
     writeln!(&mut out).unwrap();
-    writeln!(&mut out, "- `src/logic/**`").unwrap();
+    writeln!(&mut out, "- generated REST/RPC logic handler files").unwrap();
+    writeln!(&mut out, "- `src/logic/prelude.rs`").unwrap();
     writeln!(&mut out, "- `src/middleware/app.rs`").unwrap();
     writeln!(&mut out, "- `src/application.rs`").unwrap();
     writeln!(&mut out, "- `src/middleware/<custom>.rs`").unwrap();
@@ -3572,10 +3599,15 @@ fn generate_rest_project_in_place(
         )?;
     }
     fs::write(out.join("src/logic/mod.rs"), rest::render_logic_mod(spec))?;
+    write_preserved(
+        &out.join("src/logic/prelude.rs"),
+        logic_prelude_rs(),
+        options.mode,
+    )?;
     for (group, content) in rest::render_logic_group_mods(spec) {
         let dir = out.join("src/logic").join(&group);
         fs::create_dir_all(&dir)?;
-        write_logic_group_mod(&dir.join("mod.rs"), content, options.mode)?;
+        fs::write(dir.join("mod.rs"), content)?;
     }
     for (group, handler, content) in rest::render_logic_files(spec) {
         let dir = out.join("src/logic").join(&group);
@@ -3803,9 +3835,10 @@ fn generate_rpc_project_in_place(
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
-    write_rpc_logic_mod(
-        &out.join("src/logic/mod.rs"),
-        rpc::render_logic_mod(spec),
+    fs::write(out.join("src/logic/mod.rs"), rpc::render_logic_mod(spec))?;
+    write_preserved(
+        &out.join("src/logic/prelude.rs"),
+        logic_prelude_rs(),
         options.mode,
     )?;
     for (method, content) in rpc::render_logic_files(spec) {
@@ -3887,6 +3920,11 @@ fn is_framework_owned_rust_file(out: &Path, path: &Path) -> bool {
     if normalized == "src/middleware/mod.rs" {
         return true;
     }
+    if normalized == "src/logic/mod.rs"
+        || (normalized.starts_with("src/logic/") && normalized.ends_with("/mod.rs"))
+    {
+        return true;
+    }
     if normalized == "src/svc/mod.rs" {
         return true;
     }
@@ -3945,208 +3983,6 @@ fn write_preserved_logic(path: &Path, content: String, mode: GenerateMode) -> an
         }
     }
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn write_logic_group_mod(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
-    if mode != GenerateMode::Update || !path.exists() {
-        return fs::write(path, content)
-            .with_context(|| format!("failed to write {}", path.display()));
-    }
-
-    let existing =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let merged = merge_app_owned_mod_declarations(&content, &existing);
-    fs::write(path, merged).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn write_rpc_logic_mod(path: &Path, content: String, mode: GenerateMode) -> anyhow::Result<()> {
-    if mode != GenerateMode::Update || !path.exists() {
-        return fs::write(path, content)
-            .with_context(|| format!("failed to write {}", path.display()));
-    }
-
-    let existing =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let existing = rpc_app_owned_logic_declarations(&content, &existing, path.parent().unwrap());
-    let merged = merge_app_owned_mod_declarations(&content, &existing);
-    fs::write(path, merged).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn rpc_app_owned_logic_declarations(generated: &str, existing: &str, logic_dir: &Path) -> String {
-    const START: &str = "// <roze:generated-rpc-logic>";
-    const END: &str = "// </roze:generated-rpc-logic>";
-
-    if existing.lines().any(|line| line.trim() == START) {
-        let mut inside_generated = false;
-        return existing
-            .lines()
-            .filter(|line| {
-                let line = line.trim();
-                if line == START {
-                    inside_generated = true;
-                    return false;
-                }
-                if line == END {
-                    inside_generated = false;
-                    return false;
-                }
-                !inside_generated
-            })
-            .map(|line| format!("{line}\n"))
-            .collect();
-    }
-
-    let generated_modules = generated
-        .lines()
-        .filter_map(mod_declaration_name)
-        .collect::<HashSet<_>>();
-    existing
-        .lines()
-        .filter(|line| {
-            let module = mod_declaration_name(line)
-                .or_else(|| pub_use_declaration(line).map(|declaration| declaration.module));
-            module.is_none_or(|module| {
-                generated_modules.contains(&module)
-                    || logic_dir.join(format!("{module}.rs")).is_file()
-            })
-        })
-        .map(|line| format!("{line}\n"))
-        .collect()
-}
-
-fn merge_app_owned_mod_declarations(generated: &str, existing: &str) -> String {
-    let generated_modules = generated
-        .lines()
-        .filter_map(mod_declaration_name)
-        .collect::<HashSet<_>>();
-    let generated_pub_uses = generated
-        .lines()
-        .filter_map(pub_use_declaration)
-        .collect::<Vec<_>>();
-    let existing_pub_uses = existing
-        .lines()
-        .filter_map(|line| {
-            pub_use_declaration(line).map(|pub_use| (line.trim().to_string(), pub_use))
-        })
-        .collect::<Vec<_>>();
-
-    let mut replaced_pub_uses = HashSet::new();
-    let mut merged = String::new();
-    for line in generated.lines() {
-        if let Some(generated_pub_use) = pub_use_declaration(line) {
-            if let Some((existing_line, _)) =
-                existing_pub_uses.iter().find(|(_, existing_pub_use)| {
-                    existing_pub_use.module == generated_pub_use.module
-                        && generated_pub_use
-                            .symbols
-                            .iter()
-                            .all(|symbol| existing_pub_use.symbols.contains(symbol))
-                })
-            {
-                merged.push_str(existing_line);
-                merged.push('\n');
-                replaced_pub_uses.insert(existing_line.clone());
-                continue;
-            }
-        }
-
-        merged.push_str(line);
-        merged.push('\n');
-    }
-
-    let extra_mods = existing
-        .lines()
-        .filter_map(|line| {
-            let name = mod_declaration_name(line)?;
-            (!generated_modules.contains(&name)).then_some(line.trim().to_string())
-        })
-        .collect::<Vec<_>>();
-    let extra_pub_uses = existing_pub_uses
-        .into_iter()
-        .filter_map(|(line, pub_use)| {
-            let generated_has_same_module = generated_pub_uses
-                .iter()
-                .any(|generated_pub_use| generated_pub_use.module == pub_use.module);
-            (!generated_has_same_module && !replaced_pub_uses.contains(&line)).then_some(line)
-        })
-        .collect::<Vec<_>>();
-    if extra_mods.is_empty() && extra_pub_uses.is_empty() {
-        return merged;
-    }
-
-    if !merged.ends_with('\n') {
-        merged.push('\n');
-    }
-    for line in extra_mods {
-        merged.push_str(&line);
-        merged.push('\n');
-    }
-    for line in extra_pub_uses {
-        merged.push_str(&line);
-        merged.push('\n');
-    }
-    merged
-}
-
-fn mod_declaration_name(line: &str) -> Option<String> {
-    let line = line.trim();
-    let rest = line
-        .strip_prefix("mod ")
-        .or_else(|| line.strip_prefix("pub mod "))?;
-    let name = rest.strip_suffix(';')?.trim();
-    (!name.is_empty()
-        && name
-            .chars()
-            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
-    .then(|| name.to_string())
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct PubUseDeclaration {
-    module: String,
-    symbols: HashSet<String>,
-}
-
-fn pub_use_declaration(line: &str) -> Option<PubUseDeclaration> {
-    let line = line.trim();
-    let rest = line.strip_prefix("pub use ")?;
-    let rest = rest.strip_suffix(';')?.trim();
-    let (module, symbols) = rest.split_once("::")?;
-    let module = module.trim();
-    if !is_rust_ident(module) {
-        return None;
-    }
-
-    let symbols = if let Some(symbols) = symbols
-        .trim()
-        .strip_prefix('{')
-        .and_then(|symbols| symbols.strip_suffix('}'))
-    {
-        symbols
-            .split(',')
-            .map(str::trim)
-            .filter(|symbol| !symbol.is_empty())
-            .map(str::to_string)
-            .collect::<HashSet<_>>()
-    } else {
-        let symbol = symbols.trim();
-        if !is_rust_ident(symbol) {
-            return None;
-        }
-        HashSet::from([symbol.to_string()])
-    };
-
-    (!symbols.is_empty()).then(|| PubUseDeclaration {
-        module: module.to_string(),
-        symbols,
-    })
-}
-
-fn is_rust_ident(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn is_generated_default_logic_stub(content: &str) -> bool {
@@ -4248,7 +4084,12 @@ fn write_cargo_toml_with_rpc_clients(
 ) -> anyhow::Result<()> {
     let path = out.join("Cargo.toml");
     let package_name = package_name_from_output(logical_out, spec);
-    let workspace_root = find_workspace_root(logical_out)?;
+    let workspace_root = find_parent_workspace_root(logical_out)?;
+    let in_workspace = if let Some(root) = workspace_root.as_deref() {
+        !workspace_excludes_path(root, logical_out)?
+    } else {
+        false
+    };
     let local_crates_prefix = match options.dependency_source {
         DependencySource::Git => None,
         DependencySource::Path => Some(local_crates_prefix(
@@ -4267,7 +4108,7 @@ fn write_cargo_toml_with_rpc_clients(
                 &package_name,
                 options.dependency_source,
                 local_crates_prefix.as_deref(),
-                workspace_root.is_some(),
+                in_workspace,
                 kind,
                 logical_out,
                 rpc_clients,
@@ -4736,6 +4577,7 @@ tonic-prost-build = "0.14.6""#
     } else {
         format!("\n[build-dependencies]\n{build_dependencies}\n")
     };
+    let workspace_boundary = if in_workspace { "" } else { "\n[workspace]\n" };
     let rpc_client_dependencies = render_rpc_client_dependencies(out, rpc_clients);
 
     format!(
@@ -4748,7 +4590,7 @@ name = "{package_name}"
 {roze_dependencies}
 {rpc_client_dependencies}
 {remaining_dependencies}
-{build_dependencies_section}"#,
+{build_dependencies_section}{workspace_boundary}"#,
         package_name = package_name,
         package = package,
         dependencies = dependencies,
@@ -4756,6 +4598,7 @@ name = "{package_name}"
         rpc_client_dependencies = rpc_client_dependencies,
         remaining_dependencies = remaining_dependencies,
         build_dependencies_section = build_dependencies_section,
+        workspace_boundary = workspace_boundary,
     )
 }
 
@@ -8243,6 +8086,9 @@ fn regeneration_policy_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
     - src/openapi/mod.rs
     - src/route/**
     - src/handler/mod.rs
+    - src/logic/mod.rs
+    - src/logic/*/mod.rs
+    - src/svc/mod.rs
     - src/types/mod.rs
     - README.md
     - ops/**"#
@@ -8252,6 +8098,8 @@ fn regeneration_policy_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
     - src/pb/mod.rs
     - src/server/mod.rs
     - src/client/mod.rs
+    - src/logic/mod.rs
+    - src/svc/mod.rs
     - src/types/mod.rs
     - proto/service.proto
     - build.rs
@@ -8263,17 +8111,20 @@ fn regeneration_policy_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         ProjectKind::Rest => {
             r#"    - config.yaml
     - src/config/mod.rs
-    - src/svc/mod.rs
-    - src/logic/**
-    - src/middleware/**
+    - src/application.rs
+    - src/logic/prelude.rs
+    - src/logic/*/*.rs
+    - src/middleware/app.rs
+    - src/middleware/<custom>.rs
     - src/handler/*/*.rs
     - src/model/**"#
         }
         ProjectKind::Rpc => {
             r#"    - config.yaml
     - src/config/mod.rs
-    - src/svc/mod.rs
-    - src/logic/**
+    - src/application.rs
+    - src/logic/prelude.rs
+    - src/logic/<method>.rs
     - src/model/**"#
         }
     };
@@ -11217,9 +11068,12 @@ fn method_name(method: &crate::parser::HttpMethod) -> &'static str {
 }
 
 fn register_workspace_member(out: &Path) -> anyhow::Result<()> {
-    let Some(workspace_root) = find_workspace_root(out)? else {
+    let Some(workspace_root) = find_parent_workspace_root(out)? else {
         return Ok(());
     };
+    if workspace_excludes_path(&workspace_root, out)? {
+        return Ok(());
+    }
     let relative = out
         .strip_prefix(&workspace_root)
         .map(Path::to_path_buf)
@@ -11253,6 +11107,49 @@ fn register_workspace_member(out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn workspace_excludes_path(workspace_root: &Path, out: &Path) -> anyhow::Result<bool> {
+    let absolute_out = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(out)
+    };
+    let relative = absolute_out
+        .strip_prefix(workspace_root)
+        .with_context(|| {
+            format!(
+                "{} is not inside Cargo workspace {}",
+                absolute_out.display(),
+                workspace_root.display()
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let manifest = workspace_root.join("Cargo.toml");
+    let content = fs::read_to_string(&manifest)
+        .with_context(|| format!("failed to read {}", manifest.display()))?;
+    let document = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", manifest.display()))?;
+    let excluded = document
+        .get("workspace")
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|workspace| workspace.get("exclude"))
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|patterns| {
+            patterns
+                .iter()
+                .filter_map(toml_edit::Value::as_str)
+                .map(|path| {
+                    path.trim()
+                        .trim_start_matches("./")
+                        .trim_end_matches(['/', '\\'])
+                        .replace('\\', "/")
+                })
+                .any(|path| path == relative)
+        });
+    Ok(excluded)
+}
+
 pub(super) fn find_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>> {
     let absolute_out = if out.is_absolute() {
         out.to_path_buf()
@@ -11273,6 +11170,18 @@ pub(super) fn find_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>>
     }
 
     Ok(None)
+}
+
+fn find_parent_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let absolute_out = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(out)
+    };
+    let Some(parent) = absolute_out.parent() else {
+        return Ok(None);
+    };
+    find_workspace_root(parent)
 }
 
 fn config_rs() -> String {
@@ -11307,6 +11216,15 @@ pub fn register_services(
     let _ = ctx;
     Ok(())
 }
+"#
+    .to_string()
+}
+
+fn logic_prelude_rs() -> String {
+    r#"//! Application-owned logic prelude.
+//!
+//! Declare shared helper modules, imports, and re-exports in this file.
+//! `rozectl ... generate --update` preserves it while rebuilding `logic/mod.rs`.
 "#
     .to_string()
 }
@@ -13896,12 +13814,35 @@ mod tests {
 
         registry()
             .dispatch(GeneratorCommand::ApiGenerate {
-                api,
+                api: api.clone(),
                 out: out.clone(),
                 options: GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             })
             .expect("generate rest project");
         register_workspace_member(&out).expect("register rest smoke workspace member");
+        fs::write(
+            out.join("src/logic/support.rs"),
+            "pub fn shared_value() -> u64 { 1 }\n",
+        )
+        .expect("write REST logic support");
+        let prelude = r#"#[path = "support.rs"]
+mod support;
+pub use support::shared_value;
+"#;
+        fs::write(out.join("src/logic/prelude.rs"), prelude).expect("write REST logic prelude");
+        for _ in 0..2 {
+            registry()
+                .dispatch(GeneratorCommand::ApiGenerate {
+                    api: api.clone(),
+                    out: out.clone(),
+                    options: GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+                })
+                .expect("update REST project");
+        }
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read REST logic prelude"),
+            prelude
+        );
         model::generate_model_project(
             &fs::read_to_string(&model).expect("read model"),
             &out,
@@ -13968,12 +13909,35 @@ mod tests {
 
         registry()
             .dispatch(GeneratorCommand::RpcGenerate {
-                api,
+                api: api.clone(),
                 out: out.clone(),
                 options: GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
             })
             .expect("generate rpc project");
         register_workspace_member(&out).expect("register rpc smoke workspace member");
+        fs::write(
+            out.join("src/logic/support.rs"),
+            "pub fn shared_value() -> u64 { 1 }\n",
+        )
+        .expect("write RPC logic support");
+        let prelude = r#"#[path = "support.rs"]
+mod support;
+pub use support::shared_value;
+"#;
+        fs::write(out.join("src/logic/prelude.rs"), prelude).expect("write RPC logic prelude");
+        for _ in 0..2 {
+            registry()
+                .dispatch(GeneratorCommand::RpcGenerate {
+                    api: api.clone(),
+                    out: out.clone(),
+                    options: GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+                })
+                .expect("update RPC project");
+        }
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read RPC logic prelude"),
+            prelude
+        );
 
         cargo_check_generated(&out.join("Cargo.toml"));
         cargo_clippy_generated(&out.join("Cargo.toml"));
@@ -13984,6 +13948,17 @@ mod tests {
     #[ignore = "compile-smoke: generates a stream worker project and runs cargo check/clippy"]
     fn generated_stream_project_compiles() {
         let root = generated_compile_workspace("rozectl-stream-compile-smoke");
+        let workspace_manifest = root.join("Cargo.toml");
+        let workspace = fs::read_to_string(&workspace_manifest).expect("read compile workspace");
+        fs::write(
+            &workspace_manifest,
+            workspace.replacen(
+                "[workspace]\n",
+                "[workspace]\nexclude = [\"services/user-stream-standalone\"]\n",
+                1,
+            ),
+        )
+        .expect("exclude standalone services");
         let api = root.join("user-stream.api");
         fs::write(
             &api,
@@ -14031,6 +14006,28 @@ mod tests {
             cargo_check_generated(&out.join("Cargo.toml"));
             cargo_clippy_generated(&out.join("Cargo.toml"));
         }
+
+        let standalone = root.join("services/user-stream-standalone");
+        for mode in [
+            GenerateMode::Create,
+            GenerateMode::Update,
+            GenerateMode::Update,
+        ] {
+            write_stream_worker_project_with_broker(
+                &api,
+                &standalone,
+                GenerateOptions::new(mode, DependencySource::Path),
+                StreamBroker::Memory,
+            )
+            .expect("generate excluded standalone stream project");
+        }
+        let manifest =
+            fs::read_to_string(standalone.join("Cargo.toml")).expect("read standalone manifest");
+        assert!(manifest.contains("version = \"0.1.0\""));
+        assert!(!manifest.contains(".workspace = true"));
+        cargo_check_generated(&standalone.join("Cargo.toml"));
+        cargo_clippy_generated(&standalone.join("Cargo.toml"));
+
         fs::remove_dir_all(root).expect("remove compile workspace");
     }
 
@@ -15021,7 +15018,8 @@ mod tests {
         assert!(rest_production_gate.contains("broad_production_stable:"));
         assert!(rest_regeneration_policy.contains("boundary: rest"));
         assert!(rest_regeneration_policy.contains("src/openapi/mod.rs"));
-        assert!(rest_regeneration_policy.contains("src/logic/**"));
+        assert!(rest_regeneration_policy.contains("src/logic/prelude.rs"));
+        assert!(rest_regeneration_policy.contains("src/logic/*/mod.rs"));
         assert!(rest_regeneration_policy.contains("drift_classification:"));
         assert!(rest_regeneration_policy.contains("breaking_change_without_migration_plan"));
         assert!(rest_client_contract.contains("boundary: rest"));
@@ -15451,10 +15449,18 @@ mod tests {
         )
         .expect("write application context hook");
         fs::write(
-            out.join("src/logic/users/mod.rs"),
-            "mod get_user;\npub use get_user::{get_user, AdminTokenReq};\nmod catalog_map;\n",
+            out.join("src/logic/support.rs"),
+            "pub struct SupportMarker;\n",
         )
-        .expect("write custom logic group mod");
+        .expect("write custom logic support module");
+        let logic_prelude = r#"#[path = "support.rs"]
+mod support;
+#[allow(unused_imports)]
+use support::*;
+pub use support::SupportMarker;
+"#;
+        fs::write(out.join("src/logic/prelude.rs"), logic_prelude)
+            .expect("write custom logic prelude");
         let svc_path = out.join("src/svc/mod.rs");
         fs::write(
             &svc_path,
@@ -15521,12 +15527,14 @@ mod tests {
         assert!(fs::read_to_string(out.join("src/middleware/mod.rs"))
             .expect("read middleware mod")
             .contains("pub use tenant_guard::tenant_guard;"));
-        assert!(fs::read_to_string(out.join("src/logic/users/mod.rs"))
-            .expect("read logic group mod")
-            .contains("mod catalog_map;"));
-        assert!(fs::read_to_string(out.join("src/logic/users/mod.rs"))
-            .expect("read logic group mod")
-            .contains("pub use get_user::{get_user, AdminTokenReq};"));
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/prelude.rs"))
+                .expect("read preserved logic prelude"),
+            logic_prelude
+        );
+        assert!(fs::read_to_string(out.join("src/logic/mod.rs"))
+            .expect("read generated logic mod")
+            .contains("pub use prelude::*;"));
         let refreshed_svc =
             fs::read_to_string(out.join("src/svc/mod.rs")).expect("read refreshed svc");
         assert!(!refreshed_svc.contains("obsolete_customization"));
@@ -16006,11 +16014,13 @@ pub fn register_services(
         .expect("initial generation");
         fs::write(out.join("src/logic/coupon_map.rs"), "// custom helper\n")
             .expect("write custom helper");
-        fs::write(
-            out.join("src/logic/mod.rs"),
-            "mod list_coupons;\npub use list_coupons::list_coupons;\nmod get_dashboard;\npub use get_dashboard::get_dashboard;\nmod coupon_map;\n",
-        )
-        .expect("write custom logic mod");
+        let logic_prelude = r#"#[path = "coupon_map.rs"]
+mod coupon_map;
+#[allow(unused_imports)]
+use coupon_map::*;
+"#;
+        fs::write(out.join("src/logic/prelude.rs"), logic_prelude)
+            .expect("write custom logic prelude");
         fs::remove_file(out.join("src/logic/get_dashboard.rs"))
             .expect("remove obsolete generated logic");
 
@@ -16024,9 +16034,14 @@ pub fn register_services(
         let logic_mod = fs::read_to_string(out.join("src/logic/mod.rs")).expect("read logic mod");
         assert!(logic_mod.contains("mod list_coupons;"));
         assert!(logic_mod.contains("pub use list_coupons::list_coupons;"));
-        assert!(logic_mod.contains("mod coupon_map;"));
         assert!(!logic_mod.contains("get_dashboard"));
         assert!(logic_mod.contains("// <roze:generated-rpc-logic>"));
+        assert!(logic_mod.contains("pub use prelude::*;"));
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/prelude.rs"))
+                .expect("read preserved logic prelude"),
+            logic_prelude
+        );
         assert_eq!(
             fs::read_to_string(out.join("src/logic/coupon_map.rs")).expect("read helper"),
             "// custom helper\n"
@@ -16132,6 +16147,64 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         );
 
         fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn excluded_stream_projects_keep_standalone_manifests_across_updates() {
+        let root = temp_test_root("rozectl-excluded-stream");
+        let api = root.join("contracts/events.api");
+        let out = root.join("services/lumen-worker");
+        fs::create_dir_all(api.parent().expect("contract parent")).expect("create contracts");
+        let workspace_manifest =
+            "[workspace]\nmembers = []\nexclude = [\"services/lumen-worker\"]\nresolver = \"2\"\n";
+        fs::write(root.join("Cargo.toml"), workspace_manifest)
+            .expect("write excluding workspace manifest");
+        fs::write(
+            &api,
+            r#"
+            service lumen-events {
+                rpc MessagePublished (MessagePublishedReq) returns (MessagePublishedResp)
+            }
+            type MessagePublishedReq {
+                id string
+            }
+            type MessagePublishedResp {
+                accepted bool
+            }
+            "#,
+        )
+        .expect("write stream contract");
+
+        write_stream_worker_project(
+            &api,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create excluded stream");
+        let first = fs::read_to_string(out.join("Cargo.toml")).expect("read standalone manifest");
+        assert!(first.contains("version = \"0.1.0\""));
+        assert!(first.contains("anyhow = \"1\""));
+        assert!(first.contains("[workspace]"));
+        assert!(!first.contains(".workspace = true"));
+
+        for _ in 0..2 {
+            write_stream_worker_project(
+                &api,
+                &out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            )
+            .expect("update excluded stream");
+        }
+        assert_eq!(
+            fs::read_to_string(out.join("Cargo.toml")).expect("read repeated-update manifest"),
+            first
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest"),
+            workspace_manifest
+        );
+
+        fs::remove_dir_all(root).expect("remove excluded stream workspace");
     }
 
     #[test]
@@ -16287,7 +16360,10 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         assert!(content.contains("# user-api Service"));
         assert!(content.contains("| GET | `/users/:id` | `getUser` | `GetUserReq` | `UserResp` |"));
         assert!(content.contains("| `Ping` | `PingReq` | `PingResp` |"));
-        assert!(content.contains("`src/logic/**` | application | preserved during `--update`"));
+        assert!(
+            content.contains("`src/logic/prelude.rs` | application | preserved during `--update`")
+        );
+        assert!(content.contains("`src/logic/**/mod.rs` | framework | refreshed during `--update`"));
         assert!(content.contains(
             "`src/svc/mod.rs` | framework/dependencies | refreshed by `rozectl ... generate --update`"
         ));

@@ -16,15 +16,17 @@ upgrade.
 
 `rozectl --update` preserves application-owned files:
 
-- REST `src/logic/**`
-- RPC `src/logic/**`
-- REST/RPC `src/svc/mod.rs`
+- REST `src/logic/<group>/<handler>.rs`
+- RPC `src/logic/<method>.rs`
+- REST/RPC `src/logic/prelude.rs`
+- REST/RPC `src/application.rs`
 - custom REST middleware files under `src/middleware/`
 - `config.yaml`
 
-For REST services, group module indexes such as `src/logic/admin/mod.rs`
-refresh generated handler exports while preserving extra app-owned
-`mod ...;` declarations.
+`src/logic/mod.rs` and REST group indexes such as
+`src/logic/admin/mod.rs` are generator-owned. Move custom module attributes,
+declarations, imports, and re-exports into `src/logic/prelude.rs`, which is
+preserved during updates.
 
 Generated glue may be refreshed:
 

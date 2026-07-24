@@ -1060,6 +1060,9 @@ pub fn render_logic_mod(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(dead_code)]\n\nuse roze_error::RozeError;\n\n");
     out.push_str("use crate::svc::ServiceContext;\n");
     out.push_str("use crate::types::*;\n\n");
+    out.push_str(
+        "#[allow(unused_imports)]\nmod prelude;\n#[allow(unused_imports)]\npub use prelude::*;\n\n",
+    );
     out.push_str(render_auth_context_helpers());
 
     for group in route_groups(spec).keys() {

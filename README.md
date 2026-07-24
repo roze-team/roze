@@ -207,10 +207,13 @@ cargo run -p rozectl -- api generate example/user.api \
   --roze-source path
 ```
 
-`--update` preserves `src/logic/<group>/<method>.rs`, RPC
-`src/logic/<method>.rs`, custom REST middleware files under `src/middleware/`,
-and `config.yaml`. Generated glue such as `src/route/`, `src/handler/`,
-`src/server/`, `src/client/`, DTOs, OpenAPI, and proto/build files is refreshed.
+`--update` preserves `src/logic/prelude.rs`, REST
+`src/logic/<group>/<method>.rs`, RPC `src/logic/<method>.rs`, custom REST
+middleware files under `src/middleware/`, and `config.yaml`. Put shared logic
+module declarations, attributes, imports, and re-exports in the prelude;
+generated `logic/mod.rs` indexes are refreshed. Generated glue such as
+`src/route/`, `src/handler/`, `src/server/`, `src/client/`, DTOs, OpenAPI, and
+proto/build files is refreshed.
 Use `--force` only for a full rebuild. New projects use
 `https://github.com/roze-team/roze.git` dependencies by default; pass
 `--roze-source path` for projects inside this repository.
@@ -218,7 +221,10 @@ Use `--force` only for a full rebuild. New projects use
 `rozectl api new user` and `rozectl rpc new user` create `user/` in the current
 directory by default. Use `--out services/user` to choose another location.
 Projects created outside a Cargo workspace receive a standalone manifest with
-explicit package metadata and dependency versions.
+explicit package metadata and dependency versions. The same applies to
+projects listed by a parent workspace's `exclude` entries; generated standalone
+manifests include their own empty workspace boundary and remain stable across
+repeated Stream `--update` runs.
 
 `rozectl api client ts example/user.api --out sdk/user.ts` generates a typed
 TypeScript `fetch` client from REST routes and request/response types. The
