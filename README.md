@@ -20,6 +20,8 @@ Roze is a Rust service framework with:
 - `crates/roze-metrics`: in-process metrics registry; labeled metric state uses DashMap for concurrent hot paths.
 - `crates/roze-auth`: JWT and auth helpers.
 - `crates/roze-db`: database connection helpers.
+- `crates/roze-transaction-sql`: PostgreSQL/MySQL persistent Outbox with
+  transactional enqueue, lease-based claim, dead letters, and migrations.
 - `crates/roze-orm`: common ORM contracts for pagination, filters, tenant scope, audit fields, and soft delete.
 - `crates/roze-cache`: Redis cache helpers with cache-aside, negative cache, TTL jitter, and singleflight loading.
 - `crates/roze-local-cache`: Moka-backed in-process cache with TTL, capacity eviction, and hit/miss statistics.

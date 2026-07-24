@@ -88,7 +88,7 @@ gateway:
 auth:
   jwt_keys:
     - id: "2026-07"
-      secret: "secret"
+      secret: env://ROZE_JWT_SECRET
   jwt_active_key_id: "2026-07"
   jwt_issuer: "roze"
   jwt_audience: "roze-services"

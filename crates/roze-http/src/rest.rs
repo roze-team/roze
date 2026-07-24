@@ -119,7 +119,16 @@ impl<S> RestService<S> {
     }
 }
 
-impl RuntimeService for RestService<SharedService<crate::Router>> {
+impl<M> RuntimeService for RestService<M>
+where
+    M: Service<SocketAddr, Error = Infallible> + Clone + Send + 'static,
+    M::Future: Send + 'static,
+    M::Response: Service<IncomingRequest, Response = HttpResponse, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    <M::Response as Service<IncomingRequest>>::Future: Send + 'static,
+{
     fn name(&self) -> &str {
         &self.name
     }
@@ -135,53 +144,11 @@ impl RuntimeService for RestService<SharedService<crate::Router>> {
         };
         Box::pin(async move {
             let server = server.ok_or_else(|| anyhow::anyhow!("REST service already started"))?;
-            serve_router_service(server, shutdown).await?;
+            server
+                .serve_with_shutdown(async move { shutdown.wait().await })
+                .await?;
             Ok(())
         })
-    }
-}
-
-async fn serve_router_service(
-    server: RestServer<SharedService<crate::Router>>,
-    shutdown: roze_shutdown::ShutdownListener,
-) -> std::io::Result<()> {
-    let addr = server.config.addr;
-    info!(addr = %addr, "REST server listening");
-
-    let listener = TcpListener::bind(addr).await?;
-    let router = server.make_service.service;
-    let mut connections = JoinSet::new();
-    loop {
-        tokio::select! {
-            _ = wait_for_shutdown_flag(shutdown.clone()) => break,
-            joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    tracing::debug!(error = %error, "HTTP connection task failed");
-                }
-            }
-            accepted = listener.accept() => {
-                let (stream, _peer_addr) = accepted?;
-                let io = TokioIo::new(stream);
-                let service = TowerToHyperService::new(router.clone());
-                connections.spawn(async move {
-                    if let Err(error) = http1::Builder::new()
-                        .serve_connection(io, service)
-                        .with_upgrades()
-                        .await
-                    {
-                        tracing::debug!(error = %error, "HTTP connection closed with error");
-                    }
-                });
-            }
-        }
-    }
-    drain_connections(&mut connections, server.config.graceful_shutdown_timeout).await;
-    Ok(())
-}
-
-async fn wait_for_shutdown_flag(shutdown: roze_shutdown::ShutdownListener) {
-    while !shutdown.is_triggered() {
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -215,6 +182,22 @@ impl<S> RestServer<SharedService<S>> {
 
     pub fn with_config(config: RestConfig, service: S) -> Self {
         Self::with_make_service_config(config, SharedService::new(service))
+    }
+}
+
+impl RestServer<SharedService<crate::Router>> {
+    /// Enables `ConnectInfo<SocketAddr>` while preserving the standard
+    /// `RestService` lifecycle and graceful shutdown behavior.
+    pub fn with_connect_info(
+        self,
+    ) -> RestServer<crate::router::IntoMakeServiceWithConnectInfo<SocketAddr>> {
+        RestServer {
+            config: self.config,
+            make_service: self
+                .make_service
+                .service
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        }
     }
 }
 

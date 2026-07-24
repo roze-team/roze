@@ -32,20 +32,18 @@ process liveness, `/readyz` runs dependency checks concurrently, and
 `/startupz` represents startup/draining phase. Generated REST and RPC compile
 smokes pass with the new surface.
 
+### 3. Persistent Idempotency And SQL Outbox Are Framework-Owned
+
+Generated services now select `RedisIdempotencyStore` from cache configuration
+and refuse process-local idempotency for production routes that declare the
+idempotency middleware. `roze-transaction-sql` provides PostgreSQL/MySQL
+migrations, transactional enqueue, `SKIP LOCKED` claim leases, retry/dead-letter
+state, query/replay, cleanup, metrics, and real-database integration entrypoints.
+An enabled production Outbox no longer silently falls back to memory.
+
 ## Remaining Reproducible Issues
 
-### 1. Official SQL Outbox Adapters Are Missing
-
-Severity: medium. Roze now provides `RedisIdempotencyStore`, using Lua for
-atomic begin/complete/fail, fingerprint validation, execution leases, response
-replay, and bounded retention. The generator intentionally retains in-memory
-defaults so deployments must explicitly inject persistent infrastructure.
-
-Roze still lacks official PostgreSQL/MySQL Outbox stores with transactional
-enqueue, claim leases, maximum retry/dead-letter transitions, dead-letter
-query/replay, migrations, metrics, and real integration tests. The project-side
-`runtime-ops::outbox::SqlOutboxStore` remains necessary until that complete
-adapter surface is upstream.
+None in this tracking file.
 
 ## Fixed Items Removed From This Tracking File
 

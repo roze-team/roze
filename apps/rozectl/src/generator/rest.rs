@@ -63,10 +63,13 @@ async fn main() -> anyhow::Result<()> {
             async move { registry.discover(&service).await.map(|_| ()) }
         });
     }
-    let middleware_config = roze_middleware::CommonMiddlewareConfig::from_service(
+    if !rest.middlewares.trusted_proxy_cidrs.is_empty() && !rest.connect_info {
+        anyhow::bail!("rest.connect_info must be enabled when trusted_proxy_cidrs are configured");
+    }
+    let middleware_config = roze_middleware::CommonMiddlewareConfig::try_from_service(
         &rest.middlewares,
         auth_config.as_ref(),
-    );
+    )?;
     tracing::debug!(
         protocol = "rest",
         request_context = middleware_config.request_context,
@@ -85,10 +88,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::debug!(protocol = "rest", "application middleware hook applied");
     let app = roze_middleware::apply_common_with_config(app, middleware_config);
     tracing::debug!(protocol = "rest", "Roze common middleware applied");
-    group.add(RestService::new(
-        service_name.clone(),
-        RestServer::new(rest.addr, app),
-    ));
+    if rest.connect_info {
+        group.add(RestService::new(
+            service_name.clone(),
+            RestServer::new(rest.addr, app).with_connect_info(),
+        ));
+    } else {
+        group.add(RestService::new(
+            service_name.clone(),
+            RestServer::new(rest.addr, app),
+        ));
+    }
     group.add_fn("health-drain", move |shutdown| {
         let health = health.clone();
         async move {
@@ -3040,7 +3050,10 @@ mod tests {
         assert!(main.contains("let app = route::router(ctx.clone()).layer("));
         assert!(main.contains("roze_http::ws::WebSocketShutdown::new(service_shutdown)"));
         assert!(main.contains("middleware::app::apply(app, ctx)"));
-        assert!(main.contains("CommonMiddlewareConfig::from_service("));
+        assert!(main.contains("CommonMiddlewareConfig::try_from_service("));
+        assert!(main.contains("RestServer::new(rest.addr, app).with_connect_info()"));
+        assert!(main
+            .contains("rest.connect_info must be enabled when trusted_proxy_cidrs are configured"));
         assert!(main.contains("let auth_config = config.auth.clone();"));
         assert!(main.contains("auth_config.as_ref()"));
         assert!(main.contains("apply_common_with_config(app, middleware_config)"));

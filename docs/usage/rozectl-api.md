@@ -230,9 +230,10 @@ service order-api {
 
 Generated REST handlers require an `Idempotency-Key` header. Generated RPC
 servers require `idempotency-key` metadata. The generated `ServiceContext`
-holds `Arc<dyn roze_middleware::IdempotencyStore>` and provides
-`with_idempotency_store` for a persistent Redis or database adapter. The
-in-memory default is for local development and tests.
+holds `Arc<dyn roze_middleware::IdempotencyStore>`. `idempotency.store: auto`
+selects Redis whenever `cache.url` is configured. A production service with
+an idempotent generated route refuses to start with a memory store. The
+in-memory implementation remains available for local development and tests.
 
 Roze provides `RedisIdempotencyStore` as the production Redis adapter. It uses
 Lua for atomic begin/complete/fail transitions, validates the request
@@ -536,20 +537,18 @@ src/
   types/mod.rs
 ```
 
-Generated API crates do not depend on `roze-db`, `roze-mongo`, or Toasty by
-default. API services can still call RPC clients, cache, MQ, NATS, outbox, auth,
-metrics, OpenAPI, validation, and middleware crates.
+Generated API crates include `roze-db` so configured SQL health, persistent
+Outbox, and application transactions share one primary connection. They do not
+depend on `roze-mongo` or Toasty by default.
 
 Generated REST and RPC `ServiceContext` values expose
-`Arc<dyn roze_transaction::OutboxStore>`. The default
-`InMemoryOutbox` is intended for local development and tests. Production
-services should inject a persistent adapter with `with_outbox_store`. A
-persistent adapter implements asynchronous claim, publish/failure state, and
-lease recovery through `OutboxStore`. Database adapters additionally implement
-`TransactionalOutbox<Tx>` so business writes and outbox messages are inserted
-in the same database transaction before it commits. `relay_outbox_batch` then
-publishes claimed messages after commit and records retry state without
-duplicating application sequencing code.
+`Arc<dyn roze_transaction::OutboxStore>`. When `outbox.enabled` and
+`database.url` are configured, `auto` installs the official
+`roze-transaction-sql::SqlOutboxStore`; production rejects an enabled memory
+store. `ServiceContext::sql_outbox()` exposes the concrete adapter for
+`TransactionalOutbox<sea_orm::DatabaseTransaction>`, so business writes and
+outbox messages can commit atomically. `relay_outbox_batch` publishes claimed
+messages after commit and records retry/dead-letter state.
 
 Generated REST services expose standard operational endpoints:
 

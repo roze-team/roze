@@ -1,0 +1,17 @@
+[package]
+name = "roze-transaction-sql"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+roze-metrics = { path = "../roze-metrics" }
+roze-transaction = { path = "../roze-transaction" }
+sea-orm.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

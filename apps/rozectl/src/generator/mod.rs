@@ -22,7 +22,7 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 21] = [
+const REST_ROZE_CRATES: [&str; 23] = [
     "roze-config",
     "roze-error",
     "roze-health",
@@ -33,6 +33,7 @@ const REST_ROZE_CRATES: [&str; 21] = [
     "roze-jwt",
     "roze-cache",
     "roze-context",
+    "roze-db",
     "roze-mq",
     "roze-nats",
     "roze-openapi",
@@ -42,11 +43,12 @@ const REST_ROZE_CRATES: [&str; 21] = [
     "roze-service",
     "roze-storage",
     "roze-transaction",
+    "roze-transaction-sql",
     "roze-validation",
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 22] = [
+const RPC_ROZE_CRATES: [&str; 23] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -68,6 +70,7 @@ const RPC_ROZE_CRATES: [&str; 22] = [
     "roze-storage",
     "roze-trace",
     "roze-transaction",
+    "roze-transaction-sql",
     "roze-validation",
 ];
 
@@ -3490,7 +3493,7 @@ fn generate_rest_project_in_place(
     )?;
     write_service_context(
         &out.join("src/svc/mod.rs"),
-        rest_service_context_rs(rpc_clients),
+        rest_service_context_rs(rpc_clients, spec_uses_idempotency(spec)),
         options.mode,
         rpc_clients,
     )?;
@@ -3698,7 +3701,7 @@ fn generate_rpc_project_in_place(
     )?;
     write_service_context(
         &out.join("src/svc/mod.rs"),
-        rpc_service_context_rs(rpc_clients),
+        rpc_service_context_rs(rpc_clients, spec_uses_idempotency(spec)),
         options.mode,
         rpc_clients,
     )?;
@@ -10714,9 +10717,12 @@ fn config_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
     match kind {
         ProjectKind::Rest => format!(
             r#"name: {}
+profile: development # development, test, production
 rest:
   addr: 127.0.0.1:3000
   register: false
+  # Inject ConnectInfo<SocketAddr>; required for trusted proxy client IP policy.
+  connect_info: true
   middlewares:
     recover: true
     trace: true
@@ -10745,6 +10751,8 @@ rest:
     auth_public_routes: ["/healthz", "/readyz", "/startupz", "/metrics"]
     # Enable only when direct client access is blocked by a trusted proxy.
     trust_forwarded_identity_headers: false
+    # Forwarding headers are ignored unless the TCP peer matches one of these CIDRs.
+    trusted_proxy_cidrs: []
 registry:
   kind: memory
   endpoints: []
@@ -10752,7 +10760,7 @@ registry:
   # ttl_seconds: 10
   # renew_interval_secs: 3
   # user: roze
-  # pass: change-me
+  # pass: env://ROZE_REGISTRY_PASSWORD
   # ca_cert_file: certs/etcd-ca.pem
   # cert_file: certs/etcd-client.pem
   # cert_key_file: certs/etcd-client.key
@@ -10786,7 +10794,7 @@ governance:
 #   endpoints: ["127.0.0.1:4000"]
 #   # target: dns:///user.rpc
 #   # app: app-name
-#   # token: change-me
+#   # token: env://ROZE_RPC_TOKEN
 #   # non_block: false
 #   timeout_ms: 2000
 #   keepalive_time_secs: 20
@@ -10797,9 +10805,16 @@ governance:
 #     stat: true
 #     prometheus: true
 #     breaker: true
+# database:
+#   url: env://DATABASE_URL
 # cache:
-#   url: redis://127.0.0.1/
+#   url: env://REDIS_URL
 #   namespace: {}
+# idempotency:
+#   store: auto # auto, memory, redis
+#   key_prefix: roze:idempotency:v1
+#   record_ttl_millis: 86400000
+#   unavailable_policy: fail_fast # fail_fast, fail_closed
 # nats:
 #   servers: ["127.0.0.1:4222"]
 #   client_name: {}
@@ -10810,12 +10825,16 @@ governance:
 #     durable: {}
 # outbox:
 #   enabled: true
+#   store: auto # auto, memory, sql
+#   table: roze_outbox
+#   max_attempts: 16
+#   migrate: true
 #   batch_size: 100
 #   interval_ms: 1000
 # auth:
 #   jwt_keys:
 #     - id: "2026-07"
-#       secret: change-me
+#       secret: env://ROZE_JWT_SECRET
 #   jwt_active_key_id: "2026-07"
 #   jwt_issuer: {}
 #   jwt_audience: {}
@@ -10840,6 +10859,7 @@ governance:
         ),
         ProjectKind::Rpc => format!(
             r#"name: {}
+profile: development # development, test, production
 rpc:
   addr: 127.0.0.1:4000
   # advertise_addr: 127.0.0.1:4000
@@ -10850,7 +10870,7 @@ registry:
   # ttl_seconds: 10
   # renew_interval_secs: 3
   # user: roze
-  # pass: change-me
+  # pass: env://ROZE_REGISTRY_PASSWORD
   # ca_cert_file: certs/etcd-ca.pem
   # cert_file: certs/etcd-client.pem
   # cert_key_file: certs/etcd-client.key
@@ -10881,10 +10901,10 @@ governance:
   routes:
 {}
 # database:
-#   url: postgres://postgres:postgres@127.0.0.1:5432/{}
+#   url: env://DATABASE_URL
 #   # policy: round-robin # round-robin or random
 #   # replicas:
-#   #   - postgres://postgres:postgres@127.0.0.1:5432/{}_replica
+#   #   - env://DATABASE_REPLICA_URL
 # mongo:
 #   url: mongodb://127.0.0.1:27017
 #   database: {}
@@ -10892,7 +10912,7 @@ governance:
 #   endpoints: ["127.0.0.1:4000"]
 #   # target: dns:///user.rpc
 #   # app: app-name
-#   # token: change-me
+#   # token: env://ROZE_RPC_TOKEN
 #   # non_block: false
 #   timeout_ms: 2000
 #   keepalive_time_secs: 20
@@ -10904,8 +10924,13 @@ governance:
 #     prometheus: true
 #     breaker: true
 # cache:
-#   url: redis://127.0.0.1/
+#   url: env://REDIS_URL
 #   namespace: {}
+# idempotency:
+#   store: auto # auto, memory, redis
+#   key_prefix: roze:idempotency:v1
+#   record_ttl_millis: 86400000
+#   unavailable_policy: fail_fast # fail_fast, fail_closed
 # nats:
 #   servers: ["127.0.0.1:4222"]
 #   client_name: {}
@@ -10916,12 +10941,16 @@ governance:
 #     durable: {}
 # outbox:
 #   enabled: true
+#   store: auto # auto, memory, sql
+#   table: roze_outbox
+#   max_attempts: 16
+#   migrate: true
 #   batch_size: 100
 #   interval_ms: 1000
 # auth:
 #   jwt_keys:
 #     - id: "2026-07"
-#       secret: change-me
+#       secret: env://ROZE_JWT_SECRET
 #   jwt_active_key_id: "2026-07"
 #   jwt_issuer: {}
 #   jwt_audience: {}
@@ -10935,8 +10964,6 @@ governance:
 "#,
             spec.service,
             governance_routes,
-            spec.service,
-            spec.service,
             spec.service,
             spec.service,
             spec.service,
@@ -11190,28 +11217,57 @@ pub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceCon
     .to_string()
 }
 
-fn rest_service_context_rs(rpc_clients: &[RpcClientBinding]) -> String {
+fn spec_uses_idempotency(spec: &ApiSpec) -> bool {
+    let is_idempotency = |middleware: &String| {
+        roze_middleware::BuiltInMiddleware::parse(middleware)
+            == Some(roze_middleware::BuiltInMiddleware::Idempotency)
+    };
+    spec.server
+        .iter()
+        .flat_map(|server| &server.middlewares)
+        .any(is_idempotency)
+        || spec.rest_routes.iter().any(|route| {
+            route.middlewares.iter().any(is_idempotency)
+                || route
+                    .server
+                    .iter()
+                    .flat_map(|server| &server.middlewares)
+                    .any(is_idempotency)
+        })
+        || spec
+            .rpc_methods
+            .iter()
+            .flat_map(|method| &method.middlewares)
+            .any(is_idempotency)
+}
+
+fn rest_service_context_rs(rpc_clients: &[RpcClientBinding], uses_idempotency: bool) -> String {
     let mut out = r#"#![allow(dead_code)]
 
 use std::sync::Arc;
 
 use crate::config::Config;
 
+const USES_IDEMPOTENCY: bool = __USES_IDEMPOTENCY__;
+
 #[derive(Clone, Debug)]
 pub struct ServiceContext {
     pub config: Config,
     pub health: roze_health::HealthRegistry,
+    pub db_connections: Option<roze_db::DatabaseConnections>,
     pub cache: Option<roze_cache::RedisCache>,
     pub mq: Option<Arc<roze_nats::NatsJetStream>>,
     pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
     pub report_source: Option<Arc<dyn roze_report::ReportDataSource>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
+    pub sql_outbox: Option<Arc<roze_transaction_sql::SqlOutboxStore>>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
 
 impl ServiceContext {
     pub async fn new(config: Config) -> anyhow::Result<Self> {
         let health = roze_health::HealthRegistry::new();
+        let db_connections = roze_db::connect_connections_optional(config.database.as_ref()).await?;
         let cache = match config.cache.as_ref() {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
@@ -11231,6 +11287,12 @@ impl ServiceContext {
             Some(storage) => Some(Arc::from(roze_storage::build_storage(storage)?)),
             None => None,
         };
+        if let Some(db_connections) = db_connections.clone() {
+            health.register_dependency("database", move || {
+                let db_connections = db_connections.clone();
+                async move { db_connections.health_check().await.map_err(Into::into) }
+            });
+        }
         if let Some(cache) = cache.clone() {
             health.register_dependency("redis", move || {
                 let cache = cache.clone();
@@ -11243,16 +11305,101 @@ impl ServiceContext {
                 async move { mq.health_check().await }
             });
         }
+        let (outbox, sql_outbox): (
+            Arc<dyn roze_transaction::OutboxStore>,
+            Option<Arc<roze_transaction_sql::SqlOutboxStore>>,
+        ) = match config.outbox.as_ref().filter(|settings| settings.enabled) {
+            Some(settings) => {
+                let use_sql = match settings.store {
+                    roze_config::OutboxStoreKind::Auto => db_connections.is_some(),
+                    roze_config::OutboxStoreKind::Memory => false,
+                    roze_config::OutboxStoreKind::Sql => true,
+                };
+                if use_sql {
+                    let database = db_connections
+                        .as_ref()
+                        .map(|connections| connections.write().clone())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("SQL outbox requires database.url configuration")
+                        })?;
+                    let store = Arc::new(roze_transaction_sql::SqlOutboxStore::with_config(
+                        database,
+                        roze_transaction_sql::SqlOutboxConfig {
+                            table: settings.table.clone(),
+                            max_attempts: settings.max_attempts,
+                        },
+                    )?);
+                    if settings.migrate {
+                        store.migrate().await?;
+                    }
+                    (store.clone(), Some(store))
+                } else {
+                    if config.profile.is_production() {
+                        anyhow::bail!(
+                            "production services with outbox.enabled require a SQL outbox store"
+                        );
+                    }
+                    tracing::warn!(
+                        "in-memory outbox is process-local and intended only for development"
+                    );
+                    (Arc::new(roze_transaction::InMemoryOutbox::new()), None)
+                }
+            }
+            None => (Arc::new(roze_transaction::InMemoryOutbox::new()), None),
+        };
+        let idempotency: Arc<dyn roze_middleware::IdempotencyStore> = {
+            let settings = config.idempotency.clone().unwrap_or_default();
+            let use_redis = match settings.store {
+                roze_config::IdempotencyStoreKind::Auto => config.cache.is_some(),
+                roze_config::IdempotencyStoreKind::Memory => false,
+                roze_config::IdempotencyStoreKind::Redis => true,
+            };
+            if use_redis {
+                let cache = config.cache.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Redis idempotency requires cache.url configuration")
+                })?;
+                let mut store_config =
+                    roze_middleware::RedisIdempotencyConfig::new(cache.url.clone());
+                store_config.key_prefix = settings.key_prefix;
+                store_config.record_ttl_millis = settings.record_ttl_millis;
+                let store = roze_middleware::RedisIdempotencyStore::connect(store_config)?;
+                if settings.unavailable_policy
+                    == roze_config::IdempotencyUnavailablePolicy::FailFast
+                {
+                    store.health_check().await?;
+                }
+                let health_store = store.clone();
+                health.register_dependency("idempotency:redis", move || {
+                    let store = health_store.clone();
+                    async move { store.health_check().await }
+                });
+                Arc::new(store)
+            } else {
+                if USES_IDEMPOTENCY && config.profile.is_production() {
+                    anyhow::bail!(
+                        "production services with idempotent routes require Redis idempotency"
+                    );
+                }
+                if USES_IDEMPOTENCY {
+                    tracing::warn!(
+                        "in-memory idempotency is process-local and intended only for development"
+                    );
+                }
+                Arc::new(roze_middleware::InMemoryIdempotencyStore::default())
+            }
+        };
         health.mark_ready();
         Ok(Self {
             config,
             health,
+            db_connections,
             cache,
             mq,
             storage,
             report_source: None,
-            outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
-            idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
+            outbox,
+            sql_outbox,
+            idempotency,
         })
     }
 
@@ -11261,7 +11408,16 @@ impl ServiceContext {
         outbox: Arc<dyn roze_transaction::OutboxStore>,
     ) -> Self {
         self.outbox = outbox;
+        self.sql_outbox = None;
         self
+    }
+
+    pub fn sql_outbox(
+        &self,
+    ) -> anyhow::Result<Arc<roze_transaction_sql::SqlOutboxStore>> {
+        self.sql_outbox
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("SQL outbox is not configured"))
     }
 
     pub fn with_idempotency_store(
@@ -11318,17 +11474,19 @@ impl ServiceContext {
             .ok_or_else(|| anyhow::anyhow!("nats jetstream is not configured"))
     }
 "#
-    .to_string();
+    .replace("__USES_IDEMPOTENCY__", &uses_idempotency.to_string());
     out.push_str("}\n");
     inject_rpc_clients_into_service_context(out, rpc_clients)
 }
 
-fn rpc_service_context_rs(rpc_clients: &[RpcClientBinding]) -> String {
+fn rpc_service_context_rs(rpc_clients: &[RpcClientBinding], uses_idempotency: bool) -> String {
     let out = r#"#![allow(dead_code)]
 
 use std::sync::Arc;
 
 use crate::config::Config;
+
+const USES_IDEMPOTENCY: bool = __USES_IDEMPOTENCY__;
 
 #[derive(Clone, Debug)]
 pub struct ServiceContext {
@@ -11341,6 +11499,7 @@ pub struct ServiceContext {
     pub storage: Option<Arc<dyn roze_storage::ObjectStorage>>,
     pub report_source: Option<Arc<dyn roze_report::ReportDataSource>>,
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
+    pub sql_outbox: Option<Arc<roze_transaction_sql::SqlOutboxStore>>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
 }
 
@@ -11392,6 +11551,89 @@ impl ServiceContext {
                 async move { mq.health_check().await }
             });
         }
+        let (outbox, sql_outbox): (
+            Arc<dyn roze_transaction::OutboxStore>,
+            Option<Arc<roze_transaction_sql::SqlOutboxStore>>,
+        ) = match config.outbox.as_ref().filter(|settings| settings.enabled) {
+            Some(settings) => {
+                let use_sql = match settings.store {
+                    roze_config::OutboxStoreKind::Auto => db_connections.is_some(),
+                    roze_config::OutboxStoreKind::Memory => false,
+                    roze_config::OutboxStoreKind::Sql => true,
+                };
+                if use_sql {
+                    let database = db_connections
+                        .as_ref()
+                        .map(|connections| connections.write().clone())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("SQL outbox requires database.url configuration")
+                        })?;
+                    let store = Arc::new(roze_transaction_sql::SqlOutboxStore::with_config(
+                        database,
+                        roze_transaction_sql::SqlOutboxConfig {
+                            table: settings.table.clone(),
+                            max_attempts: settings.max_attempts,
+                        },
+                    )?);
+                    if settings.migrate {
+                        store.migrate().await?;
+                    }
+                    (store.clone(), Some(store))
+                } else {
+                    if config.profile.is_production() {
+                        anyhow::bail!(
+                            "production services with outbox.enabled require a SQL outbox store"
+                        );
+                    }
+                    tracing::warn!(
+                        "in-memory outbox is process-local and intended only for development"
+                    );
+                    (Arc::new(roze_transaction::InMemoryOutbox::new()), None)
+                }
+            }
+            None => (Arc::new(roze_transaction::InMemoryOutbox::new()), None),
+        };
+        let idempotency: Arc<dyn roze_middleware::IdempotencyStore> = {
+            let settings = config.idempotency.clone().unwrap_or_default();
+            let use_redis = match settings.store {
+                roze_config::IdempotencyStoreKind::Auto => config.cache.is_some(),
+                roze_config::IdempotencyStoreKind::Memory => false,
+                roze_config::IdempotencyStoreKind::Redis => true,
+            };
+            if use_redis {
+                let cache = config.cache.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Redis idempotency requires cache.url configuration")
+                })?;
+                let mut store_config =
+                    roze_middleware::RedisIdempotencyConfig::new(cache.url.clone());
+                store_config.key_prefix = settings.key_prefix;
+                store_config.record_ttl_millis = settings.record_ttl_millis;
+                let store = roze_middleware::RedisIdempotencyStore::connect(store_config)?;
+                if settings.unavailable_policy
+                    == roze_config::IdempotencyUnavailablePolicy::FailFast
+                {
+                    store.health_check().await?;
+                }
+                let health_store = store.clone();
+                health.register_dependency("idempotency:redis", move || {
+                    let store = health_store.clone();
+                    async move { store.health_check().await }
+                });
+                Arc::new(store)
+            } else {
+                if USES_IDEMPOTENCY && config.profile.is_production() {
+                    anyhow::bail!(
+                        "production services with idempotent routes require Redis idempotency"
+                    );
+                }
+                if USES_IDEMPOTENCY {
+                    tracing::warn!(
+                        "in-memory idempotency is process-local and intended only for development"
+                    );
+                }
+                Arc::new(roze_middleware::InMemoryIdempotencyStore::default())
+            }
+        };
         health.mark_ready();
         Ok(Self {
             config,
@@ -11402,8 +11644,9 @@ impl ServiceContext {
             mq,
             storage,
             report_source: None,
-            outbox: Arc::new(roze_transaction::InMemoryOutbox::new()),
-            idempotency: Arc::new(roze_middleware::InMemoryIdempotencyStore::default()),
+            outbox,
+            sql_outbox,
+            idempotency,
         })
     }
 
@@ -11412,7 +11655,16 @@ impl ServiceContext {
         outbox: Arc<dyn roze_transaction::OutboxStore>,
     ) -> Self {
         self.outbox = outbox;
+        self.sql_outbox = None;
         self
+    }
+
+    pub fn sql_outbox(
+        &self,
+    ) -> anyhow::Result<Arc<roze_transaction_sql::SqlOutboxStore>> {
+        self.sql_outbox
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("SQL outbox is not configured"))
     }
 
     pub fn with_idempotency_store(
@@ -11484,7 +11736,7 @@ impl ServiceContext {
     }
 }
 "#
-    .to_string();
+    .replace("__USES_IDEMPOTENCY__", &uses_idempotency.to_string());
     inject_rpc_clients_into_service_context(out, rpc_clients)
 }
 
@@ -11926,12 +12178,21 @@ mod tests {
 
     #[test]
     fn generated_service_context_accepts_persistent_outbox_store() {
-        for rendered in [rest_service_context_rs(&[]), rpc_service_context_rs(&[])] {
+        for rendered in [
+            rest_service_context_rs(&[], true),
+            rpc_service_context_rs(&[], true),
+        ] {
             assert!(rendered.contains("Arc<dyn roze_transaction::OutboxStore>"));
             assert!(rendered.contains("pub fn with_outbox_store"));
             assert!(rendered.contains("Arc::new(roze_transaction::InMemoryOutbox::new())"));
+            assert!(rendered.contains("roze_transaction_sql::SqlOutboxStore::with_config"));
+            assert!(rendered.contains("pub fn sql_outbox"));
             assert!(rendered.contains("Arc<dyn roze_middleware::IdempotencyStore>"));
             assert!(rendered.contains("pub fn with_idempotency_store"));
+            assert!(rendered.contains("RedisIdempotencyStore::connect"));
+            assert!(rendered.contains("const USES_IDEMPOTENCY: bool = true;"));
+            assert!(rendered
+                .contains("production services with idempotent routes require Redis idempotency"));
             assert!(rendered.contains("Arc<dyn roze_storage::ObjectStorage>"));
             assert!(rendered.contains("pub fn with_storage"));
             assert!(rendered.contains("pub async fn media_url"));
@@ -11950,8 +12211,8 @@ mod tests {
         }];
 
         for (kind, rendered) in [
-            ("api", rest_service_context_rs(&[])),
-            ("rpc", rpc_service_context_rs(&[])),
+            ("api", rest_service_context_rs(&[], false)),
+            ("rpc", rpc_service_context_rs(&[], false)),
         ] {
             let out = temp_test_root(&format!("rozectl-{kind}-managed-rpc"));
             fs::create_dir_all(out.join("src/svc")).expect("create service context directory");
@@ -13058,7 +13319,10 @@ mod tests {
             cargo.contains(r#"roze-config = { git = "https://github.com/roze-team/roze.git" }"#)
         );
         assert!(cargo.contains(r#"roze-rpc = { git = "https://github.com/roze-team/roze.git" }"#));
-        assert!(!cargo.contains("roze-db"));
+        assert!(cargo.contains(r#"roze-db = { git = "https://github.com/roze-team/roze.git" }"#));
+        assert!(cargo.contains(
+            r#"roze-transaction-sql = { git = "https://github.com/roze-team/roze.git" }"#
+        ));
         assert!(!cargo.contains("roze-mongo"));
         assert!(!cargo.contains("toasty"));
         assert!(!cargo.contains(r#"path = "../../crates/roze-"#));
@@ -13079,7 +13343,9 @@ mod tests {
 
         assert!(cargo.contains(r#"roze-config = { path = "../../crates/roze-config" }"#));
         assert!(cargo.contains(r#"roze-rpc = { path = "../../crates/roze-rpc" }"#));
-        assert!(!cargo.contains("roze-db"));
+        assert!(cargo.contains(r#"roze-db = { path = "../../crates/roze-db" }"#));
+        assert!(cargo
+            .contains(r#"roze-transaction-sql = { path = "../../crates/roze-transaction-sql" }"#));
         assert!(!cargo.contains("roze-mongo"));
         assert!(!cargo.contains("toasty"));
         assert!(!cargo.contains(ROZE_GIT_URL));
@@ -13231,15 +13497,16 @@ mod tests {
             .expect("read cargo")
             .contains("roze-rpc"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
-        assert!(!cargo.contains("roze-db"));
+        assert!(cargo.contains("roze-db"));
+        assert!(cargo.contains("roze-transaction-sql"));
         assert!(!cargo.contains("roze-mongo"));
         assert!(!cargo.contains("toasty"));
         let svc = fs::read_to_string(out.join("src/svc/mod.rs")).expect("read svc");
-        assert!(!svc.contains("DatabaseConnections"));
-        assert!(!svc.contains("connect_connections_optional"));
-        assert!(!svc.contains("read_db"));
+        assert!(svc.contains("DatabaseConnections"));
+        assert!(svc.contains("connect_connections_optional"));
+        assert!(svc.contains("sql_outbox"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
-        assert!(!config.contains("database:"));
+        assert!(config.contains("database:"));
         assert!(!config.contains("mongo:"));
         assert!(!config.contains("sqlite://"));
 
@@ -13380,7 +13647,7 @@ mod tests {
         assert!(lib.contains("pub mod client;"));
         assert!(lib.contains("pub mod pb;"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
-        assert!(config.contains("postgres://postgres:postgres@127.0.0.1:5432/user"));
+        assert!(config.contains("url: env://DATABASE_URL"));
         assert!(!config.contains("sqlite://"));
 
         fs::remove_dir_all(root).expect("remove test output");

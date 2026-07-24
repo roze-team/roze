@@ -253,6 +253,9 @@ let app = Router::new()
 - `ConnectInfo<T>` extraction with `Router::into_make_service_with_connect_info`
   so peer/connection metadata can be injected at the make-service boundary and
   consumed by handlers without becoming global application state
+- `RestServer::with_connect_info` for the same peer injection under the
+  generated `RestService`/`ServiceGroup` lifecycle, plus
+  `roze_http::client_ip::ClientIp` for fail-closed trusted-proxy resolution
 - `Router::layer` and `MethodRouter::layer` for Tower layers that preserve the
   current infallible route error model
 - Router and MethodRouter state injection share the internal Tower services in

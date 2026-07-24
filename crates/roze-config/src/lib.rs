@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
-    fmt,
+    error::Error,
+    fmt, fs,
     net::IpAddr,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -9,6 +10,7 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use thiserror::Error as ThisError;
 
 pub use roze_resilience::GovernancePolicy;
 
@@ -17,6 +19,8 @@ pub mod config_center;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub name: String,
+    #[serde(default)]
+    pub profile: ServiceProfile,
     #[serde(default)]
     pub rest: Option<RestConfig>,
     #[serde(default)]
@@ -42,12 +46,29 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub outbox: Option<OutboxConfig>,
     #[serde(default)]
+    pub idempotency: Option<IdempotencyConfig>,
+    #[serde(default)]
     pub storage: Option<roze_storage::StorageConfig>,
     #[serde(default)]
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
     pub telemetry: Option<TelemetryConfig>,
     pub governance: GovernanceConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceProfile {
+    #[default]
+    Development,
+    Test,
+    Production,
+}
+
+impl ServiceProfile {
+    pub fn is_production(self) -> bool {
+        self == Self::Production
+    }
 }
 
 impl ServiceConfig {
@@ -254,6 +275,9 @@ fn default_gateway_health_check_expected_status() -> u16 {
 pub struct RestConfig {
     pub addr: SocketAddr,
     pub register: bool,
+    /// Inject the accepted TCP peer as `ConnectInfo<SocketAddr>`.
+    #[serde(default)]
+    pub connect_info: bool,
     #[serde(default)]
     pub middlewares: HttpMiddlewaresConfig,
 }
@@ -286,6 +310,11 @@ pub struct HttpMiddlewaresConfig {
     pub auth_public_routes: Vec<String>,
     #[serde(default)]
     pub trust_forwarded_identity_headers: bool,
+    /// Networks allowed to supply `X-Forwarded-For`.
+    ///
+    /// An empty list means no forwarding header is trusted.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 impl Default for HttpMiddlewaresConfig {
@@ -304,6 +333,7 @@ impl Default for HttpMiddlewaresConfig {
             request_body_limit_bytes: None,
             auth_public_routes: default_http_auth_public_routes(),
             trust_forwarded_identity_headers: false,
+            trusted_proxy_cidrs: Vec::new(),
         }
     }
 }
@@ -371,10 +401,67 @@ pub struct RpcConfig {
 pub struct OutboxConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub store: OutboxStoreKind,
+    #[serde(default = "default_outbox_table")]
+    pub table: String,
+    #[serde(default = "default_outbox_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_true")]
+    pub migrate: bool,
     #[serde(default = "default_outbox_batch_size")]
     pub batch_size: usize,
     #[serde(default = "default_outbox_interval_ms")]
     pub interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxStoreKind {
+    #[default]
+    Auto,
+    Memory,
+    Sql,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdempotencyConfig {
+    #[serde(default)]
+    pub store: IdempotencyStoreKind,
+    #[serde(default = "default_idempotency_key_prefix")]
+    pub key_prefix: String,
+    #[serde(default = "default_idempotency_record_ttl_millis")]
+    pub record_ttl_millis: u64,
+    #[serde(default)]
+    pub unavailable_policy: IdempotencyUnavailablePolicy,
+}
+
+impl Default for IdempotencyConfig {
+    fn default() -> Self {
+        Self {
+            store: IdempotencyStoreKind::Auto,
+            key_prefix: default_idempotency_key_prefix(),
+            record_ttl_millis: default_idempotency_record_ttl_millis(),
+            unavailable_policy: IdempotencyUnavailablePolicy::FailFast,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdempotencyStoreKind {
+    #[default]
+    Auto,
+    Memory,
+    Redis,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdempotencyUnavailablePolicy {
+    #[default]
+    FailFast,
+    FailClosed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1003,6 +1090,22 @@ fn default_outbox_interval_ms() -> u64 {
     1_000
 }
 
+fn default_outbox_table() -> String {
+    "roze_outbox".to_string()
+}
+
+fn default_outbox_max_attempts() -> u32 {
+    16
+}
+
+fn default_idempotency_key_prefix() -> String {
+    "roze:idempotency:v1".to_string()
+}
+
+fn default_idempotency_record_ttl_millis() -> u64 {
+    86_400_000
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1122,7 +1225,93 @@ fn default_kafka_consumers() -> u32 {
     1
 }
 
+/// Resolves secret references found in configuration strings.
+///
+/// Providers must return `Ok(None)` for unsupported references. Error messages
+/// must identify the reference, never the resolved secret value.
+pub trait SecretProvider: fmt::Debug + Send + Sync {
+    fn resolve(
+        &self,
+        reference: &str,
+        base_dir: &Path,
+    ) -> Result<Option<String>, SecretProviderError>;
+}
+
+#[derive(Debug, ThisError)]
+pub enum SecretProviderError {
+    #[error("secret environment variable `{name}` is not set")]
+    MissingEnvironment { name: String },
+    #[error("secret file `{path}` could not be read")]
+    FileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("secret reference `{reference}` is invalid")]
+    InvalidReference { reference: String },
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnvironmentAndFileSecretProvider;
+
+impl SecretProvider for EnvironmentAndFileSecretProvider {
+    fn resolve(
+        &self,
+        reference: &str,
+        base_dir: &Path,
+    ) -> Result<Option<String>, SecretProviderError> {
+        let env_name = reference
+            .strip_prefix("env://")
+            .or_else(|| {
+                reference
+                    .strip_prefix("${")
+                    .and_then(|value| value.strip_suffix('}'))
+            })
+            .filter(|name| !name.is_empty());
+        if let Some(name) = env_name {
+            return std::env::var(name).map(Some).map_err(|_| {
+                SecretProviderError::MissingEnvironment {
+                    name: name.to_string(),
+                }
+            });
+        }
+        if reference.starts_with("env://") || reference.starts_with("${") {
+            return Err(SecretProviderError::InvalidReference {
+                reference: reference.to_string(),
+            });
+        }
+
+        let Some(path) = reference.strip_prefix("file://") else {
+            return Ok(None);
+        };
+        if path.is_empty() {
+            return Err(SecretProviderError::InvalidReference {
+                reference: reference.to_string(),
+            });
+        }
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            base_dir.join(path)
+        };
+        fs::read_to_string(&path)
+            .map(|value| Some(value.trim_end_matches(['\r', '\n']).to_string()))
+            .map_err(|source| SecretProviderError::FileRead { path, source })
+    }
+}
+
 pub fn load<T>(path: impl AsRef<Path>) -> Result<T, config::ConfigError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    load_with_secret_provider(path, &EnvironmentAndFileSecretProvider)
+}
+
+pub fn load_with_secret_provider<T>(
+    path: impl AsRef<Path>,
+    provider: &dyn SecretProvider,
+) -> Result<T, config::ConfigError>
 where
     T: for<'de> Deserialize<'de>,
 {
@@ -1135,11 +1324,152 @@ where
     if dependency_defaults.is_file() {
         builder = builder.add_source(config::File::from(dependency_defaults));
     }
-    builder
+    let config = builder
         .add_source(config::File::from(path))
         .add_source(config::Environment::with_prefix("ROZE").separator("__"))
-        .build()?
-        .try_deserialize()
+        .build()?;
+    let mut value = config.try_deserialize::<Value>()?;
+    merge_jwt_key_environment_override(&mut value)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    resolve_secret_references(&mut value, base_dir, provider)?;
+    validate_structured_secrets(&value)?;
+    serde_json::from_value(value).map_err(|error| config::ConfigError::Message(error.to_string()))
+}
+
+fn resolve_secret_references(
+    value: &mut Value,
+    base_dir: &Path,
+    provider: &dyn SecretProvider,
+) -> Result<(), config::ConfigError> {
+    match value {
+        Value::String(reference) => {
+            if let Some(secret) = provider
+                .resolve(reference, base_dir)
+                .map_err(secret_config_error)?
+            {
+                *reference = secret;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                resolve_secret_references(value, base_dir, provider)?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                resolve_secret_references(value, base_dir, provider)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn secret_config_error(error: SecretProviderError) -> config::ConfigError {
+    let mut message = error.to_string();
+    if let Some(source) = error.source() {
+        message.push_str(": ");
+        message.push_str(&source.to_string());
+    }
+    config::ConfigError::Message(message)
+}
+
+fn merge_jwt_key_environment_override(value: &mut Value) -> Result<(), config::ConfigError> {
+    let Ok(raw) = std::env::var("ROZE_AUTH_JWT_KEYS") else {
+        return Ok(());
+    };
+    merge_jwt_key_overlay(value, &raw)
+}
+
+fn merge_jwt_key_overlay(value: &mut Value, raw: &str) -> Result<(), config::ConfigError> {
+    let overlay: Vec<Value> = serde_json::from_str(raw).map_err(|_| {
+        config::ConfigError::Message(
+            "ROZE_AUTH_JWT_KEYS must be a JSON array of JWT key objects".to_string(),
+        )
+    })?;
+    let Some(root) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let auth = root
+        .entry("auth")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let auth = auth.as_object_mut().ok_or_else(|| {
+        config::ConfigError::Message("auth configuration must be an object".to_string())
+    })?;
+    let keys = auth
+        .entry("jwt_keys")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let keys = keys.as_array_mut().ok_or_else(|| {
+        config::ConfigError::Message("auth.jwt_keys must be an array".to_string())
+    })?;
+    for replacement in overlay {
+        let id = replacement
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                config::ConfigError::Message(
+                    "ROZE_AUTH_JWT_KEYS entries require a non-empty id".to_string(),
+                )
+            })?;
+        if let Some(existing) = keys.iter_mut().find(|key| {
+            key.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|current| current == id)
+        }) {
+            *existing = replacement;
+        } else {
+            keys.push(replacement);
+        }
+    }
+    Ok(())
+}
+
+fn validate_structured_secrets(value: &Value) -> Result<(), config::ConfigError> {
+    let Some(auth) = value.get("auth") else {
+        return Ok(());
+    };
+    let keys = auth
+        .get("jwt_keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            config::ConfigError::Message("auth.jwt_keys must be an array".to_string())
+        })?;
+    let mut ids = std::collections::BTreeSet::new();
+    for key in keys {
+        let id = key
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                config::ConfigError::Message("JWT key id must not be empty".to_string())
+            })?;
+        if !ids.insert(id) {
+            return Err(config::ConfigError::Message(format!(
+                "duplicate JWT key id `{id}`"
+            )));
+        }
+        let secret_length = key
+            .get("secret")
+            .and_then(Value::as_str)
+            .map(str::len)
+            .unwrap_or_default();
+        if secret_length < 32 {
+            return Err(config::ConfigError::Message(format!(
+                "JWT key `{id}` secret must contain at least 32 bytes"
+            )));
+        }
+    }
+    let active = auth
+        .get("jwt_active_key_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !ids.contains(active) {
+        return Err(config::ConfigError::Message(format!(
+            "active JWT key `{active}` was not found"
+        )));
+    }
+    Ok(())
 }
 
 pub use config_center::*;
@@ -1174,6 +1504,140 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[derive(Debug)]
+    struct TestSecretProvider;
+
+    impl SecretProvider for TestSecretProvider {
+        fn resolve(
+            &self,
+            reference: &str,
+            _base_dir: &Path,
+        ) -> Result<Option<String>, SecretProviderError> {
+            Ok((reference == "test://jwt").then(|| "0123456789abcdef0123456789abcdef".to_string()))
+        }
+    }
+
+    #[test]
+    fn resolves_pluggable_secret_references_before_validation() {
+        let path = std::env::temp_dir().join(format!(
+            "roze-secret-provider-{}.yaml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            r#"
+name: demo
+auth:
+  jwt_keys:
+    - id: active
+      secret: test://jwt
+  jwt_active_key_id: active
+  jwt_audience: demo
+governance: {}
+"#,
+        )
+        .expect("write config");
+
+        let config: ServiceConfig =
+            load_with_secret_provider(&path, &TestSecretProvider).expect("load");
+        let key = &config.auth.expect("auth").jwt_keys[0];
+        assert_eq!(key.secret.len(), 32);
+        assert!(!format!("{key:?}").contains(&key.secret));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resolves_relative_secret_files_and_trims_line_endings() {
+        let root = std::env::temp_dir().join(format!(
+            "roze-secret-file-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        fs::write(
+            root.join("jwt.secret"),
+            "0123456789abcdef0123456789abcdef\r\n",
+        )
+        .expect("write secret");
+        fs::write(
+            root.join("config.yaml"),
+            r#"
+name: demo
+auth:
+  jwt_keys:
+    - id: active
+      secret: file://jwt.secret
+  jwt_active_key_id: active
+  jwt_audience: demo
+governance: {}
+"#,
+        )
+        .expect("write config");
+
+        let config: ServiceConfig = load(root.join("config.yaml")).expect("load");
+        assert_eq!(
+            config.auth.expect("auth").jwt_keys[0].secret,
+            "0123456789abcdef0123456789abcdef"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn merges_jwt_rotation_keys_by_id_from_one_environment_value() {
+        let mut value = serde_json::json!({
+            "name": "demo",
+            "auth": {
+                "jwt_keys": [
+                    {"id": "active", "secret": "0123456789abcdef0123456789abcdef"},
+                    {"id": "old", "secret": "11111111111111111111111111111111"}
+                ],
+                "jwt_active_key_id": "active",
+                "jwt_audience": "demo"
+            },
+            "governance": {}
+        });
+        merge_jwt_key_overlay(
+            &mut value,
+            r#"[{"id":"active","secret":"abcdef0123456789abcdef0123456789"},{"id":"next","secret":"fedcba9876543210fedcba9876543210"}]"#,
+        )
+        .expect("merge");
+        validate_structured_secrets(&value).expect("validate");
+        let config: ServiceConfig = serde_json::from_value(value).expect("deserialize");
+        let keys = config.auth.expect("auth").jwt_keys;
+        assert_eq!(keys.len(), 3);
+        assert_eq!(
+            keys.iter()
+                .find(|key| key.id == "active")
+                .expect("active")
+                .secret,
+            "abcdef0123456789abcdef0123456789"
+        );
+        assert!(keys.iter().any(|key| key.id == "old"));
+        assert!(keys.iter().any(|key| key.id == "next"));
+    }
+
+    #[test]
+    fn rejects_short_or_missing_active_jwt_keys_without_exposing_secret() {
+        let short = serde_json::json!({
+            "auth": {
+                "jwt_keys": [{"id": "old", "secret": "too-short"}],
+                "jwt_active_key_id": "active"
+            }
+        });
+        let error = validate_structured_secrets(&short).expect_err("reject invalid keys");
+        let message = error.to_string();
+        assert!(!message.contains("too-short"));
+        assert!(
+            message.contains("at least 32 bytes") || message.contains("active JWT key"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+ipnet.workspace = true
 matchit.workspace = true
 percent-encoding.workspace = true
 roze-error = { path = "../roze-error" }

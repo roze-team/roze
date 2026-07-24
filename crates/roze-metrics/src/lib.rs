@@ -19,6 +19,7 @@ static QUEUE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static RESILIENCE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static REPORT_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static WEBSOCKET_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static OUTBOX_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 const LATENCY_BUCKETS: usize = 65;
 
 /// Fixed-memory, power-of-two latency histogram for long-running evidence.
@@ -461,6 +462,13 @@ pub fn record_websocket_event(route: impl Into<String>, outcome: impl Into<Strin
     websocket_metrics_registry().inc_counter("roze_websocket_events_total", labels, 1);
 }
 
+pub fn record_outbox_event(driver: impl Into<String>, outcome: impl Into<String>) {
+    let labels = MetricLabels::new()
+        .insert("driver", driver)
+        .insert("outcome", outcome);
+    outbox_metrics_registry().inc_counter("roze_outbox_events_total", labels, 1);
+}
+
 pub fn http_metrics() -> String {
     let total = REQUEST_TOTAL.load(Ordering::Relaxed);
     let failed = REQUEST_FAILED.load(Ordering::Relaxed);
@@ -491,6 +499,7 @@ pub fn http_metrics() -> String {
     out.push_str(&resilience_metrics_registry().render());
     out.push_str(&report_metrics_registry().render());
     out.push_str(&websocket_metrics_registry().render());
+    out.push_str(&outbox_metrics_registry().render());
     out
 }
 
@@ -524,6 +533,10 @@ pub fn report_metrics_registry() -> &'static MetricRegistry {
 
 pub fn websocket_metrics_registry() -> &'static MetricRegistry {
     WEBSOCKET_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn outbox_metrics_registry() -> &'static MetricRegistry {
+    OUTBOX_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -570,6 +583,15 @@ mod tests {
         record_websocket_event("/ws", "opened");
         let metrics = http_metrics();
         assert!(metrics.contains("roze_websocket_events_total{outcome=\"opened\",route=\"/ws\"}"));
+    }
+
+    #[test]
+    fn renders_bounded_outbox_metrics() {
+        record_outbox_event("postgres", "claimed");
+        let metrics = http_metrics();
+        assert!(
+            metrics.contains("roze_outbox_events_total{driver=\"postgres\",outcome=\"claimed\"}")
+        );
     }
 
     #[test]

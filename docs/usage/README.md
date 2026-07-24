@@ -27,6 +27,12 @@ services.
   Roze built-in names, adaptive shedding, and generated file ownership.
 - [Native HTTP WebSocket contract](../contracts/websocket.md): stable upgrade,
   frame, limits, shutdown, metrics, and `@websocket` generation behavior.
+- [Client address and trusted proxies](../contracts/client-address.md):
+  connection peer injection and fail-closed proxy-chain resolution.
+- [Persistent SQL Outbox](../contracts/persistent-outbox.md): PostgreSQL/MySQL
+  migrations, transactional enqueue, lease claims, retry, and dead letters.
+- [Configuration secrets](../contracts/configuration-secrets.md): environment,
+  file, and custom secret providers plus production idempotency selection.
 - [rozectl generator](./rozectl-api.md): `.api` syntax, REST/RPC generation,
   SQL/Mongo model generation and inspection, Elasticsearch/OpenSearch/
   Meilisearch search generation and inspection, client SDKs, OpenAPI output,

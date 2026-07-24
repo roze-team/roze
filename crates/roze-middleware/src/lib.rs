@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    net::SocketAddr,
     sync::OnceLock,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -29,6 +30,7 @@ pub struct CommonMiddlewareConfig {
     pub timeout_ms: Option<u64>,
     pub body_limit_bytes: Option<usize>,
     pub trust_forwarded_identity_headers: bool,
+    pub trusted_proxies: Option<roze_http::client_ip::TrustedProxyConfig>,
 }
 
 impl Default for CommonMiddlewareConfig {
@@ -42,6 +44,7 @@ impl Default for CommonMiddlewareConfig {
             timeout_ms: None,
             body_limit_bytes: None,
             trust_forwarded_identity_headers: false,
+            trusted_proxies: None,
         }
     }
 }
@@ -57,6 +60,7 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
             timeout_ms: config.timeout.then_some(30_000),
             body_limit_bytes: config.request_body_limit_bytes,
             trust_forwarded_identity_headers: config.trust_forwarded_identity_headers,
+            trusted_proxies: None,
         }
     }
 }
@@ -81,12 +85,30 @@ impl CommonMiddlewareConfig {
         middlewares: &roze_config::HttpMiddlewaresConfig,
         auth: Option<&roze_config::AuthConfig>,
     ) -> Self {
+        Self::try_from_service(middlewares, auth).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "invalid trusted proxy configuration; forwarding headers will not be trusted");
+            let mut config = Self::from(middlewares);
+            config.auth = auth.map(|auth| AuthConfig {
+                jwt: roze_jwt::JwtConfig::from(auth),
+                public_routes: middlewares.auth_public_routes.clone(),
+            });
+            config
+        })
+    }
+
+    pub fn try_from_service(
+        middlewares: &roze_config::HttpMiddlewaresConfig,
+        auth: Option<&roze_config::AuthConfig>,
+    ) -> Result<Self, roze_http::client_ip::TrustedProxyConfigError> {
         let mut config = Self::from(middlewares);
         config.auth = auth.map(|auth| AuthConfig {
             jwt: roze_jwt::JwtConfig::from(auth),
             public_routes: middlewares.auth_public_routes.clone(),
         });
-        config
+        let trusted_proxies =
+            roze_http::client_ip::TrustedProxyConfig::new(&middlewares.trusted_proxy_cidrs)?;
+        config.trusted_proxies = Some(trusted_proxies);
+        Ok(config)
     }
 }
 
@@ -133,6 +155,12 @@ pub fn apply_common_with_config(
     if config.request_context {
         service = service.layer(roze_http::middleware::from_fn(inject_request_context));
     }
+    if let Some(trusted_proxies) = config.trusted_proxies {
+        service = service.layer(roze_http::middleware::from_fn_with_state(
+            trusted_proxies,
+            inject_client_ip,
+        ));
+    }
     if !config.trust_forwarded_identity_headers {
         service = service.layer(roze_http::middleware::from_fn(
             strip_untrusted_identity_headers,
@@ -148,6 +176,24 @@ pub fn apply_common_with_config(
         service = service.layer(cors_layer(config.cors_config.as_ref()));
     }
     service
+}
+
+async fn inject_client_ip(
+    roze_http::extract::State(config): roze_http::extract::State<
+        roze_http::client_ip::TrustedProxyConfig,
+    >,
+    mut request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    if let Some(peer) = request
+        .extensions()
+        .get::<roze_http::extract::ConnectInfo<SocketAddr>>()
+        .map(|peer| peer.0)
+    {
+        let client_ip = config.resolve(peer, request.headers());
+        request.extensions_mut().insert(client_ip);
+    }
+    next.run(request).await
 }
 
 async fn authenticate_request(
@@ -1045,6 +1091,16 @@ impl RedisIdempotencyStore {
     async fn connection(&self) -> anyhow::Result<redis::aio::MultiplexedConnection> {
         Ok(self.client.get_multiplexed_async_connection().await?)
     }
+
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        let mut connection = self.connection().await?;
+        let response: String = redis::cmd("PING").query_async(&mut connection).await?;
+        anyhow::ensure!(
+            response.eq_ignore_ascii_case("PONG"),
+            "Redis idempotency health check returned an unexpected response"
+        );
+        Ok(())
+    }
 }
 
 const REDIS_IDEMPOTENCY_BEGIN: &str = r#"
@@ -1454,6 +1510,45 @@ mod tests {
             .await
             .expect("response body");
         assert_eq!(&body[..], b"forged-user");
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_middleware_injects_resolved_client_ip() {
+        use roze_http::{
+            client_ip::{ClientIp, TrustedProxyConfig},
+            extract::ConnectInfo,
+            routing::get,
+            Router,
+        };
+        use tower::ServiceExt as _;
+
+        let router = Router::new().route(
+            "/client-ip",
+            get(|client: ClientIp| async move { client.to_string() }),
+        );
+        let app = apply_common_with_config(
+            router,
+            CommonMiddlewareConfig {
+                trusted_proxies: Some(
+                    TrustedProxyConfig::new(["10.0.0.0/8"]).expect("trusted proxies"),
+                ),
+                ..Default::default()
+            },
+        );
+        let mut request = roze_http::http::Request::builder()
+            .uri("/client-ip")
+            .header("x-forwarded-for", "198.51.100.8, 10.1.0.4")
+            .body(roze_http::body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(
+            "10.2.0.5:443".parse::<SocketAddr>().expect("peer"),
+        ));
+
+        let response = app.oneshot(request).await.expect("infallible router");
+        let body = roze_http::body::to_bytes(response.into_body(), 128)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"198.51.100.8");
     }
 
     #[tokio::test]

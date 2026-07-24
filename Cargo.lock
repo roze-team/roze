@@ -3548,6 +3548,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -3768,6 +3769,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ipnet",
  "matchit",
  "percent-encoding",
  "roze-error",
@@ -4223,6 +4225,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "roze-transaction-sql"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "roze-metrics",
+ "roze-transaction",
+ "sea-orm",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
