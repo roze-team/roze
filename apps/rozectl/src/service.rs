@@ -257,16 +257,16 @@ fn sync_inner(
     manifest: &ServiceManifest,
     check: bool,
 ) -> anyhow::Result<SyncResult> {
-    validate_manifest(&manifest)?;
+    validate_manifest(manifest)?;
     validate_project_kind(project, manifest.kind)?;
 
     let mut changed = Vec::new();
     let cargo_path = project.join("Cargo.toml");
-    let cargo = render_cargo(&cargo_path, &manifest)?;
+    let cargo = render_cargo(&cargo_path, manifest)?;
     update_file(&cargo_path, cargo.as_bytes(), check, &mut changed)?;
 
     let dependency_config_path = project.join(DEPENDENCY_CONFIG);
-    let dependency_config = render_dependency_config(&manifest);
+    let dependency_config = render_dependency_config(manifest);
     update_file(
         &dependency_config_path,
         dependency_config.as_bytes(),

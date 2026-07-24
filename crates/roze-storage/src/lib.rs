@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
 use reqwest::{header, Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};

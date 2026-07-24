@@ -830,6 +830,7 @@ mod tests {
                 header::SEC_WEBSOCKET_PROTOCOL,
                 HeaderValue::from_static("chat.v1"),
             )
+            .expect("valid subprotocol header")
             .connect()
             .await
             .expect_err("unrequested selection must fail");
@@ -875,10 +876,12 @@ mod tests {
         for _ in 0..20 {
             let mut builder = ClientBuilder::from_uri(uri.clone());
             if let Some(protocol) = protocol {
-                builder = builder.add_header(
-                    header::SEC_WEBSOCKET_PROTOCOL,
-                    HeaderValue::from_static(protocol),
-                );
+                builder = builder
+                    .add_header(
+                        header::SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static(protocol),
+                    )
+                    .expect("valid subprotocol header");
             }
             match builder.connect().await {
                 Ok(connection) => return connection,

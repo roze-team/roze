@@ -27,6 +27,8 @@ services.
   Roze built-in names, adaptive shedding, and generated file ownership.
 - [Native HTTP WebSocket contract](../contracts/websocket.md): stable upgrade,
   frame, limits, shutdown, metrics, and `@websocket` generation behavior.
+- [Native gRPC routing](../contracts/grpc-routing.md): Roze-owned multi-service
+  dispatch without third-party HTTP router dependencies.
 - [Client address and trusted proxies](../contracts/client-address.md):
   connection peer injection and fail-closed proxy-chain resolution.
 - [Persistent SQL Outbox](../contracts/persistent-outbox.md): PostgreSQL/MySQL

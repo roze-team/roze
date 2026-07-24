@@ -31,6 +31,180 @@ pub mod build {
     }
 }
 
+mod router {
+    use std::{
+        collections::BTreeMap,
+        convert::Infallible,
+        fmt,
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use http::{Request, Response};
+    use tonic::{body::Body, server::NamedService, Status};
+    use tower::{util::BoxCloneService, Service, ServiceExt};
+
+    type Route = BoxCloneService<Request<Body>, Response<Body>, Infallible>;
+    type RouteFuture =
+        Pin<Box<dyn Future<Output = Result<Response<Body>, Infallible>> + Send + 'static>>;
+
+    /// A Roze-owned gRPC service router.
+    ///
+    /// It dispatches standard gRPC paths (`/{service}/{method}`) without enabling
+    /// Tonic's optional third-party router feature.
+    #[derive(Clone, Default)]
+    pub struct GrpcRouter {
+        routes: BTreeMap<&'static str, Route>,
+    }
+
+    impl fmt::Debug for GrpcRouter {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("GrpcRouter")
+                .field("services", &self.routes.keys().collect::<Vec<_>>())
+                .finish()
+        }
+    }
+
+    impl GrpcRouter {
+        pub fn new<S>(service: S) -> Self
+        where
+            S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
+                + NamedService
+                + Clone
+                + Send
+                + Sync
+                + 'static,
+            S::Future: Send + 'static,
+        {
+            Self::default().add_service(service)
+        }
+
+        #[must_use]
+        pub fn add_service<S>(mut self, service: S) -> Self
+        where
+            S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
+                + NamedService
+                + Clone
+                + Send
+                + Sync
+                + 'static,
+            S::Future: Send + 'static,
+        {
+            assert!(
+                self.routes
+                    .insert(S::NAME, BoxCloneService::new(service))
+                    .is_none(),
+                "gRPC service `{}` is already registered",
+                S::NAME
+            );
+            self
+        }
+    }
+
+    impl Service<Request<Body>> for GrpcRouter {
+        type Response = Response<Body>;
+        type Error = Infallible;
+        type Future = RouteFuture;
+
+        fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: Request<Body>) -> Self::Future {
+            let route = service_name(request.uri().path())
+                .and_then(|service| self.routes.get(service))
+                .cloned();
+            Box::pin(async move {
+                match route {
+                    Some(route) => route.oneshot(request).await,
+                    None => Ok(unimplemented_response()),
+                }
+            })
+        }
+    }
+
+    fn service_name(path: &str) -> Option<&str> {
+        let path = path.strip_prefix('/')?;
+        let (service, method) = path.split_once('/')?;
+        (!service.is_empty() && !method.is_empty()).then_some(service)
+    }
+
+    fn unimplemented_response() -> Response<Body> {
+        let (parts, ()) = Status::unimplemented("").into_http::<()>().into_parts();
+        Response::from_parts(parts, Body::empty())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{
+            future::{ready, Ready},
+            task::{Context, Poll},
+        };
+
+        use http::{header::HeaderValue, Request, Response};
+        use tonic::{body::Body, server::NamedService};
+        use tower::{Service, ServiceExt};
+
+        use super::GrpcRouter;
+
+        #[derive(Clone)]
+        struct DemoService;
+
+        impl NamedService for DemoService {
+            const NAME: &'static str = "roze.demo.v1.Demo";
+        }
+
+        impl Service<Request<Body>> for DemoService {
+            type Response = Response<Body>;
+            type Error = std::convert::Infallible;
+            type Future = Ready<Result<Self::Response, Self::Error>>;
+
+            fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _request: Request<Body>) -> Self::Future {
+                let mut response = Response::new(Body::empty());
+                response
+                    .headers_mut()
+                    .insert("x-roze-service", HeaderValue::from_static("demo"));
+                ready(Ok(response))
+            }
+        }
+
+        #[tokio::test]
+        async fn routes_by_grpc_service_name_and_rejects_unknown_services() {
+            let router = GrpcRouter::new(DemoService);
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/roze.demo.v1.Demo/Get")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("route response");
+            assert_eq!(response.headers()["x-roze-service"], "demo");
+
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/roze.missing.v1.Missing/Get")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("fallback response");
+            assert_eq!(response.headers()["grpc-status"], "12");
+        }
+    }
+}
+
+pub use router::GrpcRouter;
+
 #[macro_export]
 macro_rules! include_proto {
     ($package:literal) => {

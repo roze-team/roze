@@ -87,8 +87,8 @@ roze-search = { path = "crates/roze-search" }
 roze-orm = { path = "crates/roze-orm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 ipnet = "2"
 rust_xlsxwriter = "0.96"
 sea-orm = { version = "1", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-mysql", "sqlx-postgres", "sqlx-sqlite", "with-rust_decimal", "with-chrono"] }
@@ -98,12 +98,12 @@ rust_decimal = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2.0.18"
 validator = { version = "0.20", features = ["derive"] }
-base64 = "0.22"
-sha1 = "0.10"
+base64 = "0.23"
+sha1 = "0.11"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 mongodb = "3.7.0"
 moka = { version = "0.12", features = ["future"] }
-redis = { version = "0.27", features = ["aio", "tokio-comp"] }
+redis = { version = "1.4.1", features = ["aio", "tokio-comp"] }
 regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -117,12 +117,12 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1.10.1", features = ["server", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
-matchit = "=0.8.4"
+matchit = "=0.8.6"
 percent-encoding = "2.3"
 serde_urlencoded = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-websockets = { version = "0.10.1", default-features = false, features = ["server", "ring"] }
-tonic = { version = "0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
+tokio-websockets = { version = "0.13.3", default-features = false, features = ["server", "ring"] }
+tonic = { version = "0.14.6", default-features = false, features = ["transport", "codegen"] }
 tonic-build = "0.14.6"
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
