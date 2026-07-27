@@ -18,6 +18,9 @@
   field detection, governance range checks, secret-safe debug output, automatic
   rate-limit Redis selection from an explicit URL or `cache.url`, and
   profile-scoped rate-limit namespaces.
+- Updated the JWT signing and verification backend to `jsonwebtoken` 11 while
+  retaining the explicit AWS-LC cryptography provider and existing JWT/OIDC
+  validation contract.
 
 All notable changes to Roze should be recorded in this file.
 
