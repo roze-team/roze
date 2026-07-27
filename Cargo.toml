@@ -9,6 +9,7 @@ members = [
     "crates/roze-http",
     "crates/roze-metrics",
     "crates/roze-resilience",
+    "crates/roze-rate-limit",
     "crates/roze-middleware",
     "crates/roze-utils",
     "crates/roze-grpc",
@@ -86,6 +87,7 @@ roze-grpc = { path = "crates/roze-grpc" }
 roze-search = { path = "crates/roze-search" }
 roze-orm = { path = "crates/roze-orm" }
 serde = { version = "1", features = ["derive"] }
+serde_ignored = "0.1"
 serde_json = "1"
 sha2 = "0.11"
 hmac = "0.13"

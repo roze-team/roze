@@ -55,6 +55,18 @@ A reload has four possible outcomes:
 
 Invalid config must never replace the last valid in-memory config.
 
+`ConfigCenter::new_with_validator` applies application semantic validation to
+the initial value and every candidate snapshot before publication. A rejected
+candidate follows the same last-valid behavior as a parse failure. Use it for
+application configuration that has constraints beyond Serde types.
+
+`ServiceConfig` snapshots also receive Roze's built-in validation. In
+`production`, unknown fields are rejected instead of being silently ignored;
+development and test profiles retain forward-compatible parsing and emit a
+warning containing the unknown field path. Governance limits, retry and
+timeout bounds, rate-limit key policies, and production store requirements are
+validated before a snapshot becomes visible.
+
 ## ReloadResult Fields
 
 `ReloadResult` is the observable reload event. It must include:

@@ -167,7 +167,22 @@ and `proto/service.proto` is refreshed. Put application-owned logic module
 attributes, declarations, imports, and re-exports in
 `src/logic/prelude.rs`. For REST helpers scoped to one route group, use
 `src/logic/<group>/prelude.rs`. Both prelude forms are imported by generated
-logic and preserved verbatim. Use `--force` when you want a full rebuild.
+logic and preserved verbatim.
+
+On the first `--update` of a project created before these extension points
+existed, `rozectl` performs a transactional ownership migration:
+
+- if the preserved `src/application.rs` has `configure_context` but no
+  `register_services`, it appends the current no-op lifecycle hook;
+- if a logic prelude does not yet exist, custom `mod` declarations whose module
+  files still exist, plus their related `use` declarations, are moved from the
+  legacy generated `mod.rs` into the matching root or REST group prelude;
+- generated module declarations and declarations inside Roze generated markers
+  are not migrated;
+- the migration runs only in the staging project, so an error leaves the target
+  directory unchanged, and repeated updates do not modify the migrated files.
+
+Use `--force` when you want a full rebuild.
 
 ## WebSocket routes
 
@@ -771,10 +786,10 @@ pub fn register_services(
 }
 ```
 
-`src/application.rs` is application-owned and is never rewritten during
-`--update`. Projects generated before this hook existed must add the current
-hook signature explicitly before upgrading; the generator does not inject a
-legacy compatibility shim.
+`src/application.rs` is application-owned after creation. During the first
+`--update` from a generator version that predates `register_services`, `rozectl`
+adds only the missing default hook and then preserves the complete file on
+subsequent updates.
 
 Generated REST and RPC services also include `ops/production-evidence.md`,
 `ops/governance-baseline.yaml`, `ops/prometheus-rules.yaml`, and
@@ -1160,6 +1175,15 @@ mutating routes default to one attempt so non-idempotent writes are not retried
 accidentally. REST and RPC runtimes consume those route/method settings:
 concurrency pressure, high latency, or elevated failure ratio can shed load
 before worker saturation turns into a wider outage.
+
+Generated service config loaders call `roze_config::load_service`, which
+resolves secrets and validates governance before binding listeners. Production
+rejects unknown fields and invalid ranges; development/test keep unknown fields
+warning-only. Rate-limit storage defaults to `auto`: an explicit limiter Redis
+URL wins, then `cache.url`, and production refuses a memory fallback. The
+rate-limit Redis namespace defaults to the service profile and can be
+overridden when several environments share one Redis deployment.
+
 Generated configs also include explicit global and per-route/per-method
 `fallback` entries. They default to `enabled: false`, so services fail closed
 until an operator enables a documented degradation response; the REST/RPC

@@ -13,7 +13,8 @@ Roze is a Rust service framework with:
 - `crates/roze-core`: base types, errors, results, and shared response helpers.
 - `crates/roze-http`: Roze native HTTP server, routing, extractors, responses,
   application-facing WebSocket upgrades/frames, and graceful shutdown.
-- `crates/roze-middleware`: HTTP middleware helpers; route rate-limit and breaker state use DashMap for concurrent hot paths.
+- `crates/roze-middleware`: HTTP middleware helpers and route governance integration.
+- `crates/roze-rate-limit`: shared memory/Redis token buckets, composite identity policies, and bounded failure behavior for REST, RPC, and Gateway.
 - `crates/roze-validation`: request parameter validation helpers.
 - `crates/roze-config`: YAML/TOML/env configuration loading.
 - `crates/roze-log`: tracing and `trace_id` plumbing.
@@ -225,6 +226,10 @@ prelude, and REST group-local helper declarations and re-exports in the matching
 group prelude; generated `logic/mod.rs` indexes are refreshed. Generated glue
 such as `src/route/`, `src/handler/`, `src/server/`, `src/client/`, DTOs,
 OpenAPI, and proto/build files is refreshed.
+The first update of a legacy project transactionally adds a missing
+`application::register_services` hook and moves resolvable custom module/use
+declarations from old logic indexes into the matching application-owned
+prelude; later updates preserve those files unchanged.
 Use `--force` only for a full rebuild. New projects use
 `https://github.com/roze-team/roze.git` dependencies by default; pass
 `--roze-source path` for projects inside this repository.
@@ -399,6 +404,20 @@ build.rs
 proto/service.proto
 config.yaml
 ```
+
+### Configuration validation
+
+Generated services load `ServiceConfig` through `roze_config::load_service`.
+Secrets are resolved before semantic validation and before listeners start.
+Production rejects unknown fields, invalid governance ranges, and an enabled
+rate limit without Redis; development and test profiles report unknown fields
+as warnings. Service configuration debug output redacts database, cache,
+broker, storage, registry, and RPC-client credentials.
+
+Generated rate limiting uses `store: auto`: an explicit
+`governance.rate_limiter.redis_url` wins, then `cache.url`, with memory allowed
+only outside production. Redis keys are scoped by the service profile unless an
+explicit rate-limit namespace is configured.
 
 ### Rozectl verification
 

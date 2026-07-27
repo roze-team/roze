@@ -18,6 +18,7 @@ roze-jwt = { path = "../roze-jwt" }
 roze-grpc = { path = "../roze-grpc" }
 roze-health = { path = "../roze-health" }
 roze-metrics = { path = "../roze-metrics" }
+roze-rate-limit = { path = "../roze-rate-limit" }
 roze-resilience = { path = "../roze-resilience" }
 roze-trace = { path = "../roze-trace" }
 reqwest.workspace = true

@@ -37,5 +37,8 @@ successful completion, or suppressed failure; failed work remains failed.
 
 All governed boundaries emit `roze_resilience_decisions_total` with a bounded
 `boundary` value (`rest`, `rpc`, `gateway`, `mq`, or `job`). Policy state remains
-local to the data path, so control-plane availability is not required for each
-request, message, or job execution.
+local to the data path except when a boundary explicitly selects an external
+state provider. REST, RPC, and Gateway use the shared memory/Redis contract in
+[`distributed-rate-limit.md`](distributed-rate-limit.md); Redis-backed rate
+limiting deliberately consults the data store for each decision and applies the
+configured timeout and unavailable policy.

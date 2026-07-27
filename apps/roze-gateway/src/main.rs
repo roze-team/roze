@@ -5,6 +5,7 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (config, center) = config::load_with_config_center_with_center(config_path()).await?;
+    config.validate()?;
     roze_log::init_tracing_with_config(&config)?;
 
     let gateway = config
@@ -23,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         jwt,
         api_keys,
         registry,
-        Some(config.governance),
+        Some(resolved_governance(&config)),
     )?;
     if let Some(center) = center {
         let reload_service = service.clone();
@@ -62,6 +63,16 @@ async fn main() -> anyhow::Result<()> {
                     );
                     return;
                 };
+                if let Err(error) = updated.validate() {
+                    roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
+                    tracing::warn!(
+                        event = "gateway.config.reload.failed",
+                        version = result.version,
+                        error = %error,
+                        "gateway keeps the last valid runtime snapshot"
+                    );
+                    return;
+                }
                 let Some(gateway) = updated.gateway.clone() else {
                     roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
                     tracing::warn!(
@@ -105,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
                     jwt,
                     api_keys,
                     registry,
-                    Some(updated.governance.clone()),
+                    Some(resolved_governance(updated)),
                 ) {
                     Ok(()) => {
                         roze_gateway::record_reload_outcome(
@@ -138,9 +149,16 @@ async fn main() -> anyhow::Result<()> {
 
     info!(addr = %listen, "start roze-gateway native HTTP service");
     roze_http::rest::RestServer::new(listen, service)
+        .with_connect_info()
         .serve()
         .await?;
     Ok(())
+}
+
+fn resolved_governance(config: &roze_config::ServiceConfig) -> roze_config::GovernanceConfig {
+    let mut governance = config.governance.clone();
+    governance.rate_limiter = config.resolved_rate_limiter_config();
+    governance
 }
 
 fn gateway_reload_relevant(diff: &[roze_config::ConfigDiffEntry]) -> bool {

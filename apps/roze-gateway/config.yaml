@@ -11,6 +11,8 @@ auth:
 
 gateway:
   listen: "127.0.0.1:8081"
+  # Forwarded client addresses are trusted only from these TCP peers.
+  trusted_proxy_cidrs: []
   middlewares:
     - trace
   timeout_ms: 8000
@@ -62,6 +64,12 @@ gateway:
       rate_limit:
         burst: 20
         refill_ms: 200
+        key:
+          dimensions:
+            - route
+            - client_ip
+          headers: []
+          missing: reject
       breaker:
         failure_threshold: 5
         reset_timeout_ms: 5000
@@ -91,3 +99,13 @@ gateway:
       - content-type
       - x-request-id
       - x-trace-id
+
+governance:
+  rate_limiter:
+    store: auto
+    # Explicit redis_url overrides cache.url; production refuses memory fallback.
+    # redis_url: env://REDIS_URL
+    key_prefix: roze:rate-limit:v1
+    # namespace defaults to the service profile.
+    timeout_ms: 100
+    unavailable_policy: fail-closed

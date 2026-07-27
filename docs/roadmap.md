@@ -82,7 +82,8 @@ The phase-by-phase work packages, exit gates, and evidence checklist are in
   [Roze Upstream Issue Tracking - 2026-07-22](evidence/2026-07-22-mall-validation-backlog.md).
 - Complete deadline, cancellation, trace, tenant, idempotency-key, and retry
   budget propagation across every generated downstream call.
-- Add optional persistent state for breaker and rate limiter.
+- Add optional persistent state for circuit breakers. Distributed rate-limiter
+  state is provided by `roze-rate-limit` through the Redis store.
 - Align bounded metric labels across HTTP route, RPC method, gateway route,
   queue consumer, and job.
 - Framework lifecycle: SIGINT/SIGTERM, shutdown order, shutdown timeout,

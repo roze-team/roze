@@ -18,4 +18,5 @@ roze-gateway = { path = "../../crates/roze-gateway" }
 roze-http = { path = "../../crates/roze-http" }
 roze-jwt = { path = "../../crates/roze-jwt" }
 roze-log = { path = "../../crates/roze-log" }
+roze-rate-limit = { path = "../../crates/roze-rate-limit" }
 roze-rpc = { path = "../../crates/roze-rpc" }

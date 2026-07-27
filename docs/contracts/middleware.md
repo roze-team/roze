@@ -217,6 +217,11 @@ Route governance still lives under `governance`:
 
 ```yaml
 governance:
+  rate_limiter:
+    store: redis
+    redis_url: env://REDIS_URL
+    timeout_ms: 100
+    unavailable_policy: fail-closed
   timeout_ms: 5000
   retry:
     max_attempts: 2
@@ -225,6 +230,10 @@ governance:
   rate_limit:
     burst: 100
     refill_ms: 10
+    key:
+      dimensions: [route, client_ip, tenant]
+      headers: []
+      missing: reject
   breaker:
     failure_threshold: 5
     reset_timeout_ms: 30000
@@ -242,8 +251,9 @@ governance:
   routes: {}
 ```
 
-`begin_route` applies route/global rate limit and breaker policy and attaches
-the effective timeout to `roze_context::Context`. `shedding` is enforced before
+Generated route glue resolves route/global policy, enforces the configured
+`roze_rate_limit::RateLimiter`, and then starts the breaker/shedding guard.
+The effective timeout is attached to `roze_context::Context`. `shedding` is enforced before
 logic execution, and `fallback` is resolved with route policy taking precedence
 over global policy. Disabled fallback entries are ignored, so generated services
 default to explicit fail-closed behavior until an operator enables a degradation
@@ -259,7 +269,10 @@ schema so Gateway/RPC/MQ can use the same configuration model where applicable.
 global-plus-scoped merge operations. REST, RPC, Gateway, MQ, and Job consume the
 resulting `GovernancePolicy`; runtime implementations must not independently
 reinterpret missing fields or disabled fallback entries. The complete shared
-contract is documented in `docs/contracts/governance.md`.
+contract is documented in `docs/contracts/governance.md`. Distributed stores,
+identity dimensions, trusted client addresses, failure modes, and protocol
+responses are documented in
+[`distributed-rate-limit.md`](distributed-rate-limit.md).
 
 Timeout is intentionally a framework concern:
 

@@ -29,13 +29,12 @@ use roze_jwt::{extract_bearer_token, verify_token, JwtConfig};
 use roze_metrics::{record_resilience_decision, record_rpc_client_attempt, record_rpc_method};
 use roze_resilience::{
     full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary,
-    OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
+    OperationKey, RetryBudgetRegistry, SheddingRegistry,
 };
 use roze_trace::generate_trace_id;
 use tokio::time::sleep;
 use tracing::info;
 
-static METHOD_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
 static METHOD_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 static METHOD_SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
 static CLIENT_RETRY_BUDGETS: OnceLock<RetryBudgetRegistry> = OnceLock::new();
@@ -46,6 +45,7 @@ pub const ERROR_KIND_METADATA: &str = "x-roze-error-kind";
 pub const FALLBACK_STATUS_METADATA: &str = "x-roze-fallback-status";
 pub const FALLBACK_BODY_METADATA: &str = "x-roze-fallback-body";
 pub const FALLBACK_HEADERS_METADATA: &str = "x-roze-fallback-headers";
+pub const RETRY_AFTER_METADATA: &str = "retry-after";
 
 #[derive(Debug, Clone)]
 pub struct RpcConfig {
@@ -979,6 +979,13 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
             }
         }
     }
+    if let Some(retry_after) = error.retry_after_seconds() {
+        insert_metadata(
+            &mut metadata,
+            RETRY_AFTER_METADATA,
+            &retry_after.to_string(),
+        );
+    }
     Status::with_metadata(
         code,
         error.message_i18n(locale.as_deref().unwrap_or("en-US")),
@@ -991,7 +998,7 @@ fn grpc_code_from_error(error: &RozeError) -> Code {
         RozeError::BadRequest(_) => Code::InvalidArgument,
         RozeError::Unauthorized => Code::Unauthenticated,
         RozeError::Forbidden => Code::PermissionDenied,
-        RozeError::RateLimited => Code::ResourceExhausted,
+        RozeError::RateLimited { .. } => Code::ResourceExhausted,
         RozeError::NotFound(_) => Code::NotFound,
         RozeError::Unavailable(_) => Code::Unavailable,
         RozeError::Internal(_) => Code::Internal,
@@ -1043,7 +1050,11 @@ pub fn error_from_status(status: &Status) -> RozeError {
         Code::InvalidArgument => RozeError::BadRequest(status.message().to_string()),
         Code::Unauthenticated => RozeError::Unauthorized,
         Code::PermissionDenied => RozeError::Forbidden,
-        Code::ResourceExhausted => RozeError::RateLimited,
+        Code::ResourceExhausted => RozeError::RateLimited {
+            retry_after_seconds: metadata_value(status.metadata(), RETRY_AFTER_METADATA)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1),
+        },
         Code::NotFound => RozeError::NotFound(status.message().to_string()),
         Code::Unavailable => RozeError::Unavailable(status.message().to_string()),
         _ => RozeError::Internal(status.message().to_string()),
@@ -1178,10 +1189,11 @@ pub struct MethodPolicy {
     pub fallback: Option<roze_config::GovernanceFallbackConfig>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MethodRateLimitConfig {
     pub burst: u32,
     pub refill: Duration,
+    pub key: roze_rate_limit::RateLimitKeyPolicy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1277,11 +1289,13 @@ pub fn method_policy(
         };
     };
     let policy = governance.resolve_policy(method);
+    let rate_limit = governance.resolve_rate_limit_config(method);
     MethodPolicy {
         timeout: policy.timeout,
-        rate_limit: policy.rate_limit.map(|config| MethodRateLimitConfig {
+        rate_limit: rate_limit.map(|config| MethodRateLimitConfig {
             burst: config.burst,
-            refill: config.refill,
+            refill: Duration::from_millis(config.refill_ms),
+            key: config.key,
         }),
         breaker: policy.breaker.map(|config| MethodBreakerConfig {
             failure_threshold: config.failure_threshold,
@@ -1366,15 +1380,6 @@ pub fn begin_method(
         "RPC governance policy resolved"
     );
     let key = OperationKey::new(&service, GovernanceBoundary::Rpc, &method).to_string();
-    if let Some(config) = &policy.rate_limit {
-        match enforce_method_rate_limit(&key, config) {
-            Ok(()) => record_resilience_decision(service.as_str(), "rpc", "rate_limit", "allowed"),
-            Err(status) => {
-                record_resilience_decision(service.as_str(), "rpc", "rate_limit", "rejected");
-                return Err(status);
-            }
-        }
-    }
     let breaker_permit = match policy.breaker {
         Some(_) => match method_breaker_allow(&key) {
             BreakerDecision::Allow(permit) => {
@@ -1660,21 +1665,71 @@ fn retry_context_status(context: &Context, delay: Duration) -> Option<Status> {
 }
 
 #[allow(clippy::result_large_err)]
-fn enforce_method_rate_limit(key: &str, config: &MethodRateLimitConfig) -> Result<(), Status> {
-    if METHOD_RATE_LIMITS
-        .get_or_init(RateLimitRegistry::new)
-        .allow(key, rate_limit_config(*config))
+pub async fn enforce_method_rate_limit<T>(
+    limiter: &roze_rate_limit::RateLimiter,
+    service: &str,
+    method: &str,
+    request: &Request<T>,
+    request_ctx: &Context,
+    governance: Option<&roze_config::GovernanceConfig>,
+) -> Result<(), Status> {
+    let Some(config) = method_policy(governance, method).rate_limit else {
+        return Ok(());
+    };
+    let identity = roze_rate_limit::RateLimitIdentity::new(service, "rpc", method)
+        .with_subject(request_ctx.subject())
+        .with_tenant(request_ctx.tenant())
+        .with_headers(request.metadata().iter().filter_map(|entry| match entry {
+            roze_grpc::transport::KeyAndValueRef::Ascii(name, value) => {
+                Some((name.as_str(), value.to_str().ok()?.to_string()))
+            }
+            roze_grpc::transport::KeyAndValueRef::Binary(_, _) => None,
+        }));
+    match limiter
+        .check(
+            &config.key,
+            &identity,
+            roze_rate_limit::RateLimit {
+                burst: config.burst,
+                refill: config.refill,
+            },
+        )
+        .await
     {
-        Ok(())
-    } else {
-        Err(Status::resource_exhausted("rate limited"))
-    }
-}
-
-fn rate_limit_config(config: MethodRateLimitConfig) -> roze_resilience::RateLimitConfig {
-    roze_resilience::RateLimitConfig {
-        burst: config.burst,
-        refill: config.refill,
+        Ok(decision) if decision.allowed => {
+            record_resilience_decision(
+                service,
+                "rpc",
+                "rate_limit",
+                if decision.degraded {
+                    "store_error_fail_open"
+                } else {
+                    "allowed"
+                },
+            );
+            Ok(())
+        }
+        Ok(decision) => {
+            record_resilience_decision(service, "rpc", "rate_limit", "rejected");
+            Err(status_from_error(
+                RozeError::rate_limited(decision.retry_after),
+                request_ctx,
+            ))
+        }
+        Err(roze_rate_limit::RateLimitError::StoreUnavailable) => {
+            record_resilience_decision(service, "rpc", "rate_limit", "store_error_fail_closed");
+            Err(status_from_error(
+                RozeError::Unavailable("rate limit store unavailable".to_string()),
+                request_ctx,
+            ))
+        }
+        Err(_) => {
+            record_resilience_decision(service, "rpc", "rate_limit", "identity_rejected");
+            Err(status_from_error(
+                RozeError::rate_limited(Duration::from_secs(1)),
+                request_ctx,
+            ))
+        }
     }
 }
 
@@ -1811,7 +1866,9 @@ mod tests {
                 "forbidden",
             ),
             (
-                RozeError::RateLimited,
+                RozeError::RateLimited {
+                    retry_after_seconds: 2,
+                },
                 Code::ResourceExhausted,
                 429,
                 "rate_limited",
@@ -1866,6 +1923,26 @@ mod tests {
                 Some(expected_kind)
             );
         }
+    }
+
+    #[test]
+    fn rate_limited_status_exports_retry_after_metadata() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1");
+        let status = status_from_error(
+            RozeError::RateLimited {
+                retry_after_seconds: 3,
+            },
+            &context,
+        );
+
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(
+            status
+                .metadata()
+                .get(RETRY_AFTER_METADATA)
+                .and_then(|value| value.to_str().ok()),
+            Some("3")
+        );
     }
 
     #[test]
@@ -1940,7 +2017,9 @@ mod tests {
     fn error_from_status_restores_roze_error_variants_with_grpc_codes() {
         assert_eq!(
             error_from_status(&Status::resource_exhausted("slow down")),
-            RozeError::RateLimited
+            RozeError::RateLimited {
+                retry_after_seconds: 1
+            }
         );
         assert_eq!(
             error_from_status(&Status::unavailable("down")),

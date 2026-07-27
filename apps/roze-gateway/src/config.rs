@@ -4,7 +4,7 @@ use std::time::Duration;
 pub type Config = roze_config::ServiceConfig;
 
 pub fn load(path: impl AsRef<Path>) -> Result<Config, config::ConfigError> {
-    roze_config::load(path)
+    roze_config::load_service(path)
 }
 
 #[allow(dead_code)]
@@ -39,7 +39,12 @@ pub async fn load_with_config_center_with_center(
         subscriber.push(roze_config::FileConfigSubscriber::new(file_path));
     }
 
-    let center = roze_config::ConfigCenter::new(subscriber, center_input.options).await?;
+    let center = roze_config::ConfigCenter::new_with_validator(
+        subscriber,
+        center_input.options,
+        |config: &Config| config.validate(),
+    )
+    .await?;
     let current = center.get_config().await;
     Ok((current, Some(center)))
 }

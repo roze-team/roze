@@ -33,6 +33,7 @@ roze-auth = { path = "../roze-auth" }
 roze-context = { path = "../roze-context" }
 roze-jwt = { path = "../roze-jwt" }
 roze-metrics = { path = "../roze-metrics" }
+roze-rate-limit = { path = "../roze-rate-limit" }
 roze-resilience = { path = "../roze-resilience" }
 roze-http = { path = "../roze-http" }
 roze-rpc = { path = "../roze-rpc" }

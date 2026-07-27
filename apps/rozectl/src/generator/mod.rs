@@ -22,7 +22,7 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
-const REST_ROZE_CRATES: [&str; 23] = [
+const REST_ROZE_CRATES: [&str; 24] = [
     "roze-config",
     "roze-error",
     "roze-health",
@@ -30,6 +30,7 @@ const REST_ROZE_CRATES: [&str; 23] = [
     "roze-log",
     "roze-metrics",
     "roze-middleware",
+    "roze-rate-limit",
     "roze-jwt",
     "roze-cache",
     "roze-context",
@@ -48,7 +49,7 @@ const REST_ROZE_CRATES: [&str; 23] = [
     "roze-rpc",
 ];
 
-const RPC_ROZE_CRATES: [&str; 23] = [
+const RPC_ROZE_CRATES: [&str; 24] = [
     "roze-config",
     "roze-context",
     "roze-db",
@@ -59,6 +60,7 @@ const RPC_ROZE_CRATES: [&str; 23] = [
     "roze-jwt",
     "roze-log",
     "roze-middleware",
+    "roze-rate-limit",
     "roze-cache",
     "roze-mq",
     "roze-nats",
@@ -3596,6 +3598,7 @@ fn generate_rest_project_in_place(
         rest::render_application_middleware(),
         options.mode,
     )?;
+    migrate_legacy_application_hook(out, options.mode)?;
     write_preserved(
         &out.join("src/application.rs"),
         application_context_rs(),
@@ -3608,15 +3611,38 @@ fn generate_rest_project_in_place(
             options.mode,
         )?;
     }
+    let logic_groups = rest::render_logic_group_mods(spec);
+    let logic_files = rest::render_logic_files(spec);
+    let generated_groups = logic_groups
+        .iter()
+        .map(|(group, _)| group.clone())
+        .collect();
+    migrate_legacy_logic_prelude(
+        &out.join("src/logic/mod.rs"),
+        &out.join("src/logic/prelude.rs"),
+        &generated_groups,
+        options.mode,
+    )?;
     fs::write(out.join("src/logic/mod.rs"), rest::render_logic_mod(spec))?;
     write_preserved(
         &out.join("src/logic/prelude.rs"),
         logic_prelude_rs(),
         options.mode,
     )?;
-    for (group, content) in rest::render_logic_group_mods(spec) {
+    for (group, content) in logic_groups {
         let dir = out.join("src/logic").join(&group);
         fs::create_dir_all(&dir)?;
+        let generated_handlers = logic_files
+            .iter()
+            .filter(|(handler_group, _, _)| handler_group == &group)
+            .map(|(_, handler, _)| handler.clone())
+            .collect();
+        migrate_legacy_logic_prelude(
+            &dir.join("mod.rs"),
+            &dir.join("prelude.rs"),
+            &generated_handlers,
+            options.mode,
+        )?;
         fs::write(dir.join("mod.rs"), content)?;
         write_preserved(
             &dir.join("prelude.rs"),
@@ -3624,7 +3650,7 @@ fn generate_rest_project_in_place(
             options.mode,
         )?;
     }
-    for (group, handler, content) in rest::render_logic_files(spec) {
+    for (group, handler, content) in logic_files {
         let dir = out.join("src/logic").join(&group);
         fs::create_dir_all(&dir)?;
         write_preserved_logic(&dir.join(format!("{handler}.rs")), content, options.mode)?;
@@ -3843,6 +3869,7 @@ fn generate_rpc_project_in_place(
         out.join("src/svc/mod.rs"),
         rpc_service_context_rs(rpc_clients, spec_uses_idempotency(spec)),
     )?;
+    migrate_legacy_application_hook(out, options.mode)?;
     write_preserved(
         &out.join("src/application.rs"),
         application_context_rs(),
@@ -3850,13 +3877,24 @@ fn generate_rpc_project_in_place(
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
     fs::write(out.join("src/client/mod.rs"), rpc::render_client(spec))?;
+    let logic_files = rpc::render_logic_files(spec);
+    let generated_methods = logic_files
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect();
+    migrate_legacy_logic_prelude(
+        &out.join("src/logic/mod.rs"),
+        &out.join("src/logic/prelude.rs"),
+        &generated_methods,
+        options.mode,
+    )?;
     fs::write(out.join("src/logic/mod.rs"), rpc::render_logic_mod(spec))?;
     write_preserved(
         &out.join("src/logic/prelude.rs"),
         logic_prelude_rs(),
         options.mode,
     )?;
-    for (method, content) in rpc::render_logic_files(spec) {
+    for (method, content) in logic_files {
         write_preserved_logic(
             &out.join("src/logic").join(format!("{method}.rs")),
             content,
@@ -10706,9 +10744,21 @@ registry:
   # insecure_skip_verify: false
 governance:
   timeout_ms: 5000
+  rate_limiter:
+    store: auto # explicit redis_url, then cache.url, otherwise development memory
+    # redis_url: env://REDIS_URL # overrides cache.url
+    key_prefix: roze:rate-limit:v1
+    # namespace defaults to the service profile; override for shared Redis deployments
+    timeout_ms: 100
+    unavailable_policy: fail-closed # fail-open or fail-closed
   rate_limit:
     burst: 100
     refill_ms: 10
+    key:
+      dimensions: [route]
+      # dimensions may include route, client_ip, subject, tenant
+      # headers: [x-api-key]
+      missing: reject
   breaker:
     failure_threshold: 5
     reset_timeout_ms: 30000
@@ -10817,9 +10867,21 @@ registry:
   # insecure_skip_verify: false
 governance:
   timeout_ms: 5000
+  rate_limiter:
+    store: auto # explicit redis_url, then cache.url, otherwise development memory
+    # redis_url: env://REDIS_URL # overrides cache.url
+    key_prefix: roze:rate-limit:v1
+    # namespace defaults to the service profile; override for shared Redis deployments
+    timeout_ms: 100
+    unavailable_policy: fail-closed # fail-open or fail-closed
   rate_limit:
     burst: 100
     refill_ms: 10
+    key:
+      dimensions: [route]
+      # dimensions may include route, subject, tenant
+      # headers names resolve from propagated RPC metadata
+      missing: reject
   breaker:
     failure_threshold: 5
     reset_timeout_ms: 30000
@@ -11197,10 +11259,187 @@ fn config_rs() -> String {
     r#"pub type Config = roze_config::ServiceConfig;
 
 pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigError> {
-    roze_config::load(path)
+    roze_config::load_service(path)
 }
 "#
     .to_string()
+}
+
+fn migrate_legacy_application_hook(out: &Path, mode: GenerateMode) -> anyhow::Result<()> {
+    if mode != GenerateMode::Update {
+        return Ok(());
+    }
+    let path = out.join("src/application.rs");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read legacy application hook {}", path.display()))?;
+    let register_services =
+        regex::Regex::new(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+register_services\s*\(")
+            .expect("valid register_services function pattern");
+    if register_services.is_match(&source) {
+        return Ok(());
+    }
+
+    if !source.ends_with('\n') {
+        source.push('\n');
+    }
+    source.push_str(
+        r#"
+/// Registers application-owned workers and background services.
+///
+/// Every registered service shares Roze's shutdown signal and failure propagation.
+pub fn register_services(
+    group: &mut roze_service::ServiceGroup,
+    ctx: &ServiceContext,
+) -> anyhow::Result<()> {
+    let _ = group;
+    let _ = ctx;
+    Ok(())
+}
+"#,
+    );
+    fs::write(&path, source)
+        .with_context(|| format!("failed to migrate application hook {}", path.display()))
+}
+
+fn migrate_legacy_logic_prelude(
+    module_path: &Path,
+    prelude_path: &Path,
+    generated_modules: &HashSet<String>,
+    mode: GenerateMode,
+) -> anyhow::Result<()> {
+    if mode != GenerateMode::Update || prelude_path.exists() || !module_path.is_file() {
+        return Ok(());
+    }
+    let source = fs::read_to_string(module_path).with_context(|| {
+        format!(
+            "failed to read legacy logic module {}",
+            module_path.display()
+        )
+    })?;
+    let module_dir = module_path
+        .parent()
+        .context("legacy logic module has no parent directory")?;
+    let mut inside_generated_region = false;
+    let mut custom_modules = HashSet::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("// <roze:generated-") {
+            inside_generated_region = true;
+            continue;
+        }
+        if trimmed.starts_with("// </roze:generated-") {
+            inside_generated_region = false;
+            continue;
+        }
+        if inside_generated_region {
+            continue;
+        }
+        let Some(module) = module_declaration_name(trimmed) else {
+            continue;
+        };
+        if generated_modules.contains(module) {
+            continue;
+        }
+        if module_dir.join(format!("{module}.rs")).is_file()
+            || module_dir.join(module).join("mod.rs").is_file()
+        {
+            custom_modules.insert(module.to_string());
+        }
+    }
+
+    if custom_modules.is_empty() {
+        return Ok(());
+    }
+
+    let mut migrated = String::from(
+        "// Application-owned logic declarations migrated by `rozectl ... generate --update`.\n",
+    );
+    inside_generated_region = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("// <roze:generated-") {
+            inside_generated_region = true;
+            continue;
+        }
+        if trimmed.starts_with("// </roze:generated-") {
+            inside_generated_region = false;
+            continue;
+        }
+        if inside_generated_region {
+            continue;
+        }
+        let is_custom_module =
+            module_declaration_name(trimmed).is_some_and(|module| custom_modules.contains(module));
+        let is_related_use = use_declaration(trimmed).is_some_and(|declaration| {
+            custom_modules
+                .iter()
+                .any(|module| contains_rust_identifier(declaration, module))
+        });
+        if is_custom_module || is_related_use {
+            migrated.push_str(line);
+            migrated.push('\n');
+        }
+    }
+
+    fs::write(prelude_path, migrated).with_context(|| {
+        format!(
+            "failed to migrate legacy logic declarations from {} to {}",
+            module_path.display(),
+            prelude_path.display()
+        )
+    })
+}
+
+fn module_declaration_name(line: &str) -> Option<&str> {
+    let declaration = line.strip_suffix(';')?.trim();
+    let mut tokens = declaration.split_whitespace();
+    let first = tokens.next()?;
+    let module = match first {
+        "mod" => tokens.next()?,
+        visibility if visibility == "pub" || visibility.starts_with("pub(") => {
+            if tokens.next()? != "mod" {
+                return None;
+            }
+            tokens.next()?
+        }
+        _ => return None,
+    };
+    if tokens.next().is_none()
+        && !module.is_empty()
+        && module
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        Some(module)
+    } else {
+        None
+    }
+}
+
+fn use_declaration(line: &str) -> Option<&str> {
+    let declaration = line.strip_suffix(';')?.trim();
+    declaration
+        .strip_prefix("use ")
+        .or_else(|| declaration.strip_prefix("pub use "))
+        .or_else(|| {
+            declaration
+                .strip_prefix("pub(")?
+                .split_once(") use ")
+                .map(|(_, declaration)| declaration)
+        })
+}
+
+fn contains_rust_identifier(source: &str, identifier: &str) -> bool {
+    source.match_indices(identifier).any(|(index, _)| {
+        let before = source[..index].chars().next_back();
+        let after = source[index + identifier.len()..].chars().next();
+        !before.is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
+            && !after.is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
+    })
 }
 
 fn application_context_rs() -> String {
@@ -11305,6 +11544,7 @@ pub struct ServiceContext {
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub sql_outbox: Option<Arc<roze_transaction_sql::SqlOutboxStore>>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
+    pub rate_limiter: Arc<roze_rate_limit::RateLimiter>,
 }
 
 impl ServiceContext {
@@ -11442,6 +11682,25 @@ impl ServiceContext {
                 Arc::new(roze_middleware::InMemoryIdempotencyStore::default())
             }
         };
+        let rate_limiter_config = config.resolved_rate_limiter_config();
+        let rate_limiter = Arc::new(roze_rate_limit::RateLimiter::from_config(
+            &rate_limiter_config,
+        )?);
+        if config.profile.is_production()
+            && config.governance.uses_rate_limit()
+            && rate_limiter.store_kind() == roze_rate_limit::RateLimitStoreKind::Memory
+        {
+            anyhow::bail!(
+                "production services with rate limiting require governance.rate_limiter.redis_url or cache.url"
+            );
+        }
+        if rate_limiter.store_kind() == roze_rate_limit::RateLimitStoreKind::Redis {
+            let health_limiter = rate_limiter.clone();
+            health.register_dependency("rate-limit:redis", move || {
+                let limiter = health_limiter.clone();
+                async move { limiter.health_check().await }
+            });
+        }
         health.mark_ready();
         Ok(Self {
             config,
@@ -11456,6 +11715,7 @@ impl ServiceContext {
             outbox,
             sql_outbox,
             idempotency,
+            rate_limiter,
         })
     }
 
@@ -11509,6 +11769,11 @@ impl ServiceContext {
         idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
     ) -> Self {
         self.idempotency = idempotency;
+        self
+    }
+
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<roze_rate_limit::RateLimiter>) -> Self {
+        self.rate_limiter = rate_limiter;
         self
     }
 
@@ -11616,6 +11881,7 @@ pub struct ServiceContext {
     pub outbox: Arc<dyn roze_transaction::OutboxStore>,
     pub sql_outbox: Option<Arc<roze_transaction_sql::SqlOutboxStore>>,
     pub idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
+    pub rate_limiter: Arc<roze_rate_limit::RateLimiter>,
 }
 
 impl ServiceContext {
@@ -11760,6 +12026,25 @@ impl ServiceContext {
                 Arc::new(roze_middleware::InMemoryIdempotencyStore::default())
             }
         };
+        let rate_limiter_config = config.resolved_rate_limiter_config();
+        let rate_limiter = Arc::new(roze_rate_limit::RateLimiter::from_config(
+            &rate_limiter_config,
+        )?);
+        if config.profile.is_production()
+            && config.governance.uses_rate_limit()
+            && rate_limiter.store_kind() == roze_rate_limit::RateLimitStoreKind::Memory
+        {
+            anyhow::bail!(
+                "production services with rate limiting require governance.rate_limiter.redis_url or cache.url"
+            );
+        }
+        if rate_limiter.store_kind() == roze_rate_limit::RateLimitStoreKind::Redis {
+            let health_limiter = rate_limiter.clone();
+            health.register_dependency("rate-limit:redis", move || {
+                let limiter = health_limiter.clone();
+                async move { limiter.health_check().await }
+            });
+        }
         health.mark_ready();
         Ok(Self {
             config,
@@ -11775,6 +12060,7 @@ impl ServiceContext {
             outbox,
             sql_outbox,
             idempotency,
+            rate_limiter,
         })
     }
 
@@ -11800,6 +12086,11 @@ impl ServiceContext {
         idempotency: Arc<dyn roze_middleware::IdempotencyStore>,
     ) -> Self {
         self.idempotency = idempotency;
+        self
+    }
+
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<roze_rate_limit::RateLimiter>) -> Self {
+        self.rate_limiter = rate_limiter;
         self
     }
 
@@ -12367,6 +12658,10 @@ mod tests {
             assert!(rendered.contains("pub fn insert_extension<T>"));
             assert!(rendered.contains("pub fn extension<T>"));
             assert!(rendered.contains("pub fn require_extension<T>"));
+            assert!(rendered.contains("pub rate_limiter: Arc<roze_rate_limit::RateLimiter>"));
+            assert!(rendered.contains("config.resolved_rate_limiter_config()"));
+            assert!(rendered.contains("RateLimiter::from_config"));
+            assert!(rendered.contains("rate-limit:redis"));
         }
     }
 
@@ -12407,6 +12702,57 @@ mod tests {
                 .expect("system time")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn default_logic_preludes_compile_when_included_after_existing_items() {
+        let out = temp_test_root("rozectl-logic-prelude");
+        fs::create_dir_all(&out).expect("create logic prelude fixture");
+        fs::write(out.join("prelude.rs"), logic_prelude_rs()).expect("write root prelude");
+        fs::write(
+            out.join("group_prelude.rs"),
+            logic_group_prelude_rs("payments"),
+        )
+        .expect("write group prelude");
+        fs::write(
+            out.join("main.rs"),
+            r#"
+mod logic {
+    pub fn existing_item() {}
+    include!("prelude.rs");
+
+    pub mod payments {
+        pub fn existing_item() {}
+        include!("group_prelude.rs");
+    }
+}
+
+fn main() {
+    logic::existing_item();
+    logic::payments::existing_item();
+}
+"#,
+        )
+        .expect("write compile fixture");
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let output = std::process::Command::new(rustc)
+            .arg("--edition=2021")
+            .arg(out.join("main.rs"))
+            .arg("--out-dir")
+            .arg(&out)
+            .output()
+            .expect("run rustc");
+
+        if !output.status.success() {
+            panic!(
+                "default logic preludes must be valid after existing module items:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fs::remove_dir_all(out).expect("remove logic prelude fixture");
     }
 
     #[test]
@@ -13670,6 +14016,7 @@ mod tests {
             .contains("roze-rpc"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
         assert!(cargo.contains("roze-db"));
+        assert!(cargo.contains("roze-rate-limit"));
         assert!(cargo.contains("roze-transaction-sql"));
         assert!(!cargo.contains("roze-mongo"));
         assert!(!cargo.contains("toasty"));
@@ -13678,10 +14025,22 @@ mod tests {
         assert!(svc.contains("connect_runtime_optional"));
         assert!(svc.contains("db_shards"));
         assert!(svc.contains("sql_outbox"));
+        assert!(svc.contains("pub rate_limiter: Arc<roze_rate_limit::RateLimiter>"));
+        assert!(svc.contains("production services with rate limiting require"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
         assert!(config.contains("database:"));
+        assert!(config.contains("rate_limiter:"));
+        assert!(config.contains("store: auto"));
+        assert!(config.contains("dimensions: [route]"));
         assert!(!config.contains("mongo:"));
         assert!(!config.contains("sqlite://"));
+        assert!(fs::read_to_string(out.join("src/config/mod.rs"))
+            .expect("read config loader")
+            .contains("roze_config::load_service(path)"));
+        let handler = fs::read_to_string(out.join("src/handler/users/get_users_id.rs"))
+            .expect("read handler");
+        assert!(handler.contains("Option<roze_http::client_ip::ClientIp>"));
+        assert!(handler.contains("enforce_route_rate_limit"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -13813,15 +14172,26 @@ mod tests {
         assert!(!fs::read_to_string(out.join("Cargo.toml"))
             .expect("read cargo")
             .contains("roze-http"));
-        assert!(!fs::read_to_string(out.join("Cargo.toml"))
-            .expect("read cargo")
-            .contains("toasty"));
+        let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
+        assert!(!cargo.contains("toasty"));
+        assert!(cargo.contains("roze-rate-limit"));
         let lib = fs::read_to_string(out.join("src/lib.rs")).expect("read lib");
         assert!(lib.contains("pub mod client;"));
         assert!(lib.contains("pub mod pb;"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
         assert!(config.contains("url: env://DATABASE_URL"));
+        assert!(config.contains("rate_limiter:"));
+        assert!(config.contains("store: auto"));
+        assert!(config.contains("dimensions: [route]"));
         assert!(!config.contains("sqlite://"));
+        assert!(fs::read_to_string(out.join("src/config/mod.rs"))
+            .expect("read config loader")
+            .contains("roze_config::load_service(path)"));
+        let service_context =
+            fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
+        assert!(service_context.contains("pub rate_limiter: Arc<roze_rate_limit::RateLimiter>"));
+        let server = fs::read_to_string(out.join("src/server/mod.rs")).expect("read server");
+        assert!(server.contains("enforce_method_rate_limit"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -13973,20 +14343,31 @@ mod tests {
             "pub fn shared_value() -> u64 { 1 }\n",
         )
         .expect("write REST logic support");
-        let prelude = r#"mod support;
-pub use support::shared_value;
-"#;
-        fs::write(out.join("src/logic/prelude.rs"), prelude).expect("write REST logic prelude");
+        fs::remove_file(out.join("src/logic/prelude.rs")).expect("remove REST logic prelude");
+        let mut legacy_logic =
+            fs::read_to_string(out.join("src/logic/mod.rs")).expect("read REST logic index");
+        legacy_logic = legacy_logic.replace("include!(\"prelude.rs\");\n\n", "");
+        legacy_logic.push_str("\nmod support;\npub use support::shared_value;\n");
+        fs::write(out.join("src/logic/mod.rs"), legacy_logic)
+            .expect("write legacy REST logic index");
         fs::write(
             out.join("src/logic/users/admin_map.rs"),
             "pub fn mapped_value() -> u64 { 2 }\n",
         )
         .expect("write REST group logic support");
-        let group_prelude = r#"pub mod admin_map;
-pub use admin_map::mapped_value;
-"#;
-        fs::write(out.join("src/logic/users/prelude.rs"), group_prelude)
-            .expect("write REST group logic prelude");
+        fs::remove_file(out.join("src/logic/users/prelude.rs"))
+            .expect("remove REST group logic prelude");
+        let mut legacy_group_logic = fs::read_to_string(out.join("src/logic/users/mod.rs"))
+            .expect("read REST group logic index");
+        legacy_group_logic = legacy_group_logic.replace("include!(\"prelude.rs\");\n\n", "");
+        legacy_group_logic.push_str("\npub mod admin_map;\npub use admin_map::mapped_value;\n");
+        fs::write(out.join("src/logic/users/mod.rs"), legacy_group_logic)
+            .expect("write legacy REST group logic index");
+        fs::write(
+            out.join("src/application.rs"),
+            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    Ok(ctx)\n}\n",
+        )
+        .expect("write legacy REST application hook");
         for _ in 0..2 {
             registry()
                 .dispatch(GeneratorCommand::ApiGenerate {
@@ -13996,15 +14377,17 @@ pub use admin_map::mapped_value;
                 })
                 .expect("update REST project");
         }
-        assert_eq!(
-            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read REST logic prelude"),
-            prelude
-        );
-        assert_eq!(
-            fs::read_to_string(out.join("src/logic/users/prelude.rs"))
-                .expect("read REST group logic prelude"),
-            group_prelude
-        );
+        let prelude =
+            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read REST logic prelude");
+        assert!(prelude.contains("mod support;"));
+        assert!(prelude.contains("pub use support::shared_value;"));
+        let group_prelude = fs::read_to_string(out.join("src/logic/users/prelude.rs"))
+            .expect("read REST group logic prelude");
+        assert!(group_prelude.contains("pub mod admin_map;"));
+        assert!(group_prelude.contains("pub use admin_map::mapped_value;"));
+        assert!(fs::read_to_string(out.join("src/application.rs"))
+            .expect("read migrated REST application hook")
+            .contains("pub fn register_services("));
         model::generate_model_project(
             &fs::read_to_string(&model).expect("read model"),
             &out,
@@ -14082,10 +14465,18 @@ pub use admin_map::mapped_value;
             "pub fn shared_value() -> u64 { 1 }\n",
         )
         .expect("write RPC logic support");
-        let prelude = r#"mod support;
-pub use support::shared_value;
-"#;
-        fs::write(out.join("src/logic/prelude.rs"), prelude).expect("write RPC logic prelude");
+        fs::remove_file(out.join("src/logic/prelude.rs")).expect("remove RPC logic prelude");
+        let mut legacy_logic =
+            fs::read_to_string(out.join("src/logic/mod.rs")).expect("read RPC logic index");
+        legacy_logic = legacy_logic.replace("include!(\"prelude.rs\");\n\n", "");
+        legacy_logic.push_str("\nmod support;\npub use support::shared_value;\n");
+        fs::write(out.join("src/logic/mod.rs"), legacy_logic)
+            .expect("write legacy RPC logic index");
+        fs::write(
+            out.join("src/application.rs"),
+            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    Ok(ctx)\n}\n",
+        )
+        .expect("write legacy RPC application hook");
         for _ in 0..2 {
             registry()
                 .dispatch(GeneratorCommand::RpcGenerate {
@@ -14095,10 +14486,13 @@ pub use support::shared_value;
                 })
                 .expect("update RPC project");
         }
-        assert_eq!(
-            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read RPC logic prelude"),
-            prelude
-        );
+        let prelude =
+            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read RPC logic prelude");
+        assert!(prelude.contains("mod support;"));
+        assert!(prelude.contains("pub use support::shared_value;"));
+        assert!(fs::read_to_string(out.join("src/application.rs"))
+            .expect("read migrated RPC application hook")
+            .contains("pub fn register_services("));
         let model_source = r#"
             CREATE TABLE users (
                 id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -15757,6 +16151,216 @@ pub use admin_map::AdminMap;
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));
         assert!(cargo.contains("custom.workspace = true"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rest_update_migrates_legacy_application_hook_and_logic_declarations_once() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                @handler getUser
+                get /users/:id (GetUserReq) returns (UserResp)
+            }
+            type GetUserReq {
+                id: u64
+            }
+            type UserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rest-legacy-extension-migration");
+        let out = root.join("user");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+
+        fs::write(
+            out.join("src/application.rs"),
+            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    Ok(ctx)\n}\n",
+        )
+        .expect("write legacy application hook");
+        fs::remove_file(out.join("src/logic/prelude.rs")).expect("remove root prelude");
+        fs::write(out.join("src/logic/domain.rs"), "pub struct Domain;\n")
+            .expect("write custom root module");
+        let mut root_logic =
+            fs::read_to_string(out.join("src/logic/mod.rs")).expect("read root logic module");
+        root_logic = root_logic.replace("include!(\"prelude.rs\");\n\n", "");
+        root_logic.push_str("\npub mod domain;\npub use domain::Domain;\n");
+        fs::write(out.join("src/logic/mod.rs"), root_logic)
+            .expect("write legacy root logic module");
+
+        let group = out.join("src/logic/users");
+        fs::remove_file(group.join("prelude.rs")).expect("remove group prelude");
+        fs::write(group.join("policy.rs"), "pub struct Policy;\n")
+            .expect("write custom group module");
+        let mut group_logic =
+            fs::read_to_string(group.join("mod.rs")).expect("read group logic module");
+        group_logic = group_logic.replace("include!(\"prelude.rs\");\n\n", "");
+        group_logic.push_str("\npub mod policy;\npub use policy::Policy;\n");
+        fs::write(group.join("mod.rs"), group_logic).expect("write legacy group logic module");
+
+        let update = GenerateOptions::new(GenerateMode::Update, DependencySource::Path);
+        generate_rest_project(&spec, &out, update).expect("migrate legacy REST project");
+
+        let application =
+            fs::read_to_string(out.join("src/application.rs")).expect("read application hook");
+        assert!(application.contains("pub async fn configure_context"));
+        assert_eq!(application.matches("pub fn register_services(").count(), 1);
+        let root_prelude =
+            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read root prelude");
+        assert!(root_prelude.contains("pub mod domain;"));
+        assert!(root_prelude.contains("pub use domain::Domain;"));
+        let group_prelude =
+            fs::read_to_string(group.join("prelude.rs")).expect("read group prelude");
+        assert!(group_prelude.contains("pub mod policy;"));
+        assert!(group_prelude.contains("pub use policy::Policy;"));
+
+        generate_rest_project(&spec, &out, update).expect("repeat REST update");
+        assert_eq!(
+            fs::read_to_string(out.join("src/application.rs")).expect("read repeated application"),
+            application
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/prelude.rs"))
+                .expect("read repeated root prelude"),
+            root_prelude
+        );
+        assert_eq!(
+            fs::read_to_string(group.join("prelude.rs")).expect("read repeated group prelude"),
+            group_prelude
+        );
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn rpc_update_migrates_legacy_application_hook_and_logic_declarations_once() {
+        let spec = parse_api(
+            r#"
+            service strategy-rpc {
+                rpc Evaluate (EvaluateReq) returns (EvaluateResp)
+            }
+            type EvaluateReq {
+                strategy_id: string
+            }
+            type EvaluateResp {
+                accepted: bool
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-rpc-legacy-extension-migration");
+        let out = root.join("strategy");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+
+        fs::write(
+            out.join("src/application.rs"),
+            "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    Ok(ctx)\n}\n",
+        )
+        .expect("write legacy application hook");
+        fs::remove_file(out.join("src/logic/prelude.rs")).expect("remove logic prelude");
+        fs::write(out.join("src/logic/domain.rs"), "pub struct Domain;\n")
+            .expect("write custom logic module");
+        let mut logic =
+            fs::read_to_string(out.join("src/logic/mod.rs")).expect("read logic module");
+        logic = logic.replace("include!(\"prelude.rs\");\n\n", "");
+        logic.push_str("\npub mod domain;\npub use domain::Domain;\n");
+        fs::write(out.join("src/logic/mod.rs"), logic).expect("write legacy logic module");
+
+        let update = GenerateOptions::new(GenerateMode::Update, DependencySource::Path);
+        generate_rpc_project(&spec, &out, update).expect("migrate legacy RPC project");
+
+        let application =
+            fs::read_to_string(out.join("src/application.rs")).expect("read application hook");
+        assert_eq!(application.matches("pub fn register_services(").count(), 1);
+        let prelude =
+            fs::read_to_string(out.join("src/logic/prelude.rs")).expect("read logic prelude");
+        assert!(prelude.contains("pub mod domain;"));
+        assert!(prelude.contains("pub use domain::Domain;"));
+
+        generate_rpc_project(&spec, &out, update).expect("repeat RPC update");
+        assert_eq!(
+            fs::read_to_string(out.join("src/application.rs")).expect("read repeated application"),
+            application
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("src/logic/prelude.rs"))
+                .expect("read repeated logic prelude"),
+            prelude
+        );
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn failed_legacy_extension_migration_leaves_target_project_unchanged() {
+        let spec = parse_api(
+            r#"
+            service audit-rpc {
+                rpc Record (RecordReq) returns (RecordResp)
+            }
+            type RecordReq {
+                id: string
+            }
+            type RecordResp {
+                accepted: bool
+            }
+            "#,
+        )
+        .expect("valid api");
+        let root = temp_test_root("rozectl-legacy-migration-rollback");
+        let out = root.join("audit");
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write workspace manifest");
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+        )
+        .expect("initial generation");
+
+        fs::write(out.join("src/application.rs"), [0xff, 0xfe])
+            .expect("write invalid legacy application hook");
+        let main_before = fs::read(out.join("src/main.rs")).expect("read main before update");
+        let application_before =
+            fs::read(out.join("src/application.rs")).expect("read application before update");
+
+        let error = generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+        )
+        .expect_err("invalid legacy application hook must fail migration");
+        assert!(error
+            .to_string()
+            .contains("failed to read legacy application hook"));
+        assert_eq!(
+            fs::read(out.join("src/main.rs")).expect("read main after failed update"),
+            main_before
+        );
+        assert_eq!(
+            fs::read(out.join("src/application.rs")).expect("read application after failed update"),
+            application_before
+        );
 
         fs::remove_dir_all(root).expect("remove test output");
     }

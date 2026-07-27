@@ -35,8 +35,8 @@ pub enum RozeError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
-    #[error("rate limited")]
-    RateLimited,
+    #[error("rate limited; retry after {retry_after_seconds}s")]
+    RateLimited { retry_after_seconds: u64 },
     #[error("not found: {0}")]
     NotFound(String),
     #[error("service unavailable: {0}")]
@@ -57,7 +57,7 @@ impl RozeError {
             RozeError::BadRequest(_) => "bad_request",
             RozeError::Unauthorized => "unauthorized",
             RozeError::Forbidden => "forbidden",
-            RozeError::RateLimited => "rate_limited",
+            RozeError::RateLimited { .. } => "rate_limited",
             RozeError::NotFound(_) => "not_found",
             RozeError::Unavailable(_) => "unavailable",
             RozeError::Internal(_) => "internal",
@@ -70,7 +70,7 @@ impl RozeError {
             RozeError::BadRequest(_) => 400,
             RozeError::Unauthorized => 401,
             RozeError::Forbidden => 403,
-            RozeError::RateLimited => 429,
+            RozeError::RateLimited { .. } => 429,
             RozeError::NotFound(_) => 404,
             RozeError::Unavailable(_) => 503,
             RozeError::Internal(_) => 500,
@@ -83,7 +83,7 @@ impl RozeError {
             RozeError::BadRequest(msg) => msg.clone(),
             RozeError::Unauthorized => "unauthorized".to_string(),
             RozeError::Forbidden => "forbidden".to_string(),
-            RozeError::RateLimited => "rate limited".to_string(),
+            RozeError::RateLimited { .. } => "rate limited".to_string(),
             RozeError::NotFound(msg) => msg.clone(),
             RozeError::Unavailable(msg) => msg.clone(),
             RozeError::Internal(msg) => msg.clone(),
@@ -108,7 +108,7 @@ impl RozeError {
             RozeError::BadRequest(_)
                 | RozeError::Unauthorized
                 | RozeError::Forbidden
-                | RozeError::RateLimited
+                | RozeError::RateLimited { .. }
                 | RozeError::NotFound(_)
         )
     }
@@ -118,7 +118,7 @@ impl RozeError {
             RozeError::BadRequest(_) => StatusCode::BAD_REQUEST,
             RozeError::Unauthorized => StatusCode::UNAUTHORIZED,
             RozeError::Forbidden => StatusCode::FORBIDDEN,
-            RozeError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            RozeError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             RozeError::NotFound(_) => StatusCode::NOT_FOUND,
             RozeError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             RozeError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -137,6 +137,22 @@ impl RozeError {
             status,
             body,
             headers,
+        }
+    }
+
+    pub fn rate_limited(retry_after: std::time::Duration) -> Self {
+        let retry_after_seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+        Self::RateLimited {
+            retry_after_seconds: retry_after_seconds.max(1),
+        }
+    }
+
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            _ => None,
         }
     }
 
@@ -296,7 +312,10 @@ mod tests {
         assert_eq!(RozeError::BadRequest("x".into()).code(), 400);
         assert_eq!(RozeError::Unauthorized.code(), 401);
         assert_eq!(RozeError::Forbidden.code(), 403);
-        assert_eq!(RozeError::RateLimited.code(), 429);
+        assert_eq!(
+            RozeError::rate_limited(std::time::Duration::from_secs(3)).code(),
+            429
+        );
         assert_eq!(RozeError::NotFound("x".into()).code(), 404);
         assert_eq!(RozeError::Unavailable("x".into()).code(), 503);
         assert_eq!(RozeError::Internal("x".into()).code(), 500);

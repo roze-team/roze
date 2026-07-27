@@ -1113,6 +1113,7 @@ impl Subscriber for CascadingSubscriber {
 
 type Listener<T> = Arc<dyn Fn(&T) + Send + Sync + 'static>;
 type ReloadListener<T> = Arc<dyn Fn(&ReloadResult<T>) + Send + Sync + 'static>;
+type ConfigValidator<T> = Arc<dyn Fn(&T) -> Result<()> + Send + Sync + 'static>;
 
 struct ConfigCenterInner<T: Clone> {
     value: RwLock<T>,
@@ -1134,7 +1135,21 @@ where
     where
         S: Subscriber + 'static,
     {
+        Self::new_with_validator(subscriber, options, |_| Ok(())).await
+    }
+
+    pub async fn new_with_validator<S, F>(
+        subscriber: S,
+        options: ConfigCenterConfig,
+        validator: F,
+    ) -> Result<Self>
+    where
+        S: Subscriber + 'static,
+        F: Fn(&T) -> Result<()> + Send + Sync + 'static,
+    {
+        let validator: ConfigValidator<T> = Arc::new(validator);
         let (initial, initial_snapshot) = load_once(&subscriber, options.format).await?;
+        validator(&initial)?;
         let inner = Arc::new(ConfigCenterInner {
             value: RwLock::new(initial),
             listeners: RwLock::new(Vec::new()),
@@ -1148,6 +1163,7 @@ where
             options,
             initial_snapshot,
             watch_inner,
+            validator,
         ));
 
         Ok(Self { inner })
@@ -1181,6 +1197,7 @@ async fn watch_loop<T>(
     options: ConfigCenterConfig,
     mut last_snapshot: String,
     inner: Arc<ConfigCenterInner<T>>,
+    validator: ConfigValidator<T>,
 ) where
     T: DeserializeOwned + Clone + Send + Sync + 'static,
 {
@@ -1256,7 +1273,9 @@ async fn watch_loop<T>(
             }
         }
 
-        let parsed = match parse_config::<T>(&snapshot, options.format) {
+        let parsed = match parse_config::<T>(&snapshot, options.format)
+            .and_then(|parsed| validator(&parsed).map(|()| parsed))
+        {
             Ok(parsed) => parsed,
             Err(err) => {
                 let old_version = inner.version.load(Ordering::SeqCst);
@@ -1471,13 +1490,10 @@ where
 
 fn parse_config<T>(raw: &str, format: ConfigFormat) -> Result<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
 {
-    config::Config::builder()
-        .add_source(config::File::from_str(raw, format.as_file_format()))
-        .build()?
-        .try_deserialize::<T>()
-        .map_err(Into::into)
+    let value = parse_config_value(raw, format)?;
+    crate::deserialize_config_value(value).map_err(Into::into)
 }
 
 fn snapshot_hash(raw: &str) -> String {
@@ -1874,6 +1890,45 @@ mod tests {
             Ok(ConfigFormat::Toml)
         ));
         assert!("ini".parse::<ConfigFormat>().is_err());
+    }
+
+    #[test]
+    fn production_config_center_snapshots_reject_unknown_service_fields() {
+        let error = parse_config::<crate::ServiceConfig>(
+            "name: demo\nprofile: production\ngovernance:\n  timout_ms: 100\n",
+            ConfigFormat::Yaml,
+        )
+        .expect_err("reject unknown production config field");
+        assert!(error.to_string().contains("governance.timout_ms"));
+    }
+
+    #[tokio::test]
+    async fn validated_config_center_rejects_invalid_initial_service_config() {
+        let path = std::env::temp_dir().join(format!(
+            "roze-config-center-validation-{}.yaml",
+            current_millis()
+        ));
+        std::fs::write(
+            &path,
+            "name: demo\nprofile: production\ngovernance:\n  timeout_ms: 0\n",
+        )
+        .expect("write config");
+        let options = ConfigCenterConfig {
+            format: ConfigFormat::Yaml,
+            ..Default::default()
+        };
+        let error = ConfigCenter::<crate::ServiceConfig>::new_with_validator(
+            FileConfigSubscriber::new(&path),
+            options,
+            crate::ServiceConfig::validate,
+        )
+        .await
+        .err()
+        .expect("reject invalid initial config");
+        assert!(error
+            .to_string()
+            .contains("governance.timeout_ms must be positive"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

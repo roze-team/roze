@@ -338,6 +338,10 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
     out.push_str(&format!(
+        "        roze_rpc::rpc::enforce_method_rate_limit(self.ctx.rate_limiter.as_ref(), self.ctx.config.name.as_str(), {handler:?}, &request, &request_ctx, Some(&self.ctx.config.governance)).await?;\n",
+        handler = handler,
+    ));
+    out.push_str(&format!(
         "        let (request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
         handler
     ));
@@ -420,6 +424,10 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         resp_ty = proto_type_name(resp_ty)
     ));
     out.push_str("        let request_ctx = roze_rpc::rpc::request_context(&request);\n");
+    out.push_str(&format!(
+        "        roze_rpc::rpc::enforce_method_rate_limit(self.ctx.rate_limiter.as_ref(), self.ctx.config.name.as_str(), {method:?}, &request, &request_ctx, Some(&self.ctx.config.governance)).await?;\n",
+        method = method.name,
+    ));
     out.push_str(&format!(
         "        let (request_ctx, method_guard) = roze_rpc::rpc::begin_method(self.ctx.config.name.clone(), {:?}, request_ctx, Some(&self.ctx.config.governance))?;\n",
         method.name

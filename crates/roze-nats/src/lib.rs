@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fmt,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -12,7 +13,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NatsConfig {
     pub servers: Vec<String>,
     #[serde(default)]
@@ -21,6 +22,18 @@ pub struct NatsConfig {
     pub subject_prefix: String,
     #[serde(default)]
     pub jetstream: JetStreamConfig,
+}
+
+impl fmt::Debug for NatsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NatsConfig")
+            .field("server_count", &self.servers.len())
+            .field("client_name", &self.client_name)
+            .field("subject_prefix", &self.subject_prefix)
+            .field("jetstream", &self.jetstream)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

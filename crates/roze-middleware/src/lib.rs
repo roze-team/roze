@@ -12,11 +12,10 @@ use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
 use roze_resilience::{
     BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary, OperationKey,
-    RateLimitRegistry, SheddingRegistry,
+    SheddingRegistry,
 };
 use serde::Serialize;
 
-static ROUTE_RATE_LIMITS: OnceLock<RateLimitRegistry> = OnceLock::new();
 static ROUTE_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 static ROUTE_SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
 
@@ -576,10 +575,11 @@ pub struct RoutePolicy {
     pub fallback: Option<roze_config::GovernanceFallbackConfig>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RouteRateLimitConfig {
     pub burst: u32,
     pub refill: Duration,
+    pub key: roze_rate_limit::RateLimitKeyPolicy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -612,11 +612,13 @@ pub fn route_policy(
         };
     };
     let policy = governance.resolve_policy(route);
+    let rate_limit = governance.resolve_rate_limit_config(route);
     RoutePolicy {
         timeout: policy.timeout,
-        rate_limit: policy.rate_limit.map(|config| RouteRateLimitConfig {
+        rate_limit: rate_limit.map(|config| RouteRateLimitConfig {
             burst: config.burst,
-            refill: config.refill,
+            refill: Duration::from_millis(config.refill_ms),
+            key: config.key,
         }),
         breaker: policy.breaker.map(|config| RouteBreakerConfig {
             failure_threshold: config.failure_threshold,
@@ -693,25 +695,6 @@ pub fn begin_route(
         format!("{method}:{route}"),
     )
     .to_string();
-    if let Some(config) = &policy.rate_limit {
-        match enforce_route_rate_limit(&key, config) {
-            Ok(()) => roze_metrics::record_resilience_decision(
-                service.as_str(),
-                "rest",
-                "rate_limit",
-                "allowed",
-            ),
-            Err(err) => {
-                roze_metrics::record_resilience_decision(
-                    service.as_str(),
-                    "rest",
-                    "rate_limit",
-                    "rejected",
-                );
-                return Err(err);
-            }
-        }
-    }
     let breaker_permit = match policy.breaker {
         Some(_) => match route_breaker_allow(&key) {
             BreakerDecision::Allow(permit) => {
@@ -800,21 +783,76 @@ pub fn finish_route(mut guard: RouteGuard, success: bool, status: impl Into<Stri
     );
 }
 
-fn enforce_route_rate_limit(key: &str, config: &RouteRateLimitConfig) -> Result<(), RozeError> {
-    if ROUTE_RATE_LIMITS
-        .get_or_init(RateLimitRegistry::new)
-        .allow(key, route_rate_limit_config(*config))
-    {
-        Ok(())
-    } else {
-        Err(RozeError::RateLimited)
-    }
-}
-
-fn route_rate_limit_config(config: RouteRateLimitConfig) -> roze_resilience::RateLimitConfig {
-    roze_resilience::RateLimitConfig {
-        burst: config.burst,
-        refill: config.refill,
+#[allow(clippy::too_many_arguments)]
+pub async fn enforce_route_rate_limit(
+    limiter: &roze_rate_limit::RateLimiter,
+    service: &str,
+    route: &str,
+    method: &str,
+    request_ctx: &Context,
+    client_ip: Option<roze_http::client_ip::ClientIp>,
+    headers: &roze_http::http::HeaderMap,
+    governance: Option<&roze_config::GovernanceConfig>,
+) -> Result<(), RozeError> {
+    let Some(config) = route_policy(governance, route).rate_limit else {
+        return Ok(());
+    };
+    let identity =
+        roze_rate_limit::RateLimitIdentity::new(service, "rest", format!("{method}:{route}"))
+            .with_client_ip(client_ip.map(|value| value.0))
+            .with_subject(request_ctx.subject())
+            .with_tenant(request_ctx.tenant())
+            .with_headers(headers.iter().filter_map(|(name, value)| {
+                Some((name.as_str(), value.to_str().ok()?.to_string()))
+            }));
+    let decision = limiter
+        .check(
+            &config.key,
+            &identity,
+            roze_rate_limit::RateLimit {
+                burst: config.burst,
+                refill: config.refill,
+            },
+        )
+        .await;
+    match decision {
+        Ok(decision) if decision.allowed => {
+            roze_metrics::record_resilience_decision(
+                service,
+                "rest",
+                "rate_limit",
+                if decision.degraded {
+                    "store_error_fail_open"
+                } else {
+                    "allowed"
+                },
+            );
+            Ok(())
+        }
+        Ok(decision) => {
+            roze_metrics::record_resilience_decision(service, "rest", "rate_limit", "rejected");
+            Err(RozeError::rate_limited(decision.retry_after))
+        }
+        Err(roze_rate_limit::RateLimitError::StoreUnavailable) => {
+            roze_metrics::record_resilience_decision(
+                service,
+                "rest",
+                "rate_limit",
+                "store_error_fail_closed",
+            );
+            Err(RozeError::Unavailable(
+                "rate limit store unavailable".to_string(),
+            ))
+        }
+        Err(_) => {
+            roze_metrics::record_resilience_decision(
+                service,
+                "rest",
+                "rate_limit",
+                "identity_rejected",
+            );
+            Err(RozeError::rate_limited(Duration::from_secs(1)))
+        }
     }
 }
 
@@ -1959,6 +1997,7 @@ mod tests {
             rate_limit: Some(roze_config::RateLimitConfig {
                 burst: 10,
                 refill_ms: 100,
+                key: Default::default(),
             }),
             breaker: Some(roze_config::BreakerConfig {
                 failure_threshold: 10,
@@ -1979,6 +2018,7 @@ mod tests {
                 rate_limit: Some(roze_config::RateLimitConfig {
                     burst: 1,
                     refill_ms: 1_000,
+                    key: Default::default(),
                 }),
                 breaker: Some(roze_config::BreakerConfig {
                     failure_threshold: 1,
@@ -2060,8 +2100,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn begin_route_enforces_rate_limit() {
+    #[tokio::test]
+    async fn route_rate_limit_uses_configured_store() {
         let mut governance = roze_config::GovernanceConfig::default();
         let route = format!("limited_{}", std::process::id());
         governance.routes.insert(
@@ -2070,27 +2110,85 @@ mod tests {
                 rate_limit: Some(roze_config::RateLimitConfig {
                     burst: 1,
                     refill_ms: 60_000,
+                    key: Default::default(),
                 }),
                 ..Default::default()
             },
         );
 
-        let first = begin_route(
-            "svc".to_string(),
-            route.clone(),
+        let limiter =
+            roze_rate_limit::RateLimiter::from_config(&Default::default()).expect("limiter");
+        let headers = roze_http::http::HeaderMap::new();
+        let context = Context::background();
+        assert!(enforce_route_rate_limit(
+            &limiter,
+            "svc",
+            &route,
             "GET",
-            Context::background(),
+            &context,
+            None,
+            &headers,
             Some(&governance),
-        );
-        assert!(first.is_ok());
-        let second = begin_route(
-            "svc".to_string(),
-            route,
+        )
+        .await
+        .is_ok());
+        let second = enforce_route_rate_limit(
+            &limiter,
+            "svc",
+            &route,
             "GET",
-            Context::background(),
+            &context,
+            None,
+            &headers,
             Some(&governance),
-        );
-        assert!(matches!(second, Err(RozeError::RateLimited)));
+        )
+        .await;
+        assert!(matches!(
+            second,
+            Err(RozeError::RateLimited {
+                retry_after_seconds: _
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn route_rate_limit_isolates_verified_client_addresses() {
+        let governance = roze_config::GovernanceConfig {
+            rate_limit: Some(roze_config::RateLimitConfig {
+                burst: 1,
+                refill_ms: 60_000,
+                key: roze_rate_limit::RateLimitKeyPolicy {
+                    dimensions: vec![
+                        roze_rate_limit::RateLimitDimension::Route,
+                        roze_rate_limit::RateLimitDimension::ClientIp,
+                    ],
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        let limiter =
+            roze_rate_limit::RateLimiter::from_config(&Default::default()).expect("limiter");
+        let headers = roze_http::http::HeaderMap::new();
+        let context = Context::background();
+
+        for address in ["203.0.113.10", "203.0.113.11"] {
+            assert!(
+                enforce_route_rate_limit(
+                    &limiter,
+                    "svc",
+                    "login",
+                    "POST",
+                    &context,
+                    Some(roze_http::client_ip::ClientIp(address.parse().unwrap())),
+                    &headers,
+                    Some(&governance),
+                )
+                .await
+                .is_ok(),
+                "{address} should receive an independent bucket"
+            );
+        }
     }
 
     #[test]

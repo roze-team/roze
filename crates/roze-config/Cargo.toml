@@ -12,12 +12,14 @@ config.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+serde_ignored.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-nats = { path = "../roze-nats" }
+roze-rate-limit = { path = "../roze-rate-limit" }
 roze-resilience = { path = "../roze-resilience" }
 roze-storage = { path = "../roze-storage" }
 

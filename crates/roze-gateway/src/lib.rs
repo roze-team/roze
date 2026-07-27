@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     convert::Infallible,
     future::Future,
+    net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     task::{Context as TaskContext, Poll},
@@ -27,7 +28,7 @@ use roze_http::rest::{self, HttpResponse, IncomingRequest};
 use roze_jwt::{verify_token, JwtConfig};
 use roze_resilience::{
     full_jitter_delay, BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary,
-    OperationKey, RateLimitRegistry, RetryBudgetRegistry, SheddingRegistry,
+    OperationKey, RetryBudgetRegistry, SheddingRegistry,
 };
 use roze_rpc::registry::{Registry, ServiceInstance};
 use rustls_pki_types::pem::PemObject;
@@ -76,7 +77,9 @@ struct GatewayRuntime {
     jwt: Option<JwtConfig>,
     api_keys: Option<roze_auth::ApiKeyConfig>,
     request_body_limit_bytes: usize,
-    rate_limits: Arc<RateLimitRegistry>,
+    rate_limiter: Arc<roze_rate_limit::RateLimiter>,
+    rate_limiter_config: roze_rate_limit::RateLimiterConfig,
+    trusted_proxies: roze_http::client_ip::TrustedProxyConfig,
     breakers: Arc<BreakerRegistry>,
     shedders: Arc<SheddingRegistry>,
     retry_budgets: Arc<RetryBudgetRegistry>,
@@ -619,6 +622,20 @@ fn build_gateway_runtime(
         .and_then(governance_fallback)
         .or(config.fallback);
     let global_middlewares = normalize_middlewares(config.middlewares);
+    let trusted_proxies =
+        roze_http::client_ip::TrustedProxyConfig::new(&config.trusted_proxy_cidrs)?;
+    let rate_limiter_config = governance
+        .as_ref()
+        .map(|value| value.rate_limiter.clone())
+        .unwrap_or_default();
+    let rate_limiter = match previous {
+        Some(runtime) if runtime.rate_limiter_config == rate_limiter_config => {
+            runtime.rate_limiter.clone()
+        }
+        _ => Arc::new(roze_rate_limit::RateLimiter::from_config(
+            &rate_limiter_config,
+        )?),
+    };
     let services = config
         .services
         .into_iter()
@@ -641,9 +658,9 @@ fn build_gateway_runtime(
         jwt,
         api_keys,
         request_body_limit_bytes: config.request_body_limit_bytes.unwrap_or(2 * 1024 * 1024),
-        rate_limits: previous
-            .map(|runtime| runtime.rate_limits.clone())
-            .unwrap_or_else(|| Arc::new(RateLimitRegistry::new())),
+        rate_limiter,
+        rate_limiter_config,
+        trusted_proxies,
         breakers: previous
             .map(|runtime| runtime.breakers.clone())
             .unwrap_or_else(|| Arc::new(BreakerRegistry::new())),
@@ -823,31 +840,77 @@ impl GatewayRuntime {
         .to_string();
         let retry_key = key.clone();
 
-        if let Some(config) = route.rate_limit {
-            let allowed = self.rate_limits.allow(
-                key.clone(),
-                roze_resilience::RateLimitConfig {
-                    burst: config.burst,
-                    refill: Duration::from_millis(config.refill_ms.max(1)),
-                },
-            );
-            roze_metrics::record_resilience_decision(
+        if let Some(config) = route.rate_limit.as_ref() {
+            let client_ip = request
+                .extensions()
+                .get::<roze_http::extract::ConnectInfo<SocketAddr>>()
+                .map(|peer| self.trusted_proxies.resolve(peer.0, request.headers()));
+            let identity = roze_rate_limit::RateLimitIdentity::new(
                 "gateway",
                 "gateway",
-                "rate_limit",
-                if allowed { "allowed" } else { "rejected" },
-            );
+                format!("{}:{}", method, route.path),
+            )
+            .with_client_ip(client_ip.map(|value| value.0))
+            .with_subject(context.subject())
+            .with_tenant(context.tenant())
+            .with_headers(request.headers().iter().filter_map(|(name, value)| {
+                Some((name.as_str(), value.to_str().ok()?.to_string()))
+            }));
+            let decision = self
+                .rate_limiter
+                .check(
+                    &config.key,
+                    &identity,
+                    roze_rate_limit::RateLimit {
+                        burst: config.burst,
+                        refill: Duration::from_millis(config.refill_ms.max(1)),
+                    },
+                )
+                .await;
+            let allowed = decision.as_ref().is_ok_and(|decision| decision.allowed);
+            let metric = match &decision {
+                Ok(decision) if decision.allowed && decision.degraded => "store_error_fail_open",
+                Ok(decision) if decision.allowed => "allowed",
+                Ok(_) => "rejected",
+                Err(roze_rate_limit::RateLimitError::StoreUnavailable) => "store_error_fail_closed",
+                Err(_) => "identity_rejected",
+            };
+            roze_metrics::record_resilience_decision("gateway", "gateway", "rate_limit", metric);
             if !allowed {
+                let (status, retry_after) = match decision {
+                    Ok(decision) => (StatusCode::TOO_MANY_REQUESTS, Some(decision.retry_after)),
+                    Err(roze_rate_limit::RateLimitError::StoreUnavailable) => {
+                        (StatusCode::SERVICE_UNAVAILABLE, None)
+                    }
+                    Err(_) => (StatusCode::TOO_MANY_REQUESTS, Some(Duration::from_secs(1))),
+                };
+                let mut response = if status == StatusCode::TOO_MANY_REQUESTS {
+                    rest::text_response(status, "too many requests")
+                } else {
+                    fallback_response(
+                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
+                        status,
+                        "rate limit store unavailable",
+                    )
+                };
+                if let Some(retry_after) = retry_after {
+                    let retry_after_seconds =
+                        retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+                    if let Ok(value) = HeaderValue::try_from(retry_after_seconds.max(1).to_string())
+                    {
+                        response.headers_mut().insert(header::RETRY_AFTER, value);
+                    }
+                }
                 return self.finish_response(
                     Some(route),
                     &method,
-                    "rate_limited",
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        "rate_limited"
+                    } else {
+                        "rate_limit_unavailable"
+                    },
                     started,
-                    fallback_response(
-                        route.fallback.as_ref().or(self.global_fallback.as_ref()),
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "too many requests",
-                    ),
+                    response,
                 );
             }
         }
@@ -2031,6 +2094,15 @@ fn compile_routes(
         .into_iter()
         .map(|route| {
             let path = normalize_path_prefix(&route.path);
+            let rate_limit = route.rate_limit.clone().or_else(|| {
+                governance.and_then(|governance| {
+                    governance.resolve_rate_limit_config_for([
+                        path.as_str(),
+                        path.trim_start_matches('/'),
+                        route.service.as_str(),
+                    ])
+                })
+            });
             let policy = governance.map(|governance| {
                 governance.resolve_policy_for([
                     path.as_str(),
@@ -2083,15 +2155,7 @@ fn compile_routes(
                             headers: fallback.headers.clone(),
                         })
                 }),
-                rate_limit: route.rate_limit.or_else(|| {
-                    policy
-                        .as_ref()
-                        .and_then(|policy| policy.rate_limit)
-                        .map(|config| RateLimitConfig {
-                            burst: config.burst,
-                            refill_ms: config.refill.as_millis().min(u128::from(u64::MAX)) as u64,
-                        })
-                }),
+                rate_limit,
                 breaker: route.breaker.or_else(|| {
                     policy
                         .as_ref()
@@ -2991,6 +3055,7 @@ mod tests {
             request_body_limit_bytes: Some(1024),
             fallback: None,
             cors: None,
+            trusted_proxy_cidrs: Vec::new(),
         }
     }
 
@@ -3902,6 +3967,12 @@ mod tests {
         config.routes[0].rate_limit = Some(RateLimitConfig {
             burst: 1,
             refill_ms: 60_000,
+            key: Default::default(),
+        });
+        config.routes[0].fallback = Some(GatewayFallbackResponse {
+            status: 598,
+            body: Some(serde_json::json!({"message": "degraded"})),
+            headers: BTreeMap::new(),
         });
         let runtime = build_router(config, None);
 
@@ -3916,6 +3987,52 @@ mod tests {
             .await;
         let second = runtime
             .runtime
+            .handle(
+                Request::builder()
+                    .uri("/catalog")
+                    .body(rest::full_body(Bytes::new()))
+                    .expect("second request"),
+            )
+            .await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = second
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("Retry-After seconds");
+        assert!((1..=60).contains(&retry_after));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn hot_reload_preserves_rate_limit_state_when_store_config_is_unchanged() {
+        let (upstream, hits, _) = scripted_upstream(vec![200]).await;
+        let mut config = gateway_config(upstream, "GET");
+        config.routes[0].rate_limit = Some(RateLimitConfig {
+            burst: 1,
+            refill_ms: 60_000,
+            key: Default::default(),
+        });
+        let runtime = build_router(config.clone(), None);
+
+        let first = runtime
+            .runtime
+            .handle(
+                Request::builder()
+                    .uri("/catalog")
+                    .body(rest::full_body(Bytes::new()))
+                    .expect("first request"),
+            )
+            .await;
+        runtime
+            .reload(config, None, None, None, None)
+            .expect("reload unchanged limiter store");
+        let second = runtime
+            .current
+            .load_full()
             .handle(
                 Request::builder()
                     .uri("/catalog")

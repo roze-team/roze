@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Added `roze-rate-limit`, providing shared memory and atomic Redis token-bucket
+  stores, composite route/client-IP/subject/tenant/header keys, bounded store
+  timeouts, fail-open/fail-closed behavior, and identity-safe observability.
+- Unified generated REST, RPC, and Gateway rate-limit enforcement. HTTP
+  rejections now include `Retry-After`, RPC uses `ResourceExhausted` with
+  `retry-after` metadata, and generated production services reject accidental
+  process-local rate limiting.
+- Added transactional REST/RPC `--update` migration for projects created before
+  the application lifecycle hook and logic preludes. Missing
+  `register_services` hooks are added once, and resolvable custom module
+  declarations are moved into application-owned preludes without update-time
+  compatibility code in generated entrypoints.
+- Added validated service configuration loading with production-strict unknown
+  field detection, governance range checks, secret-safe debug output, automatic
+  rate-limit Redis selection from an explicit URL or `cache.url`, and
+  profile-scoped rate-limit namespaces.
+
 All notable changes to Roze should be recorded in this file.
 
 The format follows Keep a Changelog and Semantic Versioning.

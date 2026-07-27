@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::BTreeMap,
     error::Error,
     fmt, fs,
@@ -16,7 +17,7 @@ pub use roze_resilience::GovernancePolicy;
 
 pub mod config_center;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub name: String,
     #[serde(default)]
@@ -69,6 +70,14 @@ impl ServiceProfile {
     pub fn is_production(self) -> bool {
         self == Self::Production
     }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Test => "test",
+            Self::Production => "production",
+        }
+    }
 }
 
 impl ServiceConfig {
@@ -78,6 +87,94 @@ impl ServiceConfig {
 
     pub fn rpc_client_config_ref(&self, name: &str) -> Option<&RpcClientConfig> {
         self.rpc_clients.get(name).or(self.rpc_client.as_ref())
+    }
+
+    pub fn resolved_rate_limiter_config(&self) -> roze_rate_limit::RateLimiterConfig {
+        let mut config = self.governance.rate_limiter.clone();
+        if config
+            .redis_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+            && matches!(
+                config.store,
+                roze_rate_limit::RateLimitStoreKind::Auto
+                    | roze_rate_limit::RateLimitStoreKind::Redis
+            )
+        {
+            config.redis_url = self.cache.as_ref().map(|cache| cache.url.clone());
+        }
+        if config.namespace.is_none() {
+            config.namespace = Some(self.profile.as_str().to_string());
+        }
+        config
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.name.trim().is_empty(),
+            "service name must not be empty"
+        );
+        self.governance.validate()?;
+        if self.rpc.is_some() && self.rest.is_none() {
+            let rpc_uses_client_ip = self
+                .governance
+                .rate_limit
+                .iter()
+                .chain(
+                    self.governance
+                        .routes
+                        .values()
+                        .filter_map(|policy| policy.rate_limit.as_ref()),
+                )
+                .any(|limit| {
+                    limit
+                        .key
+                        .dimensions
+                        .contains(&roze_rate_limit::RateLimitDimension::ClientIp)
+                });
+            anyhow::ensure!(
+                !rpc_uses_client_ip,
+                "RPC rate-limit policies cannot use the client_ip dimension; use route, subject, tenant, or trusted metadata"
+            );
+        }
+        let rate_limiter = self.resolved_rate_limiter_config();
+        rate_limiter.validate()?;
+        if self.profile.is_production()
+            && self.governance.uses_rate_limit()
+            && rate_limiter.resolved_store_kind() == roze_rate_limit::RateLimitStoreKind::Memory
+        {
+            anyhow::bail!(
+                "production services with rate limiting require Redis; configure governance.rate_limiter.redis_url or cache.url"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ServiceConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceConfig")
+            .field("name", &self.name)
+            .field("profile", &self.profile)
+            .field("rest", &self.rest.is_some())
+            .field("rpc", &self.rpc.is_some())
+            .field("rpc_client", &self.rpc_client.is_some())
+            .field("rpc_clients", &self.rpc_clients.keys().collect::<Vec<_>>())
+            .field("registry", &self.registry.is_some())
+            .field("database", &self.database.is_some())
+            .field("mongo", &self.mongo.is_some())
+            .field("cache", &self.cache.is_some())
+            .field("auth", &self.auth.is_some())
+            .field("kafka", &self.kafka.is_some())
+            .field("nats", &self.nats.is_some())
+            .field("outbox", &self.outbox.is_some())
+            .field("idempotency", &self.idempotency.is_some())
+            .field("storage", &self.storage.is_some())
+            .field("gateway", &self.gateway.is_some())
+            .field("telemetry", &self.telemetry.is_some())
+            .field("governance", &self.governance)
+            .finish()
     }
 }
 
@@ -103,6 +200,8 @@ pub struct GatewayConfig {
     pub fallback: Option<GatewayFallbackResponse>,
     #[serde(default)]
     pub cors: Option<GatewayCorsConfig>,
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,7 +563,7 @@ pub enum IdempotencyUnavailablePolicy {
     FailClosed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RpcClientConfig {
     #[serde(default)]
     pub etcd: Option<RpcClientEtcdConfig>,
@@ -486,6 +585,24 @@ pub struct RpcClientConfig {
     pub balancer: RpcClientBalancerKind,
     #[serde(default)]
     pub middlewares: RpcClientMiddlewaresConfig,
+}
+
+impl fmt::Debug for RpcClientConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RpcClientConfig")
+            .field("etcd", &self.etcd)
+            .field("endpoint_count", &self.endpoints.len())
+            .field("target", &self.target)
+            .field("app", &self.app)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("non_block", &self.non_block)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("keepalive_time_secs", &self.keepalive_time_secs)
+            .field("balancer", &self.balancer)
+            .field("middlewares", &self.middlewares)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -524,7 +641,7 @@ impl fmt::Debug for RpcClientEtcdConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RpcClientEtcdConfig")
-            .field("hosts", &self.hosts)
+            .field("host_count", &self.hosts.len())
             .field("key", &self.key)
             .field("id", &self.id)
             .field("user", &self.user)
@@ -593,7 +710,7 @@ impl fmt::Debug for RegistryConfig {
         formatter
             .debug_struct("RegistryConfig")
             .field("kind", &self.kind)
-            .field("endpoints", &self.endpoints)
+            .field("endpoint_count", &self.endpoints.len())
             .field("prefix", &self.prefix)
             .field("ttl_seconds", &self.ttl_seconds)
             .field("renew_interval_secs", &self.renew_interval_secs)
@@ -640,7 +757,7 @@ impl fmt::Debug for JwtKeyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KafkaConfig {
     #[serde(default)]
     pub brokers: Vec<String>,
@@ -693,6 +810,43 @@ pub struct KafkaConfig {
     pub consumer_workers: u32,
 }
 
+impl fmt::Debug for KafkaConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KafkaConfig")
+            .field("broker_count", &self.brokers.len())
+            .field("bootstrap", &self.bootstrap.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "bootstrap_server_count",
+                &self
+                    .bootstrap_servers
+                    .as_ref()
+                    .map_or(0, std::vec::Vec::len),
+            )
+            .field("topic_prefix", &self.topic_prefix)
+            .field("group_id", &self.group_id)
+            .field("client_id", &self.client_id)
+            .field("acks", &self.acks)
+            .field("auto_offset_reset", &self.auto_offset_reset)
+            .field("enable_auto_commit", &self.enable_auto_commit)
+            .field("enable_manual_ack", &self.enable_manual_ack)
+            .field("linger_ms", &self.linger_ms)
+            .field("batch_size", &self.batch_size)
+            .field("session_timeout_ms", &self.session_timeout_ms)
+            .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
+            .field("max_poll_interval_ms", &self.max_poll_interval_ms)
+            .field("flush_timeout_ms", &self.flush_timeout_ms)
+            .field("message_timeout_ms", &self.message_timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("retry_backoff_ms", &self.retry_backoff_ms)
+            .field("retry_topic", &self.retry_topic)
+            .field("dead_letter_topic", &self.dead_letter_topic)
+            .field("topic_regex", &self.topic_regex)
+            .field("consumer_workers", &self.consumer_workers)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TelemetryConfig {
     #[serde(default)]
@@ -726,7 +880,7 @@ pub enum TelemetryPropagator {
     Jaeger,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CacheConfig {
     pub url: String,
     #[serde(default = "default_cache_namespace")]
@@ -735,7 +889,18 @@ pub struct CacheConfig {
     pub default_ttl_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl fmt::Debug for CacheConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CacheConfig")
+            .field("url", &"[REDACTED]")
+            .field("namespace", &self.namespace)
+            .field("default_ttl_secs", &self.default_ttl_secs)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub mode: DatabaseMode,
@@ -759,6 +924,37 @@ pub struct DatabaseConfig {
     pub sqlx_logging: bool,
 }
 
+impl fmt::Debug for DatabaseConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DatabaseConfig")
+            .field("mode", &self.mode)
+            .field("url", &"[REDACTED]")
+            .field("replica_count", &self.replicas.len())
+            .field(
+                "topology_name",
+                &self
+                    .topology
+                    .as_ref()
+                    .map(|topology| topology.name.as_str()),
+            )
+            .field(
+                "topology_shard_count",
+                &self
+                    .topology
+                    .as_ref()
+                    .map_or(0, |topology| topology.shards.len()),
+            )
+            .field("policy", &self.policy)
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("connect_timeout_secs", &self.connect_timeout_secs)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("sqlx_logging", &self.sqlx_logging)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DatabaseMode {
@@ -768,11 +964,29 @@ pub enum DatabaseMode {
     Sharded,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatabaseTopologyConfig {
     pub name: String,
     pub routing: DatabaseRouting,
     pub shards: Vec<DatabaseShardConfig>,
+}
+
+impl fmt::Debug for DatabaseTopologyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DatabaseTopologyConfig")
+            .field("name", &self.name)
+            .field("routing", &self.routing)
+            .field(
+                "shards",
+                &self
+                    .shards
+                    .iter()
+                    .map(|shard| &shard.id)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -781,12 +995,23 @@ pub enum DatabaseRouting {
     Fnv1a64JumpV1,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatabaseShardConfig {
     pub id: String,
     pub primary: String,
     #[serde(default)]
     pub replicas: Vec<String>,
+}
+
+impl fmt::Debug for DatabaseShardConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DatabaseShardConfig")
+            .field("id", &self.id)
+            .field("primary", &"[REDACTED]")
+            .field("replica_count", &self.replicas.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -797,7 +1022,7 @@ pub enum DatabaseReadPolicy {
     Random,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MongoConfig {
     pub url: String,
     pub database: String,
@@ -809,6 +1034,19 @@ pub struct MongoConfig {
     pub app_name: Option<String>,
 }
 
+impl fmt::Debug for MongoConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MongoConfig")
+            .field("url", &"[REDACTED]")
+            .field("database", &self.database)
+            .field("max_pool_size", &self.max_pool_size)
+            .field("min_pool_size", &self.min_pool_size)
+            .field("app_name", &self.app_name)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GovernanceConfig {
     #[serde(default)]
@@ -817,6 +1055,8 @@ pub struct GovernanceConfig {
     pub retry: Option<RetryConfig>,
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+    #[serde(default)]
+    pub rate_limiter: roze_rate_limit::RateLimiterConfig,
     #[serde(default)]
     pub breaker: Option<BreakerConfig>,
     #[serde(default)]
@@ -842,8 +1082,8 @@ impl GovernanceConfig {
             .or(self.timeout_ms);
         let retry = scoped.and_then(|policy| policy.retry).or(self.retry);
         let rate_limit = scoped
-            .and_then(|policy| policy.rate_limit)
-            .or(self.rate_limit);
+            .and_then(|policy| policy.rate_limit.as_ref())
+            .or(self.rate_limit.as_ref());
         let breaker = scoped.and_then(|policy| policy.breaker).or(self.breaker);
         let shedding = scoped.and_then(|policy| policy.shedding).or(self.shedding);
         GovernancePolicy {
@@ -881,6 +1121,132 @@ impl GovernanceConfig {
                 }),
         }
     }
+
+    pub fn resolve_rate_limit_config(&self, key: &str) -> Option<RateLimitConfig> {
+        self.resolve_rate_limit_config_for([key])
+    }
+
+    pub fn resolve_rate_limit_config_for<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a str>,
+    ) -> Option<RateLimitConfig> {
+        keys.into_iter()
+            .find_map(|key| self.routes.get(key))
+            .and_then(|policy| policy.rate_limit.clone())
+            .or_else(|| self.rate_limit.clone())
+    }
+
+    pub fn uses_rate_limit(&self) -> bool {
+        self.rate_limit.is_some()
+            || self
+                .routes
+                .values()
+                .any(|policy| policy.rate_limit.is_some())
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_governance_policy(
+            "governance",
+            self.timeout_ms,
+            self.retry.as_ref(),
+            self.rate_limit.as_ref(),
+            self.breaker.as_ref(),
+            self.shedding.as_ref(),
+            self.fallback.as_ref(),
+        )?;
+        for (route, policy) in &self.routes {
+            anyhow::ensure!(
+                !route.trim().is_empty(),
+                "governance route key must not be empty"
+            );
+            validate_governance_policy(
+                &format!("governance.routes.{route}"),
+                policy.timeout_ms,
+                policy.retry.as_ref(),
+                policy.rate_limit.as_ref(),
+                policy.breaker.as_ref(),
+                policy.shedding.as_ref(),
+                policy.fallback.as_ref(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_governance_policy(
+    path: &str,
+    timeout_ms: Option<u64>,
+    retry: Option<&RetryConfig>,
+    rate_limit: Option<&RateLimitConfig>,
+    breaker: Option<&BreakerConfig>,
+    shedding: Option<&SheddingConfig>,
+    fallback: Option<&GovernanceFallbackConfig>,
+) -> anyhow::Result<()> {
+    if let Some(timeout_ms) = timeout_ms {
+        anyhow::ensure!(timeout_ms > 0, "{path}.timeout_ms must be positive");
+    }
+    if let Some(retry) = retry {
+        anyhow::ensure!(
+            retry.max_attempts > 0,
+            "{path}.retry.max_attempts must be positive"
+        );
+        anyhow::ensure!(
+            retry.max_backoff_ms >= retry.backoff_ms,
+            "{path}.retry.max_backoff_ms must be greater than or equal to backoff_ms"
+        );
+        if let Some(percent) = retry.budget_percent {
+            anyhow::ensure!(
+                percent <= 100,
+                "{path}.retry.budget_percent must be in 0..=100"
+            );
+        }
+    }
+    if let Some(rate_limit) = rate_limit {
+        rate_limit.validate(path)?;
+    }
+    if let Some(breaker) = breaker {
+        anyhow::ensure!(
+            breaker.failure_threshold > 0,
+            "{path}.breaker.failure_threshold must be positive"
+        );
+        anyhow::ensure!(
+            breaker.reset_timeout_ms > 0,
+            "{path}.breaker.reset_timeout_ms must be positive"
+        );
+    }
+    if let Some(shedding) = shedding {
+        anyhow::ensure!(
+            shedding.concurrency > 0,
+            "{path}.shedding.concurrency must be positive"
+        );
+        anyhow::ensure!(
+            shedding.window_ms > 0,
+            "{path}.shedding.window_ms must be positive"
+        );
+        anyhow::ensure!(
+            shedding.min_samples > 0,
+            "{path}.shedding.min_samples must be positive"
+        );
+        anyhow::ensure!(
+            shedding.max_avg_latency_ms > 0,
+            "{path}.shedding.max_avg_latency_ms must be positive"
+        );
+        anyhow::ensure!(
+            shedding.max_failure_ratio_per_mille <= 1_000,
+            "{path}.shedding.max_failure_ratio_per_mille must be in 0..=1000"
+        );
+        anyhow::ensure!(
+            shedding.cool_down_ms > 0,
+            "{path}.shedding.cool_down_ms must be positive"
+        );
+    }
+    if let Some(fallback) = fallback {
+        anyhow::ensure!(
+            (100..=599).contains(&fallback.status),
+            "{path}.fallback.status must be a valid HTTP status"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -934,12 +1300,14 @@ pub struct GovernanceFallbackConfig {
     pub headers: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RateLimitConfig {
     #[serde(default = "default_rate_limit_burst")]
     pub burst: u32,
     #[serde(default = "default_rate_limit_refill_ms")]
     pub refill_ms: u64,
+    #[serde(default)]
+    pub key: roze_rate_limit::RateLimitKeyPolicy,
 }
 
 impl Default for RateLimitConfig {
@@ -947,7 +1315,21 @@ impl Default for RateLimitConfig {
         Self {
             burst: default_rate_limit_burst(),
             refill_ms: default_rate_limit_refill_ms(),
+            key: roze_rate_limit::RateLimitKeyPolicy::default(),
         }
+    }
+}
+
+impl RateLimitConfig {
+    fn validate(&self, path: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(self.burst > 0, "{path}.rate_limit.burst must be positive");
+        anyhow::ensure!(
+            self.refill_ms > 0,
+            "{path}.rate_limit.refill_ms must be positive"
+        );
+        self.key
+            .validate()
+            .map_err(|error| anyhow::anyhow!("{path}.rate_limit.key is invalid: {error}"))
     }
 }
 
@@ -1338,9 +1720,20 @@ impl SecretProvider for EnvironmentAndFileSecretProvider {
 
 pub fn load<T>(path: impl AsRef<Path>) -> Result<T, config::ConfigError>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> Deserialize<'de> + 'static,
 {
     load_with_secret_provider(path, &EnvironmentAndFileSecretProvider)
+}
+
+pub fn load_service(path: impl AsRef<Path>) -> Result<ServiceConfig, config::ConfigError> {
+    load_service_with_secret_provider(path, &EnvironmentAndFileSecretProvider)
+}
+
+pub fn load_service_with_secret_provider(
+    path: impl AsRef<Path>,
+    provider: &dyn SecretProvider,
+) -> Result<ServiceConfig, config::ConfigError> {
+    load_with_secret_provider(path, provider)
 }
 
 pub fn load_with_secret_provider<T>(
@@ -1348,7 +1741,7 @@ pub fn load_with_secret_provider<T>(
     provider: &dyn SecretProvider,
 ) -> Result<T, config::ConfigError>
 where
-    T: for<'de> Deserialize<'de>,
+    T: for<'de> Deserialize<'de> + 'static,
 {
     let path = path.as_ref();
     let dependency_defaults = path
@@ -1368,7 +1761,40 @@ where
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     resolve_secret_references(&mut value, base_dir, provider)?;
     validate_structured_secrets(&value)?;
-    serde_json::from_value(value).map_err(|error| config::ConfigError::Message(error.to_string()))
+    deserialize_config_value(value)
+}
+
+pub(crate) fn deserialize_config_value<T>(value: Value) -> Result<T, config::ConfigError>
+where
+    T: for<'de> Deserialize<'de> + 'static,
+{
+    let strict = value
+        .get("profile")
+        .and_then(Value::as_str)
+        .is_some_and(|profile| profile.eq_ignore_ascii_case("production"));
+    let encoded = serde_json::to_vec(&value)
+        .map_err(|error| config::ConfigError::Message(error.to_string()))?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&encoded);
+    let mut unknown = std::collections::BTreeSet::new();
+    let config = serde_ignored::deserialize(&mut deserializer, |path| {
+        unknown.insert(path.to_string());
+    })
+    .map_err(|error| config::ConfigError::Message(error.to_string()))?;
+    if !unknown.is_empty() {
+        let fields = unknown.into_iter().collect::<Vec<_>>().join(", ");
+        if strict {
+            return Err(config::ConfigError::Message(format!(
+                "production configuration contains unknown fields: {fields}"
+            )));
+        }
+        tracing::warn!(unknown_fields = %fields, "configuration contains unknown fields");
+    }
+    if let Some(service) = (&config as &dyn Any).downcast_ref::<ServiceConfig>() {
+        service
+            .validate()
+            .map_err(|error| config::ConfigError::Message(error.to_string()))?;
+    }
+    Ok(config)
 }
 
 fn resolve_secret_references(
@@ -1792,6 +2218,200 @@ backoff_ms = 5
     }
 
     #[test]
+    fn loads_distributed_rate_limit_key_policy_without_exposing_redis_url() {
+        let source = r#"
+name: auth
+governance:
+  rate_limiter:
+    store: redis
+    redis_url: redis://user:secret@127.0.0.1:6379
+    key_prefix: auth:rate-limit
+    timeout_ms: 75
+    unavailable_policy: fail-open
+  rate_limit:
+    burst: 5
+    refill_ms: 1000
+    key:
+      dimensions: [route, client_ip, tenant]
+      headers: [x-login-account]
+      missing: reject
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(
+            config.governance.rate_limiter.store,
+            roze_rate_limit::RateLimitStoreKind::Redis
+        );
+        let limit = config.governance.rate_limit.expect("rate limit");
+        assert_eq!(
+            limit.key.dimensions,
+            vec![
+                roze_rate_limit::RateLimitDimension::Route,
+                roze_rate_limit::RateLimitDimension::ClientIp,
+                roze_rate_limit::RateLimitDimension::Tenant,
+            ]
+        );
+        assert_eq!(limit.key.headers, vec!["x-login-account"]);
+        let debug = format!("{:?}", config.governance.rate_limiter);
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn production_rate_limiter_auto_reuses_cache_and_scopes_profile() {
+        let path = std::env::temp_dir().join(format!(
+            "roze-config-rate-limit-auto-{}.yaml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            r#"
+name: auth
+profile: production
+cache:
+  url: redis://user:cache-secret@127.0.0.1:6379
+governance:
+  rate_limiter:
+    store: auto
+    key_prefix: roze:rate-limit:v1
+  rate_limit:
+    burst: 10
+    refill_ms: 100
+"#,
+        )
+        .expect("write config");
+
+        let config = load_service(&path).expect("load validated service config");
+        let limiter = config.resolved_rate_limiter_config();
+        assert_eq!(
+            limiter.resolved_store_kind(),
+            roze_rate_limit::RateLimitStoreKind::Redis
+        );
+        assert_eq!(limiter.namespace.as_deref(), Some("production"));
+        assert_eq!(
+            limiter.redis_url.as_deref(),
+            Some("redis://user:cache-secret@127.0.0.1:6379")
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn production_service_config_rejects_unknown_and_invalid_governance_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "roze-config-strict-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        let unknown = root.join("unknown.yaml");
+        fs::write(
+            &unknown,
+            r#"
+name: auth
+profile: production
+governance:
+  refil_ms: 100
+"#,
+        )
+        .expect("write unknown field config");
+        let error = load_service(&unknown).expect_err("reject unknown production field");
+        assert!(error.to_string().contains("governance.refil_ms"));
+
+        let invalid = root.join("invalid.yaml");
+        fs::write(
+            &invalid,
+            r#"
+name: auth
+profile: production
+governance:
+  timeout_ms: 0
+"#,
+        )
+        .expect("write invalid governance config");
+        let error = load_service(&invalid).expect_err("reject invalid governance");
+        assert!(error
+            .to_string()
+            .contains("governance.timeout_ms must be positive"));
+        fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[test]
+    fn development_config_keeps_unknown_fields_non_fatal() {
+        let path = std::env::temp_dir().join(format!(
+            "roze-config-development-unknown-{}.yaml",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            "name: demo\nprofile: development\nunknown_extension: true\ngovernance: {}\n",
+        )
+        .expect("write development config");
+        let config = load_service(&path).expect("development unknown field is warning-only");
+        assert_eq!(config.name, "demo");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn service_config_debug_redacts_connection_credentials() {
+        let source = r#"
+name: payments
+rpc_client:
+  endpoints: [https://user:rpc-secret@example.test]
+  token: rpc-token-secret
+cache:
+  url: redis://user:cache-secret@example.test
+database:
+  url: postgres://user:database-secret@example.test/payments
+mongo:
+  url: mongodb://user:mongo-secret@example.test/payments
+  database: payments
+kafka:
+  brokers: [sasl://user:kafka-secret@example.test]
+nats:
+  servers: [nats://user:nats-secret@example.test]
+storage:
+  provider: s3_compatible
+  bucket: payments
+  access_key: storage-access-secret
+  secret_key: storage-secret
+governance: {}
+"#;
+        let value = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Yaml))
+            .build()
+            .expect("build")
+            .try_deserialize::<Value>()
+            .expect("deserialize value");
+        let config: ServiceConfig = deserialize_config_value(value).expect("deserialize config");
+        let debug = format!("{config:?}");
+        for secret in [
+            "rpc-secret",
+            "rpc-token-secret",
+            "cache-secret",
+            "database-secret",
+            "mongo-secret",
+            "kafka-secret",
+            "nats-secret",
+            "storage-access-secret",
+            "storage-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
+    }
+
+    #[test]
     fn resolves_governance_policy_with_scoped_precedence() {
         let mut governance = GovernanceConfig {
             timeout_ms: Some(1_000),
@@ -1802,6 +2422,7 @@ backoff_ms = 5
             rate_limit: Some(RateLimitConfig {
                 burst: 100,
                 refill_ms: 1_000,
+                key: Default::default(),
             }),
             fallback: Some(GovernanceFallbackConfig {
                 enabled: true,

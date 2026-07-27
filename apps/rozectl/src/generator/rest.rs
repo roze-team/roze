@@ -1439,9 +1439,8 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
             partial_struct_name(&handler, &request_ty.name, FieldSource::Query)
         ));
     }
-    if route_spec.has_header || uses_auth || uses_idempotency {
-        params.push("headers: HeaderMap".to_string());
-    }
+    params.push("headers: HeaderMap".to_string());
+    params.push("client_ip: Option<roze_http::client_ip::ClientIp>".to_string());
     if route_spec.groups.contains_key(&FieldSource::Form) {
         params.push(format!(
             "Form(form): Form<{}>",
@@ -1461,14 +1460,19 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         params = params.join(", "),
         response_type = response_type
     ));
+    if uses_auth {
+        out.push_str("    let request_ctx = request_ctx.with_auth(authorize(&headers, &ctx)?);\n");
+    }
+    out.push_str(&format!(
+        "    roze_middleware::enforce_route_rate_limit(ctx.rate_limiter.as_ref(), ctx.config.name.as_str(), {handler:?}, {method:?}, &request_ctx, client_ip, &headers, Some(&ctx.config.governance)).await?;\n",
+        handler = handler,
+        method = http_method_name(&route.method),
+    ));
     out.push_str(&format!(
         "    let (request_ctx, route_guard) = roze_middleware::begin_route(ctx.config.name.clone(), {:?}, {:?}, request_ctx, Some(&ctx.config.governance))?;\n",
         handler,
         http_method_name(&route.method)
     ));
-    if uses_auth {
-        out.push_str("    let request_ctx = match authorize(&headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
-    }
     if !route.permissions.is_empty() {
         out.push_str(&format!(
             "    if let Err(err) = roze_middleware::enforce_permissions(&request_ctx, &[{}]) {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
@@ -1567,23 +1571,26 @@ fn render_websocket_route_handler(spec: &ApiSpec, route: &crate::parser::RestRou
         "State(ctx): State<ServiceContext>".to_string(),
         "Extension(request_ctx): Extension<Context>".to_string(),
         "Extension(websocket_shutdown): Extension<roze_http::ws::WebSocketShutdown>".to_string(),
+        "headers: HeaderMap".to_string(),
+        "client_ip: Option<roze_http::client_ip::ClientIp>".to_string(),
     ];
-    if uses_auth {
-        params.push("headers: HeaderMap".to_string());
-    }
     params.push("upgrade: roze_http::ws::WebSocketUpgrade".to_string());
     out.push_str(&format!(
         "pub(crate) async fn {handler}({params}) -> Result<roze_http::Response, RozeError> {{\n",
         handler = handler,
         params = params.join(", "),
     ));
+    if uses_auth {
+        out.push_str("    let request_ctx = request_ctx.with_auth(authorize(&headers, &ctx)?);\n");
+    }
+    out.push_str(&format!(
+        "    roze_middleware::enforce_route_rate_limit(ctx.rate_limiter.as_ref(), ctx.config.name.as_str(), {handler:?}, \"GET\", &request_ctx, client_ip, &headers, Some(&ctx.config.governance)).await?;\n",
+        handler = handler,
+    ));
     out.push_str(&format!(
         "    let (request_ctx, route_guard) = roze_middleware::begin_route(ctx.config.name.clone(), {:?}, \"GET\", request_ctx, Some(&ctx.config.governance))?;\n",
         handler,
     ));
-    if uses_auth {
-        out.push_str("    let request_ctx = match authorize(&headers, &ctx) {\n        Ok(auth) => request_ctx.with_auth(auth),\n        Err(err) => {\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }\n    };\n");
-    }
     if !route.permissions.is_empty() {
         out.push_str(&format!(
             "    if let Err(err) = roze_middleware::enforce_permissions(&request_ctx, &[{}]) {{\n        roze_middleware::finish_route(route_guard, false, err.code().to_string());\n        return Err(err);\n    }}\n",
@@ -3169,7 +3176,8 @@ mod tests {
         assert!(handlers.contains(
             "roze_middleware::enforce_permissions(&request_ctx, &[\"users:read\", \"users:list\"])"
         ));
-        assert!(handlers.contains("let request_ctx = match authorize(&headers, &ctx)"));
+        assert!(handlers
+            .contains("let request_ctx = request_ctx.with_auth(authorize(&headers, &ctx)?);"));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains(".extension(\"x-roze-permissions\", serde_json::json!([\"users:read\", \"users:list\"]))"));

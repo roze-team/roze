@@ -185,18 +185,15 @@ impl<S> RestServer<SharedService<S>> {
     }
 }
 
-impl RestServer<SharedService<crate::Router>> {
+impl<S> RestServer<SharedService<S>> {
     /// Enables `ConnectInfo<SocketAddr>` while preserving the standard
     /// `RestService` lifecycle and graceful shutdown behavior.
-    pub fn with_connect_info(
-        self,
-    ) -> RestServer<crate::router::IntoMakeServiceWithConnectInfo<SocketAddr>> {
+    pub fn with_connect_info(self) -> RestServer<SharedServiceWithConnectInfo<S>> {
         RestServer {
             config: self.config,
-            make_service: self
-                .make_service
-                .service
-                .into_make_service_with_connect_info::<SocketAddr>(),
+            make_service: SharedServiceWithConnectInfo {
+                service: self.make_service.service,
+            },
         }
     }
 }
@@ -206,9 +203,38 @@ pub struct SharedService<S> {
     service: S,
 }
 
+#[derive(Clone)]
+pub struct SharedServiceWithConnectInfo<S> {
+    service: S,
+}
+
 impl<S> SharedService<S> {
     pub fn new(service: S) -> Self {
         Self { service }
+    }
+}
+
+impl<S, Target> Service<Target> for SharedServiceWithConnectInfo<S>
+where
+    S: Clone,
+    Target: Into<SocketAddr>,
+{
+    type Response = crate::extract::ConnectInfoService<S, SocketAddr>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, target: Target) -> Self::Future {
+        std::future::ready(Ok(crate::extract::ConnectInfoService::new(
+            self.service.clone(),
+            target.into(),
+        )))
     }
 }
 
@@ -372,7 +398,13 @@ pub fn error_response(error: &roze_error::RozeError) -> HttpResponse {
         apply_fallback_headers(&mut response, error);
         return response;
     }
-    json_response(error.status_code(), &error.response_body())
+    let mut response = json_response(error.status_code(), &error.response_body());
+    if let Some(retry_after) = error.retry_after_seconds() {
+        if let Ok(value) = HeaderValue::try_from(retry_after.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 fn apply_fallback_headers(response: &mut HttpResponse, error: &roze_error::RozeError) {
@@ -467,5 +499,18 @@ mod tests {
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], br#"{"code":503,"message":"degraded"}"#);
+    }
+
+    #[test]
+    fn rate_limited_error_response_sets_retry_after() {
+        let response = error_response(&roze_error::RozeError::rate_limited(Duration::from_millis(
+            1_250,
+        )));
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(http::header::RETRY_AFTER),
+            Some(&http::HeaderValue::from_static("2"))
+        );
     }
 }

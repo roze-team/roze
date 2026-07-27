@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -32,7 +32,7 @@ pub enum StorageProvider {
     TencentCos,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageConfig {
     pub provider: StorageProvider,
     pub bucket: String,
@@ -52,6 +52,33 @@ pub struct StorageConfig {
     pub tenant_prefix: Option<String>,
     #[serde(default)]
     pub validation: StorageValidation,
+}
+
+impl fmt::Debug for StorageConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StorageConfig")
+            .field("provider", &self.provider)
+            .field("bucket", &self.bucket)
+            .field("endpoint", &self.endpoint.as_ref().map(|_| "[REDACTED]"))
+            .field("region", &self.region)
+            .field(
+                "access_key",
+                &self.access_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "secret_key",
+                &self.secret_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "public_base_url",
+                &self.public_base_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("root", &self.root)
+            .field("tenant_prefix", &self.tenant_prefix)
+            .field("validation", &self.validation)
+            .finish()
+    }
 }
 
 impl Default for StorageConfig {
