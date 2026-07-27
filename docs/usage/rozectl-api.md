@@ -203,8 +203,25 @@ handling is generated in `src/logic/<group>/realtime.rs`; two or more
 `rozectl api generate --update` runs preserve that file and rebuild route
 registration from the `.api` contract. WebSocket routes are excluded from
 OpenAPI and normal HTTP client SDKs. They must use `EmptyReq`/`EmptyResp` and
-cannot use idempotency middleware. See the
+cannot use idempotency middleware. Generated route metadata adds the fully
+prefixed WebSocket upgrade path to common authentication's public routes so
+browser clients can upgrade without an HTTP `Authorization` header. The
+application handler must authenticate the session before accepting business
+frames, commonly in the first frame. See the
 [native HTTP WebSocket contract](../contracts/websocket.md).
+
+## Runtime configuration path
+
+Generated REST and RPC binaries resolve configuration in this order:
+
+1. `ROZE_CONFIG_PATH`, when set;
+2. `config.yaml` beside the crate manifest;
+3. `config.yaml` in the process working directory.
+
+Use the same variable in deployment managers. For example, a systemd unit can
+set `Environment=ROZE_CONFIG_PATH=/etc/example/service.yaml`; Supervisor can
+set `environment=ROZE_CONFIG_PATH="/etc/example/service.yaml"`. An explicitly
+configured path is authoritative and is not replaced by a source-tree file.
 
 ## Permission annotations and request context
 

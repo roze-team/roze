@@ -109,13 +109,7 @@ async fn main() -> anyhow::Result<()> {{
 }}
 
 fn config_path() -> PathBuf {{
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let manifest_config = manifest_dir.join("config.yaml");
-    if manifest_config.exists() {{
-        manifest_config
-    }} else {{
-        PathBuf::from("config.yaml")
-    }}
+    roze_config::service_config_path(env!("CARGO_MANIFEST_DIR"))
 }}
 "#
     )
@@ -1489,6 +1483,7 @@ mod tests {
         assert!(rendered.contains("\"service configuration loaded\""));
         assert!(rendered.contains("\"service registered\""));
         assert!(rendered.contains("\"RPC server listening\""));
+        assert!(rendered.contains("roze_config::service_config_path(env!(\"CARGO_MANIFEST_DIR\"))"));
         assert!(rendered.contains("\"RPC shutdown requested\""));
         assert!(rendered.contains("\"service stopped\""));
         assert!(rendered.contains("\"service failed\""));

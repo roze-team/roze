@@ -414,6 +414,11 @@ rate limit without Redis; development and test profiles report unknown fields
 as warnings. Service configuration debug output redacts database, cache,
 broker, storage, registry, and RPC-client credentials.
 
+Generated REST and RPC entrypoints honor `ROZE_CONFIG_PATH` before source-tree
+or working-directory `config.yaml` defaults. Deployment units should point
+that variable at the deployment-owned YAML instead of copying configuration
+into the build checkout.
+
 Generated rate limiting uses `store: auto`: an explicit
 `governance.rate_limiter.redis_url` wins, then `cache.url`, with memory allowed
 only outside production. Redis keys are scoped by the service profile unless an

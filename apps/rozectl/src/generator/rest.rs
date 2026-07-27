@@ -24,10 +24,20 @@ use roze_service::ServiceGroup;
 async fn main() -> anyhow::Result<()> {
     let config = config::load(config_path())?;
     roze_log::init_tracing_with_config(&config)?;
-    let rest = config
+    let mut rest = config
         .rest
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
+    for route in route::WEBSOCKET_PUBLIC_ROUTES {
+        if !rest
+            .middlewares
+            .auth_public_routes
+            .iter()
+            .any(|configured| configured.trim().eq_ignore_ascii_case(route))
+        {
+            rest.middlewares.auth_public_routes.push((*route).to_string());
+        }
+    }
     tracing::info!(
         service = %config.name,
         protocol = "rest",
@@ -127,13 +137,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn config_path() -> std::path::PathBuf {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let manifest_config = manifest_dir.join("config.yaml");
-    if manifest_config.exists() {
-        manifest_config
-    } else {
-        std::path::PathBuf::from("config.yaml")
-    }
+    roze_config::service_config_path(env!("CARGO_MANIFEST_DIR"))
 }
 "#
     .to_string()
@@ -309,6 +313,14 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
     out.push_str(
         "use std::{collections::BTreeMap, sync::{atomic::{AtomicU64, Ordering}, OnceLock}};\n\nuse roze_http::{extract::{Path, State}, http::HeaderMap, routing::{delete, get, post}, Json, Router};\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\nuse serde::{Deserialize, Serialize};\nuse tokio::sync::RwLock;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\n\n",
     );
+    out.push_str("pub const WEBSOCKET_PUBLIC_ROUTES: &[&str] = &[\n");
+    for route in spec.rest_routes.iter().filter(|route| route.websocket) {
+        out.push_str(&format!(
+            "    \"GET {}\",\n",
+            full_route_path_for_route(spec, route)
+        ));
+    }
+    out.push_str("];\n\n");
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    let timeout = ctx\n        .config\n        .rest\n        .as_ref()\n        .filter(|rest| rest.middlewares.timeout)\n        .and(ctx.config.governance.timeout_ms);\n    let router = Router::new()\n");
     out.push_str(&format!(
@@ -3318,6 +3330,8 @@ mod tests {
         assert!(rendered.contains("\"service failed\""));
         assert!(rendered.contains("let result = group.start().await;"));
         assert!(rendered.contains("result?;"));
+        assert!(rendered.contains("roze_config::service_config_path(env!(\"CARGO_MANIFEST_DIR\"))"));
+        assert!(rendered.contains("for route in route::WEBSOCKET_PUBLIC_ROUTES"));
     }
 
     #[test]

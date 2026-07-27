@@ -1725,6 +1725,35 @@ where
     load_with_secret_provider(path, &EnvironmentAndFileSecretProvider)
 }
 
+/// Environment variable used by generated services to select an external
+/// runtime configuration file.
+pub const SERVICE_CONFIG_PATH_ENV: &str = "ROZE_CONFIG_PATH";
+
+/// Resolves the service configuration path with deployment configuration
+/// taking precedence over source-tree and working-directory defaults.
+pub fn service_config_path(manifest_dir: impl AsRef<Path>) -> PathBuf {
+    resolve_service_config_path(
+        std::env::var_os(SERVICE_CONFIG_PATH_ENV),
+        manifest_dir.as_ref(),
+    )
+}
+
+fn resolve_service_config_path(
+    configured_path: Option<std::ffi::OsString>,
+    manifest_dir: &Path,
+) -> PathBuf {
+    if let Some(path) = configured_path {
+        return PathBuf::from(path);
+    }
+
+    let manifest_config = manifest_dir.join("config.yaml");
+    if manifest_config.exists() {
+        manifest_config
+    } else {
+        PathBuf::from("config.yaml")
+    }
+}
+
 pub fn load_service(path: impl AsRef<Path>) -> Result<ServiceConfig, config::ConfigError> {
     load_service_with_secret_provider(path, &EnvironmentAndFileSecretProvider)
 }
@@ -1943,6 +1972,66 @@ mod tests {
     #[derive(Debug, Deserialize, PartialEq)]
     struct DemoConfig {
         name: String,
+    }
+
+    #[test]
+    fn runtime_config_path_precedes_manifest_and_loads_external_service_config() {
+        static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CONFIG_PATH_ENV_LOCK.lock().expect("config path env lock");
+        let previous = std::env::var_os(SERVICE_CONFIG_PATH_ENV);
+        let root = std::env::temp_dir().join(format!(
+            "roze-external-config-path-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let manifest_dir = root.join("source");
+        let deployment_dir = root.join("deployment");
+        fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+        fs::create_dir_all(&deployment_dir).expect("create deployment dir");
+        fs::write(
+            manifest_dir.join("config.yaml"),
+            "name: source\ngovernance: {}\n",
+        )
+        .expect("write source config");
+        let configured = deployment_dir.join("service.yaml");
+        fs::write(&configured, "name: deployment\ngovernance: {}\n")
+            .expect("write deployment config");
+
+        std::env::set_var(SERVICE_CONFIG_PATH_ENV, &configured);
+        let resolved = service_config_path(&manifest_dir);
+        let service = load_service(&resolved).expect("load external service config");
+        assert_eq!(resolved, configured);
+        assert_eq!(service.name, "deployment");
+
+        match previous {
+            Some(value) => std::env::set_var(SERVICE_CONFIG_PATH_ENV, value),
+            None => std::env::remove_var(SERVICE_CONFIG_PATH_ENV),
+        }
+        fs::remove_dir_all(root).expect("remove config root");
+    }
+
+    #[test]
+    fn runtime_config_path_uses_manifest_then_working_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "roze-config-path-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create config root");
+        assert_eq!(
+            resolve_service_config_path(None, &root),
+            PathBuf::from("config.yaml")
+        );
+
+        let manifest_config = root.join("config.yaml");
+        fs::write(&manifest_config, "name: test\n").expect("write config");
+        assert_eq!(resolve_service_config_path(None, &root), manifest_config);
+
+        fs::remove_dir_all(root).expect("remove config root");
     }
 
     #[test]

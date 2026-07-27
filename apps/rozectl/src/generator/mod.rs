@@ -4789,7 +4789,9 @@ cargo run
 
 ## Config
 
-`config.yaml` is loaded from the crate directory first, then falls back to the current working directory.
+Set `ROZE_CONFIG_PATH` to an external deployment-owned YAML file. When it is
+unset, `config.yaml` is loaded from the crate directory first, then the current
+working directory.
 
 ## Production Evidence
 
@@ -4821,7 +4823,9 @@ cargo run
 
 ## Config
 
-`config.yaml` is loaded from the crate directory first, then falls back to the current working directory.
+Set `ROZE_CONFIG_PATH` to an external deployment-owned YAML file. When it is
+unset, `config.yaml` is loaded from the crate directory first, then the current
+working directory.
 
 ## Production Evidence
 
@@ -10691,6 +10695,7 @@ fn build_rs() -> String {
 
 fn config_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
     let governance_routes = governance_routes_yaml(spec, kind);
+    let auth_public_routes = auth_public_routes_yaml(spec);
     match kind {
         ProjectKind::Rest => format!(
             r#"name: {}
@@ -10725,7 +10730,7 @@ rest:
     # gunzip: true
     # request_body_limit_bytes: 2097152
     # Routes may be written as "/path", "GET /path", or "/prefix/*".
-    auth_public_routes: ["/healthz", "/readyz", "/startupz", "/metrics"]
+    auth_public_routes: {}
     # Enable only when direct client access is blocked by a trusted proxy.
     trust_forwarded_identity_headers: false
     # Forwarding headers are ignored unless the TCP peer matches one of these CIDRs.
@@ -10837,6 +10842,7 @@ governance:
 #   batcher: otlpgrpc # otlpgrpc or otlphttp
 "#,
             spec.service,
+            auth_public_routes,
             governance_routes,
             spec.service,
             spec.service,
@@ -10978,6 +10984,27 @@ governance:
             spec.service
         ),
     }
+}
+
+fn auth_public_routes_yaml(spec: &ApiSpec) -> String {
+    let mut routes = ["/healthz", "/readyz", "/startupz", "/metrics"]
+        .into_iter()
+        .map(|path| rest::full_route_path(spec, path))
+        .collect::<BTreeSet<_>>();
+    routes.extend(
+        spec.rest_routes
+            .iter()
+            .filter(|route| route.websocket)
+            .map(|route| format!("GET {}", rest::full_route_path_for_route(spec, route))),
+    );
+    format!(
+        "[{}]",
+        routes
+            .into_iter()
+            .map(|route| format!("{route:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn governance_routes_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
@@ -14200,6 +14227,9 @@ fn main() {
     fn websocket_route_and_logic_survive_two_updates() {
         let spec = parse_api(
             r#"
+            @server (
+                prefix: /api/v1
+            )
             service realtime-api {
                 @websocket
                 @handler realtime
@@ -14239,11 +14269,21 @@ fn main() {
         );
         assert!(fs::read_to_string(out.join("src/route/ws.rs"))
             .expect("read route")
-            .contains(".route(\"/ws\", get(handler::ws::realtime))"));
+            .contains(".route(\"/api/v1/ws\", get(handler::ws::realtime))"));
+        let route_mod =
+            fs::read_to_string(out.join("src/route/mod.rs")).expect("read route metadata");
+        assert!(route_mod.contains("pub const WEBSOCKET_PUBLIC_ROUTES"));
+        assert!(route_mod.contains("\"GET /api/v1/ws\""));
+        let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
+        assert!(config.contains("\"GET /api/v1/ws\""));
+        assert!(config.contains("\"/api/v1/healthz\""));
+        let main = fs::read_to_string(out.join("src/main.rs")).expect("read main");
+        assert!(main.contains("for route in route::WEBSOCKET_PUBLIC_ROUTES"));
+        assert!(main.contains("roze_config::service_config_path(env!(\"CARGO_MANIFEST_DIR\"))"));
         assert!(!openapi_document(&spec)["paths"]
             .as_object()
             .expect("OpenAPI paths")
-            .contains_key("/ws"));
+            .contains_key("/api/v1/ws"));
         assert!(!client::render_ts_client(&spec).contains("/ws"));
         assert!(!client::render_js_client(&spec).contains("/ws"));
         assert!(!render_mock_main(&spec).contains("/ws"));

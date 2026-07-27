@@ -21,6 +21,10 @@
 - Updated the JWT signing and verification backend to `jsonwebtoken` 11 while
   retaining the explicit AWS-LC cryptography provider and existing JWT/OIDC
   validation contract.
+- Generated REST/RPC services now honor `ROZE_CONFIG_PATH` before local
+  `config.yaml` defaults. Prefixed `@websocket` routes now publish and apply
+  their exact HTTP-upgrade auth exemption while leaving session authentication
+  to application-owned frame logic.
 
 All notable changes to Roze should be recorded in this file.
 

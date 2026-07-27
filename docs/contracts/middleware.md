@@ -24,6 +24,11 @@ roles, permissions, and scopes in `roze_context::Context`. Missing, malformed,
 expired, revoked, wrongly issued, or wrongly targeted tokens return `401` with
 `WWW-Authenticate: Bearer`.
 
+Generated `@websocket` routes are added as method-qualified, fully prefixed
+public upgrade routes. This exemption covers only the HTTP upgrade; it does
+not establish an authenticated WebSocket session. Application-owned WebSocket
+logic must reject business frames until its protocol authentication succeeds.
+
 Client-supplied identity propagation headers are stripped before context
 creation by default, including `x-roze-subject`, `x-roze-tenant`,
 `x-roze-roles`, permission/scope metadata, and supported Hula identity aliases.
@@ -79,7 +84,7 @@ rest:
 | `shedding` | unset | Adaptive load shedding. Exceeded concurrency or unhealthy recent windows return `503`. |
 | `gunzip` | `false` | Decompresses gzip request bodies before extraction. |
 | `request_body_limit_bytes` | unset | Reads and enforces the actual request-body size before extraction, including requests without `Content-Length`; oversized bodies return `413 request body too large`, while accepted bodies are rebuilt unchanged for JSON/Form/custom extractors. |
-| `auth_public_routes` | health/readiness/startup/metrics routes | Routes that do not require a Bearer token when service-level `auth` is configured. Entries may be exact paths, method-qualified paths such as `GET /healthz`, or prefix patterns ending in `*`. |
+| `auth_public_routes` | fully prefixed health/readiness/startup/metrics and generated WebSocket upgrade routes | Routes that do not require a Bearer token when service-level `auth` is configured. Entries may be exact paths, method-qualified paths such as `GET /healthz`, or prefix patterns ending in `*`. |
 | `trust_forwarded_identity_headers` | `false` | Accept identity propagation headers from an upstream proxy. Enable only when direct clients cannot reach the service and the proxy replaces those headers after authentication. |
 
 `trace`, `stat`, and `prometheus` share the same request observation path today:

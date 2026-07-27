@@ -42,11 +42,5 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn config_path() -> std::path::PathBuf {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let manifest_config = manifest_dir.join("config.yaml");
-    if manifest_config.exists() {
-        manifest_config
-    } else {
-        std::path::PathBuf::from("config.yaml")
-    }
+    roze_config::service_config_path(env!("CARGO_MANIFEST_DIR"))
 }
