@@ -16,6 +16,14 @@ pub struct SearchConfig {
     pub api_key: Option<String>,
 }
 
+/// Engine-neutral search hit used by higher-level application modules.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub id: Option<String>,
+    pub score: Option<f64>,
+    pub document: Value,
+}
+
 #[derive(Clone)]
 pub struct SearchClient {
     config: SearchConfig,
@@ -84,6 +92,18 @@ impl SearchClient {
             .await
     }
 
+    /// Executes a search and normalizes Elasticsearch/OpenSearch and
+    /// Meilisearch response envelopes without imposing application ranking or
+    /// document semantics.
+    pub async fn search_documents(
+        &self,
+        index: &str,
+        query: Value,
+    ) -> anyhow::Result<Vec<SearchHit>> {
+        let response = self.search(index, query).await?;
+        Ok(normalize_search_hits(&self.config.engine, response))
+    }
+
     async fn request(
         &self,
         method: reqwest::Method,
@@ -106,6 +126,41 @@ impl SearchClient {
         }
         let response = request.send().await?.error_for_status()?;
         Ok(response.json().await.unwrap_or_else(|_| json!({})))
+    }
+}
+
+fn normalize_search_hits(engine: &SearchEngine, response: Value) -> Vec<SearchHit> {
+    match engine {
+        SearchEngine::Elasticsearch | SearchEngine::Opensearch => response
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|hit| {
+                let document = hit.get("_source")?.clone();
+                Some(SearchHit {
+                    id: hit.get("_id").and_then(Value::as_str).map(str::to_string),
+                    score: hit.get("_score").and_then(Value::as_f64),
+                    document,
+                })
+            })
+            .collect(),
+        SearchEngine::Meilisearch => response
+            .get("hits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .map(|document| SearchHit {
+                id: document.get("id").and_then(|value| match value {
+                    Value::String(value) => Some(value.clone()),
+                    Value::Number(value) => Some(value.to_string()),
+                    _ => None,
+                }),
+                score: document.get("_rankingScore").and_then(Value::as_f64),
+                document,
+            })
+            .collect(),
     }
 }
 
@@ -172,6 +227,35 @@ mod tests {
             request.body_json(),
             json!([{"id": "user-1", "name": "Ada"}])
         );
+    }
+
+    #[test]
+    fn normalizes_elasticsearch_and_meilisearch_hits() {
+        let elastic = normalize_search_hits(
+            &SearchEngine::Elasticsearch,
+            json!({
+                "hits": {
+                    "hits": [
+                        {"_id": "doc-1", "_score": 0.75, "_source": {"text": "hello"}}
+                    ]
+                }
+            }),
+        );
+        assert_eq!(
+            elastic,
+            vec![SearchHit {
+                id: Some("doc-1".to_string()),
+                score: Some(0.75),
+                document: json!({"text": "hello"}),
+            }]
+        );
+
+        let meili = normalize_search_hits(
+            &SearchEngine::Meilisearch,
+            json!({"hits": [{"id": 7, "text": "hello", "_rankingScore": 0.5}]}),
+        );
+        assert_eq!(meili[0].id.as_deref(), Some("7"));
+        assert_eq!(meili[0].score, Some(0.5));
     }
 
     #[derive(Debug)]

@@ -19,6 +19,24 @@ line endings are removed. Applications can call
 `load_with_secret_provider` with a custom `SecretProvider`; unsupported
 references must return `None`.
 
+AI provider keys use the same resolver and are never loaded directly by
+`roze-ai`:
+
+```yaml
+ai:
+  default_provider: default
+  providers:
+    default:
+      kind: openai_compatible
+      base_url: https://api.openai.com/v1
+      api_key: ${OPENAI_API_KEY}
+      model: replace-with-your-model
+```
+
+Resolved keys are redacted from `AiProviderConfig` and `ServiceConfig` debug
+output. Provider base URLs containing embedded usernames or passwords are
+rejected.
+
 `ROZE_AUTH_JWT_KEYS` accepts one JSON array and merges entries by key `id`.
 This supports adding a new key and replacing an existing key without relying
 on array indexes. The YAML active key remains explicit and can use the normal

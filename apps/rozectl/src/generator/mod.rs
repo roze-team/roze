@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod client;
 pub mod model;
 pub mod native;

@@ -36,6 +36,14 @@ Roze is a Rust service framework with:
 - `crates/roze-ws`: WebSocket session hub; session lookup uses DashMap.
 - `crates/roze-storage`: object storage contracts for local/S3 API/Qiniu/Alibaba/Tencent providers.
 - `crates/roze-search`: unified search client for Elasticsearch, OpenSearch, and Meilisearch.
+- `crates/roze-ai`: experimental provider-neutral AI messages, models, tools,
+  bounded agents and teams, compiled/parallel DAG workflows, pluggable
+  checkpoint/interrupt/resume with a `roze-storage` adapter, workflow event
+  streams, bounded backpressure-aware node chunk streams, permission-aware
+  delegation, RAG component contracts, `roze-search` adapters, and
+  deterministic test doubles; it reuses Roze
+  context, permissions, errors, lifecycle attachment, and governance
+  boundaries instead of replacing them.
 
 Hot-path crates keep Criterion benchmarks under `benches/` for regression baselines:
 `roze-metrics` covers labeled writes and Prometheus rendering, `roze-local-cache`
@@ -109,6 +117,28 @@ and Kubernetes manifests. Real business behavior still belongs in application
 code, including logic handlers, complex SQL, domain validation, transactions,
 authorization, permission checks, and search ranking rules.
 
+Add an experimental AI module to an existing generated REST/RPC project
+without changing its established generators:
+
+```bash
+cargo run -p rozectl -- ai generate assistant \
+  --out services/support \
+  --roze-source path
+```
+
+The command generates provider-neutral agent/tool/prompt composition under
+`src/ai`, reuses the existing service context and Roze request context, and
+preserves application-owned AI files on `--update`. Its generated
+`config/ai.example.yaml` uses the existing Roze secret resolver and can build
+multiple OpenAI-compatible providers through `AiRuntime::from_config`.
+Add `--with-workflow` and `--with-rag` initially or during a later `--update`
+to generate application-owned composition and Roze Search-backed RAG
+scaffolds without replacing existing AI business files.
+Add `--with-team` for a bounded multi-agent team scaffold. Workflow templates
+also expose `CheckpointStore` and `roze-storage`-backed runners; team templates
+expose standard permission-checked Agent delegation without adding parallel
+storage, identity, or authorization subsystems.
+
 Generated API and RPC services use one service manifest for governed
 cross-service RPC dependencies instead of manual generated-code edits:
 
@@ -139,6 +169,7 @@ logic.
 - [Production checklist](docs/production-checklist.md)
 - [Usage documentation](docs/usage/README.md)
 - [Middleware contract](docs/contracts/middleware.md)
+- [AI runtime contract](docs/contracts/ai-runtime.md)
 - [rozectl generator guide](docs/usage/rozectl-api.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)

@@ -177,6 +177,10 @@ enum Commands {
         #[command(subcommand)]
         command: RpcCommands,
     },
+    Ai {
+        #[command(subcommand)]
+        command: AiCommands,
+    },
     Model {
         #[command(subcommand)]
         command: ModelCommands,
@@ -483,6 +487,32 @@ enum ClientCommands {
         api: PathBuf,
         #[arg(short = 'o', long, alias = "o", default_value = "client.js")]
         out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AiCommands {
+    #[command(alias = "gen")]
+    Generate {
+        #[arg(default_value = "assistant")]
+        name: String,
+        #[arg(short = 'o', long, alias = "o", default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, conflicts_with = "force")]
+        update: bool,
+        #[arg(long, value_enum, default_value_t)]
+        roze_source: RozeSource,
+        /// Generate an application-owned Graph/Workflow scaffold.
+        #[arg(long)]
+        with_workflow: bool,
+        /// Generate an application-owned RAG scaffold backed by roze-search.
+        #[arg(long)]
+        with_rag: bool,
+        /// Generate an application-owned bounded multi-agent team scaffold.
+        #[arg(long)]
+        with_team: bool,
     },
 }
 
@@ -1279,6 +1309,27 @@ fn run() -> anyhow::Result<()> {
                 let api = resolve_input_path(api, api_file, "api")?;
                 run_api_format(&api, write, check)?
             }
+        },
+        Commands::Ai { command } => match command {
+            AiCommands::Generate {
+                name,
+                out,
+                force,
+                update,
+                roze_source,
+                with_workflow,
+                with_rag,
+                with_team,
+            } => generator::ai::generate_ai_module_with_features(
+                &name,
+                &out,
+                options(force, update, roze_source),
+                generator::ai::AiGenerationFeatures {
+                    workflow: with_workflow,
+                    rag: with_rag,
+                    team: with_team,
+                },
+            )?,
         },
         Commands::Rpc { command } => match command {
             RpcCommands::Generate {
@@ -6219,6 +6270,35 @@ envFrom: []
             Commands::Stream {
                 command: StreamCommands::Gen { .. }
             }
+        ));
+
+        let ai = Cli::try_parse_from([
+            "rozectl",
+            "ai",
+            "generate",
+            "support",
+            "--out",
+            "services/support",
+            "--update",
+            "--roze-source",
+            "path",
+            "--with-workflow",
+            "--with-rag",
+            "--with-team",
+        ])
+        .expect("parse ai generate");
+        assert!(matches!(
+            ai.command,
+            Commands::Ai {
+                command: AiCommands::Generate {
+                    name,
+                    update: true,
+                    with_workflow: true,
+                    with_rag: true,
+                    with_team: true,
+                    ..
+                }
+            } if name == "support"
         ));
 
         let doc = Cli::try_parse_from(["rozectl", "api", "doc", "--dir", ".", "--o", "doc"])

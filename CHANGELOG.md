@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Added the experimental `roze-ai` runtime with provider-neutral model, tool,
+  agent, and event contracts; OpenAI-compatible invoke, SSE, and tool-call
+  support; and validated, secret-safe provider configuration.
+- Added independent transactional `rozectl ai generate` module generation with
+  framework-owned glue, preserved application-owned agents/tools/prompts, an
+  AI configuration example, and generated compile coverage. Existing REST,
+  RPC, model, search, and stream generators are unchanged.
+- Added experimental AI DAG composition, graph-as-tool adaptation, prompt
+  templates, standard document/embedding/retriever/indexer contracts, bounded
+  RAG pipelines, normalized `roze-search` hits, and incremental
+  `--with-workflow`/`--with-rag` generation.
+- Added parallel workflow layers, pluggable per-node checkpoints,
+  interrupt/resume with graph and identity-scope validation, bounded
+  sequential/parallel multi-agent task coordination, and incremental
+  `--with-team` generation.
+- Added deterministic workflow execution-event streams, a tenant/subject
+  scoped `roze-storage` checkpoint adapter, and permission-aware model-selected
+  delegation to registered Agent teams. Workflow/team generation now exposes
+  these reusable adapters without changing existing generator behavior.
+- Added `WorkflowNode::stream`, native `FnStreamNode` composition, and bounded
+  backpressure-aware `CompiledGraph::stream_chunks` for strict linear
+  workflows. Generated workflow modules expose the chunk stream without
+  changing existing REST/RPC/model/search/stream generation.
 - Added `roze-rate-limit`, providing shared memory and atomic Redis token-bucket
   stores, composite route/client-IP/subject/tenant/header keys, bounded store
   timeouts, fail-open/fail-closed behavior, and identity-safe observability.

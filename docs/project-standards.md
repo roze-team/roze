@@ -186,6 +186,38 @@ src/search/<index>.rs
 - ranking、boost、召回、组合过滤与重排属于应用模块。
 - model 与 search generation 分离；update 只刷新生成文件。
 
+## AI 模块
+
+- `rozectl ai generate <name> --out <project>` 只向已有 REST/RPC 项目添加
+  `src/ai/**`，不改变 API、RPC、model、search 或 stream 的生成入口与输出。
+- `src/ai/mod.rs`、`src/ai/generated.rs` 由生成器拥有；`agent.rs`、
+  `tools.rs` 与 `prompts/**` 由应用拥有，`--update` 必须保留。
+- `--with-workflow` 与 `--with-rag` 可分步增加应用拥有的 `workflow.rs`
+  和 `rag.rs`；功能启用后普通 `--update` 必须保留文件及模块声明。
+- `--with-team` 可分步增加应用拥有的 `team.rs`；Agent 名称、任务上限和执行
+  模式由应用显式配置。
+- AI runtime 复用 `roze-context`、`roze-error`、`roze-service` 与现有治理、
+  存储、缓存、MQ、search、job 模块，不新增平行基础设施。
+- Provider 配置统一进入 `roze_config::ServiceConfig::ai`；API key 使用现有
+  secret reference 解析与脱敏能力，不得写入生成的 Rust 源码或日志。
+- OpenAI-compatible provider 适配器只负责协议映射；业务检索、缓存、存储、
+  MQ 与异步任务分别通过现有 Roze 模块封装成 AI Tool，不复制对应实现。
+- AI 工具权限来自入站 `Context`；Agent 循环必须有明确 `max_steps`，并遵守
+  deadline 与 cancellation。
+- Workflow 必须在启动前校验环、不可达节点和 START/END 路径；节点复用同一
+  Roze Context。RAG 通过 `roze-search` 适配器检索和索引，ranking、filter、
+  rerank 与文档字段映射属于应用逻辑。
+- 可恢复 Workflow 必须校验 checkpoint version、graph revision、tenant 和
+  subject。内存 CheckpointStore 仅用于开发测试；对象存储适配器必须复用
+  `roze-storage`，敏感状态负责加密，并通过现有锁/租约机制串行化并发 resume。
+- 并行 Workflow 仅并发同一拓扑层；多 Agent task 数和每个 Agent 的
+  `max_steps` 都必须有界，并继续传播同一个 Roze Context。
+- Workflow 事件流必须保持稳定拓扑顺序；模型选择的 Agent 委派必须走标准
+  Tool 权限检查，且不得隐式向子 Agent 注入递归委派能力。
+- 节点级 chunk 流必须传播同一 Context、提供全局有界 chunk 预算并保持背压；
+  框架只自动组合严格线性 START/END 路径，分支、合并与 zip 语义由应用显式实现。
+- AI 模块生成必须事务化；失败时目标项目保持调用前状态。
+
 ## 可观测性与基数
 
 - 指标 label 只能来自有界配置枚举，例如 service、operation、boundary、

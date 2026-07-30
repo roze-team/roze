@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror::Error as ThisError;
@@ -40,6 +41,8 @@ pub struct ServiceConfig {
     pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub ai: Option<AiConfig>,
     #[serde(default)]
     pub kafka: Option<KafkaConfig>,
     #[serde(default)]
@@ -80,6 +83,106 @@ impl ServiceProfile {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AiConfig {
+    #[serde(default = "default_ai_provider")]
+    pub default_provider: String,
+    #[serde(default = "default_ai_max_steps")]
+    pub max_steps: usize,
+    #[serde(default)]
+    pub providers: BTreeMap<String, AiProviderConfig>,
+}
+
+impl AiConfig {
+    pub fn default_provider_config(&self) -> Option<&AiProviderConfig> {
+        self.providers.get(&self.default_provider)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.default_provider.trim().is_empty(),
+            "ai.default_provider must not be empty"
+        );
+        anyhow::ensure!(
+            (1..=64).contains(&self.max_steps),
+            "ai.max_steps must be between 1 and 64"
+        );
+        anyhow::ensure!(
+            !self.providers.is_empty(),
+            "ai.providers must contain at least one provider"
+        );
+        anyhow::ensure!(
+            self.providers.contains_key(&self.default_provider),
+            "ai.default_provider `{}` is not declared in ai.providers",
+            self.default_provider
+        );
+        for (name, provider) in &self.providers {
+            anyhow::ensure!(
+                !name.trim().is_empty(),
+                "ai.providers contains an empty provider name"
+            );
+            provider
+                .validate()
+                .with_context(|| format!("invalid ai.providers.{name}"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProviderKind {
+    #[default]
+    OpenaiCompatible,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AiProviderConfig {
+    #[serde(default)]
+    pub kind: AiProviderKind,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub model: String,
+    #[serde(default = "default_ai_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl AiProviderConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.base_url.trim().is_empty(),
+            "base_url must not be empty"
+        );
+        let url = reqwest::Url::parse(&self.base_url)
+            .with_context(|| format!("base_url `{}` is not a valid URL", self.base_url))?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https"),
+            "base_url must use http or https"
+        );
+        anyhow::ensure!(
+            url.username().is_empty() && url.password().is_none(),
+            "base_url must not contain credentials"
+        );
+        anyhow::ensure!(!self.model.trim().is_empty(), "model must not be empty");
+        anyhow::ensure!(self.timeout_ms > 0, "timeout_ms must be greater than zero");
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AiProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiProviderConfig")
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("model", &self.model)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
+}
+
 impl ServiceConfig {
     pub fn rpc_client_config(&self, name: &str) -> Option<RpcClientConfig> {
         self.rpc_client_config_ref(name).cloned()
@@ -115,6 +218,9 @@ impl ServiceConfig {
             "service name must not be empty"
         );
         self.governance.validate()?;
+        if let Some(ai) = &self.ai {
+            ai.validate()?;
+        }
         if self.rpc.is_some() && self.rest.is_none() {
             let rpc_uses_client_ip = self
                 .governance
@@ -166,6 +272,7 @@ impl fmt::Debug for ServiceConfig {
             .field("mongo", &self.mongo.is_some())
             .field("cache", &self.cache.is_some())
             .field("auth", &self.auth.is_some())
+            .field("ai", &self.ai.is_some())
             .field("kafka", &self.kafka.is_some())
             .field("nats", &self.nats.is_some())
             .field("outbox", &self.outbox.is_some())
@@ -176,6 +283,18 @@ impl fmt::Debug for ServiceConfig {
             .field("governance", &self.governance)
             .finish()
     }
+}
+
+fn default_ai_provider() -> String {
+    "default".to_string()
+}
+
+fn default_ai_max_steps() -> usize {
+    8
+}
+
+fn default_ai_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3113,6 +3232,74 @@ governance: {}
         assert_eq!(topology.routing, DatabaseRouting::Fnv1a64JumpV1);
         assert_eq!(topology.shards.len(), 2);
         assert_eq!(topology.shards[0].id, "shard-00");
+    }
+
+    #[test]
+    fn ai_provider_config_validates_and_redacts_credentials() {
+        let config: ServiceConfig = deserialize_config_value(serde_json::json!({
+            "name": "demo",
+            "ai": {
+                "default_provider": "primary",
+                "max_steps": 12,
+                "providers": {
+                    "primary": {
+                        "kind": "openai_compatible",
+                        "base_url": "https://api.example.com/v1",
+                        "api_key": "secret-value",
+                        "model": "example-model",
+                        "timeout_ms": 5000
+                    }
+                }
+            },
+            "governance": {}
+        }))
+        .expect("valid service config");
+
+        let ai = config.ai.expect("AI config");
+        assert_eq!(ai.max_steps, 12);
+        assert_eq!(
+            ai.default_provider_config().expect("provider").model,
+            "example-model"
+        );
+        let debug = format!("{:?}", ai.default_provider_config().unwrap());
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-value"));
+    }
+
+    #[test]
+    fn ai_provider_config_rejects_missing_defaults_and_url_credentials() {
+        let missing = AiConfig {
+            default_provider: "missing".to_string(),
+            max_steps: 8,
+            providers: BTreeMap::from([(
+                "primary".to_string(),
+                AiProviderConfig {
+                    kind: AiProviderKind::OpenaiCompatible,
+                    base_url: "https://api.example.com/v1".to_string(),
+                    api_key: None,
+                    model: "example-model".to_string(),
+                    timeout_ms: 5_000,
+                },
+            )]),
+        };
+        assert!(missing
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("missing"));
+
+        let credentials = AiProviderConfig {
+            kind: AiProviderKind::OpenaiCompatible,
+            base_url: "https://user:password@example.com/v1".to_string(),
+            api_key: None,
+            model: "example-model".to_string(),
+            timeout_ms: 5_000,
+        };
+        assert!(credentials
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain credentials"));
     }
 
     #[test]

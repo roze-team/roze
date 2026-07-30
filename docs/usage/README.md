@@ -39,6 +39,10 @@ services.
   SQL/Mongo model generation and inspection, Elasticsearch/OpenSearch/
   Meilisearch search generation and inspection, client SDKs, OpenAPI output,
   Docker/Kubernetes manifests, type mapping, and validator tag support.
+- [AI module generation](./rozectl-ai.md): adds a provider-neutral AI runtime,
+  agent composition, tools, prompts, optional resumable DAG workflows,
+  multi-agent teams, and Roze Search-backed RAG scaffolds to an existing
+  generated REST/RPC project without changing the established generators.
 
 ## Install rozectl
 
@@ -85,6 +89,7 @@ rozectl api --help
 rozectl rpc --help
 rozectl model --help
 rozectl search --help
+rozectl ai --help
 ```
 
 If `rozectl` is not found after installation, make sure Cargo's bin directory is

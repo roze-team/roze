@@ -1,12 +1,15 @@
 # Module Maturity Matrix
 
-Roze 1.0 separates public-contract stability from operational evidence. Every
-area below has a stable 1.x API or generated contract. The evidence column says
-what has actually been exercised; it must not be upgraded by declaration.
+Roze 1.0 separates public-contract stability from operational evidence. Areas
+below have a stable 1.x API or generated contract unless explicitly marked
+experimental. The evidence column says what has actually been exercised; it
+must not be upgraded by declaration.
 
 Status legend:
 
 - `stable`: covered by Semantic Versioning, upgrade notes, and the contract gate.
+- `experimental`: available for adoption, but its API or generated contract may
+  change before promotion to stable.
 - `verified`: focused tests plus generated compile/smoke coverage exist.
 - `integration`: real dependency integration coverage exists.
 - `long-run pending`: the 24h/72h signed evidence required for a
@@ -19,6 +22,7 @@ Status legend:
 | Stream worker generation | stable | verified | Producer, consumer, envelope, lifecycle, shutdown, and generated compile coverage use the shared event contract. |
 | OpenAPI generation | stable | verified | Runtime constraints, extensions, auth declarations, reports, and chart contracts are projected into OpenAPI 3. |
 | TypeScript/JavaScript SDK generation | stable | verified | Web clients include typed errors, auth injection, interceptors, cancellation, timeout, and bounded retry. Non-Web SDKs are out of scope. |
+| AI runtime and module generation | experimental | verified | Provider-neutral model/tool/agent contracts, compiled and parallel-layer DAG workflows, deterministic workflow event streaming, bounded backpressure-aware linear node chunk streams, checkpoint/interrupt/resume with a `roze-storage` adapter, bounded task teams and permission-aware model delegation, standard RAG components, `roze-search` adapters, OpenAI-compatible invoke/SSE/tool calls, transactional generation, and compile smoke are implemented. Automatic branch/join stream merge semantics and CAS/lease-safe concurrent resume remain application-explicit. |
 | HTTP middleware | stable | verified | Trace, recovery, metrics, CORS, timeout, connection/body limits, rate limit, breaker, retry budget, and shedding share bounded operation labels. |
 | Gateway | stable | long-run pending | Registry routing, canary/blue-green/A-B selection, mirroring, health/outlier handling, retry, fallback, SSE, WebSocket, TLS, auth, and hot reload are implemented. |
 | Config center | stable | long-run pending | Signed publish, staged rollout, audit, permissions, listener isolation, snapshot restore, promotion, rejection, and rollback are implemented. |
