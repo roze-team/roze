@@ -378,7 +378,7 @@ impl CloudObjectStorage {
     }
 
     fn ensure_s3(&self) -> anyhow::Result<()> {
-        if self.config.provider != StorageProvider::S3Compatible {
+        if !self.uses_s3_protocol() {
             anyhow::bail!(
                 "{:?} runtime operations are not supported; configure an SDK adapter",
                 self.config.provider
@@ -386,6 +386,15 @@ impl CloudObjectStorage {
         }
         if self.config.endpoint.is_none() {
             anyhow::bail!("S3-compatible storage requires endpoint");
+        }
+        if self.config.provider == StorageProvider::QiniuKodo
+            && self
+                .config
+                .region
+                .as_deref()
+                .is_none_or(|region| region.trim().is_empty())
+        {
+            anyhow::bail!("Qiniu Kodo S3-compatible storage requires region");
         }
         if self
             .config
@@ -403,6 +412,13 @@ impl CloudObjectStorage {
             anyhow::bail!("S3-compatible storage requires access_key and secret_key");
         }
         Ok(())
+    }
+
+    fn uses_s3_protocol(&self) -> bool {
+        matches!(
+            self.config.provider,
+            StorageProvider::S3Compatible | StorageProvider::QiniuKodo
+        )
     }
 
     fn object_key(&self, key: &str) -> anyhow::Result<String> {
@@ -566,7 +582,7 @@ impl ObjectStorage for CloudObjectStorage {
     }
 
     async fn presign_put(&self, key: &str, expires: Duration) -> anyhow::Result<PresignedUrl> {
-        if self.config.provider != StorageProvider::S3Compatible {
+        if !self.uses_s3_protocol() {
             return unsigned_cloud_url("PUT", &self.config, key, expires);
         }
         self.ensure_s3()?;
@@ -575,7 +591,7 @@ impl ObjectStorage for CloudObjectStorage {
     }
 
     async fn presign_get(&self, key: &str, expires: Duration) -> anyhow::Result<PresignedUrl> {
-        if self.config.provider != StorageProvider::S3Compatible {
+        if !self.uses_s3_protocol() {
             return unsigned_cloud_url("GET", &self.config, key, expires);
         }
         self.ensure_s3()?;
@@ -1079,6 +1095,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qiniu_kodo_uses_its_s3_compatible_sigv4_runtime() {
+        let storage = CloudObjectStorage::new(StorageConfig {
+            provider: StorageProvider::QiniuKodo,
+            bucket: "roze-kodo".to_string(),
+            endpoint: Some("https://s3.cn-east-1.qiniucs.com".to_string()),
+            region: Some("cn-east-1".to_string()),
+            access_key: Some("test-access-key".to_string()),
+            secret_key: Some("test-secret-key".to_string()),
+            ..Default::default()
+        });
+
+        let signed = storage
+            .presign_put("images/a.png", Duration::from_secs(60))
+            .await
+            .expect("presign Kodo upload");
+        assert!(signed
+            .url
+            .starts_with("https://s3.cn-east-1.qiniucs.com/roze-kodo/images/a.png?"));
+        assert!(signed.url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(signed.url.contains("%2Fcn-east-1%2Fs3%2Faws4_request"));
+        assert!(signed.url.contains("X-Amz-Signature="));
+    }
+
+    #[tokio::test]
     async fn non_s3_runtime_operations_fail_explicitly() {
         let storage = CloudObjectStorage::new(StorageConfig {
             provider: StorageProvider::AliyunOss,
@@ -1137,6 +1177,63 @@ mod tests {
             .await
             .expect("stat after delete")
             .is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a dedicated real Qiniu Kodo test bucket"]
+    async fn qiniu_kodo_round_trip_against_real_service() {
+        let storage = CloudObjectStorage::new(StorageConfig {
+            provider: StorageProvider::QiniuKodo,
+            bucket: std::env::var("ROZE_TEST_KODO_BUCKET")
+                .expect("ROZE_TEST_KODO_BUCKET is required"),
+            endpoint: Some(
+                std::env::var("ROZE_TEST_KODO_ENDPOINT")
+                    .expect("ROZE_TEST_KODO_ENDPOINT is required"),
+            ),
+            region: Some(
+                std::env::var("ROZE_TEST_KODO_REGION").expect("ROZE_TEST_KODO_REGION is required"),
+            ),
+            access_key: Some(
+                std::env::var("ROZE_TEST_KODO_ACCESS_KEY")
+                    .expect("ROZE_TEST_KODO_ACCESS_KEY is required"),
+            ),
+            secret_key: Some(
+                std::env::var("ROZE_TEST_KODO_SECRET_KEY")
+                    .expect("ROZE_TEST_KODO_SECRET_KEY is required"),
+            ),
+            validation: StorageValidation {
+                allowed_extensions: vec!["png".into()],
+                allowed_mime_types: vec!["image/png".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let key = format!("roze-integration/{}.png", uuid::Uuid::now_v7());
+        let payload = vec![137, 80, 78, 71, 1, 2, 3];
+
+        let info = storage
+            .put_object(PutObjectRequest::image(&key, payload.clone(), "image/png"))
+            .await
+            .expect("put Kodo object");
+        assert_eq!(info.provider, StorageProvider::QiniuKodo);
+        assert_eq!(
+            storage.get_object(&key).await.expect("get Kodo object"),
+            payload
+        );
+        assert!(storage
+            .stat_object(&key)
+            .await
+            .expect("stat Kodo object")
+            .is_some());
+        let signed = storage
+            .presign_get(&key, Duration::from_secs(60))
+            .await
+            .expect("presign Kodo get");
+        assert!(signed.url.contains("X-Amz-Signature="));
+        storage
+            .delete_object(&key)
+            .await
+            .expect("delete Kodo object");
     }
 
     #[tokio::test]

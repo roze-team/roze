@@ -11678,10 +11678,11 @@ impl ServiceContext {
             };
             if use_redis {
                 let cache = config.cache.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("Redis idempotency requires cache.url configuration")
+                    anyhow::anyhow!("Redis idempotency requires cache Redis topology configuration")
                 })?;
                 let mut store_config =
                     roze_middleware::RedisIdempotencyConfig::new(cache.url.clone());
+                store_config.cluster_urls = cache.cluster_urls.clone();
                 store_config.key_prefix = settings.key_prefix;
                 store_config.record_ttl_millis = settings.record_ttl_millis;
                 let store = roze_middleware::RedisIdempotencyStore::connect(store_config)?;
@@ -12022,10 +12023,11 @@ impl ServiceContext {
             };
             if use_redis {
                 let cache = config.cache.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("Redis idempotency requires cache.url configuration")
+                    anyhow::anyhow!("Redis idempotency requires cache Redis topology configuration")
                 })?;
                 let mut store_config =
                     roze_middleware::RedisIdempotencyConfig::new(cache.url.clone());
+                store_config.cluster_urls = cache.cluster_urls.clone();
                 store_config.key_prefix = settings.key_prefix;
                 store_config.record_ttl_millis = settings.record_ttl_millis;
                 let store = roze_middleware::RedisIdempotencyStore::connect(store_config)?;

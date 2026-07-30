@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use roze_auth::BearerTokenVerifier as _;
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
+use roze_redis::redis;
 use roze_resilience::{
     BreakerDecision, BreakerPermit, BreakerRegistry, GovernanceBoundary, OperationKey,
     SheddingRegistry,
@@ -1074,6 +1075,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedisIdempotencyConfig {
     pub url: String,
+    pub cluster_urls: Vec<String>,
     pub key_prefix: String,
     pub record_ttl_millis: u64,
 }
@@ -1082,6 +1084,7 @@ impl RedisIdempotencyConfig {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
+            cluster_urls: Vec::new(),
             key_prefix: "roze:idempotency:v1".to_string(),
             record_ttl_millis: 86_400_000,
         }
@@ -1090,7 +1093,7 @@ impl RedisIdempotencyConfig {
 
 #[derive(Clone)]
 pub struct RedisIdempotencyStore {
-    client: redis::Client,
+    client: roze_redis::RedisClient,
     key_prefix: String,
     record_ttl_millis: u64,
 }
@@ -1116,7 +1119,7 @@ impl RedisIdempotencyStore {
             "Redis idempotency record TTL must be positive"
         );
         Ok(Self {
-            client: redis::Client::open(config.url)?,
+            client: roze_redis::RedisClient::open_topology(&config.url, &config.cluster_urls)?,
             key_prefix: config.key_prefix.trim_end_matches(':').to_string(),
             record_ttl_millis: config.record_ttl_millis,
         })
@@ -1126,8 +1129,8 @@ impl RedisIdempotencyStore {
         format!("{}:{}:{}:{key}", self.key_prefix, scope.len(), scope)
     }
 
-    async fn connection(&self) -> anyhow::Result<redis::aio::MultiplexedConnection> {
-        Ok(self.client.get_multiplexed_async_connection().await?)
+    async fn connection(&self) -> anyhow::Result<roze_redis::RedisConnection> {
+        self.client.connection().await
     }
 
     pub async fn health_check(&self) -> anyhow::Result<()> {

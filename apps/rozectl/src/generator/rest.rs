@@ -223,9 +223,7 @@ pub fn render_handlers(spec: &ApiSpec) -> String {
         .iter()
         .any(|route| route_uses_auth(spec, route))
     {
-        out.push_str(
-            "fn authorize(headers: &HeaderMap, ctx: &ServiceContext) -> Result<roze_context::AuthContext, RozeError> {\n    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;\n    let header_value = headers\n        .get(\"authorization\")\n        .and_then(|value| value.to_str().ok())\n        .ok_or(RozeError::Unauthorized)?;\n    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;\n    let claims = roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;\n    Ok(roze_context::AuthContext {\n        subject: claims.sub,\n        roles: claims.roles,\n        tenant: claims.tenant,\n    })\n}\n\n",
-        );
+        out.push_str(authorize_rs());
     }
 
     for route in &spec.rest_routes {
@@ -294,9 +292,7 @@ pub fn render_handler_mod(spec: &ApiSpec) -> String {
         .iter()
         .any(|route| route_uses_auth(spec, route))
     {
-        out.push_str(
-            "fn authorize(headers: &HeaderMap, ctx: &ServiceContext) -> Result<roze_context::AuthContext, RozeError> {\n    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;\n    let header_value = headers\n        .get(\"authorization\")\n        .and_then(|value| value.to_str().ok())\n        .ok_or(RozeError::Unauthorized)?;\n    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;\n    let claims = roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;\n    Ok(roze_context::AuthContext {\n        subject: claims.sub,\n        roles: claims.roles,\n        tenant: claims.tenant,\n    })\n}\n\n",
-        );
+        out.push_str(authorize_rs());
     }
 
     out
@@ -383,6 +379,33 @@ pub fn render_route_mod(spec: &ApiSpec) -> String {
     out.push_str(report_chart_interface_code());
 
     out
+}
+
+fn authorize_rs() -> &'static str {
+    r#"fn authorize(
+    headers: &HeaderMap,
+    ctx: &ServiceContext,
+    request_ctx: &roze_context::Context,
+) -> Result<roze_context::Context, RozeError> {
+    let jwt = ctx.jwt_config().ok_or(RozeError::Unauthorized)?;
+    let header_value = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(RozeError::Unauthorized)?;
+    let token = roze_jwt::extract_bearer_token(header_value).ok_or(RozeError::Unauthorized)?;
+    let claims = roze_jwt::verify_token(token, &jwt).map_err(|_| RozeError::Unauthorized)?;
+    let auth = roze_context::AuthContext {
+        subject: claims.sub,
+        roles: claims.roles,
+        tenant: claims.tenant,
+    };
+    Ok(request_ctx
+        .with_auth(auth)
+        .with_permissions(claims.permissions)
+        .with_metadata(roze_context::SCOPE_METADATA_KEY, claims.scopes.join(",")))
+}
+
+"#
 }
 
 fn report_chart_interface_code() -> &'static str {
@@ -1473,7 +1496,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         response_type = response_type
     ));
     if uses_auth {
-        out.push_str("    let request_ctx = request_ctx.with_auth(authorize(&headers, &ctx)?);\n");
+        out.push_str("    let request_ctx = authorize(&headers, &ctx, &request_ctx)?;\n");
     }
     out.push_str(&format!(
         "    roze_middleware::enforce_route_rate_limit(ctx.rate_limiter.as_ref(), ctx.config.name.as_str(), {handler:?}, {method:?}, &request_ctx, client_ip, &headers, Some(&ctx.config.governance)).await?;\n",
@@ -1593,7 +1616,7 @@ fn render_websocket_route_handler(spec: &ApiSpec, route: &crate::parser::RestRou
         params = params.join(", "),
     ));
     if uses_auth {
-        out.push_str("    let request_ctx = request_ctx.with_auth(authorize(&headers, &ctx)?);\n");
+        out.push_str("    let request_ctx = authorize(&headers, &ctx, &request_ctx)?;\n");
     }
     out.push_str(&format!(
         "    roze_middleware::enforce_route_rate_limit(ctx.rate_limiter.as_ref(), ctx.config.name.as_str(), {handler:?}, \"GET\", &request_ctx, client_ip, &headers, Some(&ctx.config.governance)).await?;\n",
@@ -3188,8 +3211,11 @@ mod tests {
         assert!(handlers.contains(
             "roze_middleware::enforce_permissions(&request_ctx, &[\"users:read\", \"users:list\"])"
         ));
-        assert!(handlers
-            .contains("let request_ctx = request_ctx.with_auth(authorize(&headers, &ctx)?);"));
+        assert!(handlers.contains("let request_ctx = authorize(&headers, &ctx, &request_ctx)?;"));
+        assert!(handlers.contains(".with_permissions(claims.permissions)"));
+        assert!(handlers.contains(
+            ".with_metadata(roze_context::SCOPE_METADATA_KEY, claims.scopes.join(\",\"))"
+        ));
 
         let openapi = render_openapi(&spec);
         assert!(openapi.contains(".extension(\"x-roze-permissions\", serde_json::json!([\"users:read\", \"users:list\"]))"));
@@ -3416,7 +3442,7 @@ mod tests {
         assert!(handlers.contains(".route(\"/api/v1/users/{id}\", get(get_user))"));
         assert!(handlers.contains(".route(\"/internal/stats\", get(get_stats))"));
         assert!(handlers.contains(".route(\"/internal/users/{id}\", patch(update_user))"));
-        assert!(handlers.contains("authorize(&headers, &ctx)"));
+        assert!(handlers.contains("authorize(&headers, &ctx, &request_ctx)"));
         assert!(handlers
             .contains("ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout)"));
         assert!(handlers.contains("crate::middleware::audit(&ctx, &request_ctx).await"));

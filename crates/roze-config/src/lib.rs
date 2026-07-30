@@ -198,13 +198,17 @@ impl ServiceConfig {
             .redis_url
             .as_deref()
             .is_none_or(|url| url.trim().is_empty())
+            && config.redis_cluster_urls.is_empty()
             && matches!(
                 config.store,
                 roze_rate_limit::RateLimitStoreKind::Auto
                     | roze_rate_limit::RateLimitStoreKind::Redis
             )
         {
-            config.redis_url = self.cache.as_ref().map(|cache| cache.url.clone());
+            if let Some(cache) = &self.cache {
+                config.redis_url = (!cache.url.trim().is_empty()).then(|| cache.url.clone());
+                config.redis_cluster_urls = cache.cluster_urls.clone();
+            }
         }
         if config.namespace.is_none() {
             config.namespace = Some(self.profile.as_str().to_string());
@@ -220,6 +224,16 @@ impl ServiceConfig {
         self.governance.validate()?;
         if let Some(ai) = &self.ai {
             ai.validate()?;
+        }
+        if let Some(cache) = &self.cache {
+            anyhow::ensure!(
+                !cache.url.trim().is_empty() || !cache.cluster_urls.is_empty(),
+                "cache requires url or cluster_urls"
+            );
+            anyhow::ensure!(
+                cache.cluster_urls.iter().all(|url| !url.trim().is_empty()),
+                "cache.cluster_urls cannot contain empty seed URLs"
+            );
         }
         if self.rpc.is_some() && self.rest.is_none() {
             let rpc_uses_client_ip = self
@@ -1001,7 +1015,10 @@ pub enum TelemetryPropagator {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CacheConfig {
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub cluster_urls: Vec<String>,
     #[serde(default = "default_cache_namespace")]
     pub namespace: String,
     #[serde(default = "default_cache_ttl_secs")]
@@ -1013,6 +1030,7 @@ impl fmt::Debug for CacheConfig {
         formatter
             .debug_struct("CacheConfig")
             .field("url", &"[REDACTED]")
+            .field("cluster_urls", &vec!["[REDACTED]"; self.cluster_urls.len()])
             .field("namespace", &self.namespace)
             .field("default_ttl_secs", &self.default_ttl_secs)
             .finish()
@@ -2484,7 +2502,9 @@ governance:
 name: auth
 profile: production
 cache:
-  url: redis://user:cache-secret@127.0.0.1:6379
+  cluster_urls:
+    - redis://user:cache-secret@127.0.0.1:7000
+    - redis://user:cache-secret@127.0.0.1:7001
 governance:
   rate_limiter:
     store: auto
@@ -2503,10 +2523,8 @@ governance:
             roze_rate_limit::RateLimitStoreKind::Redis
         );
         assert_eq!(limiter.namespace.as_deref(), Some("production"));
-        assert_eq!(
-            limiter.redis_url.as_deref(),
-            Some("redis://user:cache-secret@127.0.0.1:6379")
-        );
+        assert!(limiter.redis_url.is_none());
+        assert_eq!(limiter.redis_cluster_urls.len(), 2);
         let _ = fs::remove_file(path);
     }
 

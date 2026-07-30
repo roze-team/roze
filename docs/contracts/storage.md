@@ -1,41 +1,28 @@
 # Roze 对象存储契约
 
-`roze-storage` 提供统一对象存储接口，用于图片、附件、头像、导入文件等上传场景。
+`roze-storage` 为图片、附件、头像和导入文件提供统一的 `ObjectStorage`
+接口。业务模块只依赖该接口，不直接依赖云厂商 SDK。
 
 ## Provider
 
-支持的配置边界：
+- `local`：本地读写、删除、stat 和 URL 生成。
+- `s3_compatible`：基于 AWS Signature V4 的 S3 兼容运行时。
+- `qiniu_kodo`：复用同一 SigV4 运行时，通过七牛 Kodo 官方 S3
+  兼容 endpoint 执行服务端读写和预签名。
+- `aliyun_oss`、`tencent_cos`：保留配置边界；在专用签名适配器完成前，
+  mutation 继续 fail closed。
 
-- `local`
-- `s3_compatible`
-- `qiniu_kodo`
-- `aliyun_oss`
-- `tencent_cos`
-
-当前已完整可执行：
-
-- `local`：本地落盘、读取、删除、stat、presign URL。
-
-当前已提供统一配置和接口边界：
-
-- 七牛 Kodo
-- 阿里云 OSS
-- 腾讯云 COS
-- S3 API providers
-
-云厂商真实签名上传需要继续接具体 SDK 或签名协议；业务代码先依赖 `ObjectStorage` trait，不直接依赖厂商 SDK。
-
-## 配置示例
+Kodo 配置示例：
 
 ```yaml
 storage:
-  provider: aliyun_oss
-  bucket: images
-  endpoint: https://oss-cn-hangzhou.aliyuncs.com
-  region: cn-hangzhou
-  access_key: ${OSS_ACCESS_KEY}
-  secret_key: ${OSS_SECRET_KEY}
-  public_base_url: https://cdn.example.com
+  provider: qiniu_kodo
+  bucket: roze-images
+  endpoint: https://s3.cn-east-1.qiniucs.com
+  region: cn-east-1
+  access_key: ${QINIU_ACCESS_KEY}
+  secret_key: ${QINIU_SECRET_KEY}
+  public_base_url: https://media.example.com
   tenant_prefix: tenant-a
   validation:
     max_size_bytes: 10485760
@@ -43,9 +30,10 @@ storage:
     allowed_extensions: [jpg, jpeg, png, webp, gif]
 ```
 
-## 统一接口
+`bucket` 必须填写七牛空间对应的 S3 空间名。`endpoint` 和 `region`
+必须属于同一区域。
 
-`ObjectStorage`：
+## 统一接口
 
 - `put_object`
 - `get_object`
@@ -54,43 +42,16 @@ storage:
 - `presign_put`
 - `presign_get`
 
-`PutObjectRequest`：
-
-- `key`
-- `bytes`
-- `content_type`
-- `metadata`
-
-`ObjectInfo`：
-
-- `provider`
-- `bucket`
-- `key`
-- `size`
-- `content_type`
-- `etag`
-- `url`
-- `metadata`
-- `updated_at_millis`
+服务端上传统一执行大小、MIME、扩展名、对象键和 tenant prefix 校验。
+预签名上传只签发短期 PUT URL；调用方仍应在上传完成后通过 `stat_object`
+校验对象，并由业务层决定失败清理和覆盖策略。
 
 ## 安全边界
 
-已实现：
-
-- key 规范化。
-- 阻止 `/` 开头、空 key、`\0`、`..` 路径穿越。
-- 非安全 path segment 自动转 `_`。
-- 默认图片 MIME 白名单。
-- 默认图片扩展名白名单。
-- 默认 10MB 上传上限。
-- tenant prefix。
-
-后续生产增强：
-
-- 七牛/OSS/COS 真实服务端签名。
-- 分片上传。
-- 回调验签。
-- 图片尺寸/内容探测。
-- 病毒扫描接口。
-- CDN 刷新/预热。
-- lifecycle/归档策略。
+- 拒绝空 key、绝对路径、NUL 和 `..` 路径穿越。
+- 默认图片 MIME/扩展名白名单和 10 MiB 上限。
+- AK/SK 在 `Debug` 输出中始终脱敏。
+- Kodo 使用官方 S3 兼容 endpoint 与 AWS Signature V4，不生成无签名的
+  “兼容 URL”。
+- 七牛原生上传策略、回调验签、分片上传、CDN 刷新和内容安全不属于当前
+  S3 兼容适配器；需要这些能力时应作为独立 provider 扩展实现。

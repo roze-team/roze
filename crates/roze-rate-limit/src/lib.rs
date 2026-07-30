@@ -33,6 +33,8 @@ pub struct RateLimiterConfig {
     pub store: RateLimitStoreKind,
     #[serde(default)]
     pub redis_url: Option<String>,
+    #[serde(default)]
+    pub redis_cluster_urls: Vec<String>,
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
     #[serde(default)]
@@ -49,6 +51,10 @@ impl fmt::Debug for RateLimiterConfig {
             .debug_struct("RateLimiterConfig")
             .field("store", &self.store)
             .field("redis_url", &self.redis_url.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "redis_cluster_urls",
+                &vec!["[REDACTED]"; self.redis_cluster_urls.len()],
+            )
             .field("key_prefix", &self.key_prefix)
             .field("namespace", &self.namespace)
             .field("timeout_ms", &self.timeout_ms)
@@ -62,6 +68,7 @@ impl Default for RateLimiterConfig {
         Self {
             store: RateLimitStoreKind::Auto,
             redis_url: None,
+            redis_cluster_urls: Vec::new(),
             key_prefix: default_key_prefix(),
             namespace: None,
             timeout_ms: default_timeout_ms(),
@@ -73,7 +80,10 @@ impl Default for RateLimiterConfig {
 impl RateLimiterConfig {
     pub fn resolved_store_kind(&self) -> RateLimitStoreKind {
         match self.store {
-            RateLimitStoreKind::Auto if self.redis_url.as_deref().is_some_and(non_empty) => {
+            RateLimitStoreKind::Auto
+                if self.redis_url.as_deref().is_some_and(non_empty)
+                    || !self.redis_cluster_urls.is_empty() =>
+            {
                 RateLimitStoreKind::Redis
             }
             RateLimitStoreKind::Auto => RateLimitStoreKind::Memory,
@@ -93,10 +103,17 @@ impl RateLimiterConfig {
                 "rate limit namespace must not be empty when configured"
             );
         }
+        anyhow::ensure!(
+            self.redis_cluster_urls
+                .iter()
+                .all(|url| !url.trim().is_empty()),
+            "redis_cluster_urls cannot contain empty seed URLs"
+        );
         if self.store == RateLimitStoreKind::Redis {
             anyhow::ensure!(
-                self.redis_url.as_deref().is_some_and(non_empty),
-                "Redis rate limiting requires redis_url"
+                self.redis_url.as_deref().is_some_and(non_empty)
+                    || !self.redis_cluster_urls.is_empty(),
+                "Redis rate limiting requires redis_url or redis_cluster_urls"
             );
         }
         Ok(())
@@ -339,14 +356,11 @@ impl RateLimiter {
         let store: Arc<dyn RateLimitStore> = match store_kind {
             RateLimitStoreKind::Auto => unreachable!("auto store kind must resolve before use"),
             RateLimitStoreKind::Memory => Arc::new(InMemoryRateLimitStore::default()),
-            RateLimitStoreKind::Redis => {
-                let url = config
-                    .redis_url
-                    .as_deref()
-                    .filter(|url| !url.trim().is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("Redis rate limiting requires redis_url"))?;
-                Arc::new(RedisRateLimitStore::connect(url, &key_prefix)?)
-            }
+            RateLimitStoreKind::Redis => Arc::new(RedisRateLimitStore::connect_topology(
+                config.redis_url.as_deref().unwrap_or_default(),
+                &config.redis_cluster_urls,
+                &key_prefix,
+            )?),
         };
         Ok(Self {
             store,
@@ -544,7 +558,7 @@ impl RateLimitStore for InMemoryRateLimitStore {
 
 #[derive(Clone)]
 pub struct RedisRateLimitStore {
-    client: redis::Client,
+    client: roze_redis::RedisClient,
     key_prefix: String,
 }
 
@@ -559,18 +573,26 @@ impl fmt::Debug for RedisRateLimitStore {
 
 impl RedisRateLimitStore {
     pub fn connect(url: &str, key_prefix: &str) -> anyhow::Result<Self> {
+        Self::connect_topology(url, &[], key_prefix)
+    }
+
+    pub fn connect_topology(
+        url: &str,
+        cluster_urls: &[String],
+        key_prefix: &str,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !key_prefix.trim().is_empty(),
             "key prefix must not be empty"
         );
         Ok(Self {
-            client: redis::Client::open(url)?,
+            client: roze_redis::RedisClient::open_topology(url, cluster_urls)?,
             key_prefix: key_prefix.trim_end_matches(':').to_string(),
         })
     }
 
-    async fn connection(&self) -> anyhow::Result<redis::aio::MultiplexedConnection> {
-        Ok(self.client.get_multiplexed_async_connection().await?)
+    async fn connection(&self) -> anyhow::Result<roze_redis::RedisConnection> {
+        self.client.connection().await
     }
 }
 
@@ -601,12 +623,13 @@ impl RateLimitStore for RedisRateLimitStore {
     async fn check(&self, key: &str, limit: RateLimit) -> anyhow::Result<RateLimitDecision> {
         let mut connection = self.connection().await?;
         let refill_ms = limit.refill.as_millis().max(1).min(u128::from(u64::MAX)) as u64;
-        let (allowed, retry_after_ms): (i64, u64) = redis::Script::new(REDIS_TOKEN_BUCKET)
-            .key(format!("{}:{key}", self.key_prefix))
-            .arg(limit.burst)
-            .arg(refill_ms)
-            .invoke_async(&mut connection)
-            .await?;
+        let (allowed, retry_after_ms): (i64, u64) =
+            roze_redis::redis::Script::new(REDIS_TOKEN_BUCKET)
+                .key(format!("{}:{key}", self.key_prefix))
+                .arg(limit.burst)
+                .arg(refill_ms)
+                .invoke_async(&mut connection)
+                .await?;
         Ok(if allowed == 1 {
             RateLimitDecision::allowed(false)
         } else {
@@ -616,7 +639,9 @@ impl RateLimitStore for RedisRateLimitStore {
 
     async fn health_check(&self) -> anyhow::Result<()> {
         let mut connection = self.connection().await?;
-        let response: String = redis::cmd("PING").query_async(&mut connection).await?;
+        let response: String = roze_redis::redis::cmd("PING")
+            .query_async(&mut connection)
+            .await?;
         anyhow::ensure!(
             response.eq_ignore_ascii_case("PONG"),
             "Redis rate limit health check returned an unexpected response"
@@ -781,6 +806,7 @@ mod tests {
         let config = RateLimiterConfig {
             store: RateLimitStoreKind::Redis,
             redis_url: Some(url),
+            redis_cluster_urls: Vec::new(),
             key_prefix: unique,
             namespace: None,
             timeout_ms: 1_000,

@@ -14,10 +14,10 @@ roze-error = { path = "../roze-error" }
 roze-http = { path = "../roze-http" }
 roze-metrics = { path = "../roze-metrics" }
 roze-rate-limit = { path = "../roze-rate-limit" }
+roze-redis = { path = "../roze-redis" }
 roze-resilience = { path = "../roze-resilience" }
 roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
-redis.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 serde.workspace = true

@@ -951,8 +951,10 @@ enum ModelCommands {
         roze_source: RozeSource,
         #[arg(long, value_enum, default_value_t)]
         format: ModelFormat,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
+        #[arg(long, value_enum)]
+        orm: Option<ModelOrm>,
+        #[arg(long, requires_all = ["orm", "update"])]
+        switch_orm: bool,
     },
     Inspect {
         table: String,
@@ -1442,22 +1444,34 @@ fn run() -> anyhow::Result<()> {
                 roze_source,
                 format,
                 orm,
-            } => registry.dispatch(GeneratorCommand::ModelGenerate {
-                schema,
-                out,
-                options: GenerateOptions::new(
-                    if force {
-                        GenerateMode::Force
-                    } else if update {
-                        GenerateMode::Update
-                    } else {
-                        GenerateMode::Create
-                    },
-                    roze_source.into(),
-                ),
-                format: format.into(),
-                orm: orm.into(),
-            })?,
+                switch_orm,
+            } => {
+                let mode = if force {
+                    GenerateMode::Force
+                } else if update {
+                    GenerateMode::Update
+                } else {
+                    GenerateMode::Create
+                };
+                let orm = generator::model::resolve_model_orm(
+                    &out,
+                    mode,
+                    orm.map(Into::into),
+                    switch_orm,
+                )?;
+                if mode == GenerateMode::Update && switch_orm {
+                    eprintln!(
+                        "ORM switch preview: regenerate src/model generated modules and Cargo dependencies; preserve application-owned src/model/*_ext.rs files"
+                    );
+                }
+                registry.dispatch(GeneratorCommand::ModelGenerate {
+                    schema,
+                    out,
+                    options: GenerateOptions::new(mode, roze_source.into()),
+                    format: format.into(),
+                    orm,
+                })?
+            }
             ModelCommands::Inspect {
                 table,
                 schema,
@@ -6136,7 +6150,7 @@ envFrom: []
             Commands::Model {
                 command: ModelCommands::Generate {
                     format: ModelFormat::Sql,
-                    orm: ModelOrm::Toasty,
+                    orm: Some(ModelOrm::Toasty),
                     ..
                 }
             }
@@ -6147,10 +6161,7 @@ envFrom: []
         assert!(matches!(
             default_orm.command,
             Commands::Model {
-                command: ModelCommands::Generate {
-                    orm: ModelOrm::Toasty,
-                    ..
-                }
+                command: ModelCommands::Generate { orm: None, .. }
             }
         ));
 

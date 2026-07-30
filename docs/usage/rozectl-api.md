@@ -443,6 +443,10 @@ Generated TypeScript and JavaScript clients throw `RozeApiError` for
 non-success responses. The typed error preserves HTTP status, business error
 code, message, trace ID, structured details, and `Retry-After`; non-JSON
 upstream responses safely fall back to an `HTTP_<status>` code.
+Successful standard Roze envelopes are returned as their typed `data` value.
+If an HTTP-success envelope has a non-zero business code, the client throws
+the same typed error using `msg`, `trace_id`, and `data`. Raw non-envelope
+responses remain supported for compatibility.
 
 TypeScript and JavaScript `RequestOptions` also support `authToken`,
 `timeoutMs`, an external `AbortSignal`, `beforeRequest`, `afterResponse`, and a
@@ -1623,6 +1627,14 @@ Entity schema:
 rozectl model generate model/schema.ent --out services/user-api --format ent
 rozectl model generate model/schema.ent --out services/user-api --format ent --orm sea-orm
 ```
+
+On `--update`, omit `--orm` to inherit the ORM marker stored in the generated
+`src/model/mod.rs`. Legacy projects are inferred from their unambiguous
+`Cargo.toml` dependency. If Roze cannot determine the ORM, generation stops
+and requires an explicit `--orm`. Changing an existing ORM requires both
+`--orm <target>` and `--switch-orm`; the CLI previews the generated files and
+dependencies that will change while preserving application-owned
+`src/model/*_ext.rs` files.
 
 Database inspection:
 

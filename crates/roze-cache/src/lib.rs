@@ -120,8 +120,8 @@ fn escape_cache_segment(value: &str) -> String {
 
 impl RedisCache {
     pub async fn connect(config: &CacheConfig) -> anyhow::Result<Self> {
-        let client =
-            RedisClient::open(config.url.as_str())?.with_namespace(config.namespace.clone());
+        let client = RedisClient::open_topology(config.url.as_str(), &config.cluster_urls)?
+            .with_namespace(config.namespace.clone());
         Ok(Self {
             client,
             config: config.clone(),
@@ -400,6 +400,7 @@ mod tests {
     fn namespaces_keys() {
         let config = CacheConfig {
             url: "redis://127.0.0.1/".to_string(),
+            cluster_urls: Vec::new(),
             namespace: "roze".to_string(),
             default_ttl_secs: 300,
         };

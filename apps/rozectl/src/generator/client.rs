@@ -92,12 +92,20 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("    let error: Record<string, unknown> = {};\n");
     out.push_str("    try { error = JSON.parse(text) as Record<string, unknown>; } catch { /* non-JSON upstream response */ }\n");
     out.push_str("    const code = typeof error.code === 'string' || typeof error.code === 'number' ? String(error.code) : `HTTP_${response.status}`;\n");
-    out.push_str("    const message = typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`);\n");
+    out.push_str("    const message = typeof error.msg === 'string' ? error.msg : (typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`));\n");
     out.push_str("    const traceId = typeof error.trace_id === 'string' ? error.trace_id : (response.headers.get('x-trace-id') ?? undefined);\n");
-    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
     out.push_str("  }\n");
-    out.push_str("  if (response.status === 204) return undefined as T;\n");
-    out.push_str("  return await response.json() as T;\n");
+    out.push_str("  if (response.status === 204 || method === 'HEAD') return undefined as T;\n");
+    out.push_str("  const payload = await response.json() as unknown;\n");
+    out.push_str("  if (payload && typeof payload === 'object' && 'code' in payload && 'msg' in payload && 'data' in payload) {\n");
+    out.push_str("    const envelope = payload as { code: string | number; msg: unknown; data: unknown; trace_id?: unknown };\n");
+    out.push_str("    const code = String(envelope.code);\n");
+    out.push_str("    const message = typeof envelope.msg === 'string' ? envelope.msg : code;\n");
+    out.push_str("    if (code !== '0') throw new RozeApiError(response.status, code, message, typeof envelope.trace_id === 'string' ? envelope.trace_id : undefined, envelope.data, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    return envelope.data as T;\n");
+    out.push_str("  }\n");
+    out.push_str("  return payload as T;\n");
     out.push_str("}\n\n");
 
     for route in &spec.rest_routes {
@@ -202,12 +210,19 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
         "    try { error = JSON.parse(text); } catch { /* non-JSON upstream response */ }\n",
     );
     out.push_str("    const code = typeof error.code === 'string' || typeof error.code === 'number' ? String(error.code) : `HTTP_${response.status}`;\n");
-    out.push_str("    const message = typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`);\n");
+    out.push_str("    const message = typeof error.msg === 'string' ? error.msg : (typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`));\n");
     out.push_str("    const traceId = typeof error.trace_id === 'string' ? error.trace_id : (response.headers.get('x-trace-id') ?? undefined);\n");
-    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
     out.push_str("  }\n");
-    out.push_str("  if (response.status === 204) return undefined;\n");
-    out.push_str("  return await response.json();\n");
+    out.push_str("  if (response.status === 204 || method === 'HEAD') return undefined;\n");
+    out.push_str("  const payload = await response.json();\n");
+    out.push_str("  if (payload && typeof payload === 'object' && 'code' in payload && 'msg' in payload && 'data' in payload) {\n");
+    out.push_str("    const code = String(payload.code);\n");
+    out.push_str("    const message = typeof payload.msg === 'string' ? payload.msg : code;\n");
+    out.push_str("    if (code !== '0') throw new RozeApiError(response.status, code, message, typeof payload.trace_id === 'string' ? payload.trace_id : undefined, payload.data, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    return payload.data;\n");
+    out.push_str("  }\n");
+    out.push_str("  return payload;\n");
     out.push_str("}\n\n");
 
     for route in &spec.rest_routes {
@@ -840,6 +855,9 @@ mod tests {
         assert!(client.contains("options.afterResponse"));
         assert!(client.contains("await attemptResponse.body?.cancel()"));
         assert!(client.contains("Math.random() * cap"));
+        assert!(client.contains("return envelope.data as T;"));
+        assert!(client.contains("typeof error.msg === 'string' ? error.msg"));
+        assert!(client.contains("response.status === 204 || method === 'HEAD'"));
     }
 
     #[test]
@@ -988,6 +1006,8 @@ mod tests {
         assert!(client.contains("throw new RozeApiError"));
         assert!(client.contains("requestHeaders.authorization = `Bearer ${token}`"));
         assert!(client.contains("Math.min(options.maxAttempts ?? 1, 5)"));
+        assert!(client.contains("return payload.data;"));
+        assert!(client.contains("typeof error.msg === 'string' ? error.msg"));
     }
 
     #[test]

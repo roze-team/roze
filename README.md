@@ -280,6 +280,9 @@ parameters, query parameters, headers, and JSON bodies. Declared custom object
 types, nested arrays, optional fields, and JSON field renames remain typed
 across the generated interface graph. Idempotent routes require a typed,
 reusable `idempotencyKey` option and forward it as `Idempotency-Key`.
+Standard Roze `{ code, msg, data }` responses are unwrapped to `data`;
+non-zero envelope codes raise `RozeApiError` with the server `msg`, while
+non-envelope endpoints retain their raw response shape.
 Use `rozectl api client js example/user.api --out sdk/user.js` for a plain ESM
 JavaScript client with JSDoc typedefs and the same request-building behavior.
 
