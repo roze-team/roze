@@ -38,6 +38,11 @@ When rate limiting or idempotency inherits the service `cache` configuration,
 both the standalone URL and `cluster_urls` are propagated. Existing
 single-URL services require no changes.
 
+Generated REST and RPC `ServiceContext` code passes `cache.cluster_urls` to
+the primary `RedisCache` constructor as well as the Redis idempotency store.
+Regeneration with `--update` therefore keeps cache, idempotency, rate limiting,
+readiness, and application `roze-redis` clients on the same declared topology.
+
 The current Lua operations use exactly one key per invocation, so they remain
 single-slot safe. New multi-key scripts or transactions must use an explicit
 shared hash tag such as `{tenant-id}` and validate it before execution.

@@ -11,6 +11,7 @@ regeneration exercise without adding project-local replacements.
 | RZ-014 | `QiniuKodo` executes the existing S3 SigV4 runtime against Qiniu's official S3-compatible endpoint. | Kodo SigV4 unit test; real bucket evidence remains credential-gated. |
 | RZ-015 | `roze-redis` owns standalone/Cluster topology; cache, idempotency, and rate limit reuse it. | Package tests plus ignored real Cluster round trip. |
 | RZ-016 | `model generate --update` inherits an ORM marker or legacy manifest dependency, refuses ambiguous updates, and requires `--switch-orm` for a change. | ORM inheritance/switch tests and CLI parsing tests. |
+| RZ-017 | Generated REST/RPC primary cache construction propagates `cache.cluster_urls`, matching idempotency and rate-limit topology wiring. | Service-context render test and REST `--update` preservation regression. |
 
 ## Compatibility
 

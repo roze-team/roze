@@ -11591,6 +11591,7 @@ impl ServiceContext {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
                     url: cache.url.clone(),
+                    cluster_urls: cache.cluster_urls.clone(),
                     namespace: cache.namespace.clone(),
                     default_ttl_secs: cache.default_ttl_secs,
                 })
@@ -11930,6 +11931,7 @@ impl ServiceContext {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
                     url: cache.url.clone(),
+                    cluster_urls: cache.cluster_urls.clone(),
                     namespace: cache.namespace.clone(),
                     default_ttl_secs: cache.default_ttl_secs,
                 })
@@ -12692,6 +12694,8 @@ mod tests {
             assert!(rendered.contains("config.resolved_rate_limiter_config()"));
             assert!(rendered.contains("RateLimiter::from_config"));
             assert!(rendered.contains("rate-limit:redis"));
+            assert!(rendered.contains("cluster_urls: cache.cluster_urls.clone(),"));
+            assert!(rendered.contains("store_config.cluster_urls = cache.cluster_urls.clone();"));
         }
     }
 
@@ -16190,6 +16194,7 @@ pub use admin_map::AdminMap;
         assert!(!refreshed_svc.contains("obsolete_customization"));
         assert!(refreshed_svc.contains("pub sql_outbox:"));
         assert!(refreshed_svc.contains("RedisIdempotencyStore::connect"));
+        assert!(refreshed_svc.contains("cluster_urls: cache.cluster_urls.clone(),"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
         assert!(cargo.contains(ROZE_GIT_URL));
         assert!(cargo.contains(r#"name = "custom-service""#));
