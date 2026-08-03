@@ -2,7 +2,9 @@
 
 `roze-transaction-sql` is the official PostgreSQL/MySQL implementation of
 `roze_transaction::OutboxStore` and
-`TransactionalOutbox<sea_orm::DatabaseTransaction>`.
+`TransactionalOutbox<sea_orm::DatabaseTransaction>`. It also implements the
+same contract for `toasty::Transaction`; both adapters write the same schema
+and preserve the same idempotency behavior.
 
 It provides:
 
@@ -35,6 +37,9 @@ outbox:
 An enabled memory store is rejected in the production profile and produces a
 warning in development. Generated `ServiceContext::sql_outbox()` returns the
 concrete store when application code must call `enqueue_in_transaction`.
+For Toasty business repositories, pass `&mut toasty::Transaction` to the same
+method. `SqlOutboxStore` rejects non-SQL Toasty drivers and a PostgreSQL/MySQL
+dialect mismatch before executing the insert.
 
 The bundled migrations are available as `POSTGRES_MIGRATION` and
 `MYSQL_MIGRATION`. `SqlOutboxStore::migrate` applies the migration to the
@@ -44,5 +49,5 @@ SQL through their normal migration approval process and set `migrate: false`.
 Ignored real-database tests use `ROZE_TEST_POSTGRES_URL` and
 `ROZE_TEST_MYSQL_URL`. They verify concurrent claim exclusion, lease recovery,
 retry scheduling, persistence across store reconstruction, transactional
-enqueue, and that a failed consumer transaction does not mark an event
-published.
+enqueue through SeaORM and Toasty (including Toasty rollback), and that a
+failed consumer transaction does not mark an event published.

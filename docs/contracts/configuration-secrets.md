@@ -46,6 +46,13 @@ redacts the entire application value from `Debug` output. Production unknown
 fields are rejected against both schemas and built-in service validation runs
 before a listener is bound.
 
+When updating an older generated REST/RPC service, `rozectl --update` migrates
+only exact historical generated config-loader shapes (`load`, `load_service`,
+and the first typed loader). Custom `src/config/mod.rs` files remain unchanged
+and produce a manual-migration warning. The generated config module declares
+the application-config submodule itself; extra binary targets can therefore
+reuse that config module without separately declaring `application_config`.
+
 `ROZE_AUTH_JWT_KEYS` accepts one JSON array and merges entries by key `id`.
 This supports adding a new key and replacing an existing key without relying
 on array indexes. The YAML active key remains explicit and can use the normal

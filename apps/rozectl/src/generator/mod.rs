@@ -124,6 +124,7 @@ pub enum StreamBroker {
     #[default]
     Memory,
     Rdkafka,
+    RdkafkaCmake,
     RustNative,
 }
 
@@ -132,7 +133,15 @@ impl StreamBroker {
         match self {
             Self::Memory => "memory",
             Self::Rdkafka => "rdkafka",
+            Self::RdkafkaCmake => "rdkafka-cmake",
             Self::RustNative => "rust-native",
+        }
+    }
+
+    const fn runtime_provider_name(self) -> &'static str {
+        match self {
+            Self::RdkafkaCmake => "rdkafka",
+            broker => broker.provider_name(),
         }
     }
 
@@ -140,6 +149,7 @@ impl StreamBroker {
         match self {
             Self::Memory => "memory",
             Self::Rdkafka => "rdkafka",
+            Self::RdkafkaCmake => "rdkafka-cmake",
             Self::RustNative => "rskafka",
         }
     }
@@ -970,7 +980,7 @@ fn render_stream_config_yaml(spec: &ApiSpec, broker: StreamBroker) -> String {
     let mut out = String::new();
     writeln!(&mut out, "name: {}-stream", to_snake_case(&spec.service)).unwrap();
     writeln!(&mut out, "kafka:").unwrap();
-    writeln!(&mut out, "  provider: {}", broker.provider_name()).unwrap();
+    writeln!(&mut out, "  provider: {}", broker.runtime_provider_name()).unwrap();
     writeln!(&mut out, "  brokers: [\"127.0.0.1:9092\"]").unwrap();
     writeln!(
         &mut out,
@@ -3564,6 +3574,7 @@ fn generate_rest_project_in_place(
     remove_path_if_exists(&out.join("src/config.rs"))?;
     remove_path_if_exists(&out.join("src/openapi.rs"))?;
     remove_path_if_exists(&out.join("src/types.rs"))?;
+    let config_migration = migrate_legacy_config_module(out, options.mode)?;
     write_preserved(&out.join("src/config/mod.rs"), config_rs(), options.mode)?;
     fs::write(out.join("src/openapi/mod.rs"), rest::render_openapi(spec))?;
     fs::write(
@@ -3669,7 +3680,10 @@ fn generate_rest_project_in_place(
         out.join("src/svc/mod.rs"),
         rest_service_context_rs(rpc_clients, spec_uses_idempotency(spec)),
     )?;
-    fs::write(out.join("src/main.rs"), rest::render_rest_main(spec))?;
+    fs::write(
+        out.join("src/main.rs"),
+        rest::render_rest_main(spec, config_migration != ConfigMigration::PreservedCustom),
+    )?;
     ensure_model_module(out)?;
     format_new_project_rust(out, options.mode)?;
     Ok(())
@@ -3865,6 +3879,7 @@ fn generate_rpc_project_in_place(
         config_yaml(spec, ProjectKind::Rpc),
         options.mode,
     )?;
+    let config_migration = migrate_legacy_config_module(out, options.mode)?;
     write_preserved(&out.join("src/config/mod.rs"), config_rs(), options.mode)?;
     fs::write(out.join("src/pb/mod.rs"), render_pb(spec))?;
     fs::write(
@@ -3913,7 +3928,10 @@ fn generate_rpc_project_in_place(
         )?;
     }
     fs::write(out.join("src/lib.rs"), rpc::render_lib())?;
-    fs::write(out.join("src/main.rs"), rpc::render_main(spec))?;
+    fs::write(
+        out.join("src/main.rs"),
+        rpc::render_main(spec, config_migration != ConfigMigration::PreservedCustom),
+    )?;
     fs::write(out.join("proto/service.proto"), render_proto(spec)?)?;
     ensure_model_module(out)?;
     format_new_project_rust(out, options.mode)?;
@@ -4156,20 +4174,32 @@ fn write_cargo_toml_with_rpc_clients(
             })?,
         )?),
     };
+    let explicit_manifest = cargo_toml(
+        &package_name,
+        options.dependency_source,
+        local_crates_prefix.as_deref(),
+        false,
+        kind,
+        logical_out,
+        rpc_clients,
+    );
     if options.mode != GenerateMode::Update || !path.exists() {
-        return fs::write(
-            &path,
-            cargo_toml(
-                &package_name,
-                options.dependency_source,
-                local_crates_prefix.as_deref(),
-                in_workspace,
-                kind,
-                logical_out,
-                rpc_clients,
-            ),
-        )
-        .with_context(|| format!("failed to write {}", path.display()));
+        let mut manifest = cargo_toml(
+            &package_name,
+            options.dependency_source,
+            local_crates_prefix.as_deref(),
+            in_workspace,
+            kind,
+            logical_out,
+            rpc_clients,
+        );
+        normalize_generated_workspace_dependencies(
+            &mut manifest,
+            workspace_root.as_deref(),
+            &explicit_manifest,
+        )?;
+        return fs::write(&path, manifest)
+            .with_context(|| format!("failed to write {}", path.display()));
     }
 
     let content =
@@ -4202,8 +4232,106 @@ fn write_cargo_toml_with_rpc_clients(
         );
     }
 
+    normalize_workspace_dependency_document(
+        &mut document,
+        workspace_root.as_deref(),
+        &explicit_manifest,
+    )?;
+
     fs::write(&path, document.to_string())
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn normalize_generated_workspace_dependencies(
+    manifest: &mut String,
+    workspace_root: Option<&Path>,
+    explicit_manifest: &str,
+) -> anyhow::Result<()> {
+    let Some(workspace_root) = workspace_root else {
+        return Ok(());
+    };
+    let mut document = manifest
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse generated Cargo.toml")?;
+    normalize_workspace_dependency_document(
+        &mut document,
+        Some(workspace_root),
+        explicit_manifest,
+    )?;
+    *manifest = document.to_string();
+    Ok(())
+}
+
+fn normalize_workspace_dependency_document(
+    document: &mut toml_edit::DocumentMut,
+    workspace_root: Option<&Path>,
+    explicit_manifest: &str,
+) -> anyhow::Result<()> {
+    let Some(workspace_root) = workspace_root else {
+        return Ok(());
+    };
+    let workspace_manifest_path = workspace_root.join("Cargo.toml");
+    let workspace_manifest = fs::read_to_string(&workspace_manifest_path)
+        .with_context(|| format!("failed to read {}", workspace_manifest_path.display()))?;
+    let workspace_document = workspace_manifest
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", workspace_manifest_path.display()))?;
+    let workspace_dependencies = workspace_document
+        .get("workspace")
+        .and_then(|item| item.get("dependencies"))
+        .and_then(toml_edit::Item::as_table);
+    let explicit_document = explicit_manifest
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse explicit generated Cargo.toml")?;
+
+    for section in ["dependencies", "build-dependencies"] {
+        let Some(explicit_dependencies) = explicit_document
+            .get(section)
+            .and_then(toml_edit::Item::as_table)
+        else {
+            continue;
+        };
+        let Some(dependencies) = document
+            .get_mut(section)
+            .and_then(toml_edit::Item::as_table_mut)
+        else {
+            continue;
+        };
+        let missing = explicit_dependencies
+            .iter()
+            .filter_map(|(name, _)| {
+                dependencies
+                    .get(name)
+                    .filter(|item| dependency_uses_workspace(item))
+                    .filter(|_| {
+                        workspace_dependencies.is_none_or(|workspace| !workspace.contains_key(name))
+                    })
+                    .map(|_| name.to_string())
+            })
+            .collect::<Vec<_>>();
+        for name in missing {
+            dependencies.insert(
+                &name,
+                explicit_dependencies
+                    .get(&name)
+                    .expect("managed explicit dependency exists")
+                    .clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn dependency_uses_workspace(item: &toml_edit::Item) -> bool {
+    item.as_inline_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(toml_edit::Value::as_bool)
+        .or_else(|| {
+            item.as_table()
+                .and_then(|table| table.get("workspace"))
+                .and_then(toml_edit::Item::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 fn has_entries(path: &Path) -> anyhow::Result<bool> {
@@ -11294,6 +11422,30 @@ fn find_parent_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>> {
 }
 
 fn config_rs() -> String {
+    r#"#[path = "../application_config.rs"]
+pub mod application_config;
+
+pub type Config = roze_config::ServiceConfigWithApplication<application_config::ApplicationConfig>;
+
+pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigError> {
+    roze_config::load_service_with_application(path)
+}
+"#
+    .to_string()
+}
+
+fn legacy_config_rs(loader: &str) -> String {
+    format!(
+        r#"pub type Config = roze_config::ServiceConfig;
+
+pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigError> {{
+    roze_config::{loader}(path)
+}}
+"#
+    )
+}
+
+fn root_application_config_rs() -> String {
     r#"pub type Config = roze_config::ServiceConfigWithApplication<crate::application_config::ApplicationConfig>;
 
 pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigError> {
@@ -11301,6 +11453,51 @@ pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigE
 }
 "#
     .to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigMigration {
+    NotApplicable,
+    Migrated,
+    AlreadyCurrent,
+    PreservedCustom,
+}
+
+fn migrate_legacy_config_module(out: &Path, mode: GenerateMode) -> anyhow::Result<ConfigMigration> {
+    if mode != GenerateMode::Update {
+        return Ok(ConfigMigration::NotApplicable);
+    }
+    let path = out.join("src/config/mod.rs");
+    if !path.is_file() {
+        return Ok(ConfigMigration::NotApplicable);
+    }
+
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read legacy config module {}", path.display()))?;
+    let normalized = source.replace("\r\n", "\n");
+    let current = config_rs();
+    if normalized == current {
+        return Ok(ConfigMigration::AlreadyCurrent);
+    }
+
+    let recognized = [
+        legacy_config_rs("load"),
+        legacy_config_rs("load_service"),
+        root_application_config_rs(),
+    ];
+    if recognized.contains(&normalized) {
+        fs::write(&path, current)
+            .with_context(|| format!("failed to migrate config module {}", path.display()))?;
+        return Ok(ConfigMigration::Migrated);
+    }
+
+    eprintln!(
+        "warning: preserving custom config module {}; migrate it to \
+         roze_config::ServiceConfigWithApplication<application_config::ApplicationConfig> and \
+         roze_config::load_service_with_application manually",
+        path.display()
+    );
+    Ok(ConfigMigration::PreservedCustom)
 }
 
 fn application_config_rs() -> String {
@@ -14457,6 +14654,12 @@ fn main() {
         assert!(fs::read_to_string(out.join("src/application.rs"))
             .expect("read migrated REST application hook")
             .contains("pub fn register_services("));
+        fs::create_dir_all(out.join("src/bin")).expect("create extra binary directory");
+        fs::write(
+            out.join("src/bin/scheduler-worker.rs"),
+            "#[path = \"../config/mod.rs\"]\nmod config;\n\nfn main() {\n    let _ = config::load(\"config.yaml\");\n}\n",
+        )
+        .expect("write extra generated-project binary");
         model::generate_model_project(
             &fs::read_to_string(&model).expect("read model"),
             &out,
@@ -14957,9 +15160,10 @@ fn main() {
 
         for (broker, feature, provider) in [
             (StreamBroker::Rdkafka, "rdkafka", "rdkafka"),
+            (StreamBroker::RdkafkaCmake, "rdkafka-cmake", "rdkafka"),
             (StreamBroker::RustNative, "rskafka", "rust-native"),
         ] {
-            let provider_out = root.join(provider);
+            let provider_out = root.join(broker.provider_name());
             write_stream_worker_project_with_broker(
                 &api,
                 &provider_out,
@@ -15026,6 +15230,7 @@ fn main() {
         for broker in [
             StreamBroker::Memory,
             StreamBroker::Rdkafka,
+            StreamBroker::RdkafkaCmake,
             StreamBroker::RustNative,
         ] {
             let out = root.join(broker.provider_name());
@@ -16141,8 +16346,8 @@ pub use admin_map::AdminMap;
             .expect("read initial cargo")
             .replace("name = \"user\"", "name = \"custom-service\"")
             .replace(
-                "anyhow.workspace = true",
-                "anyhow.workspace = true\ncustom.workspace = true",
+                "[dependencies]\n",
+                "[dependencies]\ncustom.workspace = true\n",
             );
         fs::write(&cargo_path, cargo).expect("write custom cargo");
 
@@ -16569,6 +16774,9 @@ pub fn register_services(
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config module")
             .contains("rpc_clients"));
+        let main = fs::read_to_string(out.join("src/main.rs")).expect("read generated main");
+        assert!(main.contains("pub mod application_config;"));
+        assert!(!main.contains("pub use config::application_config;"));
         let handler = fs::read_to_string(out.join("src/handler/admin/auth_me.rs"))
             .expect("read handler adapter");
         assert!(!handler.contains("pub async fn auth_me(headers: HeaderMap)"));
@@ -16576,6 +16784,59 @@ pub fn register_services(
         assert!(fs::read_to_string(out.join("src/handler/admin/mod.rs"))
             .expect("read handler group mod")
             .contains("pub(crate) use auth_me::auth_me;"));
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn update_migrates_exact_generated_config_loaders_and_is_byte_stable() {
+        let root = temp_test_root("rozectl-config-loader-migration-test");
+        let out = root.join("service");
+        fs::create_dir_all(out.join("src/config")).expect("create config directory");
+
+        for legacy in [
+            legacy_config_rs("load"),
+            legacy_config_rs("load_service"),
+            root_application_config_rs(),
+        ] {
+            fs::write(out.join("src/config/mod.rs"), legacy).expect("write legacy config");
+            assert_eq!(
+                migrate_legacy_config_module(&out, GenerateMode::Update)
+                    .expect("migrate legacy config"),
+                ConfigMigration::Migrated
+            );
+            assert_eq!(
+                fs::read_to_string(out.join("src/config/mod.rs")).expect("read migrated config"),
+                config_rs()
+            );
+            assert_eq!(
+                migrate_legacy_config_module(&out, GenerateMode::Update)
+                    .expect("repeat config migration"),
+                ConfigMigration::AlreadyCurrent
+            );
+        }
+
+        fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn update_preserves_unrecognized_config_loader() {
+        let root = temp_test_root("rozectl-custom-config-loader-test");
+        let out = root.join("service");
+        let path = out.join("src/config/mod.rs");
+        fs::create_dir_all(path.parent().expect("config parent")).expect("create config directory");
+        let custom = "pub struct Config { pub custom: String }\n";
+        fs::write(&path, custom).expect("write custom config");
+
+        assert_eq!(
+            migrate_legacy_config_module(&out, GenerateMode::Update)
+                .expect("preserve custom config"),
+            ConfigMigration::PreservedCustom
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read custom config"),
+            custom
+        );
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -16697,6 +16958,9 @@ pub fn register_services(
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config module")
             .contains("registry_namespace"));
+        let main = fs::read_to_string(out.join("src/main.rs")).expect("read generated main");
+        assert!(main.contains("pub mod application_config;"));
+        assert!(!main.contains("pub use config::application_config;"));
 
         fs::remove_dir_all(root).expect("remove test output");
     }
@@ -17238,6 +17502,104 @@ pub async fn create_aftersales(ctx: ServiceContext, request_ctx: roze_context::C
         );
 
         fs::remove_dir_all(root).expect("remove standalone project");
+    }
+
+    #[test]
+    fn rpc_generation_falls_back_for_missing_workspace_dependencies() {
+        let root = temp_test_root("rozectl-partial-workspace-rpc");
+        let out = root.join("services/catalog");
+        fs::create_dir_all(&root).expect("create partial workspace");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = []
+resolver = "2"
+
+[workspace.package]
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+tonic = "0.14.6"
+"#,
+        )
+        .expect("write partial workspace manifest");
+        let spec = parse_api(
+            r#"
+            service catalog-rpc {
+                rpc GetProduct (GetProductReq) returns (GetProductResp)
+            }
+            type GetProductReq {
+                id: u64
+            }
+            type GetProductResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid RPC api");
+        let options = GenerateOptions::new(GenerateMode::Create, DependencySource::Git);
+        generate_rpc_project(&spec, &out, options).expect("generate in partial workspace");
+
+        let manifest_path = out.join("Cargo.toml");
+        let first = fs::read_to_string(&manifest_path).expect("read generated manifest");
+        assert!(first.contains("anyhow.workspace = true"));
+        assert!(first.contains("tonic.workspace = true"));
+        assert!(first.contains("config = { version = \"0.15.24\""));
+        assert!(first.contains("prost = \"0.14\""));
+        assert!(first.contains("protoc-bin-vendored = \"3\""));
+        assert!(first.contains("roze-grpc = { git ="));
+        assert!(!first.contains("config.workspace = true"));
+        assert!(!first.contains("prost.workspace = true"));
+        assert!(!first.contains("roze-grpc.workspace = true"));
+
+        fs::write(
+            &manifest_path,
+            first.replace(
+                "[dependencies]\n",
+                "[dependencies]\ntoasty.workspace = true\nrust_decimal.workspace = true\n",
+            ),
+        )
+        .expect("seed legacy invalid model dependencies");
+        model::generate_model_project(
+            r#"
+            CREATE TABLE products (
+                id BIGINT NOT NULL PRIMARY KEY,
+                price DECIMAL(18, 2) NOT NULL
+            );
+            "#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            model::ModelFormat::Sql,
+            model::ModelOrm::Toasty,
+        )
+        .expect("generate Toasty model in partial workspace");
+        let modeled = fs::read_to_string(&manifest_path).expect("read modeled manifest");
+        assert!(modeled.contains("toasty = { version = \"0.7\""));
+        assert!(modeled.contains("rust_decimal = { version = \"1\""));
+        assert!(!modeled.contains("toasty.workspace = true"));
+        assert!(!modeled.contains("rust_decimal.workspace = true"));
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update in partial workspace");
+        let updated = fs::read_to_string(&manifest_path).expect("read updated manifest");
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("repeat update in partial workspace");
+        assert_eq!(
+            fs::read_to_string(&manifest_path).expect("reread generated manifest"),
+            updated
+        );
+
+        fs::remove_dir_all(root).expect("remove partial workspace");
     }
 
     #[test]

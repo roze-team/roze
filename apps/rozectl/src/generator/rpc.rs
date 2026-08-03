@@ -3,15 +3,21 @@ use crate::{
     parser::{ApiSpec, Field, HttpMethod, RestRoute, RpcMethod, TypeDef},
 };
 
-pub fn render_main(spec: &ApiSpec) -> String {
+pub fn render_main(spec: &ApiSpec, config_owns_application_config: bool) -> String {
     let package = rpc_proto_module(spec);
     let service = to_pascal_case(&spec.service);
     let server_mod = format!("{}_server", to_snake_case(&service));
 
+    let application_config_module = if config_owns_application_config {
+        "pub use config::application_config;"
+    } else {
+        "pub mod application_config;"
+    };
+
     format!(
         r#"mod application;
-mod application_config;
 mod config;
+__ROZE_APPLICATION_CONFIG_MODULE__
 mod client;
 mod logic;
 mod model;
@@ -113,6 +119,10 @@ fn config_path() -> PathBuf {{
     roze_config::service_config_path(env!("CARGO_MANIFEST_DIR"))
 }}
 "#
+    )
+    .replace(
+        "__ROZE_APPLICATION_CONFIG_MODULE__",
+        application_config_module,
     )
 }
 
@@ -1463,7 +1473,7 @@ mod tests {
         )
         .expect("api");
 
-        let rendered = render_main(&spec);
+        let rendered = render_main(&spec, true);
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
         assert!(rendered.contains("mod model;"));
         assert!(rendered.contains(

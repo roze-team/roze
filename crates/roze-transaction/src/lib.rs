@@ -370,7 +370,7 @@ pub async fn relay_outbox_batch<S, P>(
 ) -> Result<OutboxRelayReport>
 where
     S: OutboxStore + ?Sized,
-    P: roze_mq::Publisher,
+    P: roze_mq::Publisher + ?Sized,
 {
     let mut report = OutboxRelayReport::default();
     let lease_until = now_millis.saturating_add(config.lease_millis);
@@ -726,9 +726,10 @@ mod tests {
             .await
             .expect("enqueue");
 
+        let publisher: Arc<dyn roze_mq::Publisher> = Arc::new(broker.clone());
         let report = relay_outbox_batch(
             &outbox,
-            &broker,
+            publisher.as_ref(),
             1,
             OutboxRelayConfig {
                 limit: 10,

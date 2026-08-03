@@ -1254,12 +1254,27 @@ fn update_model_dependencies(
         ModelOrm::Toasty => "toasty",
     };
     let uses_workspace = content.contains("edition.workspace = true")
+        || content.contains("license.workspace = true")
+        || content.contains("version.workspace = true")
         || content.contains("toasty.workspace = true")
         || content.contains("sea-orm.workspace = true")
         || content.contains("serde_json.workspace = true");
+    let workspace_dependencies = find_workspace_root(logical_out)?
+        .map(|root| read_workspace_dependency_names(&root.join("Cargo.toml")))
+        .transpose()?;
+    let use_workspace_dependency = |name: &str| {
+        uses_workspace
+            && workspace_dependencies
+                .as_ref()
+                .is_none_or(|dependencies| dependencies.contains(name))
+    };
 
-    if !dependencies.contains_key(dependency_name) {
-        let item = if uses_workspace {
+    if dependency_needs_replacement(
+        dependencies,
+        dependency_name,
+        use_workspace_dependency(dependency_name),
+    ) {
+        let item = if use_workspace_dependency(dependency_name) {
             workspace_dependency_item()
         } else {
             match orm {
@@ -1282,8 +1297,12 @@ fn update_model_dependencies(
         };
         dependencies.insert(dependency_name, item);
     }
-    if !dependencies.contains_key("roze-orm") {
-        let item = if uses_workspace {
+    if dependency_needs_replacement(
+        dependencies,
+        "roze-orm",
+        use_workspace_dependency("roze-orm"),
+    ) {
+        let item = if use_workspace_dependency("roze-orm") {
             workspace_dependency_item()
         } else {
             match source {
@@ -1301,8 +1320,14 @@ fn update_model_dependencies(
         };
         dependencies.insert("roze-orm", item);
     }
-    if needs.sharding && !dependencies.contains_key("roze-db") {
-        let item = if uses_workspace {
+    if needs.sharding
+        && dependency_needs_replacement(
+            dependencies,
+            "roze-db",
+            use_workspace_dependency("roze-db"),
+        )
+    {
+        let item = if use_workspace_dependency("roze-db") {
             workspace_dependency_item()
         } else {
             match source {
@@ -1341,9 +1366,28 @@ fn update_model_dependencies(
         }
     }
 
-    if (orm == ModelOrm::Toasty || needs.rust_decimal) && !dependencies.contains_key("rust_decimal")
+    if dependency_needs_replacement(dependencies, "serde", use_workspace_dependency("serde")) {
+        let item = if use_workspace_dependency("serde") {
+            workspace_dependency_item()
+        } else {
+            r#"{ version = "1", features = ["derive"] }"#
+                .parse::<toml_edit::Item>()
+                .expect("valid toml dependency value")
+        };
+        dependencies.insert("serde", item);
+    }
+    if let Some(item) = dependencies.get_mut("serde") {
+        ensure_dependency_feature(item, "derive");
+    }
+
+    if (orm == ModelOrm::Toasty || needs.rust_decimal)
+        && dependency_needs_replacement(
+            dependencies,
+            "rust_decimal",
+            use_workspace_dependency("rust_decimal"),
+        )
     {
-        let item = if uses_workspace {
+        let item = if use_workspace_dependency("rust_decimal") {
             workspace_dependency_item()
         } else {
             r#"{ version = "1", features = ["serde"] }"#
@@ -1352,8 +1396,10 @@ fn update_model_dependencies(
         };
         dependencies.insert("rust_decimal", item);
     }
-    if needs.chrono && !dependencies.contains_key("chrono") {
-        let item = if uses_workspace {
+    if needs.chrono
+        && dependency_needs_replacement(dependencies, "chrono", use_workspace_dependency("chrono"))
+    {
+        let item = if use_workspace_dependency("chrono") {
             workspace_dependency_item()
         } else {
             r#"{ version = "0.4", default-features = false, features = ["clock", "serde"] }"#
@@ -1369,24 +1415,30 @@ fn update_model_dependencies(
         }
     }
 
-    if !dependencies.contains_key("serde_json") {
-        let item = if uses_workspace {
+    if dependency_needs_replacement(
+        dependencies,
+        "serde_json",
+        use_workspace_dependency("serde_json"),
+    ) {
+        let item = if use_workspace_dependency("serde_json") {
             workspace_dependency_item()
         } else {
             r#""1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
         };
         dependencies.insert("serde_json", item);
     }
-    if !dependencies.contains_key("tracing") {
-        let item = if uses_workspace {
+    if dependency_needs_replacement(dependencies, "tracing", use_workspace_dependency("tracing")) {
+        let item = if use_workspace_dependency("tracing") {
             workspace_dependency_item()
         } else {
             r#""0.1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
         };
         dependencies.insert("tracing", item);
     }
-    if needs.uuid && !dependencies.contains_key("uuid") {
-        let item = if uses_workspace {
+    if needs.uuid
+        && dependency_needs_replacement(dependencies, "uuid", use_workspace_dependency("uuid"))
+    {
+        let item = if use_workspace_dependency("uuid") {
             workspace_dependency_item()
         } else {
             r#"{ version = "1", features = ["v7"] }"#
@@ -1395,8 +1447,10 @@ fn update_model_dependencies(
         };
         dependencies.insert("uuid", item);
     }
-    if needs.regex && !dependencies.contains_key("regex") {
-        let item = if uses_workspace {
+    if needs.regex
+        && dependency_needs_replacement(dependencies, "regex", use_workspace_dependency("regex"))
+    {
+        let item = if use_workspace_dependency("regex") {
             workspace_dependency_item()
         } else {
             r#""1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
@@ -1495,6 +1549,47 @@ fn workspace_dependency_item() -> toml_edit::Item {
     let mut table = toml_edit::InlineTable::new();
     table.insert("workspace", true.into());
     toml_edit::Item::Value(toml_edit::Value::InlineTable(table))
+}
+
+fn read_workspace_dependency_names(manifest_path: &Path) -> anyhow::Result<HashSet<String>> {
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let document = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    Ok(document
+        .get("workspace")
+        .and_then(|item| item.get("dependencies"))
+        .and_then(toml_edit::Item::as_table)
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn dependency_needs_replacement(
+    dependencies: &toml_edit::Table,
+    name: &str,
+    workspace_allowed: bool,
+) -> bool {
+    dependencies
+        .get(name)
+        .is_none_or(|item| !workspace_allowed && model_dependency_uses_workspace(item))
+}
+
+fn model_dependency_uses_workspace(item: &toml_edit::Item) -> bool {
+    item.as_inline_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(toml_edit::Value::as_bool)
+        .or_else(|| {
+            item.as_table()
+                .and_then(|table| table.get("workspace"))
+                .and_then(toml_edit::Item::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 fn insert_after_module(content: &str, needle: &str, insert: &str) -> Option<String> {
@@ -25965,6 +26060,63 @@ impl ServiceContext {
     }
 
     #[test]
+    fn toasty_update_restores_direct_serde_dependency_in_standalone_crate() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rozectl-toasty-serde-out-{unique}"));
+        write_minimal_main(&out);
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "standalone-toasty-model"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde", "rust_decimal"] }
+"#,
+        )
+        .expect("manifest");
+        let source = r#"
+            CREATE TABLE jobs (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL
+            );
+        "#;
+
+        for _ in 0..2 {
+            generate_model_project(
+                source,
+                &out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+                ModelFormat::Sql,
+                ModelOrm::Toasty,
+            )
+            .expect("update standalone Toasty model");
+        }
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
+        assert!(manifest.contains(r#"serde = { version = "1", features = ["derive"] }"#));
+        let once = manifest.clone();
+        generate_model_project(
+            source,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Sql,
+            ModelOrm::Toasty,
+        )
+        .expect("repeat standalone Toasty update");
+        assert_eq!(
+            fs::read_to_string(out.join("Cargo.toml")).expect("repeated manifest read"),
+            once
+        );
+
+        fs::remove_dir_all(out).expect("remove test output");
+    }
+
+    #[test]
     fn ent_uuid_default_updates_manifest_dependency() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -27253,7 +27405,6 @@ version = "0.0.0"
 
 [dependencies]
 rust_decimal = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
 toasty = { version = "0.7", default-features = false, features = ["postgresql", "mysql", "serde", "rust_decimal"] }
 tracing = "0.1"
 "#,

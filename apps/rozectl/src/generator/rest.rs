@@ -5,10 +5,15 @@ use crate::{
     parser::{ApiSpec, Field, FieldSource, HttpMethod, RestRoute, TypeDef},
 };
 
-pub fn render_rest_main(_spec: &ApiSpec) -> String {
+pub fn render_rest_main(_spec: &ApiSpec, config_owns_application_config: bool) -> String {
+    let application_config_module = if config_owns_application_config {
+        "pub use config::application_config;"
+    } else {
+        "pub mod application_config;"
+    };
     r#"mod application;
-mod application_config;
 mod config;
+__ROZE_APPLICATION_CONFIG_MODULE__
 mod handler;
 mod logic;
 mod middleware;
@@ -141,7 +146,10 @@ fn config_path() -> std::path::PathBuf {
     roze_config::service_config_path(env!("CARGO_MANIFEST_DIR"))
 }
 "#
-    .to_string()
+    .replace(
+        "__ROZE_APPLICATION_CONFIG_MODULE__",
+        application_config_module,
+    )
 }
 
 #[cfg(test)]
@@ -3171,7 +3179,7 @@ mod tests {
         )
         .expect("valid api");
 
-        let main = render_rest_main(&spec);
+        let main = render_rest_main(&spec, true);
         assert!(main.contains("let app = route::router(ctx.clone()).layer("));
         assert!(main.contains("roze_http::ws::WebSocketShutdown::new(service_shutdown)"));
         assert!(main.contains("middleware::app::apply(app, ctx)"));
@@ -3339,7 +3347,7 @@ mod tests {
         )
         .expect("valid api");
 
-        let rendered = render_rest_main(&spec);
+        let rendered = render_rest_main(&spec, true);
         assert!(rendered.contains("use roze_service::ServiceGroup;"));
         assert!(rendered.contains("mod model;"));
         assert!(rendered.contains(

@@ -94,6 +94,10 @@ Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
 instead of inheriting `edition.workspace`. Toasty is the default SQL model ORM,
 and generated Toasty dependencies use MySQL/PostgreSQL features only; sqlite
 support remains available through the Roze SeaORM/sqlx stack.
+When a generated service is inside a Cargo workspace, its manifest inherits a
+dependency only when that name exists in `[workspace.dependencies]`; otherwise
+the generator emits the standalone explicit version. This supports partial
+application workspaces and remains deterministic across repeated `--update`.
 
 ## Commands
 
@@ -130,14 +134,14 @@ cargo run -p rozectl -- api generate example/user.api \
 `--update` preserves:
 
 - REST `src/logic/<group>/<method>.rs`
-- REST `src/config/mod.rs`
+- REST `src/config/mod.rs` (except exact legacy generated loader migration)
 - REST `src/handler/<group>/<method>.rs`
 - REST/RPC `src/logic/prelude.rs`
 - REST `src/logic/<group>/prelude.rs`
 - REST/RPC `src/application.rs`
 - REST service-wide middleware hook `src/middleware/app.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
-- RPC `src/config/mod.rs`
+- RPC `src/config/mod.rs` (except exact legacy generated loader migration)
 - RPC `src/logic/<method>.rs`
 - `config.yaml`
 
@@ -177,6 +181,14 @@ existed, `rozectl` performs a transactional ownership migration:
 - if a logic prelude does not yet exist, custom `mod` declarations whose module
   files still exist, plus their related `use` declarations, are moved from the
   legacy generated `mod.rs` into the matching root or REST group prelude;
+- exact historical generated `src/config/mod.rs` shapes using
+  `roze_config::load`, `load_service`, or the first typed loader are migrated
+  to `ServiceConfigWithApplication` and
+  `load_service_with_application`. The config module owns the preserved
+  `application_config.rs` declaration, so additional binary targets can reuse
+  it by importing `src/config/mod.rs` without declaring another root module;
+- any config module that is not an exact recognized generated shape is
+  preserved unchanged and produces an actionable manual-migration warning;
 - generated module declarations and declarations inside Roze generated markers
   are not migrated;
 - the migration runs only in the staging project, so an error leaves the target
@@ -348,6 +360,7 @@ Generate a Stream worker with an explicit Kafka provider:
 ```bash
 rozectl stream gen --api example/events.api --out workers/events --broker memory
 rozectl stream gen --api example/events.api --out workers/events --broker rdkafka
+rozectl stream gen --api example/events.api --out workers/events --broker rdkafka-cmake
 rozectl stream gen --api example/events.api --out workers/events --broker rust-native
 ```
 
@@ -360,6 +373,10 @@ Create, `--update`, and `--force` generation format framework-owned Rust files
 inside the transactional staging directory before replacing the target, so a
 successful command is immediately clean under `cargo fmt --all -- --check`.
 Update formatting never rewrites the application-owned consumer or config.
+`rdkafka-cmake` enables the bundled CMake build of librdkafka (useful on native
+Windows) but writes `kafka.provider: rdkafka`, because it selects a build
+feature rather than a distinct runtime provider. The build host must provide
+CMake and a compatible C/C++ toolchain.
 If the target matches a parent Cargo workspace `exclude` entry, Stream
 generation emits standalone package metadata and explicit dependency versions.
 It also emits an empty local `[workspace]` boundary, does not add the project to
@@ -633,8 +650,10 @@ Generated REST and RPC `ServiceContext` values expose
 `roze-transaction-sql::SqlOutboxStore`; production rejects an enabled memory
 store. `ServiceContext::sql_outbox()` exposes the concrete adapter for
 `TransactionalOutbox<sea_orm::DatabaseTransaction>`, so business writes and
-outbox messages can commit atomically. `relay_outbox_batch` publishes claimed
-messages after commit and records retry/dead-letter state.
+outbox messages can commit atomically. The same store implements
+`TransactionalOutbox<toasty::Transaction>` for Toasty repositories.
+`relay_outbox_batch` accepts concrete or `dyn roze_mq::Publisher` values,
+publishes claimed messages after commit, and records retry/dead-letter state.
 
 Generated REST services expose standard operational endpoints:
 
@@ -2048,6 +2067,10 @@ respectively, including their nullable forms, and model generation adds the
 `with-chrono` SeaORM feature plus `clock` and `serde` to the `chrono` dependency
 when needed, merging the features into an existing dependency if present.
 `.ent` `datetime` is accepted as an alias for `timestamp`.
+Standalone SQL/Ent model generation adds a direct `serde` dependency with the
+`derive` feature because generated Toasty and SeaORM model structs import and
+derive `Serialize`/`Deserialize`. An existing compatible dependency is reused,
+and repeated `--update` runs are byte-stable.
 Model names and field names must generate valid, non-conflicting Rust module,
 type, field, and field-enum identifiers. Names that normalize to a single `_`
 are rejected.

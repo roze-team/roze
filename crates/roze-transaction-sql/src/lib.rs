@@ -181,6 +181,62 @@ impl SqlOutboxStore {
         );
         Ok(inserted)
     }
+
+    /// Enqueues messages through a Toasty executor. Passing a
+    /// [`toasty::Transaction`] keeps the business mutation and outbox insert
+    /// on the same database transaction.
+    pub async fn enqueue_with_toasty(
+        &self,
+        executor: &mut dyn toasty::Executor,
+        messages: &[OutboxMessage],
+    ) -> Result<()> {
+        let placeholder = executor
+            .capability()
+            .sql_placeholder
+            .context("Toasty outbox requires a SQL driver")?;
+        ensure_toasty_backend(self.backend, placeholder)?;
+
+        for message in messages {
+            let sql = toasty_insert_sql(&self.config.table, self.backend);
+            let attempts =
+                i32::try_from(message.attempts).context("outbox attempts exceeds SQL INTEGER")?;
+            let next_attempt = message.next_attempt_millis.map(millis_to_i64).transpose()?;
+            let lease_until = message.lease_until_millis.map(millis_to_i64).transpose()?;
+            let affected = toasty::sql::statement(sql)
+                .bind_typed(message.id.clone(), toasty::schema::db::Type::Text)
+                .bind_typed(message.topic.clone(), toasty::schema::db::Type::Text)
+                .bind_typed(message.key.clone(), toasty::schema::db::Type::Text)
+                .bind_typed(
+                    serde_json::to_string(&message.headers)?,
+                    toasty::schema::db::Type::Text,
+                )
+                .bind_typed(
+                    message.idempotency_key.clone(),
+                    toasty::schema::db::Type::Text,
+                )
+                .bind_typed(
+                    serde_json::to_string(&message.payload)?,
+                    toasty::schema::db::Type::Text,
+                )
+                .bind_typed(
+                    status_name(message.status).to_string(),
+                    toasty::schema::db::Type::Text,
+                )
+                .bind_typed(attempts, toasty::schema::db::Type::Integer(4))
+                .bind_typed(next_attempt, toasty::schema::db::Type::Integer(8))
+                .bind_typed(lease_until, toasty::schema::db::Type::Integer(8))
+                .bind_typed(message.last_error.clone(), toasty::schema::db::Type::Text)
+                .exec(executor)
+                .await
+                .context("failed to enqueue Toasty SQL outbox message")?;
+            let inserted = affected == 1;
+            roze_metrics::record_outbox_event(
+                driver_name(self.backend),
+                if inserted { "enqueued" } else { "duplicate" },
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -352,6 +408,17 @@ impl TransactionalOutbox<DatabaseTransaction> for SqlOutboxStore {
     }
 }
 
+#[async_trait]
+impl<'tx> TransactionalOutbox<toasty::Transaction<'tx>> for SqlOutboxStore {
+    async fn enqueue_in_transaction(
+        &self,
+        transaction: &mut toasty::Transaction<'tx>,
+        messages: &[OutboxMessage],
+    ) -> Result<()> {
+        self.enqueue_with_toasty(transaction, messages).await
+    }
+}
+
 fn encode_message(message: &OutboxMessage) -> Result<Vec<Value>> {
     Ok(vec![
         message.id.clone().into(),
@@ -396,6 +463,31 @@ fn placeholders(backend: DbBackend, count: usize) -> Vec<String> {
         DbBackend::MySql => (0..count).map(|_| "?".to_string()).collect(),
         _ => unreachable!("backend validated by constructor"),
     }
+}
+
+fn ensure_toasty_backend(backend: DbBackend, placeholder: toasty::SqlPlaceholder) -> Result<()> {
+    let matches = matches!(
+        (backend, placeholder),
+        (DbBackend::Postgres, toasty::SqlPlaceholder::DollarNumber)
+            | (DbBackend::MySql, toasty::SqlPlaceholder::QuestionMark)
+    );
+    anyhow::ensure!(
+        matches,
+        "Toasty SQL driver does not match the SQL outbox backend"
+    );
+    Ok(())
+}
+
+fn toasty_insert_sql(table: &str, backend: DbBackend) -> String {
+    let conflict = match backend {
+        DbBackend::Postgres => " ON CONFLICT (id) DO NOTHING",
+        DbBackend::MySql => " ON DUPLICATE KEY UPDATE id = id",
+        _ => unreachable!("backend validated by constructor"),
+    };
+    format!(
+        "INSERT INTO {table} ({COLUMNS}) VALUES ({}){conflict}",
+        placeholders(backend, 11).join(", ")
+    )
 }
 
 fn one_value(backend: DbBackend, value: Value) -> (String, Vec<Value>) {
@@ -490,6 +582,33 @@ mod tests {
         assert_eq!(values.len(), 11);
     }
 
+    #[test]
+    fn toasty_outbox_uses_backend_placeholders_and_rejects_mismatches() {
+        let postgres = toasty_insert_sql("tenant_outbox", DbBackend::Postgres);
+        assert!(postgres.contains("VALUES ($1, $2, $3"));
+        assert!(postgres.ends_with("ON CONFLICT (id) DO NOTHING"));
+        let mysql = toasty_insert_sql("tenant_outbox", DbBackend::MySql);
+        assert!(mysql.contains("VALUES (?, ?, ?"));
+        assert!(mysql.ends_with("ON DUPLICATE KEY UPDATE id = id"));
+
+        assert!(
+            ensure_toasty_backend(DbBackend::Postgres, toasty::SqlPlaceholder::DollarNumber)
+                .is_ok()
+        );
+        assert!(
+            ensure_toasty_backend(DbBackend::MySql, toasty::SqlPlaceholder::QuestionMark).is_ok()
+        );
+        assert!(
+            ensure_toasty_backend(DbBackend::Postgres, toasty::SqlPlaceholder::QuestionMark)
+                .is_err()
+        );
+        assert!(ensure_toasty_backend(
+            DbBackend::MySql,
+            toasty::SqlPlaceholder::NumberedQuestionMark,
+        )
+        .is_err());
+    }
+
     async fn real_database_outbox_evidence(url: &str) {
         let database = Database::connect(url).await.expect("connect database");
         let table = format!(
@@ -582,6 +701,56 @@ mod tests {
             .await
             .expect("get transactional")
             .is_some());
+
+        let mut toasty = toasty::Db::builder()
+            .models(toasty::models!())
+            .connect(url)
+            .await
+            .expect("connect Toasty database");
+        let toasty_committed = OutboxMessage::new(
+            format!("{table}-toasty-committed"),
+            "captcha.stats",
+            format!("{table}-toasty-commit-key"),
+            serde_json::json!({"orm": "toasty", "outcome": "committed"}),
+        );
+        let mut transaction = toasty
+            .transaction()
+            .await
+            .expect("begin Toasty transaction");
+        store
+            .enqueue_in_transaction(&mut transaction, std::slice::from_ref(&toasty_committed))
+            .await
+            .expect("enqueue in Toasty transaction");
+        transaction
+            .commit()
+            .await
+            .expect("commit Toasty transaction");
+        assert!(peer
+            .get(&toasty_committed.id)
+            .await
+            .expect("get Toasty committed message")
+            .is_some());
+
+        let toasty_rolled_back = OutboxMessage::new(
+            format!("{table}-toasty-rolled-back"),
+            "captcha.stats",
+            format!("{table}-toasty-rollback-key"),
+            serde_json::json!({"orm": "toasty", "outcome": "rolled-back"}),
+        );
+        let mut transaction = toasty.transaction().await.expect("begin Toasty rollback");
+        store
+            .enqueue_in_transaction(&mut transaction, std::slice::from_ref(&toasty_rolled_back))
+            .await
+            .expect("enqueue before Toasty rollback");
+        transaction
+            .rollback()
+            .await
+            .expect("rollback Toasty transaction");
+        assert!(peer
+            .get(&toasty_rolled_back.id)
+            .await
+            .expect("get Toasty rolled-back message")
+            .is_none());
 
         database
             .execute_unprepared(&format!("DROP TABLE {table}"))

@@ -38,6 +38,8 @@ enum StreamBroker {
     #[default]
     Memory,
     Rdkafka,
+    #[value(name = "rdkafka-cmake")]
+    RdkafkaCmake,
     #[value(name = "rust-native", alias = "rskafka")]
     RustNative,
 }
@@ -47,6 +49,7 @@ impl From<StreamBroker> for generator::StreamBroker {
         match value {
             StreamBroker::Memory => Self::Memory,
             StreamBroker::Rdkafka => Self::Rdkafka,
+            StreamBroker::RdkafkaCmake => Self::RdkafkaCmake,
             StreamBroker::RustNative => Self::RustNative,
         }
     }
@@ -6267,6 +6270,28 @@ envFrom: []
             Commands::Stream {
                 command: StreamCommands::Gen {
                     broker: StreamBroker::RustNative,
+                    ..
+                }
+            }
+        ));
+
+        let stream_cmake = Cli::try_parse_from([
+            "rozectl",
+            "stream",
+            "gen",
+            "--api",
+            "user.api",
+            "--out",
+            "stream",
+            "--broker",
+            "rdkafka-cmake",
+        ])
+        .expect("parse stream gen with bundled librdkafka");
+        assert!(matches!(
+            stream_cmake.command,
+            Commands::Stream {
+                command: StreamCommands::Gen {
+                    broker: StreamBroker::RdkafkaCmake,
                     ..
                 }
             }

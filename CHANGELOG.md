@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added `rozectl stream gen --broker rdkafka-cmake` for native Windows
+  librdkafka builds while retaining `provider: rdkafka` at runtime.
+- Persistent SQL outbox enqueue now participates in either SeaORM or Toasty
+  PostgreSQL/MySQL transactions, and the relay accepts dynamically dispatched
+  `Publisher` values.
+- Generated REST/RPC manifests now inherit only dependencies actually declared
+  by a parent workspace and fall back to explicit versions for missing entries.
 - Added semantic `Conflict` and `FailedPrecondition` errors with stable HTTP,
   gRPC, metadata, localization, and round-trip mappings.
 - Generated SeaORM queries now support `.primary()` and
@@ -12,6 +19,10 @@
 - Added redaction-safe typed application configuration, generated as a
   preserved `src/application_config.rs`, with normal Roze secret resolution
   and `ServiceConfig` validation.
+- REST/RPC `--update` now migrates exact legacy generated config loaders to
+  typed application configuration, preserves unrecognized custom loaders with
+  an actionable warning, and keeps config loading reusable from extra binary
+  targets without duplicate `application_config` declarations.
 - Added the experimental `roze-ai` runtime with provider-neutral model, tool,
   agent, and event contracts; OpenAI-compatible invoke, SSE, and tool-call
   support; and validated, secret-safe provider configuration.
@@ -159,6 +170,9 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Ensure standalone Toasty and SeaORM model generation declares the direct
+  `serde` dependency with derive support required by generated model structs;
+  repeated `--update` runs preserve the normalized dependency.
 - Preserve PostgreSQL `BIGINT`/`BIGSERIAL`/`INT8` as signed `i64` and map
   `TIMESTAMP`/`TIMESTAMPTZ` to SeaORM's native chrono-backed datetime types in
   SQL generation and database inspection. MySQL `BIGINT UNSIGNED` remains
