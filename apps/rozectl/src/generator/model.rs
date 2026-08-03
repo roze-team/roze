@@ -2871,6 +2871,25 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     }
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    fn read_db_from(&self, source: roze_orm::ReadSource) -> anyhow::Result<&DatabaseConnection> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        match source {{").unwrap();
+    writeln!(
+        &mut out,
+        "            roze_orm::ReadSource::Replica => self.read_db(),"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            roze_orm::ReadSource::Primary => self.write_db(),"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
     render_sea_orm_transaction_method(&mut out);
     writeln!(&mut out, "    pub fn table_name() -> &'static str {{").unwrap();
     writeln!(&mut out, "        \"{}\"", table_name).unwrap();
@@ -2945,6 +2964,14 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     )
     .unwrap();
     writeln!(&mut out, "        self.mutation_hooks.iter().fold({pascal}UpdateMany::new(self), |mutation, hooks| hooks.update_many(mutation))").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub fn update_where(&self) -> {pascal}UpdateMany<'_, 'a> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        self.update_many()").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -3809,6 +3836,7 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
     writeln!(out, "    limit: Option<u64>,").unwrap();
     writeln!(out, "    offset: Option<u64>,").unwrap();
     writeln!(out, "    page: Option<(u64, u64)>,").unwrap();
+    writeln!(out, "    read_source: roze_orm::ReadSource,").unwrap();
     if model.soft_delete.is_some() {
         writeln!(out, "    include_deleted: bool,").unwrap();
     }
@@ -5262,6 +5290,132 @@ fn render_sea_orm_update_many_builder(
     writeln!(out).unwrap();
     writeln!(
         out,
+        "    /// Executes one conditional SQL UPDATE and returns its affected-row count."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    pub async fn execute(mut self) -> anyhow::Result<UpdateResult> {{"
+    )
+    .unwrap();
+    writeln!(out, "        struct ConditionalUpdateTerminal;").unwrap();
+    writeln!(out, "        impl<'repo, 'ctx> roze_orm::Operation<{pascal}UpdateMany<'repo, 'ctx>, u64, anyhow::Error> for ConditionalUpdateTerminal {{").unwrap();
+    writeln!(out, "            fn call<'call>(&'call self, mutation: {pascal}UpdateMany<'repo, 'ctx>) -> roze_orm::OperationFuture<'call, u64, anyhow::Error> where {pascal}UpdateMany<'repo, 'ctx>: 'call, u64: 'call, anyhow::Error: 'call {{ Box::pin(mutation.execute_unhooked()) }}").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(
+        out,
+        "        let hooks = std::mem::take(&mut self.atomic_hooks);"
+    )
+    .unwrap();
+    writeln!(out, "        let rows_affected = roze_orm::execute_chain(&ConditionalUpdateTerminal, &hooks, self).await?;").unwrap();
+    writeln!(out, "        Ok(UpdateResult {{ rows_affected }})").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    let conditional_fields = updatable_model_fields(model, primary);
+    if conditional_fields.is_empty() {
+        writeln!(out, "    #[allow(unreachable_code)]").unwrap();
+    }
+    writeln!(
+        out,
+        "    async fn execute_unhooked(self) -> anyhow::Result<u64> {{"
+    )
+    .unwrap();
+    render_required_field_checks(out, model, "anyhow", false);
+    render_required_edge_checks(out, model, "anyhow", false);
+    render_field_validation_checks(out, &conditional_fields, "anyhow");
+    let pending_updates = conditional_fields
+        .iter()
+        .map(|field| format!("self.{}.is_some()", model_field_ident(field)))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    if pending_updates.is_empty() {
+        writeln!(
+            out,
+            "        anyhow::bail!(\"conditional update has no mutable fields\");"
+        )
+        .unwrap();
+    } else if conditional_fields.len() == 1 {
+        let field_ident = model_field_ident(conditional_fields[0]);
+        writeln!(out, "        if self.{field_ident}.is_none() {{ anyhow::bail!(\"conditional update requires at least one field assignment\"); }}").unwrap();
+    } else {
+        writeln!(out, "        if !({pending_updates}) {{ anyhow::bail!(\"conditional update requires at least one field assignment\"); }}").unwrap();
+    }
+    writeln!(out, "        let db = self.repo.write_db()?;").unwrap();
+    if model.cache {
+        writeln!(out, "        let mut existing_query = Entity::find();").unwrap();
+        if let Some(soft_field) = model
+            .soft_delete
+            .as_deref()
+            .and_then(|name| model.fields.iter().find(|field| field.name == name))
+        {
+            let soft_column = to_pascal_case(&soft_field.name);
+            if soft_field.ty == "bool" {
+                writeln!(out, "        existing_query = existing_query.filter(Column::{soft_column}.eq(false));").unwrap();
+            } else if optional_inner_type(&soft_field.ty).is_some() {
+                writeln!(out, "        existing_query = existing_query.filter(Column::{soft_column}.is_null());").unwrap();
+            }
+        }
+        writeln!(out, "        for predicate in &self.predicates {{ existing_query = existing_query.filter({pascal}Query::predicate_condition(predicate)); }}").unwrap();
+        writeln!(out, "        let existing = existing_query.all(db).await?;").unwrap();
+    }
+    writeln!(out, "        let mut update = Entity::update_many();").unwrap();
+    if let Some(soft_field) = model
+        .soft_delete
+        .as_deref()
+        .and_then(|name| model.fields.iter().find(|field| field.name == name))
+    {
+        let soft_column = to_pascal_case(&soft_field.name);
+        if soft_field.ty == "bool" {
+            writeln!(
+                out,
+                "        update = update.filter(Column::{soft_column}.eq(false));"
+            )
+            .unwrap();
+        } else if optional_inner_type(&soft_field.ty).is_some() {
+            writeln!(
+                out,
+                "        update = update.filter(Column::{soft_column}.is_null());"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "        for predicate in &self.predicates {{ update = update.filter({pascal}Query::predicate_condition(predicate)); }}").unwrap();
+    for field in updatable_model_fields(model, primary) {
+        let field_ident = model_field_ident(field);
+        let column = to_pascal_case(&field.name);
+        let value_expr = update_slot_value_from_ref(field, "value");
+        writeln!(out, "        if let Some(value) = self.{field_ident}.as_ref() {{ update = update.col_expr(Column::{column}, Expr::value({value_expr})); }}").unwrap();
+    }
+    writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+    if model.cache {
+        writeln!(
+            out,
+            "        for model in existing {{ self.repo.invalidate_model_cache(&model).await?; }}"
+        )
+        .unwrap();
+        for field in model
+            .fields
+            .iter()
+            .filter(|field| model.cache_keys.contains(&field.name))
+            .filter(|field| {
+                updatable_model_fields(model, primary)
+                    .iter()
+                    .any(|candidate| candidate.name == field.name)
+            })
+        {
+            let field_ident = model_field_ident(field);
+            if optional_inner_type(&field.ty).is_some() {
+                writeln!(out, "        if let Some(Some(value)) = self.{field_ident}.as_ref() {{ self.repo.invalidate_cache_field({:?}, value).await?; }}", field.name).unwrap();
+            } else {
+                writeln!(out, "        if let Some(value) = self.{field_ident}.as_ref() {{ self.repo.invalidate_cache_field({:?}, value).await?; }}", field.name).unwrap();
+            }
+        }
+    }
+    writeln!(out, "        Ok(result.rows_affected)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "    pub async fn save(mut self) -> anyhow::Result<Vec<Model>> {{"
     )
     .unwrap();
@@ -5569,10 +5723,36 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
     writeln!(out, "            limit: None,").unwrap();
     writeln!(out, "            offset: None,").unwrap();
     writeln!(out, "            page: None,").unwrap();
+    writeln!(
+        out,
+        "            read_source: roze_orm::ReadSource::Replica,"
+    )
+    .unwrap();
     if model.soft_delete.is_some() {
         writeln!(out, "            include_deleted: false,").unwrap();
     }
     writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    pub fn read_from(mut self, source: roze_orm::ReadSource) -> Self {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.read_source = source;").unwrap();
+    writeln!(out, "        self").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    pub fn primary(self) -> Self {{").unwrap();
+    writeln!(out, "        self.read_from(roze_orm::ReadSource::Primary)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.repo.read_db_from(self.read_source)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
     writeln!(
@@ -7045,7 +7225,11 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
             group.ty
         )
         .unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
         writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum, \"roze_sum\").group_by(Column::{group_column}).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
@@ -7062,7 +7246,11 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
                 group.ty
             )
             .unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
         writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.gte(minimum)).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
@@ -7074,7 +7262,11 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
             value.name, group.name
         ));
         writeln!(out, "    pub async fn {sum_having_method}(self, maximum: {sum_ty}) -> anyhow::Result<Vec<({}, {sum_ty})>> {{", group.ty).unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
         writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.lte(maximum)).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
@@ -7086,7 +7278,11 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
             value.name, group.name
         ));
         writeln!(out, "    pub async fn {sum_having_method}(self, minimum: {sum_ty}, maximum: {sum_ty}) -> anyhow::Result<Vec<({}, {sum_ty})>> {{", group.ty).unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
         writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.clone().gte(minimum)).having(sum.lte(maximum)).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
@@ -7100,7 +7296,11 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
             group.ty
         )
         .unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         writeln!(out, "        Ok(self.build_filter_select().select_only().column(Column::{group_column}).column_as(Into::<sea_orm::sea_query::SimpleExpr>::into(Func::avg(Expr::col(Column::{value_column}))), \"roze_avg\").group_by(Column::{group_column}).into_tuple::<({}, Option<{avg_ty}>)>().all(db).await?)", group.ty).unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -7113,7 +7313,11 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
                 group.ty
             )
             .unwrap();
-            writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+            writeln!(
+                out,
+                "        let db = self.repo.read_db_from(self.read_source)?;"
+            )
+            .unwrap();
             writeln!(out, "        Ok(self.build_filter_select().select_only().column(Column::{group_column}).column_as(Expr::col(Column::{value_column}).{expression}(), \"roze_{aggregate}\").group_by(Column::{group_column}).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?)", group.ty).unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
@@ -7254,7 +7458,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "    pub async fn count(self) -> anyhow::Result<u64> {{"
     )
     .unwrap();
-    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let db = self.repo.read_db_from(self.read_source)?;"
+    )
+    .unwrap();
     writeln!(
         out,
         "        Ok(self.build_filter_select().count(db).await?)"
@@ -7294,8 +7502,12 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "    async fn all_unintercepted(self) -> anyhow::Result<Vec<Model>> {{"
     )
     .unwrap();
-    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", query_type = \"all\", predicate_count = self.predicates.len(), order_count = self.orders.len(), limit = ?self.limit, offset = ?self.offset, \"model query executing\");", model.name).unwrap();
-    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", source = self.read_source.label(), query_type = \"all\", predicate_count = self.predicates.len(), order_count = self.orders.len(), limit = ?self.limit, offset = ?self.offset, \"model query executing\");", model.name).unwrap();
+    writeln!(
+        out,
+        "        let db = self.repo.read_db_from(self.read_source)?;"
+    )
+    .unwrap();
     writeln!(out, "        Ok(self.build_select().all(db).await?)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
@@ -7312,7 +7524,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         primary_field.ty
     )
     .unwrap();
-    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let db = self.repo.read_db_from(self.read_source)?;"
+    )
+    .unwrap();
     writeln!(
         out,
         "        Ok(self.build_select().select_only().column(Column::{primary_column}).into_tuple::<{}>().all(db).await?)",
@@ -7364,7 +7580,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
             field.ty
         )
         .unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         writeln!(
             out,
             "        Ok(self.build_select().select_only().column(Column::{column}).into_tuple::<{}>().all(db).await?)",
@@ -7382,7 +7602,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
                 field.ty
             )
             .unwrap();
-            writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+            writeln!(
+                out,
+                "        let db = self.repo.read_db_from(self.read_source)?;"
+            )
+            .unwrap();
             writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
             writeln!(
                 out,
@@ -7395,7 +7619,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
             let having_method =
                 rust_identifier(&format!("count_by_{}_having_at_least", field.name));
             writeln!(out, "    pub async fn {having_method}(self, minimum: u64) -> anyhow::Result<Vec<({}, u64)>> {{", field.ty).unwrap();
-            writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+            writeln!(
+                out,
+                "        let db = self.repo.read_db_from(self.read_source)?;"
+            )
+            .unwrap();
             writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).having(Column::{column}.count().gte(minimum as i64)).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
             writeln!(
                 out,
@@ -7407,7 +7635,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
 
             let having_method = rust_identifier(&format!("count_by_{}_having_at_most", field.name));
             writeln!(out, "    pub async fn {having_method}(self, maximum: u64) -> anyhow::Result<Vec<({}, u64)>> {{", field.ty).unwrap();
-            writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+            writeln!(
+                out,
+                "        let db = self.repo.read_db_from(self.read_source)?;"
+            )
+            .unwrap();
             writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).having(Column::{column}.count().lte(maximum as i64)).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
             writeln!(
                 out,
@@ -7419,7 +7651,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
 
             let having_method = rust_identifier(&format!("count_by_{}_having_between", field.name));
             writeln!(out, "    pub async fn {having_method}(self, minimum: u64, maximum: u64) -> anyhow::Result<Vec<({}, u64)>> {{", field.ty).unwrap();
-            writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+            writeln!(
+                out,
+                "        let db = self.repo.read_db_from(self.read_source)?;"
+            )
+            .unwrap();
             writeln!(out, "        let count = Column::{column}.count();").unwrap();
             writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(count.clone(), \"roze_count\").group_by(Column::{column}).having(count.clone().gte(minimum as i64)).having(count.lte(maximum as i64)).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
             writeln!(
@@ -7498,7 +7734,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
             left.ty, right.ty
         )
         .unwrap();
-        writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+        writeln!(
+            out,
+            "        let db = self.repo.read_db_from(self.read_source)?;"
+        )
+        .unwrap();
         writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{left_column}).column(Column::{right_column}).column_as(Column::{left_column}.count(), \"roze_count\").group_by(Column::{left_column}).group_by(Column::{right_column}).into_tuple::<({}, {}, i64)>().all(db).await?;", left.ty, right.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(left, right, count)| ((left, right), count as u64)).collect())").unwrap();
         writeln!(out, "    }}").unwrap();
@@ -7588,7 +7828,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "    pub async fn first(self) -> anyhow::Result<Option<Model>> {{"
     )
     .unwrap();
-    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let db = self.repo.read_db_from(self.read_source)?;"
+    )
+    .unwrap();
     writeln!(out, "        Ok(self.build_select().one(db).await?)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
@@ -7621,7 +7865,11 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "    pub async fn page(self) -> anyhow::Result<{pascal}Page> {{"
     )
     .unwrap();
-    writeln!(out, "        let db = self.repo.read_db()?;").unwrap();
+    writeln!(
+        out,
+        "        let db = self.repo.read_db_from(self.read_source)?;"
+    )
+    .unwrap();
     writeln!(
         out,
         "        let (page, page_size) = self.page.unwrap_or((1, 20));"
@@ -7637,7 +7885,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "        let page_size = if page_size == 0 {{ 20 }} else {{ page_size.min(500) }};"
     )
     .unwrap();
-    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", query_type = \"page\", page, page_size, predicate_count = self.predicates.len(), order_count = self.orders.len(), \"model query executing\");", model.name).unwrap();
+    writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", source = self.read_source.label(), query_type = \"page\", page, page_size, predicate_count = self.predicates.len(), order_count = self.orders.len(), \"model query executing\");", model.name).unwrap();
     writeln!(
         out,
         "        let total = self.build_filter_select().count(db).await?;"
@@ -20183,13 +20431,13 @@ mod tests {
             sea_orm
                 .matches("if matches!(self.bio.as_ref(), Some(None))")
                 .count(),
-            2
+            3
         );
         assert_eq!(
             sea_orm
                 .matches("if matches!(self.locale.as_ref(), Some(None))")
                 .count(),
-            3
+            4
         );
         assert!(!sea_orm.contains("fn clear_bio"));
         assert!(!sea_orm.contains("fn clear_locale"));
@@ -23262,7 +23510,7 @@ mod tests {
             sea_orm
                 .matches("if matches!(self.author_id.as_ref(), Some(None)) { anyhow::bail!(\"missing required edge `author`\"); }")
                 .count(),
-            2
+            3
         );
 
         let toasty = render_toasty_model_module(post);
@@ -24751,6 +24999,10 @@ mod tests {
         assert!(rendered.contains("pub fn update_one(&self, id: i64) -> UserUpdate<'_, 'a>"));
         assert!(rendered.contains("pub fn delete_one(&self, id: i64) -> UserDelete<'_, 'a>"));
         assert!(rendered.contains("pub fn update_many(&self) -> UserUpdateMany<'_, 'a>"));
+        assert!(rendered.contains("pub fn update_where(&self) -> UserUpdateMany<'_, 'a>"));
+        assert!(rendered.contains("pub async fn execute(mut self) -> anyhow::Result<UpdateResult>"));
+        assert!(rendered.contains("let mut update = Entity::update_many();"));
+        assert!(rendered.contains("let result = update.exec(db).await?;"));
         assert!(rendered.contains("pub fn delete_many(&self) -> UserDeleteMany<'_, 'a>"));
         assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
         assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
@@ -24772,6 +25024,11 @@ mod tests {
         assert!(rendered.contains("updated.push(update.save().await?);"));
         assert!(rendered.contains("let result = self.repo.delete_one(item.id).exec().await?;"));
         assert!(rendered.contains("pub fn query(&self) -> UserQuery<'_, 'a>"));
+        assert!(
+            rendered.contains("pub fn read_from(mut self, source: roze_orm::ReadSource) -> Self")
+        );
+        assert!(rendered.contains("pub fn primary(self) -> Self"));
+        assert!(rendered.contains("self.repo.read_db_from(self.read_source)"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(
             rendered

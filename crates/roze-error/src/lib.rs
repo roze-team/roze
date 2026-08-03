@@ -31,6 +31,10 @@ pub struct ErrorResponse {
 pub enum RozeError {
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("failed precondition: {0}")]
+    FailedPrecondition(String),
     #[error("unauthorized")]
     Unauthorized,
     #[error("forbidden")]
@@ -55,6 +59,8 @@ impl RozeError {
     pub fn kind(&self) -> &'static str {
         match self {
             RozeError::BadRequest(_) => "bad_request",
+            RozeError::Conflict(_) => "conflict",
+            RozeError::FailedPrecondition(_) => "failed_precondition",
             RozeError::Unauthorized => "unauthorized",
             RozeError::Forbidden => "forbidden",
             RozeError::RateLimited { .. } => "rate_limited",
@@ -68,6 +74,8 @@ impl RozeError {
     pub fn code(&self) -> i32 {
         match self {
             RozeError::BadRequest(_) => 400,
+            RozeError::Conflict(_) => 409,
+            RozeError::FailedPrecondition(_) => 412,
             RozeError::Unauthorized => 401,
             RozeError::Forbidden => 403,
             RozeError::RateLimited { .. } => 429,
@@ -81,6 +89,8 @@ impl RozeError {
     pub fn message(&self) -> String {
         match self {
             RozeError::BadRequest(msg) => msg.clone(),
+            RozeError::Conflict(msg) => msg.clone(),
+            RozeError::FailedPrecondition(msg) => msg.clone(),
             RozeError::Unauthorized => "unauthorized".to_string(),
             RozeError::Forbidden => "forbidden".to_string(),
             RozeError::RateLimited { .. } => "rate limited".to_string(),
@@ -94,6 +104,8 @@ impl RozeError {
     pub fn message_i18n(&self, locale: impl AsRef<str>) -> String {
         match self {
             RozeError::BadRequest(msg) if !msg.is_empty() => msg.clone(),
+            RozeError::Conflict(msg) if !msg.is_empty() => msg.clone(),
+            RozeError::FailedPrecondition(msg) if !msg.is_empty() => msg.clone(),
             RozeError::NotFound(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Unavailable(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Internal(msg) if !msg.is_empty() => msg.clone(),
@@ -106,6 +118,8 @@ impl RozeError {
         matches!(
             self,
             RozeError::BadRequest(_)
+                | RozeError::Conflict(_)
+                | RozeError::FailedPrecondition(_)
                 | RozeError::Unauthorized
                 | RozeError::Forbidden
                 | RozeError::RateLimited { .. }
@@ -116,6 +130,8 @@ impl RozeError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             RozeError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            RozeError::Conflict(_) => StatusCode::CONFLICT,
+            RozeError::FailedPrecondition(_) => StatusCode::PRECONDITION_FAILED,
             RozeError::Unauthorized => StatusCode::UNAUTHORIZED,
             RozeError::Forbidden => StatusCode::FORBIDDEN,
             RozeError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -182,6 +198,8 @@ pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
     match normalize_locale(locale).as_deref() {
         Some("zh-CN") => match kind {
             "bad_request" => "请求参数错误",
+            "conflict" => "资源冲突",
+            "failed_precondition" => "前置条件不满足",
             "unauthorized" => "未认证或登录已失效",
             "forbidden" => "无权限访问",
             "not_found" => "资源不存在",
@@ -190,6 +208,8 @@ pub fn localized_error_message(kind: &str, locale: &str) -> &'static str {
         },
         _ => match kind {
             "bad_request" => "bad request",
+            "conflict" => "conflict",
+            "failed_precondition" => "failed precondition",
             "unauthorized" => "unauthorized",
             "forbidden" => "forbidden",
             "rate_limited" => "rate limited",
@@ -310,6 +330,8 @@ mod tests {
     #[test]
     fn derives_status_codes() {
         assert_eq!(RozeError::BadRequest("x".into()).code(), 400);
+        assert_eq!(RozeError::Conflict("x".into()).code(), 409);
+        assert_eq!(RozeError::FailedPrecondition("x".into()).code(), 412);
         assert_eq!(RozeError::Unauthorized.code(), 401);
         assert_eq!(RozeError::Forbidden.code(), 403);
         assert_eq!(
@@ -330,6 +352,30 @@ mod tests {
         let err = RozeError::Unauthorized;
         assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
         assert_eq!(err.response_body().code, 401);
+    }
+
+    #[test]
+    fn serializes_semantic_conflict_responses() {
+        for (error, kind, code, status) in [
+            (
+                RozeError::Conflict("device already bound".into()),
+                "conflict",
+                409,
+                StatusCode::CONFLICT,
+            ),
+            (
+                RozeError::FailedPrecondition("stale version".into()),
+                "failed_precondition",
+                412,
+                StatusCode::PRECONDITION_FAILED,
+            ),
+        ] {
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.status_code(), status);
+            let body = error.response_body();
+            assert_eq!(body.code, code);
+            assert_eq!(body.msg, error.message());
+        }
     }
 
     #[test]

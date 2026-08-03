@@ -501,6 +501,30 @@ mod tests {
         assert_eq!(&body[..], br#"{"code":503,"message":"degraded"}"#);
     }
 
+    #[tokio::test]
+    async fn semantic_conflict_errors_use_stable_http_envelopes() {
+        for (error, expected_status, expected_body) in [
+            (
+                roze_error::RozeError::Conflict("already bound".to_string()),
+                StatusCode::CONFLICT,
+                serde_json::json!({"code": 409, "msg": "already bound", "data": null}),
+            ),
+            (
+                roze_error::RozeError::FailedPrecondition("stale version".to_string()),
+                StatusCode::PRECONDITION_FAILED,
+                serde_json::json!({"code": 412, "msg": "stale version", "data": null}),
+            ),
+        ] {
+            let response = error_response(&error);
+            assert_eq!(response.status(), expected_status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                expected_body
+            );
+        }
+    }
+
     #[test]
     fn rate_limited_error_response_sets_retry_after() {
         let response = error_response(&roze_error::RozeError::rate_limited(Duration::from_millis(

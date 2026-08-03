@@ -7,6 +7,7 @@ use crate::{
 
 pub fn render_rest_main(_spec: &ApiSpec) -> String {
     r#"mod application;
+mod application_config;
 mod config;
 mod handler;
 mod logic;

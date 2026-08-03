@@ -996,6 +996,8 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
 fn grpc_code_from_error(error: &RozeError) -> Code {
     match error {
         RozeError::BadRequest(_) => Code::InvalidArgument,
+        RozeError::Conflict(_) => Code::AlreadyExists,
+        RozeError::FailedPrecondition(_) => Code::FailedPrecondition,
         RozeError::Unauthorized => Code::Unauthenticated,
         RozeError::Forbidden => Code::PermissionDenied,
         RozeError::RateLimited { .. } => Code::ResourceExhausted,
@@ -1035,7 +1037,8 @@ where
 }
 
 pub fn error_from_status(status: &Status) -> RozeError {
-    if metadata_value(status.metadata(), ERROR_KIND_METADATA) == Some("fallback") {
+    let error_kind = metadata_value(status.metadata(), ERROR_KIND_METADATA);
+    if error_kind == Some("fallback") {
         let fallback_status = metadata_value(status.metadata(), FALLBACK_STATUS_METADATA)
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(503);
@@ -1045,6 +1048,12 @@ pub fn error_from_status(status: &Status) -> RozeError {
             .and_then(|value| serde_json::from_str::<BTreeMap<String, String>>(value).ok())
             .unwrap_or_default();
         return RozeError::fallback_response(fallback_status, body, headers);
+    }
+    if error_kind == Some("conflict") {
+        return RozeError::Conflict(status.message().to_string());
+    }
+    if error_kind == Some("failed_precondition") {
+        return RozeError::FailedPrecondition(status.message().to_string());
     }
     match status.code() {
         Code::InvalidArgument => RozeError::BadRequest(status.message().to_string()),
@@ -1056,6 +1065,8 @@ pub fn error_from_status(status: &Status) -> RozeError {
                 .unwrap_or(1),
         },
         Code::NotFound => RozeError::NotFound(status.message().to_string()),
+        Code::AlreadyExists | Code::Aborted => RozeError::Conflict(status.message().to_string()),
+        Code::FailedPrecondition => RozeError::FailedPrecondition(status.message().to_string()),
         Code::Unavailable => RozeError::Unavailable(status.message().to_string()),
         _ => RozeError::Internal(status.message().to_string()),
     }
@@ -1854,6 +1865,18 @@ mod tests {
                 "bad_request",
             ),
             (
+                RozeError::Conflict("already exists".into()),
+                Code::AlreadyExists,
+                409,
+                "conflict",
+            ),
+            (
+                RozeError::FailedPrecondition("stale version".into()),
+                Code::FailedPrecondition,
+                412,
+                "failed_precondition",
+            ),
+            (
                 RozeError::Unauthorized,
                 Code::Unauthenticated,
                 401,
@@ -2025,6 +2048,26 @@ mod tests {
             error_from_status(&Status::unavailable("down")),
             RozeError::Unavailable("down".into())
         );
+        assert_eq!(
+            error_from_status(&Status::already_exists("already bound")),
+            RozeError::Conflict("already bound".into())
+        );
+        assert_eq!(
+            error_from_status(&Status::failed_precondition("stale version")),
+            RozeError::FailedPrecondition("stale version".into())
+        );
+    }
+
+    #[test]
+    fn semantic_errors_round_trip_through_grpc_metadata() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1");
+        for error in [
+            RozeError::Conflict("already bound".into()),
+            RozeError::FailedPrecondition("stale version".into()),
+        ] {
+            let status = status_from_error(error.clone(), &context);
+            assert_eq!(error_from_status(&status), error);
+        }
     }
 
     #[test]

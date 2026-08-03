@@ -60,6 +60,39 @@ pub struct ServiceConfig {
     pub governance: GovernanceConfig,
 }
 
+/// A validated Roze service configuration with an application-owned typed section.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ServiceConfigWithApplication<A> {
+    #[serde(flatten)]
+    pub service: ServiceConfig,
+    #[serde(default)]
+    pub application: A,
+}
+
+impl<A> std::ops::Deref for ServiceConfigWithApplication<A> {
+    type Target = ServiceConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.service
+    }
+}
+
+impl<A> std::ops::DerefMut for ServiceConfigWithApplication<A> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.service
+    }
+}
+
+impl<A> fmt::Debug for ServiceConfigWithApplication<A> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceConfigWithApplication")
+            .field("service", &self.service)
+            .field("application", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceProfile {
@@ -1902,6 +1935,30 @@ pub fn load_service_with_secret_provider(
     load_with_secret_provider(path, provider)
 }
 
+pub fn load_service_with_application<A>(
+    path: impl AsRef<Path>,
+) -> Result<ServiceConfigWithApplication<A>, config::ConfigError>
+where
+    A: for<'de> Deserialize<'de> + Default + 'static,
+{
+    load_service_with_application_and_secret_provider(path, &EnvironmentAndFileSecretProvider)
+}
+
+pub fn load_service_with_application_and_secret_provider<A>(
+    path: impl AsRef<Path>,
+    provider: &dyn SecretProvider,
+) -> Result<ServiceConfigWithApplication<A>, config::ConfigError>
+where
+    A: for<'de> Deserialize<'de> + Default + 'static,
+{
+    let config: ServiceConfigWithApplication<A> = load_with_secret_provider(path, provider)?;
+    config
+        .service
+        .validate()
+        .map_err(|error| config::ConfigError::Message(error.to_string()))?;
+    Ok(config)
+}
+
 pub fn load_with_secret_provider<T>(
     path: impl AsRef<Path>,
     provider: &dyn SecretProvider,
@@ -2104,6 +2161,59 @@ pub use config_center::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default, Deserialize, PartialEq, Eq)]
+    struct TestApplicationConfig {
+        credential: String,
+    }
+
+    #[test]
+    fn loads_typed_application_config_after_secret_resolution_and_redacts_debug() {
+        let root = std::env::temp_dir().join(format!(
+            "roze-typed-application-config-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create config root");
+        fs::write(root.join("credential"), "resolved-secret\n").expect("write secret");
+        let path = root.join("config.yaml");
+        fs::write(
+            &path,
+            "name: typed\ngovernance: {}\napplication:\n  credential: file://credential\n",
+        )
+        .expect("write config");
+
+        let config = load_service_with_application::<TestApplicationConfig>(&path)
+            .expect("load typed application config");
+        assert_eq!(config.name, "typed");
+        assert_eq!(config.application.credential, "resolved-secret");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("resolved-secret"));
+
+        fs::remove_dir_all(root).expect("remove config root");
+    }
+
+    #[test]
+    fn production_typed_application_config_rejects_unknown_fields() {
+        let value = serde_json::json!({
+            "name": "typed",
+            "profile": "production",
+            "governance": {},
+            "application": {
+                "credential": "configured",
+                "unexpected": true
+            }
+        });
+
+        let error =
+            deserialize_config_value::<ServiceConfigWithApplication<TestApplicationConfig>>(value)
+                .expect_err("unknown application field should fail");
+        let message = error.to_string();
+        assert!(message.contains("application.unexpected"), "{message}");
+        assert!(!message.contains("configured"), "{message}");
+    }
     use std::fs;
 
     #[derive(Debug, Deserialize, PartialEq)]

@@ -3,6 +3,37 @@ use serde::{Deserialize, Serialize};
 use std::{future::Future, marker::PhantomData, pin::Pin, sync::Arc};
 use thiserror::Error;
 
+/// Selects the bounded database source used by a generated read query.
+/// Transaction-scoped clients override this selection with their transaction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadSource {
+    #[default]
+    Replica,
+    Primary,
+}
+
+impl ReadSource {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Replica => "replica",
+            Self::Primary => "primary",
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_source_tests {
+    use super::ReadSource;
+
+    #[test]
+    fn read_source_has_bounded_observability_labels() {
+        assert_eq!(ReadSource::default(), ReadSource::Replica);
+        assert_eq!(ReadSource::Replica.label(), "replica");
+        assert_eq!(ReadSource::Primary.label(), "primary");
+    }
+}
+
 pub type OperationFuture<'a, O, E> = Pin<Box<dyn Future<Output = Result<O, E>> + Send + 'a>>;
 
 pub trait Operation<I, O, E>: Send + Sync {

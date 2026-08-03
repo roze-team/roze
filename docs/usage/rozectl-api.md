@@ -2304,6 +2304,33 @@ let updated_many = ctx
     .save()
     .await?;
 
+// Use the primary for authorization or write-decision reads.
+let current = ctx
+    .model()
+    .user()
+    .query()
+    .primary()
+    .where_(user::id_eq(user_id))
+    .first()
+    .await?;
+
+// One conditional UPDATE; rows_affected is the optimistic-lock signal.
+let result = ctx
+    .model()
+    .user()
+    .update_where()
+    .where_(user::id_eq(user_id))
+    .where_(user::version_eq(expected_version))
+    .set_name("alice-renamed".to_string())
+    .set_version(expected_version + 1)
+    .execute()
+    .await?;
+if result.rows_affected == 0 {
+    return Err(roze_error::RozeError::FailedPrecondition(
+        "stale user version".to_string(),
+    ));
+}
+
 let deleted_many = ctx
     .model()
     .user()

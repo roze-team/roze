@@ -37,6 +37,15 @@ Resolved keys are redacted from `AiProviderConfig` and `ServiceConfig` debug
 output. Provider base URLs containing embedded usernames or passwords are
 rejected.
 
+Generated REST/RPC services also load a typed top-level `application` section
+through the preserved `src/application_config.rs` declaration. Its values use
+the same `env://`, `${NAME}`, `file://`, and custom `SecretProvider` resolution
+before deserialization. `ServiceConfigWithApplication<A>` dereferences to the
+built-in service config, exposes the typed value as `config.application`, and
+redacts the entire application value from `Debug` output. Production unknown
+fields are rejected against both schemas and built-in service validation runs
+before a listener is bound.
+
 `ROZE_AUTH_JWT_KEYS` accepts one JSON array and merges entries by key `id`.
 This supports adding a new key and replacing an existing key without relying
 on array indexes. The YAML active key remains explicit and can use the normal

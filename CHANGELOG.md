@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added semantic `Conflict` and `FailedPrecondition` errors with stable HTTP,
+  gRPC, metadata, localization, and round-trip mappings.
+- Generated SeaORM queries now support `.primary()` and
+  `.read_from(ReadSource)` while retaining replica reads by default, and emit
+  bounded `primary`/`replica` source labels.
+- Generated SeaORM repositories now expose `update_where()` with a
+  single-statement conditional `execute()` terminal returning `UpdateResult`.
+- Added redaction-safe typed application configuration, generated as a
+  preserved `src/application_config.rs`, with normal Roze secret resolution
+  and `ServiceConfig` validation.
 - Added the experimental `roze-ai` runtime with provider-neutral model, tool,
   agent, and event contracts; OpenAI-compatible invoke, SSE, and tool-call
   support; and validated, secret-safe provider configuration.

@@ -10,6 +10,7 @@ pub fn render_main(spec: &ApiSpec) -> String {
 
     format!(
         r#"mod application;
+mod application_config;
 mod config;
 mod client;
 mod logic;

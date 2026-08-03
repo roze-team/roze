@@ -3605,6 +3605,11 @@ fn generate_rest_project_in_place(
         application_context_rs(),
         options.mode,
     )?;
+    write_preserved(
+        &out.join("src/application_config.rs"),
+        application_config_rs(),
+        options.mode,
+    )?;
     for (name, content) in rest::render_middleware_files(spec) {
         write_preserved(
             &out.join("src/middleware").join(format!("{name}.rs")),
@@ -3874,6 +3879,11 @@ fn generate_rpc_project_in_place(
     write_preserved(
         &out.join("src/application.rs"),
         application_context_rs(),
+        options.mode,
+    )?;
+    write_preserved(
+        &out.join("src/application_config.rs"),
+        application_config_rs(),
         options.mode,
     )?;
     fs::write(out.join("src/server/mod.rs"), rpc::render_rpc(spec))?;
@@ -11284,11 +11294,23 @@ fn find_parent_workspace_root(out: &Path) -> anyhow::Result<Option<PathBuf>> {
 }
 
 fn config_rs() -> String {
-    r#"pub type Config = roze_config::ServiceConfig;
+    r#"pub type Config = roze_config::ServiceConfigWithApplication<crate::application_config::ApplicationConfig>;
 
 pub fn load(path: impl AsRef<std::path::Path>) -> Result<Config, config::ConfigError> {
-    roze_config::load_service(path)
+    roze_config::load_service_with_application(path)
 }
+"#
+    .to_string()
+}
+
+fn application_config_rs() -> String {
+    r#"use serde::Deserialize;
+
+/// Application-owned typed configuration loaded from the top-level `application` section.
+/// Secret references are resolved before deserialization and debug output redacts this value.
+/// This file is preserved by `rozectl ... generate --update`.
+#[derive(Clone, Default, Deserialize)]
+pub struct ApplicationConfig {}
 "#
     .to_string()
 }
@@ -14070,7 +14092,7 @@ fn main() {
         assert!(!config.contains("sqlite://"));
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config loader")
-            .contains("roze_config::load_service(path)"));
+            .contains("roze_config::load_service_with_application(path)"));
         let handler = fs::read_to_string(out.join("src/handler/users/get_users_id.rs"))
             .expect("read handler");
         assert!(handler.contains("Option<roze_http::client_ip::ClientIp>"));
@@ -14220,7 +14242,7 @@ fn main() {
         assert!(!config.contains("sqlite://"));
         assert!(fs::read_to_string(out.join("src/config/mod.rs"))
             .expect("read config loader")
-            .contains("roze_config::load_service(path)"));
+            .contains("roze_config::load_service_with_application(path)"));
         let service_context =
             fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
         assert!(service_context.contains("pub rate_limiter: Arc<roze_rate_limit::RateLimiter>"));
@@ -16080,6 +16102,9 @@ fn main() {
             "use crate::svc::ServiceContext;\n\npub async fn configure_context(ctx: ServiceContext) -> anyhow::Result<ServiceContext> {\n    // attach application report source\n    Ok(ctx)\n}\n\npub fn register_services(\n    group: &mut roze_service::ServiceGroup,\n    ctx: &ServiceContext,\n) -> anyhow::Result<()> {\n    let _ = group;\n    let _ = ctx;\n    Ok(())\n}\n",
         )
         .expect("write application context hook");
+        let application_config = "use serde::Deserialize;\n\n#[derive(Clone, Default, Deserialize)]\npub struct ApplicationConfig {\n    pub provider: String,\n}\n";
+        fs::write(out.join("src/application_config.rs"), application_config)
+            .expect("write application config declaration");
         fs::write(
             out.join("src/logic/support.rs"),
             "pub struct SupportMarker;\n",
@@ -16146,6 +16171,11 @@ pub use admin_map::AdminMap;
         assert!(fs::read_to_string(out.join("src/application.rs"))
             .expect("read preserved application lifecycle hook")
             .contains("pub fn register_services("));
+        assert_eq!(
+            fs::read_to_string(out.join("src/application_config.rs"))
+                .expect("read application config declaration"),
+            application_config
+        );
         assert!(fs::read_to_string(out.join("src/main.rs"))
             .expect("read generated main")
             .contains("middleware::app::apply(app, ctx)"));
