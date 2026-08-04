@@ -369,6 +369,11 @@ The generated entrypoint constructs Kafka through
 `roze_mq::Subscriber` trait. `--broker` selects the generated Cargo feature and
 initial `kafka.provider` value. `config.yaml` and
 `src/stream/consumer.rs` remain application-owned during `--update`.
+The Stream manifest follows the same ownership boundary: `--update` refreshes
+the generator-managed runtime, broker, and common dependencies but preserves
+application-added dependencies and unrelated Cargo sections. This includes
+local workspace/RPC crates and Roze crates used only by the preserved consumer.
+`--force` still performs an intentional full scaffold replacement.
 Create, `--update`, and `--force` generation format framework-owned Rust files
 inside the transactional staging directory before replacing the target, so a
 successful command is immediately clean under `cargo fmt --all -- --check`.

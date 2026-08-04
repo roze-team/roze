@@ -831,18 +831,75 @@ fn write_stream_cargo_toml(
             })?,
         )?),
     };
-    fs::write(
-        out.join("Cargo.toml"),
-        render_stream_cargo_toml(
-            spec,
-            logical_out,
-            options.dependency_source,
-            local_crates_prefix.as_deref(),
-            in_workspace,
-            broker,
-        ),
-    )
-    .with_context(|| format!("failed to write {}", out.join("Cargo.toml").display()))
+    let path = out.join("Cargo.toml");
+    let explicit_manifest = render_stream_cargo_toml(
+        spec,
+        logical_out,
+        options.dependency_source,
+        local_crates_prefix.as_deref(),
+        false,
+        broker,
+    );
+    let mut generated_manifest = render_stream_cargo_toml(
+        spec,
+        logical_out,
+        options.dependency_source,
+        local_crates_prefix.as_deref(),
+        in_workspace,
+        broker,
+    );
+    normalize_generated_workspace_dependencies(
+        &mut generated_manifest,
+        workspace_root.as_deref(),
+        &explicit_manifest,
+    )?;
+
+    let manifest = if options.mode == GenerateMode::Update && path.is_file() {
+        merge_stream_cargo_toml(
+            &fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?,
+            &generated_manifest,
+            workspace_root.as_deref(),
+            &explicit_manifest,
+        )?
+    } else {
+        generated_manifest
+    };
+    fs::write(&path, manifest).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn merge_stream_cargo_toml(
+    existing: &str,
+    generated: &str,
+    workspace_root: Option<&Path>,
+    explicit_manifest: &str,
+) -> anyhow::Result<String> {
+    let mut document = existing
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse existing Stream Cargo.toml")?;
+    let generated_document = generated
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse generated Stream Cargo.toml")?;
+    let generated_dependencies = generated_document
+        .get("dependencies")
+        .and_then(toml_edit::Item::as_table)
+        .context("generated Stream Cargo.toml has no [dependencies] table")?;
+    let dependencies = document
+        .get_mut("dependencies")
+        .and_then(toml_edit::Item::as_table_mut)
+        .context("existing Stream Cargo.toml has no [dependencies] table")?;
+
+    for (name, generated_item) in generated_dependencies {
+        let unchanged = dependencies
+            .get(name)
+            .is_some_and(|existing_item| existing_item.to_string() == generated_item.to_string());
+        if !unchanged {
+            dependencies.insert(name, generated_item.clone());
+        }
+    }
+
+    normalize_workspace_dependency_document(&mut document, workspace_root, explicit_manifest)?;
+    Ok(document.to_string())
 }
 
 fn render_stream_cargo_toml(
@@ -14846,6 +14903,22 @@ fn main() {
         )
         .expect("write stream api");
 
+        let application_events = root.join("apps/application-events");
+        fs::create_dir_all(application_events.join("src"))
+            .expect("create application dependency crate");
+        fs::write(
+            application_events.join("Cargo.toml"),
+            "[package]\nname = \"application-events\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+        )
+        .expect("write application dependency manifest");
+        fs::write(
+            application_events.join("src/lib.rs"),
+            "pub fn marker() -> &'static str { \"application-events\" }\n",
+        )
+        .expect("write application dependency library");
+        register_workspace_member(&application_events)
+            .expect("register application dependency crate");
+
         for (name, broker) in [
             ("user-stream-memory", StreamBroker::Memory),
             ("user-stream-rust-native", StreamBroker::RustNative),
@@ -14859,8 +14932,55 @@ fn main() {
             )
             .expect("generate stream project");
 
-            cargo_check_generated(&out.join("Cargo.toml"));
-            cargo_clippy_generated(&out.join("Cargo.toml"));
+            let manifest_path = out.join("Cargo.toml");
+            let mut manifest = fs::read_to_string(&manifest_path)
+                .expect("read generated stream manifest")
+                .parse::<toml_edit::DocumentMut>()
+                .expect("parse generated stream manifest");
+            let dependencies = manifest["dependencies"]
+                .as_table_mut()
+                .expect("stream dependencies");
+            dependencies.insert(
+                "application-events",
+                r#"{ path = "../application-events" }"#
+                    .parse::<toml_edit::Item>()
+                    .expect("application dependency"),
+            );
+            dependencies.insert(
+                "roze-context",
+                r#"{ path = "../../crates/roze-context" }"#
+                    .parse::<toml_edit::Item>()
+                    .expect("application Roze dependency"),
+            );
+            fs::write(&manifest_path, manifest.to_string())
+                .expect("write application Stream dependencies");
+            let consumer_path = out.join("src/stream/consumer.rs");
+            let custom_consumer = fs::read_to_string(&consumer_path)
+                .expect("read generated consumer")
+                + "\n#[allow(dead_code)]\nfn application_dependency_compile_check() {\n    let _ = application_events::marker();\n    let _: Option<roze_context::Context> = None;\n}\n";
+            fs::write(&consumer_path, &custom_consumer)
+                .expect("write application consumer behavior");
+
+            for _ in 0..2 {
+                write_stream_worker_project_with_broker(
+                    &api,
+                    &out,
+                    GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+                    broker,
+                )
+                .expect("update Stream project with application dependencies");
+            }
+            let updated_manifest =
+                fs::read_to_string(&manifest_path).expect("read updated Stream manifest");
+            assert!(updated_manifest.contains("application-events"));
+            assert!(updated_manifest.contains("roze-context"));
+            assert_eq!(
+                fs::read_to_string(&consumer_path).expect("read preserved consumer"),
+                custom_consumer
+            );
+
+            cargo_check_generated(&manifest_path);
+            cargo_clippy_generated(&manifest_path);
         }
 
         let standalone = root.join("services/user-stream-standalone");
@@ -15274,6 +15394,101 @@ fn main() {
             );
             cargo_fmt_generated(&out.join("Cargo.toml"));
         }
+
+        fs::remove_dir_all(root).expect("remove stream root");
+    }
+
+    #[test]
+    fn stream_update_preserves_application_manifest_dependencies() {
+        let root = temp_test_root("rozectl-stream-application-dependencies");
+        fs::create_dir_all(&root).expect("create stream root");
+        let api = root.join("events.api");
+        let out = root.join("events-worker");
+        fs::write(
+            &api,
+            r#"
+            service events {
+                rpc EventCreated (EventCreatedReq) returns (EventCreatedResp)
+            }
+            type EventCreatedReq {
+                id: u64
+            }
+            type EventCreatedResp {
+                accepted: bool
+            }
+            "#,
+        )
+        .expect("write stream api");
+
+        write_stream_worker_project_with_broker(
+            &api,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+            StreamBroker::RdkafkaCmake,
+        )
+        .expect("create stream project");
+
+        let manifest_path = out.join("Cargo.toml");
+        let mut manifest = fs::read_to_string(&manifest_path)
+            .expect("read stream manifest")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse stream manifest");
+        let dependencies = manifest["dependencies"]
+            .as_table_mut()
+            .expect("dependencies table");
+        dependencies.insert(
+            "allocation-rpc",
+            r#"{ path = "../allocation-rpc", features = ["client"] }"#
+                .parse::<toml_edit::Item>()
+                .expect("application RPC dependency"),
+        );
+        dependencies.insert(
+            "roze-context",
+            r#"{ git = "https://github.com/roze-team/roze.git" }"#
+                .parse::<toml_edit::Item>()
+                .expect("application Roze dependency"),
+        );
+        manifest["dev-dependencies"]["application-test-support"] = toml_edit::value("1.0");
+        fs::write(&manifest_path, manifest.to_string()).expect("customize stream manifest");
+        let customized = fs::read_to_string(&manifest_path).expect("read customized manifest");
+
+        for _ in 0..2 {
+            write_stream_worker_project_with_broker(
+                &api,
+                &out,
+                GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+                StreamBroker::RdkafkaCmake,
+            )
+            .expect("update stream project");
+        }
+
+        let updated = fs::read_to_string(&manifest_path).expect("read updated manifest");
+        assert_eq!(updated, customized);
+        assert!(updated.contains("allocation-rpc"));
+        assert!(updated.contains("roze-context"));
+        assert!(updated.contains("application-test-support"));
+        assert!(updated.contains(r#"features = ["rdkafka-cmake"]"#));
+
+        let consumer_path = out.join("src/stream/consumer.rs");
+        let consumer = fs::read_to_string(&consumer_path).expect("read consumer before failure");
+        let invalid_manifest = "[package]\nname = \"broken\"\n[dependencies]\nbroken = {\n";
+        fs::write(&manifest_path, invalid_manifest).expect("write invalid manifest");
+        let error = write_stream_worker_project_with_broker(
+            &api,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            StreamBroker::RdkafkaCmake,
+        )
+        .expect_err("invalid application manifest must fail transactionally");
+        assert!(error.to_string().contains("Stream Cargo.toml"));
+        assert_eq!(
+            fs::read_to_string(&manifest_path).expect("read preserved invalid manifest"),
+            invalid_manifest
+        );
+        assert_eq!(
+            fs::read_to_string(&consumer_path).expect("read preserved consumer"),
+            consumer
+        );
 
         fs::remove_dir_all(root).expect("remove stream root");
     }
