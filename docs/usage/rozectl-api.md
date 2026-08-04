@@ -1282,9 +1282,12 @@ Expired requests cancel the in-flight handler future and return HTTP `504` with
 `request timeout`; route-specific handler timeouts can still impose a shorter
 effective deadline.
 `rest.middlewares.request_body_limit_bytes` is enforced against the actual body
-before extraction, including chunked requests without `Content-Length`.
-Oversized requests return HTTP `413` with `request body too large`; accepted
-bodies remain available to JSON, form, and custom extractors.
+before extraction, including chunked requests without `Content-Length` and the
+decompressed body when `gunzip` is enabled. The configured value also replaces
+the native extractor's 2 MiB default. Oversized requests return HTTP `413` with
+`request body too large`; accepted bodies remain available to JSON, form, and
+custom extractors without allocating a second copy of the payload. When the
+setting is absent, native extractors retain their 2 MiB default.
 
 `cors: true` enables CORS. Without `cors_config`, generated services use a
 permissive development default. Add `cors_config` to restrict browser

@@ -7,6 +7,9 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+async-compression.workspace = true
+futures-util.workspace = true
+http-body-util.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-config = { path = "../roze-config" }
 roze-context = { path = "../roze-context" }
@@ -19,6 +22,7 @@ roze-resilience = { path = "../roze-resilience" }
 roze-jwt = { path = "../roze-jwt" }
 roze-trace = { path = "../roze-trace" }
 tokio.workspace = true
+tokio-util.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tower.workspace = true

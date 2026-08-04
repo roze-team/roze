@@ -7,6 +7,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt as _;
+use http_body_util::BodyExt as _;
 use roze_auth::BearerTokenVerifier as _;
 use roze_context::{AuthContext, Context};
 use roze_error::RozeError;
@@ -16,6 +18,8 @@ use roze_resilience::{
     SheddingRegistry,
 };
 use serde::Serialize;
+use tokio::io::AsyncReadExt as _;
+use tokio_util::io::StreamReader;
 
 static ROUTE_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 static ROUTE_SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
@@ -28,6 +32,7 @@ pub struct CommonMiddlewareConfig {
     pub cors: bool,
     pub cors_config: Option<CorsConfig>,
     pub timeout_ms: Option<u64>,
+    pub gunzip: bool,
     pub body_limit_bytes: Option<usize>,
     pub trust_forwarded_identity_headers: bool,
     pub trusted_proxies: Option<roze_http::client_ip::TrustedProxyConfig>,
@@ -42,6 +47,7 @@ impl Default for CommonMiddlewareConfig {
             cors: true,
             cors_config: None,
             timeout_ms: None,
+            gunzip: false,
             body_limit_bytes: None,
             trust_forwarded_identity_headers: false,
             trusted_proxies: None,
@@ -58,6 +64,7 @@ impl From<&roze_config::HttpMiddlewaresConfig> for CommonMiddlewareConfig {
             cors: config.cors,
             cors_config: config.cors_config.as_ref().map(CorsConfig::from),
             timeout_ms: config.timeout.then_some(30_000),
+            gunzip: config.gunzip,
             body_limit_bytes: config.request_body_limit_bytes,
             trust_forwarded_identity_headers: config.trust_forwarded_identity_headers,
             trusted_proxies: None,
@@ -170,6 +177,18 @@ pub fn apply_common_with_config(
         service = service.layer(roze_http::middleware::from_fn_with_state(
             limit,
             enforce_request_body_limit,
+        ));
+        service = service.layer(roze_http::extract::DefaultBodyLimit::max(limit));
+    }
+    if config.gunzip {
+        service = service.layer(roze_http::middleware::from_fn_with_state(
+            GzipBodyPolicy {
+                limit: config
+                    .body_limit_bytes
+                    .unwrap_or(roze_http::extract::DEFAULT_BODY_LIMIT),
+                configured_limit: config.body_limit_bytes.is_some(),
+            },
+            decompress_gzip_request,
         ));
     }
     if config.cors {
@@ -446,6 +465,78 @@ async fn enforce_request_body_limit(
             format!("failed to read request body: {error}"),
         )),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GzipBodyPolicy {
+    limit: usize,
+    configured_limit: bool,
+}
+
+async fn decompress_gzip_request(
+    roze_http::extract::State(policy): roze_http::extract::State<GzipBodyPolicy>,
+    request: roze_http::IncomingRequest,
+    next: roze_http::middleware::Next,
+) -> roze_http::HttpResponse {
+    if request
+        .headers()
+        .get(roze_http::http::header::CONTENT_ENCODING)
+        .is_none_or(|encoding| encoding.as_bytes() != b"gzip")
+    {
+        return next.run(request).await;
+    }
+
+    let (mut parts, body) = request.into_parts();
+    match decompress_gzip_limited(body, policy.limit).await {
+        Ok(bytes) => {
+            parts
+                .headers
+                .remove(roze_http::http::header::CONTENT_ENCODING);
+            parts
+                .headers
+                .remove(roze_http::http::header::CONTENT_LENGTH);
+            next.run(roze_http::http::Request::from_parts(
+                parts,
+                roze_http::body::full(bytes),
+            ))
+            .await
+        }
+        Err(roze_http::body::BodyError::LengthLimitExceeded { .. }) => {
+            let status = if policy.configured_limit {
+                roze_http::http::StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                roze_http::http::StatusCode::BAD_REQUEST
+            };
+            roze_http::IntoResponse::into_response((status, "request body too large"))
+        }
+        Err(error) => roze_http::IntoResponse::into_response((
+            roze_http::http::StatusCode::BAD_REQUEST,
+            format!("failed to decompress request body: {error}"),
+        )),
+    }
+}
+
+async fn decompress_gzip_limited(
+    body: roze_http::body::Body,
+    limit: usize,
+) -> Result<roze_http::body::Bytes, roze_http::body::BodyError> {
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let reader = StreamReader::new(stream);
+    let decoder = async_compression::tokio::bufread::GzipDecoder::new(reader);
+    let read_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut limited = decoder.take(read_limit);
+    let mut decoded = Vec::with_capacity(limit.min(64 * 1024));
+    limited
+        .read_to_end(&mut decoded)
+        .await
+        .map_err(|error| roze_http::body::BodyError::Body(roze_http::BoxError::new(error)))?;
+    if decoded.len() > limit {
+        return Err(roze_http::body::BodyError::LengthLimitExceeded {
+            limit,
+            actual: decoded.len(),
+        });
+    }
+    Ok(roze_http::body::Bytes::from(decoded))
 }
 
 pub fn apply_timeout(service: roze_http::Router, timeout_ms: u64) -> roze_http::Router {
@@ -1669,6 +1760,219 @@ mod tests {
             .await
             .expect("response body");
         assert_eq!(&body[..], b"1234");
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LargeJsonPayload {
+        value: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LargeFormPayload {
+        value: String,
+    }
+
+    struct CustomBody(roze_http::body::Bytes);
+
+    impl roze_http::extract::FromRequest for CustomBody {
+        type Rejection = RozeError;
+
+        fn from_request(
+            request: roze_http::IncomingRequest,
+        ) -> roze_http::extract::ExtractFuture<'static, Self, Self::Rejection> {
+            Box::pin(async move {
+                Ok(Self(
+                    <roze_http::body::Bytes as roze_http::extract::FromRequest>::from_request(
+                        request,
+                    )
+                    .await?,
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_body_limit_raises_json_extractor_limit() {
+        use roze_http::{routing::post, Json, Router};
+        use tower::ServiceExt as _;
+
+        let value = "a".repeat(roze_http::extract::DEFAULT_BODY_LIMIT + 1);
+        let body = serde_json::to_vec(&serde_json::json!({ "value": value })).unwrap();
+        let router = || {
+            Router::new().route(
+                "/json",
+                post(|Json(payload): Json<LargeJsonPayload>| async move {
+                    payload.value.len().to_string()
+                }),
+            )
+        };
+        let request = || {
+            roze_http::http::Request::builder()
+                .method(roze_http::http::Method::POST)
+                .uri("/json")
+                .header(roze_http::http::header::CONTENT_TYPE, "application/json")
+                .body(roze_http::body::full(body.clone()))
+                .unwrap()
+        };
+
+        let native_default = apply_common(router())
+            .oneshot(request())
+            .await
+            .expect("native default response");
+        assert_eq!(
+            native_default.status(),
+            roze_http::http::StatusCode::BAD_REQUEST
+        );
+
+        let configured = apply_common_with_config(
+            router(),
+            CommonMiddlewareConfig {
+                body_limit_bytes: Some(32 * 1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .oneshot(request())
+        .await
+        .expect("configured response");
+        assert_eq!(configured.status(), roze_http::http::StatusCode::OK);
+
+        let malformed_oversized = roze_http::http::Request::builder()
+            .method(roze_http::http::Method::POST)
+            .uri("/json")
+            .header(roze_http::http::header::CONTENT_TYPE, "application/json")
+            .body(roze_http::body::full("not-json-and-too-large"))
+            .unwrap();
+        let rejected = apply_common_with_config(
+            router(),
+            CommonMiddlewareConfig {
+                body_limit_bytes: Some(8),
+                ..Default::default()
+            },
+        )
+        .oneshot(malformed_oversized)
+        .await
+        .expect("oversized JSON response");
+        assert_eq!(
+            rejected.status(),
+            roze_http::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_body_limit_covers_form_and_custom_extractors_without_content_length() {
+        use roze_http::{extract::Form, routing::post, Router};
+        use tower::ServiceExt as _;
+
+        let value = "a".repeat(roze_http::extract::DEFAULT_BODY_LIMIT + 1);
+        let form_body = format!("value={value}");
+        let app = apply_common_with_config(
+            Router::new()
+                .route(
+                    "/form",
+                    post(|Form(payload): Form<LargeFormPayload>| async move {
+                        payload.value.len().to_string()
+                    }),
+                )
+                .route(
+                    "/custom",
+                    post(|body: CustomBody| async move {
+                        format!("{}:{}", body.0.len(), body.0.as_ptr() as usize)
+                    }),
+                ),
+            CommonMiddlewareConfig {
+                body_limit_bytes: Some(32 * 1024 * 1024),
+                ..Default::default()
+            },
+        );
+
+        let form_request = roze_http::http::Request::builder()
+            .method(roze_http::http::Method::POST)
+            .uri("/form")
+            .header(
+                roze_http::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(roze_http::body::full(form_body.clone()))
+            .unwrap();
+        assert!(!form_request
+            .headers()
+            .contains_key(roze_http::http::header::CONTENT_LENGTH));
+        let form_response = app
+            .clone()
+            .oneshot(form_request)
+            .await
+            .expect("form response");
+        assert_eq!(form_response.status(), roze_http::http::StatusCode::OK);
+
+        let custom_payload = roze_http::body::Bytes::from(value);
+        let original_storage = custom_payload.clone();
+        let custom_request = roze_http::http::Request::builder()
+            .method(roze_http::http::Method::POST)
+            .uri("/custom")
+            .body(roze_http::body::full(custom_payload))
+            .unwrap();
+        let custom_response = app.oneshot(custom_request).await.expect("custom response");
+        assert_eq!(custom_response.status(), roze_http::http::StatusCode::OK);
+        let custom_response_body = roze_http::body::to_bytes(custom_response.into_body(), 64)
+            .await
+            .expect("custom response body");
+        let (length, pointer) = std::str::from_utf8(&custom_response_body)
+            .unwrap()
+            .split_once(':')
+            .unwrap();
+        assert_eq!(length.parse::<usize>().unwrap(), original_storage.len());
+        assert_eq!(
+            pointer.parse::<usize>().unwrap(),
+            original_storage.as_ptr() as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_body_limit_rejects_decompressed_body_before_extraction() {
+        use roze_http::{routing::post, Router};
+        use tower::ServiceExt as _;
+
+        const GZIP_12345: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 4, 0, 51, 52, 50, 54, 49, 5, 0, 28, 58, 245, 203, 5, 0, 0, 0,
+        ];
+        let router = || Router::new().route("/gzip", post(|body: String| async move { body }));
+        let request = || {
+            roze_http::http::Request::builder()
+                .method(roze_http::http::Method::POST)
+                .uri("/gzip")
+                .header(roze_http::http::header::CONTENT_ENCODING, "gzip")
+                .body(roze_http::body::full(GZIP_12345))
+                .unwrap()
+        };
+
+        let rejected = apply_common_with_config(
+            router(),
+            CommonMiddlewareConfig {
+                gunzip: true,
+                body_limit_bytes: Some(4),
+                ..Default::default()
+            },
+        )
+        .oneshot(request())
+        .await
+        .expect("rejected response");
+        assert_eq!(
+            rejected.status(),
+            roze_http::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let accepted = apply_common_with_config(
+            router(),
+            CommonMiddlewareConfig {
+                gunzip: true,
+                body_limit_bytes: Some(5),
+                ..Default::default()
+            },
+        )
+        .oneshot(request())
+        .await
+        .expect("accepted response");
+        assert_eq!(accepted.status(), roze_http::http::StatusCode::OK);
     }
 
     #[tokio::test]

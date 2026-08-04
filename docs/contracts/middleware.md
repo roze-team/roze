@@ -82,8 +82,8 @@ rest:
 | `timeout` | `true` | Enables framework-level timeout enforcement. Generated routes apply the service-wide `governance.timeout_ms` as a Roze HTTP timeout layer; an expired request cancels the handler future and returns `504 request timeout`. Generated handler adapters still enforce route-specific effective timeouts from `governance.routes`. |
 | `max_conns` | unset | Hard concurrent request cap. Exceeded requests return `503`. |
 | `shedding` | unset | Adaptive load shedding. Exceeded concurrency or unhealthy recent windows return `503`. |
-| `gunzip` | `false` | Decompresses gzip request bodies before extraction. |
-| `request_body_limit_bytes` | unset | Reads and enforces the actual request-body size before extraction, including requests without `Content-Length`; oversized bodies return `413 request body too large`, while accepted bodies are rebuilt unchanged for JSON/Form/custom extractors. |
+| `gunzip` | `false` | Decompresses gzip request bodies before size enforcement and extraction. |
+| `request_body_limit_bytes` | unset | Reads and enforces the actual, decompressed request-body size before extraction, including requests without `Content-Length`; oversized bodies return `413 request body too large`. The same value replaces the native extractor's 2 MiB default for JSON/Form/raw body extractors, while accepted bodies retain shared `Bytes` storage for custom extractors without a second payload allocation. |
 | `auth_public_routes` | fully prefixed health/readiness/startup/metrics and generated WebSocket upgrade routes | Routes that do not require a Bearer token when service-level `auth` is configured. Entries may be exact paths, method-qualified paths such as `GET /healthz`, or prefix patterns ending in `*`. |
 | `trust_forwarded_identity_headers` | `false` | Accept identity propagation headers from an upstream proxy. Enable only when direct clients cannot reach the service and the proxy replaces those headers after authentication. |
 

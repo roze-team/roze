@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Configured REST request-body limits now raise the matching native extractor
+  limit, and optional gzip decoding runs before decompressed-size enforcement.
 - Added backward-compatible `tokens_per_refill` governance rate limits with
   matching REST, RPC, Gateway, memory, and Redis token-bucket semantics.
 - SQL model import now recognizes PostgreSQL named and anonymous table-level

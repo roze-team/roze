@@ -4242,7 +4242,10 @@ name = "roze-middleware"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "async-trait",
+ "futures-util",
+ "http-body-util",
  "roze-auth",
  "roze-config",
  "roze-context",
@@ -4257,6 +4260,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http 0.7.0",
  "tracing",
