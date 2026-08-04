@@ -1507,6 +1507,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     if uses_auth {
         out.push_str("    let request_ctx = authorize(&headers, &ctx, &request_ctx)?;\n");
     }
+    out.push_str("    let request_ctx = match client_ip {\n        Some(client_ip) => request_ctx.with_metadata(\"client_ip\", client_ip.to_string()),\n        None => request_ctx,\n    };\n");
     out.push_str(&format!(
         "    roze_middleware::enforce_route_rate_limit(ctx.rate_limiter.as_ref(), ctx.config.name.as_str(), {handler:?}, {method:?}, &request_ctx, client_ip, &headers, Some(&ctx.config.governance)).await?;\n",
         handler = handler,
@@ -1627,6 +1628,7 @@ fn render_websocket_route_handler(spec: &ApiSpec, route: &crate::parser::RestRou
     if uses_auth {
         out.push_str("    let request_ctx = authorize(&headers, &ctx, &request_ctx)?;\n");
     }
+    out.push_str("    let request_ctx = match client_ip {\n        Some(client_ip) => request_ctx.with_metadata(\"client_ip\", client_ip.to_string()),\n        None => request_ctx,\n    };\n");
     out.push_str(&format!(
         "    roze_middleware::enforce_route_rate_limit(ctx.rate_limiter.as_ref(), ctx.config.name.as_str(), {handler:?}, \"GET\", &request_ctx, client_ip, &headers, Some(&ctx.config.governance)).await?;\n",
         handler = handler,

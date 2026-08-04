@@ -14350,6 +14350,7 @@ fn main() {
         let handler = fs::read_to_string(out.join("src/handler/users/get_users_id.rs"))
             .expect("read handler");
         assert!(handler.contains("Option<roze_http::client_ip::ClientIp>"));
+        assert!(handler.contains("request_ctx.with_metadata(\"client_ip\", client_ip.to_string())"));
         assert!(handler.contains("enforce_route_rate_limit"));
 
         fs::remove_dir_all(root).expect("remove test output");
@@ -14563,6 +14564,9 @@ fn main() {
         let main = fs::read_to_string(out.join("src/main.rs")).expect("read main");
         assert!(main.contains("for route in route::WEBSOCKET_PUBLIC_ROUTES"));
         assert!(main.contains("roze_config::service_config_path(env!(\"CARGO_MANIFEST_DIR\"))"));
+        let handler =
+            fs::read_to_string(out.join("src/handler/ws/realtime.rs")).expect("read handler");
+        assert!(handler.contains("request_ctx.with_metadata(\"client_ip\", client_ip.to_string())"));
         assert!(!openapi_document(&spec)["paths"]
             .as_object()
             .expect("OpenAPI paths")
