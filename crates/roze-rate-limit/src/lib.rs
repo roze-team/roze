@@ -206,6 +206,7 @@ fn default_dimensions() -> Vec<RateLimitDimension> {
 pub struct RateLimit {
     pub burst: u32,
     pub refill: Duration,
+    pub tokens_per_refill: u32,
 }
 
 impl RateLimit {
@@ -214,6 +215,10 @@ impl RateLimit {
         anyhow::ensure!(
             !self.refill.is_zero(),
             "rate limit refill duration must be positive"
+        );
+        anyhow::ensure!(
+            self.tokens_per_refill > 0,
+            "rate limit tokens per refill must be positive"
         );
         Ok(())
     }
@@ -394,7 +399,7 @@ impl RateLimiter {
         identity: &RateLimitIdentity,
         limit: RateLimit,
     ) -> Result<RateLimitDecision, RateLimitError> {
-        if limit.burst == 0 || limit.refill.is_zero() {
+        if limit.burst == 0 || limit.refill.is_zero() || limit.tokens_per_refill == 0 {
             return Ok(RateLimitDecision::denied(
                 limit.refill.max(Duration::from_secs(1)),
             ));
@@ -541,19 +546,30 @@ impl RateLimitStore for InMemoryRateLimitStore {
             tokens: f64::from(limit.burst),
             last_refill: now,
         });
-        let refill_units =
-            now.duration_since(state.last_refill).as_secs_f64() / limit.refill.as_secs_f64();
-        state.tokens = (state.tokens + refill_units).min(f64::from(limit.burst));
+        state.tokens = refilled_tokens(state.tokens, now.duration_since(state.last_refill), limit);
         state.last_refill = now;
         if state.tokens >= 1.0 {
             state.tokens -= 1.0;
             return Ok(RateLimitDecision::allowed(false));
         }
-        let retry = Duration::from_secs_f64((1.0 - state.tokens) * limit.refill.as_secs_f64());
-        Ok(RateLimitDecision::denied(
-            retry.max(Duration::from_millis(1)),
-        ))
+        Ok(RateLimitDecision::denied(retry_after_for_tokens(
+            state.tokens,
+            limit,
+        )))
     }
+}
+
+fn refilled_tokens(tokens: f64, elapsed: Duration, limit: RateLimit) -> f64 {
+    (tokens
+        + elapsed.as_secs_f64() / limit.refill.as_secs_f64() * f64::from(limit.tokens_per_refill))
+    .min(f64::from(limit.burst))
+}
+
+fn retry_after_for_tokens(tokens: f64, limit: RateLimit) -> Duration {
+    Duration::from_secs_f64(
+        (1.0 - tokens).max(0.0) * limit.refill.as_secs_f64() / f64::from(limit.tokens_per_refill),
+    )
+    .max(Duration::from_millis(1))
 }
 
 #[derive(Clone)]
@@ -601,20 +617,22 @@ local now = redis.call('TIME')
 local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
 local burst = tonumber(ARGV[1])
 local refill_ms = tonumber(ARGV[2])
+local tokens_per_refill = tonumber(ARGV[3])
 local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or burst)
 local last_ms = tonumber(redis.call('HGET', KEYS[1], 'last_ms') or now_ms)
 local elapsed = math.max(0, now_ms - last_ms)
-tokens = math.min(burst, tokens + elapsed / refill_ms)
+tokens = math.min(burst, tokens + elapsed / refill_ms * tokens_per_refill)
 local allowed = 0
 local retry_after_ms = 0
 if tokens >= 1 then
   tokens = tokens - 1
   allowed = 1
 else
-  retry_after_ms = math.max(1, math.ceil((1 - tokens) * refill_ms))
+  retry_after_ms = math.max(1, math.ceil((1 - tokens) * refill_ms / tokens_per_refill))
 end
 redis.call('HSET', KEYS[1], 'tokens', tokens, 'last_ms', now_ms)
-redis.call('PEXPIRE', KEYS[1], math.max(refill_ms * burst * 2, refill_ms + 1000))
+local full_refill_ms = math.ceil(refill_ms * burst / tokens_per_refill)
+redis.call('PEXPIRE', KEYS[1], math.max(full_refill_ms * 2, refill_ms + 1000))
 return {allowed, retry_after_ms}
 "#;
 
@@ -628,6 +646,7 @@ impl RateLimitStore for RedisRateLimitStore {
                 .key(format!("{}:{key}", self.key_prefix))
                 .arg(limit.burst)
                 .arg(refill_ms)
+                .arg(limit.tokens_per_refill)
                 .invoke_async(&mut connection)
                 .await?;
         Ok(if allowed == 1 {
@@ -671,6 +690,7 @@ mod tests {
         let limit = RateLimit {
             burst: 1,
             refill: Duration::from_secs(60),
+            tokens_per_refill: 1,
         };
         assert!(
             limiter
@@ -692,6 +712,35 @@ mod tests {
                 .await
                 .unwrap()
                 .allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn tokens_per_refill_supports_high_rates_and_bounded_retry_after() {
+        let limit = RateLimit {
+            burst: 50,
+            refill: Duration::from_millis(1),
+            tokens_per_refill: 50,
+        };
+        assert_eq!(refilled_tokens(0.0, Duration::from_millis(1), limit), 50.0);
+
+        let ten_thousand_per_second = RateLimit {
+            burst: 10,
+            refill: Duration::from_millis(1),
+            tokens_per_refill: 10,
+        };
+        ten_thousand_per_second.validate().unwrap();
+        limit.validate().unwrap();
+        assert_eq!(
+            retry_after_for_tokens(
+                0.0,
+                RateLimit {
+                    burst: 10,
+                    refill: Duration::from_secs(1),
+                    tokens_per_refill: 10,
+                },
+            ),
+            Duration::from_millis(100)
         );
     }
 
@@ -761,6 +810,7 @@ mod tests {
         let limit = RateLimit {
             burst: 1,
             refill: Duration::from_secs(1),
+            tokens_per_refill: 1,
         };
         let open = RateLimiter::with_store(
             Arc::new(FailingStore),
@@ -823,6 +873,7 @@ mod tests {
         let limit = RateLimit {
             burst: 8,
             refill: Duration::from_secs(60),
+            tokens_per_refill: 1,
         };
         let allowed = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();

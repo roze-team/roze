@@ -178,6 +178,7 @@ fn next_retry_jitter() -> u64 {
 pub struct RateLimitConfig {
     pub burst: u32,
     pub refill: Duration,
+    pub tokens_per_refill: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,7 +558,7 @@ fn refill_tokens(state: &mut RateLimitState, config: RateLimitConfig) {
 
     let now = Instant::now();
     let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-    let tokens_to_add = elapsed / refill_secs;
+    let tokens_to_add = elapsed / refill_secs * f64::from(config.tokens_per_refill);
     if tokens_to_add > 0.0 {
         state.tokens = (state.tokens + tokens_to_add).min(config.burst as f64);
         state.last_refill = now;
@@ -727,11 +728,29 @@ mod tests {
         let config = RateLimitConfig {
             burst: 1,
             refill: Duration::from_millis(10),
+            tokens_per_refill: 1,
         };
 
         assert!(registry.allow(key, config));
         assert!(!registry.allow(key, config));
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn rate_limit_refills_multiple_tokens_per_window() {
+        let mut state = RateLimitState {
+            tokens: 0.0,
+            last_refill: Instant::now() - Duration::from_millis(1),
+        };
+        refill_tokens(
+            &mut state,
+            RateLimitConfig {
+                burst: 50,
+                refill: Duration::from_millis(1),
+                tokens_per_refill: 50,
+            },
+        );
+        assert_eq!(state.tokens, 50.0);
     }
 
     #[test]

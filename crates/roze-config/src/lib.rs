@@ -1267,6 +1267,7 @@ impl GovernanceConfig {
             rate_limit: rate_limit.map(|config| roze_resilience::RateLimitConfig {
                 burst: config.burst,
                 refill: Duration::from_millis(config.refill_ms),
+                tokens_per_refill: config.tokens_per_refill,
             }),
             breaker: breaker.map(|config| roze_resilience::BreakerConfig {
                 failure_threshold: config.failure_threshold,
@@ -1476,6 +1477,8 @@ pub struct RateLimitConfig {
     pub burst: u32,
     #[serde(default = "default_rate_limit_refill_ms")]
     pub refill_ms: u64,
+    #[serde(default = "default_rate_limit_tokens_per_refill")]
+    pub tokens_per_refill: u32,
     #[serde(default)]
     pub key: roze_rate_limit::RateLimitKeyPolicy,
 }
@@ -1485,6 +1488,7 @@ impl Default for RateLimitConfig {
         Self {
             burst: default_rate_limit_burst(),
             refill_ms: default_rate_limit_refill_ms(),
+            tokens_per_refill: default_rate_limit_tokens_per_refill(),
             key: roze_rate_limit::RateLimitKeyPolicy::default(),
         }
     }
@@ -1496,6 +1500,14 @@ impl RateLimitConfig {
         anyhow::ensure!(
             self.refill_ms > 0,
             "{path}.rate_limit.refill_ms must be positive"
+        );
+        anyhow::ensure!(
+            self.tokens_per_refill > 0,
+            "{path}.rate_limit.tokens_per_refill must be positive"
+        );
+        anyhow::ensure!(
+            self.refill_ms.checked_mul(u64::from(self.burst)).is_some(),
+            "{path}.rate_limit refill window exceeds the supported range"
         );
         self.key
             .validate()
@@ -1715,6 +1727,10 @@ fn default_rate_limit_burst() -> u32 {
 
 fn default_rate_limit_refill_ms() -> u64 {
     10
+}
+
+fn default_rate_limit_tokens_per_refill() -> u32 {
+    1
 }
 
 fn default_shedding_concurrency() -> usize {
@@ -2758,6 +2774,7 @@ governance: {}
             rate_limit: Some(RateLimitConfig {
                 burst: 100,
                 refill_ms: 1_000,
+                tokens_per_refill: 1,
                 key: Default::default(),
             }),
             fallback: Some(GovernanceFallbackConfig {
@@ -2797,6 +2814,25 @@ governance: {}
 
         governance.fallback.as_mut().expect("fallback").enabled = false;
         assert!(governance.resolve_policy("missing").fallback.is_none());
+    }
+
+    #[test]
+    fn rate_limit_tokens_per_refill_is_compatible_and_validated() {
+        let legacy: RateLimitConfig =
+            serde_json::from_str(r#"{"burst":100,"refill_ms":10}"#).expect("legacy rate limit");
+        assert_eq!(legacy.tokens_per_refill, 1);
+
+        let high_rate: RateLimitConfig =
+            serde_json::from_str(r#"{"burst":50000,"refill_ms":1,"tokens_per_refill":50}"#)
+                .expect("high-rate limit");
+        high_rate.validate("governance").expect("valid high rate");
+
+        let mut invalid = high_rate;
+        invalid.tokens_per_refill = 0;
+        assert!(invalid.validate("governance").is_err());
+        invalid.tokens_per_refill = 1;
+        invalid.refill_ms = u64::MAX;
+        assert!(invalid.validate("governance").is_err());
     }
 
     #[test]

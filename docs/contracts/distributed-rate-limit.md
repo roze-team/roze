@@ -21,11 +21,20 @@ governance:
   rate_limit:
     burst: 100
     refill_ms: 10
+    tokens_per_refill: 1
     key:
       dimensions: [route, client_ip, tenant]
       headers: []
       missing: reject
 ```
+
+The sustained token rate is `tokens_per_refill / refill_ms`; `burst` remains
+the maximum bucket capacity. `tokens_per_refill` defaults to `1`, so existing
+configuration keeps its previous behavior. For example, `refill_ms: 1` with
+`tokens_per_refill: 10` or `50` represents 10,000 or 50,000 tokens per second
+without requiring a sub-millisecond configuration value. REST, RPC, Gateway,
+memory, and Redis stores use the same calculation. Retry delays are rounded up
+to at least one millisecond.
 
 `governance.routes.<operation>.rate_limit` overrides the global limit and may
 define its own key policy. Supported dimensions are:
@@ -94,7 +103,8 @@ Connection strings are redacted from configuration debug output.
 ## Startup validation
 
 `roze_config::load_service` resolves secrets and validates the complete service
-configuration before listeners start. It rejects zero limits or timeouts,
+configuration before listeners start. It rejects zero limits, refill counts,
+or timeouts, as well as refill-window arithmetic overflow,
 empty/duplicate key dimensions, invalid or duplicate header names, invalid
 governance ranges, missing production Redis configuration, and empty
 namespaces.

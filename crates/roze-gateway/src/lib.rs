@@ -864,6 +864,7 @@ impl GatewayRuntime {
                     roze_rate_limit::RateLimit {
                         burst: config.burst,
                         refill: Duration::from_millis(config.refill_ms.max(1)),
+                        tokens_per_refill: config.tokens_per_refill,
                     },
                 )
                 .await;
@@ -3967,6 +3968,7 @@ mod tests {
         config.routes[0].rate_limit = Some(RateLimitConfig {
             burst: 1,
             refill_ms: 60_000,
+            tokens_per_refill: 1,
             key: Default::default(),
         });
         config.routes[0].fallback = Some(GatewayFallbackResponse {
@@ -4014,6 +4016,7 @@ mod tests {
         config.routes[0].rate_limit = Some(RateLimitConfig {
             burst: 1,
             refill_ms: 60_000,
+            tokens_per_refill: 1,
             key: Default::default(),
         });
         let runtime = build_router(config.clone(), None);

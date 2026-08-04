@@ -413,7 +413,8 @@ Supported SQL input focuses on common MySQL and Postgres DDL:
 - `DEFAULT` and column comments, including `COMMENT ON COLUMN ... IS ...`
 - common scalar column types such as integers, booleans, text, JSON, timestamps, UUIDs, and blobs
 - standalone `CREATE INDEX` and `CREATE UNIQUE INDEX`, including composite and PostgreSQL partial indexes
-- unsupported features such as composite keys and foreign keys fail fast with a clear error
+- table-level named or anonymous `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, and `CHECK` constraints; checks are recognized but are not projected into generated validation
+- unsupported features such as composite primary and foreign keys fail fast with a clear error
 
 PostgreSQL `BIGINT`, `BIGSERIAL`, and `INT8` generate signed `i64` fields;
 unsigned `u64` is reserved for explicitly unsigned types such as MySQL

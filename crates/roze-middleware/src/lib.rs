@@ -580,6 +580,7 @@ pub struct RoutePolicy {
 pub struct RouteRateLimitConfig {
     pub burst: u32,
     pub refill: Duration,
+    pub tokens_per_refill: u32,
     pub key: roze_rate_limit::RateLimitKeyPolicy,
 }
 
@@ -619,6 +620,7 @@ pub fn route_policy(
         rate_limit: rate_limit.map(|config| RouteRateLimitConfig {
             burst: config.burst,
             refill: Duration::from_millis(config.refill_ms),
+            tokens_per_refill: config.tokens_per_refill,
             key: config.key,
         }),
         breaker: policy.breaker.map(|config| RouteBreakerConfig {
@@ -813,6 +815,7 @@ pub async fn enforce_route_rate_limit(
             roze_rate_limit::RateLimit {
                 burst: config.burst,
                 refill: config.refill,
+                tokens_per_refill: config.tokens_per_refill,
             },
         )
         .await;
@@ -2000,6 +2003,7 @@ mod tests {
             rate_limit: Some(roze_config::RateLimitConfig {
                 burst: 10,
                 refill_ms: 100,
+                tokens_per_refill: 1,
                 key: Default::default(),
             }),
             breaker: Some(roze_config::BreakerConfig {
@@ -2021,6 +2025,7 @@ mod tests {
                 rate_limit: Some(roze_config::RateLimitConfig {
                     burst: 1,
                     refill_ms: 1_000,
+                    tokens_per_refill: 1,
                     key: Default::default(),
                 }),
                 breaker: Some(roze_config::BreakerConfig {
@@ -2113,6 +2118,7 @@ mod tests {
                 rate_limit: Some(roze_config::RateLimitConfig {
                     burst: 1,
                     refill_ms: 60_000,
+                    tokens_per_refill: 1,
                     key: Default::default(),
                 }),
                 ..Default::default()
@@ -2160,6 +2166,7 @@ mod tests {
             rate_limit: Some(roze_config::RateLimitConfig {
                 burst: 1,
                 refill_ms: 60_000,
+                tokens_per_refill: 1,
                 key: roze_rate_limit::RateLimitKeyPolicy {
                     dimensions: vec![
                         roze_rate_limit::RateLimitDimension::Route,

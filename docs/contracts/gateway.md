@@ -49,7 +49,7 @@ gateway:
       max_stream_connections: 100
       fallback: { status: 503, body: { code: 503, message: "..." }, headers: {...} }
       middlewares: [trace, rate, breaker, auth]
-      rate_limit: { burst: 20, refill_ms: 200 }
+      rate_limit: { burst: 20, refill_ms: 200, tokens_per_refill: 1 }
       breaker: { failure_threshold: 5, reset_timeout_ms: 5000 }
     - path: /user
       service: user-v2
@@ -163,6 +163,7 @@ unknown mirror services fail config validation.
 - `rate_limit` 使用令牌桶模型：
   - `burst`：可用 tokens 上限
   - `refill_ms`：刷新窗口
+  - `tokens_per_refill`：每个刷新窗口补充的 token 数，默认 `1`
 - `breaker` 失败计数满阈值后开启，持续 `reset_timeout_ms` 期间直接返回 503。
 - `shedding` 使用路由级并发上限做第一阶段负载保护；活跃请求数达到 `concurrency` 时直接返回 429。
 - `fallback` 可由 `route.fallback`、`governance.routes`、`governance` 或 `gateway.fallback` 提供，按显式路由、路由治理、全局治理、网关默认的顺序选择；可配置 `status`、`body` 和 `headers`。

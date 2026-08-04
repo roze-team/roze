@@ -18637,7 +18637,7 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
             continue;
         }
 
-        if starts_with_ci(entry, "primary key") {
+        if is_table_constraint(entry, "primary", Some("key")) {
             let columns = parse_key_columns(entry, start_line)?;
             if columns.len() != 1 {
                 bail!(
@@ -18677,16 +18677,27 @@ fn parse_create_table(statement: &str, start_line: usize) -> anyhow::Result<Mode
         }
 
         if starts_with_ci(entry, "constraint ")
-            && (entry.to_ascii_lowercase().contains("foreign key")
-                || entry.to_ascii_lowercase().contains("references"))
+            && is_table_constraint(entry, "foreign", Some("key"))
         {
             foreign_keys.push(parse_sql_foreign_key(entry, start_line)?);
             continue;
         }
 
-        if starts_with_ci(entry, "foreign key") {
+        if is_table_constraint(entry, "foreign", Some("key")) {
             foreign_keys.push(parse_sql_foreign_key(entry, start_line)?);
             continue;
+        }
+
+        if is_table_constraint(entry, "check", None) {
+            continue;
+        }
+
+        if starts_with_ci(entry, "constraint ") {
+            bail!(
+                "line {}: unsupported table constraint `{}`",
+                start_line,
+                entry
+            );
         }
 
         let field = parse_sql_field(entry, start_line)?;
@@ -19459,9 +19470,26 @@ fn starts_with_ci(input: &str, prefix: &str) -> bool {
 }
 
 fn is_unique_key_entry(entry: &str) -> bool {
-    starts_with_ci(entry, "unique key")
+    is_table_constraint(entry, "unique", None)
+        || starts_with_ci(entry, "unique key")
         || starts_with_ci(entry, "unique index")
-        || (starts_with_ci(entry, "constraint ") && entry.to_ascii_lowercase().contains(" unique"))
+}
+
+fn is_table_constraint(entry: &str, keyword: &str, suffix: Option<&str>) -> bool {
+    let tokens = tokenize_sql(entry);
+    let offset = usize::from(
+        tokens
+            .first()
+            .is_some_and(|token| token.eq_ignore_ascii_case("constraint")),
+    ) * 2;
+    tokens
+        .get(offset)
+        .is_some_and(|token| token.eq_ignore_ascii_case(keyword))
+        && suffix.is_none_or(|suffix| {
+            tokens
+                .get(offset + 1)
+                .is_some_and(|token| token.eq_ignore_ascii_case(suffix))
+        })
 }
 
 fn split_once_ci<'a>(input: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
@@ -24953,6 +24981,41 @@ mod tests {
         assert!(toasty_order.contains("pub async fn traverse_user"));
         assert!(toasty_order
             .contains("let Some(value) = self.profile_id.as_ref() else { return Ok(None); };"));
+    }
+
+    #[test]
+    fn imports_postgres_named_table_constraints_without_phantom_columns() {
+        let source = r#"
+        CREATE TABLE accounts (
+            id BIGINT NOT NULL,
+            tenant_id BIGINT NOT NULL,
+            code VARCHAR(64) NOT NULL,
+            status VARCHAR(16) NOT NULL,
+            CONSTRAINT accounts_pkey PRIMARY KEY (id),
+            CONSTRAINT accounts_tenant_code_key UNIQUE (tenant_id, code),
+            CONSTRAINT accounts_status_check
+                CHECK (status IN ('active', 'disabled')),
+            CONSTRAINT accounts_code_check CHECK (char_length(code) > 2 AND code <> 'x,y'),
+            CHECK (tenant_id > 0)
+        );
+        "#;
+
+        let models = parse_models_with_format(source, ModelFormat::Sql).expect("parse");
+        let account = models.iter().find(|model| model.name == "Account").unwrap();
+        assert_eq!(account.primary, "id");
+        assert_eq!(
+            account
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "tenant_id", "code", "status"]
+        );
+        assert!(account.indexes.iter().any(|index| {
+            index.name == "accounts_tenant_code_key"
+                && index.unique
+                && index.fields == ["tenant_id", "code"]
+        }));
     }
 
     #[test]

@@ -235,6 +235,7 @@ governance:
   rate_limit:
     burst: 100
     refill_ms: 10
+    tokens_per_refill: 1
     key:
       dimensions: [route, client_ip, tenant]
       headers: []

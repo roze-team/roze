@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added backward-compatible `tokens_per_refill` governance rate limits with
+  matching REST, RPC, Gateway, memory, and Redis token-bucket semantics.
+- SQL model import now recognizes PostgreSQL named and anonymous table-level
+  primary-key, unique, foreign-key, and check constraints without generating
+  phantom `constraint` columns.
 - Added `rozectl stream gen --broker rdkafka-cmake` for native Windows
   librdkafka builds while retaining `provider: rdkafka` at runtime.
 - Persistent SQL outbox enqueue now participates in either SeaORM or Toasty

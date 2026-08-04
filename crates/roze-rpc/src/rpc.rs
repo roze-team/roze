@@ -1204,6 +1204,7 @@ pub struct MethodPolicy {
 pub struct MethodRateLimitConfig {
     pub burst: u32,
     pub refill: Duration,
+    pub tokens_per_refill: u32,
     pub key: roze_rate_limit::RateLimitKeyPolicy,
 }
 
@@ -1306,6 +1307,7 @@ pub fn method_policy(
         rate_limit: rate_limit.map(|config| MethodRateLimitConfig {
             burst: config.burst,
             refill: Duration::from_millis(config.refill_ms),
+            tokens_per_refill: config.tokens_per_refill,
             key: config.key,
         }),
         breaker: policy.breaker.map(|config| MethodBreakerConfig {
@@ -1703,6 +1705,7 @@ pub async fn enforce_method_rate_limit<T>(
             roze_rate_limit::RateLimit {
                 burst: config.burst,
                 refill: config.refill,
+                tokens_per_refill: config.tokens_per_refill,
             },
         )
         .await
