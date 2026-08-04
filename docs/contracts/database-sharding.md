@@ -136,6 +136,29 @@ ctx.sharded_db()?
     .await?;
 ```
 
+Generated SeaORM services expose the same one-shard boundary through the model
+client while retaining normal generated repositories and builders:
+
+```rust
+ctx.model()
+    .transaction_for_key(&tenant_id, |tx| {
+        Box::pin(async move {
+            tx.order().update_one(order_id).set_status(status).save().await?;
+            tx.audit_event()
+                .create()
+                .set_order_id(order_id)
+                .save()
+                .await?;
+            Ok(())
+        })
+    })
+    .await?;
+```
+
+Reads made by repositories from this scoped client always use the selected
+transaction primary, even when a query requests the replica source. Cache
+invalidations are applied after commit and discarded on rollback.
+
 Roze does not provide an implicit distributed transaction. Saga, TCC, Outbox,
 and application compensation remain explicit cross-shard orchestration.
 

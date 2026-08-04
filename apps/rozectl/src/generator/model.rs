@@ -1132,6 +1132,7 @@ fn write_model_project(
             json: models_need_json(models),
             uuid: models_need_uuid(models),
             regex: models_need_regex(models),
+            cache: models.iter().any(|model| model.cache),
             sharding: models
                 .iter()
                 .any(|model| model_shard_spec(model).is_ok_and(|shard| shard.is_some())),
@@ -1222,6 +1223,7 @@ struct ModelDependencyNeeds {
     json: bool,
     uuid: bool,
     regex: bool,
+    cache: bool,
     sharding: bool,
 }
 
@@ -1320,6 +1322,32 @@ fn update_model_dependencies(
         };
         dependencies.insert("roze-orm", item);
     }
+    if orm == ModelOrm::SeaOrm
+        && needs.cache
+        && dependency_needs_replacement(
+            dependencies,
+            "roze-cache",
+            use_workspace_dependency("roze-cache"),
+        )
+    {
+        let item = if use_workspace_dependency("roze-cache") {
+            workspace_dependency_item()
+        } else {
+            match source {
+                DependencySource::Git => {
+                    format!(r#"{{ git = "{ROZE_GIT_URL}" }}"#).parse::<toml_edit::Item>()?
+                }
+                DependencySource::Path => {
+                    let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
+                        anyhow::anyhow!("--roze-source path requires output inside a Cargo workspace containing Roze crates")
+                    })?;
+                    let prefix = local_crates_prefix(logical_out, &workspace_root)?;
+                    format!(r#"{{ path = "{prefix}/roze-cache" }}"#).parse::<toml_edit::Item>()?
+                }
+            }
+        };
+        dependencies.insert("roze-cache", item);
+    }
     if needs.sharding
         && dependency_needs_replacement(
             dependencies,
@@ -1359,6 +1387,20 @@ fn update_model_dependencies(
         if let Some(item) = dependencies.get_mut("sea-orm") {
             ensure_dependency_feature(item, "with-json");
         }
+    }
+    if orm == ModelOrm::SeaOrm
+        && dependency_needs_replacement(
+            dependencies,
+            "async-trait",
+            use_workspace_dependency("async-trait"),
+        )
+    {
+        let item = if use_workspace_dependency("async-trait") {
+            workspace_dependency_item()
+        } else {
+            r#""0.1""#.parse::<toml_edit::Item>().expect("valid toml dependency value")
+        };
+        dependencies.insert("async-trait", item);
     }
     if orm == ModelOrm::Toasty {
         if let Some(item) = dependencies.get_mut("toasty") {
@@ -1803,6 +1845,99 @@ fn render_model_client(models: &[ModelSpec], orm: ModelOrm) -> String {
         .unwrap();
     }
     writeln!(out).unwrap();
+    if orm == ModelOrm::SeaOrm {
+        out.push_str(
+            r#"pub(crate) enum ModelConnection<'a> {
+    Database(&'a sea_orm::DatabaseConnection),
+    Transaction(&'a sea_orm::DatabaseTransaction),
+}
+
+#[async_trait::async_trait]
+impl sea_orm::ConnectionTrait for ModelConnection<'_> {
+    fn get_database_backend(&self) -> sea_orm::DatabaseBackend {
+        match self {
+            Self::Database(connection) => connection.get_database_backend(),
+            Self::Transaction(transaction) => transaction.get_database_backend(),
+        }
+    }
+
+    fn support_returning(&self) -> bool {
+        match self {
+            Self::Database(connection) => connection.support_returning(),
+            Self::Transaction(transaction) => transaction.support_returning(),
+        }
+    }
+
+    fn is_mock_connection(&self) -> bool {
+        match self {
+            Self::Database(connection) => connection.is_mock_connection(),
+            Self::Transaction(transaction) => transaction.is_mock_connection(),
+        }
+    }
+
+    async fn execute(&self, statement: sea_orm::Statement) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
+        match self {
+            Self::Database(connection) => connection.execute(statement).await,
+            Self::Transaction(transaction) => transaction.execute(statement).await,
+        }
+    }
+
+    async fn execute_unprepared(&self, sql: &str) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
+        match self {
+            Self::Database(connection) => connection.execute_unprepared(sql).await,
+            Self::Transaction(transaction) => transaction.execute_unprepared(sql).await,
+        }
+    }
+
+    async fn query_one(&self, statement: sea_orm::Statement) -> Result<Option<sea_orm::QueryResult>, sea_orm::DbErr> {
+        match self {
+            Self::Database(connection) => connection.query_one(statement).await,
+            Self::Transaction(transaction) => transaction.query_one(statement).await,
+        }
+    }
+
+    async fn query_all(&self, statement: sea_orm::Statement) -> Result<Vec<sea_orm::QueryResult>, sea_orm::DbErr> {
+        match self {
+            Self::Database(connection) => connection.query_all(statement).await,
+            Self::Transaction(transaction) => transaction.query_all(statement).await,
+        }
+    }
+}
+
+"#,
+        );
+        writeln!(out, "pub struct TransactionModelClient<'tx> {{").unwrap();
+        writeln!(out, "    ctx: &'tx ServiceContext,").unwrap();
+        writeln!(out, "    transaction: &'tx sea_orm::DatabaseTransaction,").unwrap();
+        writeln!(
+            out,
+            "    pending_invalidations: &'tx std::sync::Mutex<Vec<String>>,"
+        )
+        .unwrap();
+        for model in models {
+            let method = model_field_ident_by_name(&to_snake_case(&model.name));
+            let pascal = to_pascal_case(&model.name);
+            writeln!(
+                out,
+                "    {method}_mutation_hooks: Vec<&'tx dyn {pascal}MutationHooks>,"
+            )
+            .unwrap();
+        }
+        writeln!(out, "}}\n").unwrap();
+        writeln!(out, "impl<'tx> TransactionModelClient<'tx> {{").unwrap();
+        for model in models {
+            let method = model_field_ident_by_name(&to_snake_case(&model.name));
+            let pascal = to_pascal_case(&model.name);
+            writeln!(
+                out,
+                "    pub fn {method}(&self) -> {pascal}Repository<'_> {{"
+            )
+            .unwrap();
+            writeln!(out, "        self.{method}_mutation_hooks.iter().fold({pascal}Repository::new_in_transaction(self.ctx, self.transaction, self.pending_invalidations), |repository, hooks| repository.with_mutation_hooks(*hooks))").unwrap();
+            writeln!(out, "    }}\n").unwrap();
+        }
+        writeln!(out, "}}\n").unwrap();
+    }
     writeln!(out, "pub struct ModelClient<'a> {{").unwrap();
     writeln!(out, "    ctx: &'a ServiceContext,").unwrap();
     for model in models {
@@ -1827,6 +1962,110 @@ fn render_model_client(models: &[ModelSpec], orm: ModelOrm) -> String {
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+    if orm == ModelOrm::SeaOrm {
+        if models.iter().any(|model| model.cache) {
+            out.push_str(
+                r#"    async fn flush_invalidations(&self, pending: &std::sync::Mutex<Vec<String>>) -> anyhow::Result<()> {
+        let mut keys = pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("model cache invalidation lock is poisoned"))?
+            .clone();
+        keys.sort_unstable();
+        keys.dedup();
+        if let Some(cache) = self.ctx.cache.as_ref() {
+            for key in keys {
+                cache.del(&key).await?;
+            }
+        }
+        Ok(())
+    }
+
+"#,
+            );
+        } else {
+            out.push_str(
+                r#"    async fn flush_invalidations(&self, _pending: &std::sync::Mutex<Vec<String>>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+"#,
+            );
+        }
+        out.push_str(
+            r#"    pub async fn transaction<F, T>(&self, func: F) -> anyhow::Result<T>
+    where
+        F: for<'tx> FnOnce(TransactionModelClient<'tx>) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'tx>> + Send,
+        T: Send,
+    {
+        let database = self.ctx.write_db()?;
+        self.transaction_on(database, func).await
+    }
+
+"#,
+        );
+        if models
+            .iter()
+            .any(|model| model_shard_spec(model).is_ok_and(|shard| shard.is_some()))
+        {
+            out.push_str(
+                r#"    pub async fn transaction_for_key<K, F, T>(&self, key: &K, func: F) -> anyhow::Result<T>
+    where
+        K: roze_db::ShardKey + ?Sized,
+        F: for<'tx> FnOnce(TransactionModelClient<'tx>) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'tx>> + Send,
+        T: Send,
+    {
+        let database = self.ctx.sharded_db()?;
+        let route = database.route(key);
+        self.transaction_on(route.write(), func).await
+    }
+
+"#,
+            );
+        }
+        out.push_str(
+            r#"    async fn transaction_on<F, T>(&self, database: &sea_orm::DatabaseConnection, func: F) -> anyhow::Result<T>
+    where
+        F: for<'tx> FnOnce(TransactionModelClient<'tx>) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'tx>> + Send,
+        T: Send,
+    {
+        use sea_orm::TransactionTrait as _;
+        tracing::debug!(backend = "sea_orm", phase = "begin", "model transaction phase");
+        let transaction = database.begin().await?;
+        let pending_invalidations = std::sync::Mutex::new(Vec::new());
+        let client = TransactionModelClient {
+            ctx: self.ctx,
+            transaction: &transaction,
+            pending_invalidations: &pending_invalidations,
+"#,
+        );
+        for model in models {
+            let method = model_field_ident_by_name(&to_snake_case(&model.name));
+            writeln!(
+                out,
+                "            {method}_mutation_hooks: self.{method}_mutation_hooks.to_vec(),"
+            )
+            .unwrap();
+        }
+        out.push_str(
+            r#"        };
+        match func(client).await {
+            Ok(value) => {
+                transaction.commit().await?;
+                tracing::debug!(backend = "sea_orm", phase = "commit", "model transaction phase");
+                self.flush_invalidations(&pending_invalidations).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                transaction.rollback().await?;
+                tracing::debug!(backend = "sea_orm", phase = "rollback", "model transaction phase");
+                Err(error)
+            }
+        }
+    }
+
+"#,
+        );
+    }
     for model in models {
         let method = model_field_ident_by_name(&to_snake_case(&model.name));
         let module = to_snake_case(&model.name);
@@ -2763,6 +3002,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "use crate::svc::ServiceContext;").unwrap();
+    writeln!(&mut out, "use super::client::ModelConnection;").unwrap();
     writeln!(&mut out).unwrap();
     render_serde_default_helper(&mut out, model);
     let derive_eq = model_supports_eq(model);
@@ -2879,6 +3119,16 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     render_like_pattern_helpers(&mut out, model);
     writeln!(&mut out, "pub struct {}Repository<'a> {{", pascal).unwrap();
     writeln!(&mut out, "    ctx: &'a ServiceContext,").unwrap();
+    writeln!(
+        &mut out,
+        "    transaction: Option<&'a DatabaseTransaction>,"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    pending_invalidations: Option<&'a std::sync::Mutex<Vec<String>>>,"
+    )
+    .unwrap();
     if shard_spec.is_some() {
         writeln!(&mut out, "    shard_route: Option<roze_db::ShardRoute>,").unwrap();
     }
@@ -2898,15 +3148,27 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     if shard_spec.is_some() {
         writeln!(
             &mut out,
-            "        Self {{ ctx, shard_route: None, mutation_hooks: Vec::new() }}"
+            "        Self {{ ctx, transaction: None, pending_invalidations: None, shard_route: None, mutation_hooks: Vec::new() }}"
         )
         .unwrap();
     } else {
         writeln!(
             &mut out,
-            "        Self {{ ctx, mutation_hooks: Vec::new() }}"
+            "        Self {{ ctx, transaction: None, pending_invalidations: None, mutation_hooks: Vec::new() }}"
         )
         .unwrap();
+    }
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub(crate) fn new_in_transaction(ctx: &'a ServiceContext, transaction: &'a DatabaseTransaction, pending_invalidations: &'a std::sync::Mutex<Vec<String>>) -> Self {{"
+    )
+    .unwrap();
+    if shard_spec.is_some() {
+        writeln!(&mut out, "        Self {{ ctx, transaction: Some(transaction), pending_invalidations: Some(pending_invalidations), shard_route: None, mutation_hooks: Vec::new() }}").unwrap();
+    } else {
+        writeln!(&mut out, "        Self {{ ctx, transaction: Some(transaction), pending_invalidations: Some(pending_invalidations), mutation_hooks: Vec::new() }}").unwrap();
     }
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
@@ -2932,7 +3194,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "    fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
+        "    fn read_database(&self) -> anyhow::Result<&DatabaseConnection> {{"
     )
     .unwrap();
     if shard_spec.is_some() {
@@ -2950,7 +3212,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "    fn write_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
+        "    fn write_database(&self) -> anyhow::Result<&DatabaseConnection> {{"
     )
     .unwrap();
     if shard_spec.is_some() {
@@ -2968,7 +3230,55 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
-        "    fn read_db_from(&self, source: roze_orm::ReadSource) -> anyhow::Result<&DatabaseConnection> {{"
+        "    fn read_db(&self) -> anyhow::Result<ModelConnection<'_>> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        if let Some(transaction) = self.transaction {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            Ok(ModelConnection::Transaction(transaction))"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }} else {{").unwrap();
+    writeln!(
+        &mut out,
+        "            Ok(ModelConnection::Database(self.read_database()?))"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    fn write_db(&self) -> anyhow::Result<ModelConnection<'_>> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        if let Some(transaction) = self.transaction {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "            Ok(ModelConnection::Transaction(transaction))"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }} else {{").unwrap();
+    writeln!(
+        &mut out,
+        "            Ok(ModelConnection::Database(self.write_database()?))"
+    )
+    .unwrap();
+    writeln!(&mut out, "        }}").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    fn read_db_from(&self, source: roze_orm::ReadSource) -> anyhow::Result<ModelConnection<'_>> {{"
     )
     .unwrap();
     writeln!(&mut out, "        match source {{").unwrap();
@@ -3106,7 +3416,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
         writeln!(
             &mut out,
-            "        Ok(Entity::find_by_id({}).one(db).await?)",
+            "        Ok(Entity::find_by_id({}).one(&db).await?)",
             primary_ident
         )
         .unwrap();
@@ -3121,7 +3431,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
         writeln!(
             &mut out,
-            "        Ok(Entity::find_by_id({}).one(db).await?)",
+            "        Ok(Entity::find_by_id({}).one(&db).await?)",
             primary_ident
         )
         .unwrap();
@@ -3158,7 +3468,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         writeln!(&mut out, "        let db = self.read_db()?;").unwrap();
         writeln!(
             &mut out,
-            "        Ok(Entity::find().filter(Column::{}.eq({})).one(db).await?)",
+            "        Ok(Entity::find().filter(Column::{}.eq({})).one(&db).await?)",
             column, field_ident
         )
         .unwrap();
@@ -3173,7 +3483,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
         writeln!(
             &mut out,
-            "        Ok(Entity::find().filter(Column::{}.eq({})).one(db).await?)",
+            "        Ok(Entity::find().filter(Column::{}.eq({})).one(&db).await?)",
             column, field_ident
         )
         .unwrap();
@@ -3192,7 +3502,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     } else {
         writeln!(&mut out, "        let select = Entity::find();").unwrap();
     }
-    writeln!(&mut out, "        Ok(select.all(db).await?)").unwrap();
+    writeln!(&mut out, "        Ok(select.all(&db).await?)").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -3206,7 +3516,11 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "        let active: ActiveModel = model.into_active_model();"
     )
     .unwrap();
-    writeln!(&mut out, "        let inserted = active.insert(db).await?;").unwrap();
+    writeln!(
+        &mut out,
+        "        let inserted = active.insert(&db).await?;"
+    )
+    .unwrap();
     if model.cache {
         writeln!(
             &mut out,
@@ -3247,7 +3561,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "        let active: ActiveModel = model.into_active_model();"
     )
     .unwrap();
-    writeln!(&mut out, "        let saved = Entity::insert(active).on_conflict(OnConflict::columns([{conflict_columns}]).update_columns([{update_columns}]).to_owned()).exec_with_returning(db).await?;").unwrap();
+    writeln!(&mut out, "        let saved = Entity::insert(active).on_conflict(OnConflict::columns([{conflict_columns}]).update_columns([{update_columns}]).to_owned()).exec_with_returning(&db).await?;").unwrap();
     if model.cache {
         writeln!(
             &mut out,
@@ -3270,7 +3584,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "        let active: ActiveModel = model.into_active_model();"
     )
     .unwrap();
-    writeln!(&mut out, "        let updated = active.update(db).await?;").unwrap();
+    writeln!(&mut out, "        let updated = active.update(&db).await?;").unwrap();
     if model.cache {
         writeln!(
             &mut out,
@@ -3300,7 +3614,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         writeln!(&mut out, "        let delete_key = {primary_value_expr};").unwrap();
         writeln!(
             &mut out,
-            "        let result = Entity::delete_by_id(delete_key).exec(db).await?;"
+            "        let result = Entity::delete_by_id(delete_key).exec(&db).await?;"
         )
         .unwrap();
         if model.cache {
@@ -3347,37 +3661,32 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
             "    async fn invalidate_model_cache(&self, model: &Model) -> anyhow::Result<()> {{"
         )
         .unwrap();
-        writeln!(
-            &mut out,
-            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
-        )
-        .unwrap();
         for field in &cache_fields {
             writeln!(
                 &mut out,
-                "            cache.del(&self.cache_key(\"{}\", &model.{})).await?;",
+                "        self.invalidate_cache_key(self.cache_key(\"{}\", &model.{})).await?;",
                 field.name,
                 model_field_ident(field)
             )
             .unwrap();
         }
-        writeln!(&mut out, "        }}").unwrap();
         writeln!(&mut out, "        Ok(())").unwrap();
         writeln!(&mut out, "    }}").unwrap();
         writeln!(&mut out).unwrap();
         writeln!(
             &mut out,
-            "    async fn invalidate_cache_field(&self, field: &str, value: impl std::fmt::Display) -> anyhow::Result<()> {{"
+            "    async fn invalidate_cache_key(&self, key: String) -> anyhow::Result<()> {{"
         )
         .unwrap();
         writeln!(
             &mut out,
-            "        if let Some(cache) = self.ctx.cache.as_ref() {{"
+            "        if let Some(pending) = self.pending_invalidations {{"
         )
         .unwrap();
+        writeln!(&mut out, "            pending.lock().map_err(|_| anyhow::anyhow!(\"model cache invalidation lock is poisoned\"))?.push(key);").unwrap();
         writeln!(
             &mut out,
-            "            let key = self.cache_key(field, value);"
+            "        }} else if let Some(cache) = self.ctx.cache.as_ref() {{"
         )
         .unwrap();
         writeln!(&mut out, "            cache.del(&key).await?;").unwrap();
@@ -3387,10 +3696,28 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         writeln!(&mut out).unwrap();
         writeln!(
             &mut out,
+            "    async fn invalidate_cache_field(&self, field: &str, value: impl std::fmt::Display) -> anyhow::Result<()> {{"
+        )
+        .unwrap();
+        writeln!(&mut out, "        let key = self.cache_key(field, value);").unwrap();
+        writeln!(&mut out, "        self.invalidate_cache_key(key).await").unwrap();
+        writeln!(&mut out, "    }}").unwrap();
+        writeln!(&mut out).unwrap();
+        writeln!(
+            &mut out,
             "    pub async fn cached_find_by_{}(&self, {}: {}) -> anyhow::Result<Option<Model>> {{",
             primary, primary_ident, primary_ty
         )
         .unwrap();
+        writeln!(&mut out, "        if self.transaction.is_some() {{").unwrap();
+        writeln!(
+            &mut out,
+            "            return self.find_by_{}_uncached({}).await;",
+            primary,
+            sea_orm_reusable_value_expr(&primary_ty, primary_ident.as_str())
+        )
+        .unwrap();
+        writeln!(&mut out, "        }}").unwrap();
         writeln!(
             &mut out,
             "        if let Some(cache) = self.ctx.cache.as_ref() {{"
@@ -3453,6 +3780,15 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
                 field_name, field_ident, field_ty
             )
             .unwrap();
+            writeln!(&mut out, "        if self.transaction.is_some() {{").unwrap();
+            writeln!(
+                &mut out,
+                "            return self.find_by_{}_uncached({}).await;",
+                field_name,
+                sea_orm_reusable_value_expr(field_ty, field_ident.as_str())
+            )
+            .unwrap();
+            writeln!(&mut out, "        }}").unwrap();
             writeln!(
                 &mut out,
                 "        if let Some(cache) = self.ctx.cache.as_ref() {{"
@@ -3636,7 +3972,7 @@ fn render_sea_orm_transaction_method(out: &mut String) {
     writeln!(out, "    {{").unwrap();
     writeln!(
         out,
-        "        let db = self.write_db().map_err(|err| DbErr::Custom(err.to_string()))?;"
+        "        let db = self.write_database().map_err(|err| DbErr::Custom(err.to_string()))?;"
     )
     .unwrap();
     writeln!(out, "        tracing::debug!(backend = \"sea_orm\", phase = \"begin\", \"model transaction phase\");").unwrap();
@@ -4323,7 +4659,7 @@ fn render_sea_orm_composite_key_methods(out: &mut String, model: &ModelSpec, pas
     writeln!(out, "        let db = self.read_db()?;").unwrap();
     writeln!(
         out,
-        "        Ok(Entity::find_by_id(({tuple})).one(db).await?)"
+        "        Ok(Entity::find_by_id(({tuple})).one(&db).await?)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
@@ -4336,7 +4672,7 @@ fn render_sea_orm_composite_key_methods(out: &mut String, model: &ModelSpec, pas
     writeln!(out, "        let db = self.write_db()?;").unwrap();
     writeln!(
         out,
-        "        Ok(Entity::delete_by_id(({tuple})).exec(db).await?)"
+        "        Ok(Entity::delete_by_id(({tuple})).exec(&db).await?)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
@@ -4568,7 +4904,7 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
         writeln!(out, "            ..std::default::Default::default()").unwrap();
     }
     writeln!(out, "        }};").unwrap();
-    writeln!(out, "        let inserted = active.insert(db).await?;").unwrap();
+    writeln!(out, "        let inserted = active.insert(&db).await?;").unwrap();
     if model.cache {
         writeln!(
             out,
@@ -5112,7 +5448,7 @@ fn render_sea_orm_update_builder(
     }
     let update_default_fields = updatable_model_fields(model, primary);
     render_update_default_assignments(out, &update_default_fields, "sea-orm-active");
-    writeln!(out, "        let updated = active.update(db).await?;").unwrap();
+    writeln!(out, "        let updated = active.update(&db).await?;").unwrap();
     if model.cache {
         writeln!(
             out,
@@ -5451,7 +5787,11 @@ fn render_sea_orm_update_many_builder(
             }
         }
         writeln!(out, "        for predicate in &self.predicates {{ existing_query = existing_query.filter({pascal}Query::predicate_condition(predicate)); }}").unwrap();
-        writeln!(out, "        let existing = existing_query.all(db).await?;").unwrap();
+        writeln!(
+            out,
+            "        let existing = existing_query.all(&db).await?;"
+        )
+        .unwrap();
     }
     writeln!(out, "        let mut update = Entity::update_many();").unwrap();
     if let Some(soft_field) = model
@@ -5481,7 +5821,7 @@ fn render_sea_orm_update_many_builder(
         let value_expr = update_slot_value_from_ref(field, "value");
         writeln!(out, "        if let Some(value) = self.{field_ident}.as_ref() {{ update = update.col_expr(Column::{column}, Expr::value({value_expr})); }}").unwrap();
     }
-    writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+    writeln!(out, "        let result = update.exec(&db).await?;").unwrap();
     if model.cache {
         writeln!(
             out,
@@ -5844,7 +6184,7 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
     writeln!(out).unwrap();
     writeln!(
         out,
-        "    fn read_db(&self) -> anyhow::Result<&DatabaseConnection> {{"
+        "    fn read_db(&self) -> anyhow::Result<ModelConnection<'_>> {{"
     )
     .unwrap();
     writeln!(out, "        self.repo.read_db_from(self.read_source)").unwrap();
@@ -7326,7 +7666,7 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
         )
         .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
-        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum, \"roze_sum\").group_by(Column::{group_column}).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
+        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum, \"roze_sum\").group_by(Column::{group_column}).into_tuple::<({}, Option<{sum_ty}>)>().all(&db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -7347,7 +7687,7 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
         )
         .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
-        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.gte(minimum)).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
+        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.gte(minimum)).into_tuple::<({}, Option<{sum_ty}>)>().all(&db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -7363,7 +7703,7 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
         )
         .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
-        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.lte(maximum)).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
+        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.lte(maximum)).into_tuple::<({}, Option<{sum_ty}>)>().all(&db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -7379,7 +7719,7 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
         )
         .unwrap();
         render_sea_orm_sum_expr(out, &value_column, sum_ty);
-        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.clone().gte(minimum)).having(sum.lte(maximum)).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?;", group.ty).unwrap();
+        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{group_column}).column_as(sum.clone(), \"roze_sum\").group_by(Column::{group_column}).having(sum.clone().gte(minimum)).having(sum.lte(maximum)).into_tuple::<({}, Option<{sum_ty}>)>().all(&db).await?;", group.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(group, value)| (group, value.unwrap_or_default())).collect())").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -7396,7 +7736,7 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
             "        let db = self.repo.read_db_from(self.read_source)?;"
         )
         .unwrap();
-        writeln!(out, "        Ok(self.build_filter_select().select_only().column(Column::{group_column}).column_as(Into::<sea_orm::sea_query::SimpleExpr>::into(Func::avg(Expr::col(Column::{value_column}))), \"roze_avg\").group_by(Column::{group_column}).into_tuple::<({}, Option<{avg_ty}>)>().all(db).await?)", group.ty).unwrap();
+        writeln!(out, "        Ok(self.build_filter_select().select_only().column(Column::{group_column}).column_as(Into::<sea_orm::sea_query::SimpleExpr>::into(Func::avg(Expr::col(Column::{value_column}))), \"roze_avg\").group_by(Column::{group_column}).into_tuple::<({}, Option<{avg_ty}>)>().all(&db).await?)", group.ty).unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
 
@@ -7413,7 +7753,7 @@ fn render_sea_orm_grouped_aggregate_methods(out: &mut String, model: &ModelSpec)
                 "        let db = self.repo.read_db_from(self.read_source)?;"
             )
             .unwrap();
-            writeln!(out, "        Ok(self.build_filter_select().select_only().column(Column::{group_column}).column_as(Expr::col(Column::{value_column}).{expression}(), \"roze_{aggregate}\").group_by(Column::{group_column}).into_tuple::<({}, Option<{sum_ty}>)>().all(db).await?)", group.ty).unwrap();
+            writeln!(out, "        Ok(self.build_filter_select().select_only().column(Column::{group_column}).column_as(Expr::col(Column::{value_column}).{expression}(), \"roze_{aggregate}\").group_by(Column::{group_column}).into_tuple::<({}, Option<{sum_ty}>)>().all(&db).await?)", group.ty).unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
         }
@@ -7510,10 +7850,14 @@ fn render_sea_orm_atomic_query_methods(out: &mut String, model: &ModelSpec, prim
             }
             if model.cache {
                 writeln!(out, "        for predicate in &self.predicates {{ existing_query = existing_query.filter(Self::predicate_condition(predicate)); }}").unwrap();
-                writeln!(out, "        let existing = existing_query.all(db).await?;").unwrap();
+                writeln!(
+                    out,
+                    "        let existing = existing_query.all(&db).await?;"
+                )
+                .unwrap();
             }
             writeln!(out, "        for predicate in &self.predicates {{ update = update.filter(Self::predicate_condition(predicate)); }}").unwrap();
-            writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+            writeln!(out, "        let result = update.exec(&db).await?;").unwrap();
             if model.cache {
                 writeln!(out, "        for model in existing {{").unwrap();
                 writeln!(
@@ -7560,7 +7904,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
     .unwrap();
     writeln!(
         out,
-        "        Ok(self.build_filter_select().count(db).await?)"
+        "        Ok(self.build_filter_select().count(&db).await?)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
@@ -7603,7 +7947,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "        let db = self.repo.read_db_from(self.read_source)?;"
     )
     .unwrap();
-    writeln!(out, "        Ok(self.build_select().all(db).await?)").unwrap();
+    writeln!(out, "        Ok(self.build_select().all(&db).await?)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
@@ -7626,7 +7970,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
     .unwrap();
     writeln!(
         out,
-        "        Ok(self.build_select().select_only().column(Column::{primary_column}).into_tuple::<{}>().all(db).await?)",
+        "        Ok(self.build_select().select_only().column(Column::{primary_column}).into_tuple::<{}>().all(&db).await?)",
         primary_field.ty
     )
     .unwrap();
@@ -7682,7 +8026,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         .unwrap();
         writeln!(
             out,
-            "        Ok(self.build_select().select_only().column(Column::{column}).into_tuple::<{}>().all(db).await?)",
+            "        Ok(self.build_select().select_only().column(Column::{column}).into_tuple::<{}>().all(&db).await?)",
             field.ty
         )
         .unwrap();
@@ -7702,7 +8046,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
                 "        let db = self.repo.read_db_from(self.read_source)?;"
             )
             .unwrap();
-            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
+            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).into_tuple::<({}, i64)>().all(&db).await?;", field.ty).unwrap();
             writeln!(
                 out,
                 "        Ok(rows.into_iter().map(|(value, count)| (value, count as u64)).collect())"
@@ -7719,7 +8063,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
                 "        let db = self.repo.read_db_from(self.read_source)?;"
             )
             .unwrap();
-            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).having(Column::{column}.count().gte(minimum as i64)).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
+            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).having(Column::{column}.count().gte(minimum as i64)).into_tuple::<({}, i64)>().all(&db).await?;", field.ty).unwrap();
             writeln!(
                 out,
                 "        Ok(rows.into_iter().map(|(value, count)| (value, count as u64)).collect())"
@@ -7735,7 +8079,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
                 "        let db = self.repo.read_db_from(self.read_source)?;"
             )
             .unwrap();
-            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).having(Column::{column}.count().lte(maximum as i64)).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
+            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(Column::{column}.count(), \"roze_count\").group_by(Column::{column}).having(Column::{column}.count().lte(maximum as i64)).into_tuple::<({}, i64)>().all(&db).await?;", field.ty).unwrap();
             writeln!(
                 out,
                 "        Ok(rows.into_iter().map(|(value, count)| (value, count as u64)).collect())"
@@ -7752,7 +8096,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
             )
             .unwrap();
             writeln!(out, "        let count = Column::{column}.count();").unwrap();
-            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(count.clone(), \"roze_count\").group_by(Column::{column}).having(count.clone().gte(minimum as i64)).having(count.lte(maximum as i64)).into_tuple::<({}, i64)>().all(db).await?;", field.ty).unwrap();
+            writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{column}).column_as(count.clone(), \"roze_count\").group_by(Column::{column}).having(count.clone().gte(minimum as i64)).having(count.lte(maximum as i64)).into_tuple::<({}, i64)>().all(&db).await?;", field.ty).unwrap();
             writeln!(
                 out,
                 "        Ok(rows.into_iter().map(|(value, count)| (value, count as u64)).collect())"
@@ -7834,7 +8178,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
             "        let db = self.repo.read_db_from(self.read_source)?;"
         )
         .unwrap();
-        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{left_column}).column(Column::{right_column}).column_as(Column::{left_column}.count(), \"roze_count\").group_by(Column::{left_column}).group_by(Column::{right_column}).into_tuple::<({}, {}, i64)>().all(db).await?;", left.ty, right.ty).unwrap();
+        writeln!(out, "        let rows = self.build_filter_select().select_only().column(Column::{left_column}).column(Column::{right_column}).column_as(Column::{left_column}.count(), \"roze_count\").group_by(Column::{left_column}).group_by(Column::{right_column}).into_tuple::<({}, {}, i64)>().all(&db).await?;", left.ty, right.ty).unwrap();
         writeln!(out, "        Ok(rows.into_iter().map(|(left, right, count)| ((left, right), count as u64)).collect())").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -7928,7 +8272,7 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
         "        let db = self.repo.read_db_from(self.read_source)?;"
     )
     .unwrap();
-    writeln!(out, "        Ok(self.build_select().one(db).await?)").unwrap();
+    writeln!(out, "        Ok(self.build_select().one(&db).await?)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
@@ -7983,12 +8327,12 @@ fn render_sea_orm_query_execute_methods(out: &mut String, model: &ModelSpec, pas
     writeln!(out, "        tracing::debug!(model = {:?}, backend = \"sea_orm\", source = self.read_source.label(), query_type = \"page\", page, page_size, predicate_count = self.predicates.len(), order_count = self.orders.len(), \"model query executing\");", model.name).unwrap();
     writeln!(
         out,
-        "        let total = self.build_filter_select().count(db).await?;"
+        "        let total = self.build_filter_select().count(&db).await?;"
     )
     .unwrap();
     writeln!(
         out,
-        "        let paginator = self.build_select().paginate(db, page_size);"
+        "        let paginator = self.build_select().paginate(&db, page_size);"
     )
     .unwrap();
     writeln!(
@@ -8107,7 +8451,7 @@ fn render_sea_orm_batch_methods(
     .unwrap();
     writeln!(
         out,
-        "        Entity::insert_many(active_models).exec(db).await?;"
+        "        Entity::insert_many(active_models).exec(&db).await?;"
     )
     .unwrap();
     writeln!(out, "        Ok(())").unwrap();
@@ -8126,7 +8470,7 @@ fn render_sea_orm_batch_methods(
     writeln!(out, "        let db = self.write_db()?;").unwrap();
     writeln!(
         out,
-        "        let result = Entity::delete_many().filter(Column::{primary_column}.is_in(ids.clone())).exec(db).await?;"
+        "        let result = Entity::delete_many().filter(Column::{primary_column}.is_in(ids.clone())).exec(&db).await?;"
     )
     .unwrap();
     if model.cache {
@@ -8179,7 +8523,7 @@ fn render_sea_orm_soft_delete_methods(
     )
     .unwrap();
     render_soft_delete_assignment(out, field, &soft_column);
-    writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+    writeln!(out, "        let result = update.exec(&db).await?;").unwrap();
     if model.cache {
         writeln!(
             out,
@@ -8207,7 +8551,7 @@ fn render_sea_orm_soft_delete_methods(
     )
     .unwrap();
     render_soft_delete_assignment(out, field, &soft_column);
-    writeln!(out, "        let result = update.exec(db).await?;").unwrap();
+    writeln!(out, "        let result = update.exec(&db).await?;").unwrap();
     if model.cache {
         writeln!(out, "        for id in ids {{").unwrap();
         writeln!(
@@ -25136,6 +25480,27 @@ mod tests {
         };
 
         let rendered = render_model_module(&model);
+        let client = render_model_client(std::slice::from_ref(&model), ModelOrm::SeaOrm);
+        assert!(client.contains("pub struct TransactionModelClient<'tx>"));
+        assert!(client.contains("pub async fn transaction<F, T>(&self, func: F)"));
+        assert!(client.contains("UserRepository::new_in_transaction"));
+        assert!(client.contains("transaction.commit().await?;"));
+        assert!(client.contains("self.flush_invalidations(&pending_invalidations).await?;"));
+        assert!(
+            client.find("transaction.commit().await?;").unwrap()
+                < client
+                    .find("self.flush_invalidations(&pending_invalidations).await?;")
+                    .unwrap()
+        );
+        assert_eq!(
+            client
+                .matches("self.flush_invalidations(&pending_invalidations).await?;")
+                .count(),
+            1
+        );
+        assert!(rendered.contains("ModelConnection::Transaction(transaction)"));
+        assert!(rendered.contains("if self.transaction.is_some()"));
+        assert!(rendered.contains("pending.lock()"));
         assert!(rendered.contains("DeriveEntityModel"));
         assert!(rendered.contains("PaginatorTrait"));
         assert!(rendered.contains("DatabaseTransaction"));
@@ -25160,7 +25525,7 @@ mod tests {
         assert!(rendered.contains("pub fn update_where(&self) -> UserUpdateMany<'_, 'a>"));
         assert!(rendered.contains("pub async fn execute(mut self) -> anyhow::Result<UpdateResult>"));
         assert!(rendered.contains("let mut update = Entity::update_many();"));
-        assert!(rendered.contains("let result = update.exec(db).await?;"));
+        assert!(rendered.contains("let result = update.exec(&db).await?;"));
         assert!(rendered.contains("pub fn delete_many(&self) -> UserDeleteMany<'_, 'a>"));
         assert!(rendered.contains("pub fn set_name(mut self, value: String) -> Self"));
         assert!(rendered.contains("pub fn set_nickname(mut self, value: Option<String>) -> Self"));
@@ -25397,10 +25762,10 @@ mod tests {
         assert!(rendered.contains("Column::Nickname.is_null()"));
         assert!(rendered.contains("order_by_desc(Column::Id)"));
         let sea_orm_count_pos = rendered
-            .find("let total = self.build_filter_select().count(db).await?;")
+            .find("let total = self.build_filter_select().count(&db).await?;")
             .expect("sea-orm count uses filter-only select");
         let sea_orm_sort_pos = rendered
-            .find("let paginator = self.build_select().paginate(db, page_size);")
+            .find("let paginator = self.build_select().paginate(&db, page_size);")
             .expect("sea-orm page query applies generated sort");
         assert!(sea_orm_count_pos < sea_orm_sort_pos);
         assert!(!rendered.contains("let total = paginator.num_items().await?;"));
@@ -26631,6 +26996,8 @@ impl ServiceContext {
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("manifest read");
         assert!(manifest.contains("sea-orm = { workspace = true"));
+        assert!(manifest.contains("async-trait = { workspace = true"));
+        assert!(manifest.contains("roze-cache = { workspace = true"));
         assert!(manifest.contains("with-json"));
         assert!(manifest.contains("with-chrono"));
         assert!(
@@ -28186,6 +28553,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 pub struct ServiceContext {
     pub read: DatabaseConnection,
     pub write: DatabaseConnection,
+    pub cache: Option<roze_cache::RedisCache>,
 }
 
 impl ServiceContext {
@@ -28199,7 +28567,7 @@ impl ServiceContext {
             r#"
             entity User {
                 table "users"
-                cache false
+                cache true
                 field Int64("id").Primary() {
                 }
                 field String("name") {
@@ -28391,7 +28759,7 @@ async fn main() -> anyhow::Result<()> {
         exec(&db, sql).await?;
     }
 
-    let ctx = svc::ServiceContext { read: db.clone(), write: db };
+    let ctx = svc::ServiceContext { read: db.clone(), write: db, cache: None };
     let users = UserRepository::new(&ctx);
     let groups = GroupRepository::new(&ctx);
     let memberships = MembershipRepository::new(&ctx);
@@ -28469,6 +28837,36 @@ async fn main() -> anyhow::Result<()> {
     assert_eq!(combined.len(), 1);
     assert_eq!(combined[0].account.as_ref().map(|account| (account.tenant_id, account.account_id)), Some((7, 9)));
     assert_eq!(combined[0].owner.as_ref().map(|owner| owner.id), Some(1));
+
+    let replica = Database::connect("sqlite::memory:").await?;
+    for sql in [
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL, score INTEGER NULL)",
+        "CREATE TABLE orders (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL)",
+    ] {
+        exec(&replica, sql).await?;
+    }
+    let transaction_ctx = svc::ServiceContext { read: replica, write: ctx.write.clone(), cache: None };
+    let transaction_users = UserRepository::new(&transaction_ctx);
+    let transaction_orders = OrderRepository::new(&transaction_ctx);
+
+    let rollback: anyhow::Result<()> = transaction_ctx.model().transaction(|transaction| Box::pin(async move {
+        transaction.user().update_one(1).set_name("rollback-user".to_string()).save().await?;
+        transaction.order().update_one(100).set_user_id(2).save().await?;
+        assert_eq!(transaction.user().query().where_(model::user::id_eq(1)).only().await?.name, "rollback-user");
+        assert_eq!(transaction.order().query().where_(model::order::id_eq(100)).only().await?.user_id, 2);
+        anyhow::bail!("force rollback")
+    })).await;
+    assert!(rollback.is_err());
+    assert_eq!(transaction_users.query().primary().where_(model::user::id_eq(1)).only().await?.name, "alice");
+    assert_eq!(transaction_orders.query().primary().where_(model::order::id_eq(100)).only().await?.user_id, 1);
+
+    transaction_ctx.model().transaction(|transaction| Box::pin(async move {
+        transaction.user().update_one(1).set_name("committed-user".to_string()).save().await?;
+        transaction.order().update_one(100).set_user_id(2).save().await?;
+        Ok(())
+    })).await?;
+    assert_eq!(transaction_users.query().primary().where_(model::user::id_eq(1)).only().await?.name, "committed-user");
+    assert_eq!(transaction_orders.query().primary().where_(model::order::id_eq(100)).only().await?.user_id, 2);
     Ok(())
 }
 "#,
@@ -28825,8 +29223,12 @@ pub async fn load_three_levels<'ctx>(
             .to_path_buf();
         let orm_path = crates.join("roze-orm").to_string_lossy().replace('\\', "/");
         let db_path = crates.join("roze-db").to_string_lossy().replace('\\', "/");
+        let cache_path = crates
+            .join("roze-cache")
+            .to_string_lossy()
+            .replace('\\', "/");
         content.push_str(&format!(
-            "roze-orm = {{ path = {orm_path:?} }}\nroze-db = {{ path = {db_path:?} }}\n"
+            "roze-orm = {{ path = {orm_path:?} }}\nroze-db = {{ path = {db_path:?} }}\nroze-cache = {{ path = {cache_path:?} }}\n"
         ));
         fs::write(manifest, content).expect("add local roze-orm dependency");
     }
@@ -29058,6 +29460,7 @@ entity Order {
 
         let client = render_model_client(&models, ModelOrm::SeaOrm);
         assert!(client.contains("pub fn order_for_key<K>"));
+        assert!(client.contains("pub async fn transaction_for_key<K, F, T>"));
         assert!(client.contains("database.topology() != \"commerce\""));
         assert!(client.contains("database.route(key)"));
     }

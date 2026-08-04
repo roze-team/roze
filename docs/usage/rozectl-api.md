@@ -2267,10 +2267,15 @@ SQL repositories additionally generate:
   column is configured or inferred
 - tenant-scoped `find_by_<primary>_for_<tenant>` helpers when a tenant column is
   configured or inferred
-- local transaction helpers for Toasty and SeaORM; Toasty repository methods
-  accept `&mut dyn toasty::Executor`, so the same CRUD helpers can run against
-  a `toasty::Db` or `toasty::Transaction`, while SeaORM passes a
-  `&DatabaseTransaction` to the callback
+- transaction-scoped model clients for SeaORM. `ctx.model().transaction(...)`
+  passes a scoped client whose per-model repositories retain generated hooks,
+  policies, scopes, and builders while forcing reads and writes through the
+  same primary transaction. Cached reads are bypassed, and mutation cache keys
+  are invalidated only after commit succeeds; rollback discards them. The
+  legacy per-repository helper still passes a raw `&DatabaseTransaction`
+- local transaction helpers for Toasty; repository methods accept
+  `&mut dyn toasty::Executor`, so the same CRUD helpers can run against a
+  `toasty::Db` or `toasty::Transaction`
 
 SQL and inspect imports infer soft-delete columns from `deleted`, `is_deleted`,
 `deleted_at`, `delete_time`, or `deleted_at_millis`, and tenant columns from
@@ -2425,17 +2430,36 @@ UserRepository::transaction(&mut db, |tx| {
 .await?;
 ```
 
-SeaORM transaction callbacks follow SeaORM's boxed-future transaction shape:
+SeaORM services should use the transaction-scoped model client when an atomic
+operation spans repositories:
 
 ```rust
-repo.transaction(|tx| {
-    Box::pin(async move {
-        // call SeaORM operations with `tx`
-        Ok(())
+ctx.model()
+    .transaction(|tx| {
+        Box::pin(async move {
+            let user = tx
+                .user()
+                .create()
+                .set_name("alice".to_string())
+                .save()
+                .await?;
+            tx.audit_event()
+                .create()
+                .set_user_id(user.id)
+                .set_action("user.created".to_string())
+                .save()
+                .await?;
+            Ok(())
+        })
     })
-})
-.await?;
+    .await?;
 ```
+
+All query-source selectors, including `.read_from(ReadSource::Replica)`, are
+bound to the transaction inside this callback and cannot escape to a replica.
+For sharded SeaORM models, `ctx.model().transaction_for_key(&key, ...)` resolves
+one shard primary before constructing the same scoped client. It does not
+provide a cross-shard transaction.
 
 Model generation treats `schema.ent`, `mod.rs`, `<model>.rs`, and
 `<model>_fields.rs` as schema-owned generated files. Re-running with `--update`
