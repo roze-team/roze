@@ -129,8 +129,9 @@ The phase-by-phase work packages, exit gates, and evidence checklist are in
 
 ## P1: Data Boundary
 
-- Keep Toasty as the default generated SQL model scaffold unless the CLI flag
-  requests SeaORM.
+- Keep SeaORM as the default generated SQL model scaffold while retaining
+  explicit `--orm toasty` generation and safe ORM switching for existing
+  projects.
 - Document transaction boundaries, domain validation, authorization checks, and
   reliable event publishing as application-owned code.
 - Provide full examples for DB transaction + outbox + MQ publish + RPC call +

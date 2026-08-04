@@ -67,7 +67,7 @@ pub fn resolve_model_orm(
         );
     }
     if mode != GenerateMode::Update {
-        return Ok(requested.unwrap_or(ModelOrm::Toasty));
+        return Ok(requested.unwrap_or(ModelOrm::SeaOrm));
     }
 
     let existing = detect_existing_model_orm(out)?;
@@ -20077,6 +20077,23 @@ mod tests {
     };
 
     #[test]
+    fn new_model_projects_default_to_sea_orm() {
+        let out = temp_model_output("default-sea-orm");
+
+        for mode in [GenerateMode::Create, GenerateMode::Force] {
+            assert_eq!(
+                resolve_model_orm(&out, mode, None, false).expect("resolve default ORM"),
+                ModelOrm::SeaOrm
+            );
+        }
+        assert_eq!(
+            resolve_model_orm(&out, GenerateMode::Create, Some(ModelOrm::Toasty), false)
+                .expect("resolve explicit Toasty ORM"),
+            ModelOrm::Toasty
+        );
+    }
+
+    #[test]
     fn model_update_inherits_generated_orm_and_requires_explicit_switch() {
         let out = temp_model_output("orm-inheritance");
         fs::create_dir_all(out.join("src/model")).expect("create model directory");
@@ -20096,6 +20113,17 @@ mod tests {
         assert_eq!(
             resolve_model_orm(&out, GenerateMode::Update, Some(ModelOrm::Toasty), true)
                 .expect("explicit ORM switch"),
+            ModelOrm::Toasty
+        );
+
+        fs::write(
+            out.join("src/model/mod.rs"),
+            format!("{MODEL_GENERATED_MARKER}\n{MODEL_ORM_MARKER_PREFIX}toasty\n"),
+        )
+        .expect("write Toasty ORM marker");
+        assert_eq!(
+            resolve_model_orm(&out, GenerateMode::Update, None, false)
+                .expect("inherit existing Toasty ORM"),
             ModelOrm::Toasty
         );
 

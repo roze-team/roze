@@ -91,9 +91,10 @@ separate project layout. For starter project creation, `quickstart`,
 `--branch` to read `api.api` or `rpc.api` starter templates before generation.
 
 Generated REST/RPC services pin `edition = "2021"` in their own `Cargo.toml`
-instead of inheriting `edition.workspace`. Toasty is the default SQL model ORM,
-and generated Toasty dependencies use MySQL/PostgreSQL features only; sqlite
-support remains available through the Roze SeaORM/sqlx stack.
+instead of inheriting `edition.workspace`. SeaORM is the default SQL model ORM.
+Pass `--orm toasty` when Toasty output is required; generated Toasty
+dependencies use MySQL/PostgreSQL features only, while sqlite support remains
+available through the Roze SeaORM/sqlx stack.
 When a generated service is inside a Cargo workspace, its manifest inherits a
 dependency only when that name exists in `[workspace.dependencies]`; otherwise
 the generator emits the standalone explicit version. This supports partial
@@ -1643,7 +1644,7 @@ SQL DDL:
 
 ```bash
 rozectl model generate example/user.sql --out services/user-api --format sql
-rozectl model generate example/user.sql --out services/user-api --format sql --orm sea-orm
+rozectl model generate example/user.sql --out services/user-api --format sql --orm toasty
 rozectl model mysql ddl --src example/user.sql --dir services/user-api
 rozectl model pg ddl --src example/user.sql --dir services/user-api
 ```
@@ -1652,7 +1653,7 @@ Entity schema:
 
 ```bash
 rozectl model generate model/schema.ent --out services/user-api --format ent
-rozectl model generate model/schema.ent --out services/user-api --format ent --orm sea-orm
+rozectl model generate model/schema.ent --out services/user-api --format ent --orm toasty
 ```
 
 On `--update`, omit `--orm` to inherit the ORM marker stored in the generated
@@ -1668,15 +1669,15 @@ Database inspection:
 ```bash
 rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api
 rozectl model inspect users --db-kind postgres --db-url postgres://postgres:postgres@127.0.0.1:5432/roze --schema public --out services/user-api
-rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api --orm sea-orm
+rozectl model inspect users --db-kind mysql --db-url mysql://root:root@127.0.0.1:3306/roze --out services/user-api --orm toasty
 rozectl model inspect users --db-kind mongo --db-url mongodb://127.0.0.1:27017/roze --sample-size 100 --out services/user-api
 rozectl model mysql datasource --url mysql://root:root@127.0.0.1:3306/roze --table users --dir services/user-api
 rozectl model pg datasource --url postgres://postgres:postgres@127.0.0.1:5432/roze --table users --schema public --dir services/user-api
 rozectl model mongo --collection users --db-url mongodb://127.0.0.1:27017/roze --dir services/user-api
 ```
 
-Toasty is the default SQL ORM. `--orm sea-orm` switches model output to
-SeaORM-style modules. Model generation first writes a complete
+SeaORM is the default SQL ORM. `--orm toasty` explicitly switches model output
+to Toasty-style modules. Model generation first writes a complete
 `src/model/schema.ent` file, then generates Rust model code from that `.ent`
 schema. SQL, DSL, and database inspection are import paths into `.ent`; `.ent`
 is the model codegen source.

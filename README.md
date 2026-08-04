@@ -78,9 +78,8 @@ The direction is Rust-native microservice ergonomics with explicit generated bou
 - Generated layout: handlers, logic, service context, config, and proto are generated from IDL.
 - REST: `roze_http`, `tower`, and `tower-http` with `roze-result::ApiResponse`, `roze-error::RozeError`, and Roze middleware boundaries.
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
-- ORM: Toasty is the default generated SQL model scaffold; `--orm sea-orm`
-  switches model generation to SeaORM. Shared ORM request contracts live in
-  `roze-orm`.
+- ORM: SeaORM is the default generated SQL model scaffold; `--orm toasty`
+  explicitly selects Toasty. Shared ORM request contracts live in `roze-orm`.
 - DTM: built-in distributed transaction manager defaults to TCC and keeps Saga as an optional workflow.
 - Governance: registry, balancing, middleware, config center, tracing, NATS JetStream, outbox relay, and error handling live across the `roze-*` crates.
 
@@ -307,25 +306,25 @@ rozectl doc service --api example/user.api --out SERVICE.md
 ```
 
 `rozectl model generate example/user.model --out apps/roze-example` writes a
-Toasty model scaffold into an existing service. The model generator
+SeaORM model scaffold into an existing service. The model generator
 supports both the existing DSL and SQL DDL via `--format auto|dsl|sql`.
 The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `field` lines.
 
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
-inspects an existing SQL table and emits the same Toasty-based model scaffold.
-Postgres, MySQL, and MongoDB are also supported through `--db-kind`. Toasty
-remains the default SQL ORM for generated database code. Pass `--orm sea-orm`
-to generate SeaORM-style SQL modules instead:
+inspects an existing SQL table and emits the same SeaORM-based model scaffold.
+Postgres, MySQL, and MongoDB are also supported through `--db-kind`. SeaORM is
+the default SQL ORM for generated database code. Pass `--orm toasty` to
+explicitly generate Toasty-style SQL modules instead:
 
 ```bash
 rozectl model generate example/user.sql \
   --out apps/roze-example \
   --format sql \
-  --orm sea-orm
+  --orm toasty
 ```
 
-The default Toasty output uses `#[derive(toasty::Model)]`, preserves
+Toasty output uses `#[derive(toasty::Model)]`, preserves
 auto-increment primary keys with `#[auto]`, marks generated cache-key lookups as
 `#[unique]`, and adds `toasty` to the target service manifest when a
 `Cargo.toml` is present. Generated Toasty repository methods accept

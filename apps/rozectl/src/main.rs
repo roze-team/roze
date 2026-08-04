@@ -67,9 +67,9 @@ enum ModelFormat {
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum ModelOrm {
+    #[default]
     #[value(name = "sea-orm")]
     SeaOrm,
-    #[default]
     Toasty,
 }
 
@@ -977,8 +977,8 @@ enum ModelCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
+        #[arg(long, value_enum)]
+        orm: Option<ModelOrm>,
     },
     Mysql {
         #[command(subcommand)]
@@ -1025,8 +1025,8 @@ enum ModelSqlCompatCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
+        #[arg(long, value_enum)]
+        orm: Option<ModelOrm>,
     },
     Ddl {
         #[arg(short = 's', long = "src")]
@@ -1039,8 +1039,8 @@ enum ModelSqlCompatCommands {
         update: bool,
         #[arg(long, value_enum, default_value_t)]
         roze_source: RozeSource,
-        #[arg(long, value_enum, default_value_t)]
-        orm: ModelOrm,
+        #[arg(long, value_enum)]
+        orm: Option<ModelOrm>,
     },
 }
 
@@ -1486,25 +1486,29 @@ fn run() -> anyhow::Result<()> {
                 update,
                 roze_source,
                 orm,
-            } => registry.dispatch(GeneratorCommand::ModelInspect {
-                table,
-                schema,
-                db_url,
-                db_kind: db_kind.into(),
-                sample_size,
-                out,
-                options: GenerateOptions::new(
-                    if force {
-                        GenerateMode::Force
-                    } else if update {
-                        GenerateMode::Update
-                    } else {
-                        GenerateMode::Create
-                    },
-                    roze_source.into(),
-                ),
-                orm: orm.into(),
-            })?,
+            } => {
+                let mode = generation_mode(force, update);
+                let orm = if matches!(db_kind, DbKind::Mongo) {
+                    orm.unwrap_or_default().into()
+                } else {
+                    generator::model::resolve_model_orm(
+                        &out,
+                        mode,
+                        orm.map(Into::into),
+                        false,
+                    )?
+                };
+                registry.dispatch(GeneratorCommand::ModelInspect {
+                    table,
+                    schema,
+                    db_url,
+                    db_kind: db_kind.into(),
+                    sample_size,
+                    out,
+                    options: GenerateOptions::new(mode, roze_source.into()),
+                    orm,
+                })?
+            }
             ModelCommands::Mysql { command } => {
                 run_sql_model_compat(command, DbKind::MySql, &registry)?
             }
@@ -4578,14 +4582,17 @@ fn diff_mode(out: &Path) -> GenerateMode {
 }
 
 fn options(force: bool, update: bool, roze_source: RozeSource) -> GenerateOptions {
-    let mode = if force {
+    GenerateOptions::new(generation_mode(force, update), roze_source.into())
+}
+
+fn generation_mode(force: bool, update: bool) -> GenerateMode {
+    if force {
         GenerateMode::Force
     } else if update {
         GenerateMode::Update
     } else {
         GenerateMode::Create
-    };
-    GenerateOptions::new(mode, roze_source.into())
+    }
 }
 
 fn render_completion(shell: CompletionShell) -> &'static str {
@@ -4915,16 +4922,20 @@ fn run_sql_model_compat(
             update,
             roze_source,
             orm,
-        } => registry.dispatch(GeneratorCommand::ModelInspect {
-            table,
-            schema,
-            db_url,
-            db_kind: db_kind.into(),
-            sample_size: 100,
-            out: dir,
-            options: options(force, update, roze_source),
-            orm: orm.into(),
-        }),
+        } => {
+            let mode = generation_mode(force, update);
+            let orm = generator::model::resolve_model_orm(&dir, mode, orm.map(Into::into), false)?;
+            registry.dispatch(GeneratorCommand::ModelInspect {
+                table,
+                schema,
+                db_url,
+                db_kind: db_kind.into(),
+                sample_size: 100,
+                out: dir,
+                options: GenerateOptions::new(mode, roze_source.into()),
+                orm,
+            })
+        }
         ModelSqlCompatCommands::Ddl {
             src,
             dir,
@@ -4932,13 +4943,17 @@ fn run_sql_model_compat(
             update,
             roze_source,
             orm,
-        } => registry.dispatch(GeneratorCommand::ModelGenerate {
-            schema: src,
-            out: dir,
-            options: options(force, update, roze_source),
-            format: generator::model::ModelFormat::Sql,
-            orm: orm.into(),
-        }),
+        } => {
+            let mode = generation_mode(force, update);
+            let orm = generator::model::resolve_model_orm(&dir, mode, orm.map(Into::into), false)?;
+            registry.dispatch(GeneratorCommand::ModelGenerate {
+                schema: src,
+                out: dir,
+                options: GenerateOptions::new(mode, roze_source.into()),
+                format: generator::model::ModelFormat::Sql,
+                orm,
+            })
+        }
     }
 }
 
@@ -6161,10 +6176,27 @@ envFrom: []
 
         let default_orm = Cli::try_parse_from(["rozectl", "model", "generate", "user.sql"])
             .expect("parse default model orm");
+        assert!(matches!(ModelOrm::default(), ModelOrm::SeaOrm));
         assert!(matches!(
             default_orm.command,
             Commands::Model {
                 command: ModelCommands::Generate { orm: None, .. }
+            }
+        ));
+
+        let default_inspect_orm = Cli::try_parse_from([
+            "rozectl",
+            "model",
+            "inspect",
+            "users",
+            "--db-url",
+            "sqlite::memory:",
+        ])
+        .expect("parse default model inspect ORM");
+        assert!(matches!(
+            default_inspect_orm.command,
+            Commands::Model {
+                command: ModelCommands::Inspect { orm: None, .. }
             }
         ));
 

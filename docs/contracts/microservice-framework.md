@@ -18,7 +18,7 @@
 | 配置中心 | 已实现；真实长稳待补 | Etcd watch、revision 恢复、last-known-good reload |
 | 服务发现 | 已集成；故障证据待补 | Memory、DNS、Etcd、Consul、cached resolver |
 | 数据一致性 | 已实现；真实故障待补 | transaction、outbox/inbox、idempotency、Saga/TCC |
-| ORM 生成 | 已实现 | Toasty 默认；`--orm sea-orm` 可选；tenant/audit/soft-delete |
+| ORM 生成 | 已实现 | SeaORM 默认；`--orm toasty` 可选；tenant/audit/soft-delete |
 | MQ | 已实现；真实 broker 长稳待补 | in-memory、NATS、Kafka、retry、DLQ、outbox relay |
 | Gateway | 已实现；长连接长稳待补 | HTTP/WebSocket/SSE、registry、health、outlier、热更新 |
 | Search | 已实现；真实恢复待补 | Elasticsearch、OpenSearch、Meilisearch |
