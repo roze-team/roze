@@ -1129,6 +1129,7 @@ fn write_model_project(
         ModelDependencyNeeds {
             rust_decimal: models_need_rust_decimal(models),
             chrono: models_need_chrono(models),
+            jiff: models_need_jiff(models),
             json: models_need_json(models),
             uuid: models_need_uuid(models),
             regex: models_need_regex(models),
@@ -1151,8 +1152,10 @@ fn models_for_orm(models: &[ModelSpec], orm: ModelOrm) -> Vec<ModelSpec> {
                 field.ty = match field.ty.as_str() {
                     "serde_json::Value" => "String".to_string(),
                     "Option<serde_json::Value>" => "Option<String>".to_string(),
-                    "DateTime" | "DateTimeUtc" => "String".to_string(),
-                    "Option<DateTime>" | "Option<DateTimeUtc>" => "Option<String>".to_string(),
+                    "DateTime" => "jiff::civil::DateTime".to_string(),
+                    "Option<DateTime>" => "Option<jiff::civil::DateTime>".to_string(),
+                    "DateTimeUtc" => "jiff::Timestamp".to_string(),
+                    "Option<DateTimeUtc>" => "Option<jiff::Timestamp>".to_string(),
                     _ => continue,
                 };
             }
@@ -1220,6 +1223,7 @@ fn update_main_rs(out: &Path) -> anyhow::Result<()> {
 struct ModelDependencyNeeds {
     rust_decimal: bool,
     chrono: bool,
+    jiff: bool,
     json: bool,
     uuid: bool,
     regex: bool,
@@ -1405,6 +1409,9 @@ fn update_model_dependencies(
     if orm == ModelOrm::Toasty {
         if let Some(item) = dependencies.get_mut("toasty") {
             ensure_dependency_feature(item, "rust_decimal");
+            if needs.jiff {
+                ensure_dependency_feature(item, "jiff");
+            }
         }
     }
 
@@ -1453,6 +1460,23 @@ fn update_model_dependencies(
     if needs.chrono {
         if let Some(item) = dependencies.get_mut("chrono") {
             ensure_dependency_feature(item, "clock");
+            ensure_dependency_feature(item, "serde");
+        }
+    }
+    if needs.jiff
+        && dependency_needs_replacement(dependencies, "jiff", use_workspace_dependency("jiff"))
+    {
+        let item = if use_workspace_dependency("jiff") {
+            workspace_dependency_item()
+        } else {
+            r#"{ version = "0.2", features = ["serde"] }"#
+                .parse::<toml_edit::Item>()
+                .expect("valid toml dependency value")
+        };
+        dependencies.insert("jiff", item);
+    }
+    if needs.jiff {
+        if let Some(item) = dependencies.get_mut("jiff") {
             ensure_dependency_feature(item, "serde");
         }
     }
@@ -1518,6 +1542,17 @@ fn models_need_chrono(models: &[ModelSpec]) -> bool {
             matches!(
                 optional_inner_type(&field.ty).unwrap_or(&field.ty),
                 "DateTime" | "DateTimeUtc"
+            )
+        })
+    })
+}
+
+fn models_need_jiff(models: &[ModelSpec]) -> bool {
+    models.iter().any(|model| {
+        model.fields.iter().any(|field| {
+            matches!(
+                optional_inner_type(&field.ty).unwrap_or(&field.ty),
+                "jiff::civil::DateTime" | "jiff::Timestamp"
             )
         })
     })
@@ -7484,6 +7519,8 @@ fn toasty_stmt_type(ty: &str) -> Option<&'static str> {
         "f32" => Some("toasty::stmt::Type::F32"),
         "f64" => Some("toasty::stmt::Type::F64"),
         "rust_decimal::Decimal" => Some("toasty::stmt::Type::Decimal"),
+        "jiff::civil::DateTime" => Some("toasty::stmt::Type::DateTime"),
+        "jiff::Timestamp" => Some("toasty::stmt::Type::Timestamp"),
         _ => None,
     }
 }
@@ -7504,6 +7541,8 @@ fn toasty_value_variant(ty: &str) -> Option<&'static str> {
         "f32" => Some("F32"),
         "f64" => Some("F64"),
         "rust_decimal::Decimal" => Some("Decimal"),
+        "jiff::civil::DateTime" => Some("DateTime"),
+        "jiff::Timestamp" => Some("Timestamp"),
         _ => None,
     }
 }
@@ -13546,6 +13585,8 @@ fn model_fixture_value_expr(model: &ModelSpec, field: &ModelField, ty: &str) -> 
         }
         "DateTime" => "chrono::DateTime::<chrono::Utc>::from_timestamp(index.saturating_add(1) as i64, 0).map(|value| value.naive_utc()).unwrap_or_default()".to_string(),
         "DateTimeUtc" => "chrono::DateTime::<chrono::Utc>::from_timestamp(index.saturating_add(1) as i64, 0).unwrap_or_default()".to_string(),
+        "jiff::civil::DateTime" => "jiff::civil::DateTime::new(1970, 1, 1, 0, 0, (index % 60) as i8, 0).unwrap_or_default()".to_string(),
+        "jiff::Timestamp" => "jiff::Timestamp::new(index.saturating_add(1) as i64, 0).unwrap_or_default()".to_string(),
         "serde_json::Value" => "serde_json::json!({\"fixture\": index})".to_string(),
         _ => "Default::default()".to_string(),
     }
@@ -15609,6 +15650,8 @@ fn group_count_return_type(ty: &str) -> Option<&str> {
             | "u128"
             | "usize"
             | "rust_decimal::Decimal"
+            | "jiff::civil::DateTime"
+            | "jiff::Timestamp"
     )
     .then_some(ty)
 }
@@ -15634,6 +15677,8 @@ fn is_copy_filter_type(ty: &str) -> bool {
             | "f64"
             | "DateTime"
             | "DateTimeUtc"
+            | "jiff::civil::DateTime"
+            | "jiff::Timestamp"
     )
 }
 
@@ -26337,6 +26382,33 @@ mod tests {
         assert!(sea_orm.contains("Column::UpdateTime.eq(Some(*value))"));
         assert!(!sea_orm.contains("pub notice_id: u64"));
         assert!(!sea_orm.contains("pub create_time: String"));
+
+        let toasty_models = models_for_orm(&models, ModelOrm::Toasty);
+        let toasty = render_toasty_model_module(&toasty_models[0]);
+        assert!(toasty.contains("pub local_time: jiff::civil::DateTime"));
+        assert!(toasty.contains("pub create_time: jiff::Timestamp"));
+        assert!(toasty.contains("pub update_time: Option<jiff::Timestamp>"));
+        assert!(toasty
+            .contains("pub fn set_local_time(mut self, value: jiff::civil::DateTime) -> Self"));
+        assert!(toasty
+            .contains("pub fn set_update_time(mut self, value: Option<jiff::Timestamp>) -> Self"));
+        assert!(
+            toasty.contains("pub fn create_time_eq(value: jiff::Timestamp) -> SysNoticePredicate")
+        );
+        assert!(
+            toasty.contains("pub fn update_time_eq(value: jiff::Timestamp) -> SysNoticePredicate")
+        );
+        assert!(toasty.contains("pub fn create_time_asc() -> SysNoticeOrder"));
+        assert!(toasty.contains(
+            "pub async fn count_by_create_time(self) -> toasty::Result<Vec<(jiff::Timestamp, u64)>>"
+        ));
+        assert!(toasty.contains(
+            "pub async fn count_by_update_time(self) -> toasty::Result<Vec<(Option<jiff::Timestamp>, u64)>>"
+        ));
+        assert!(toasty.contains("toasty::stmt::Type::Timestamp"));
+        assert!(toasty.contains("toasty::stmt::Value::Timestamp(value)"));
+        assert!(!toasty.contains("pub create_time: String"));
+        assert!(!toasty.contains("pub update_time: Option<String>"));
     }
 
     #[test]
@@ -26407,7 +26479,10 @@ impl ServiceContext {
             CREATE TABLE users (
                 id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
-                config JSONB NOT NULL DEFAULT '{}'::jsonb
+                config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                local_time TIMESTAMP NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NULL
             );
             "#,
             &out,
@@ -26421,10 +26496,15 @@ impl ServiceContext {
         assert!(manifest.contains("toasty = { workspace = true"));
         assert!(manifest.contains("rust_decimal"));
         assert!(manifest.contains("rust_decimal = { workspace = true }"));
+        assert!(manifest.contains("jiff"));
+        assert!(manifest.contains("jiff = { workspace = true"));
         assert!(!manifest.contains("sea-orm.workspace = true"));
         let module = fs::read_to_string(out.join("src/model/user.rs")).expect("module read");
         assert!(module.contains("toasty::Model"));
         assert!(module.contains("pub config: String"));
+        assert!(module.contains("pub local_time: jiff::civil::DateTime"));
+        assert!(module.contains("pub created_at: jiff::Timestamp"));
+        assert!(module.contains("pub updated_at: Option<jiff::Timestamp>"));
         let schema = fs::read_to_string(out.join("src/model/schema.ent")).expect("schema read");
         assert!(schema.contains("field config: json {"));
         assert!(schema.contains("default \"{}\""));
@@ -27895,6 +27975,12 @@ tracing = "0.1"
                 field score: i32? {
                 }
                 field visits: i32 {
+                }
+                field local_time: timestamp {
+                }
+                field created_at: timestamptz {
+                }
+                field updated_at: timestamptz? {
                 }
                 field required_label: string {
                     nillable

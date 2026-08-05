@@ -420,7 +420,10 @@ PostgreSQL `BIGINT`, `BIGSERIAL`, and `INT8` generate signed `i64` fields;
 unsigned `u64` is reserved for explicitly unsigned types such as MySQL
 `BIGINT UNSIGNED`. PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` remain distinct as
 `.ent` `timestamp` and `timestamptz` fields and generate SeaORM `DateTime` and
-`DateTimeUtc` fields with chrono support enabled automatically.
+`DateTimeUtc` fields with chrono support enabled automatically. Toasty output
+uses `jiff::civil::DateTime` for `timestamp` and `jiff::Timestamp` for
+`timestamptz`, including nullable fields, and enables Toasty's `jiff` feature
+plus the direct serde-enabled `jiff` dependency automatically.
 
 Generated RPC service layout:
 

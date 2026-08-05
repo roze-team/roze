@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Generated Toasty PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` fields now use
+  native `jiff::civil::DateTime` and `jiff::Timestamp` values across models,
+  mutations, predicates, ordering, projections, and grouped counts.
 - Standardized generated REST and RPC error handling on numeric response codes:
   success remains `code: 0`, framework errors use numeric codes, and the
   parallel string business-code contract has been removed.

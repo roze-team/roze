@@ -2077,6 +2077,11 @@ PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` preserve their distinction as `.ent`
 respectively, including their nullable forms, and model generation adds the
 `with-chrono` SeaORM feature plus `clock` and `serde` to the `chrono` dependency
 when needed, merging the features into an existing dependency if present.
+Toasty output uses `jiff::civil::DateTime` and `jiff::Timestamp` respectively,
+including nullable forms. Generation enables Toasty's `jiff` feature and adds
+a direct serde-enabled `jiff` dependency so create/update builders, typed
+predicates, ordering, projections, and grouped counts keep native database time
+values instead of converting them through strings.
 `.ent` `datetime` is accepted as an alias for `timestamp`.
 Standalone SQL/Ent model generation adds a direct `serde` dependency with the
 `derive` feature because generated Toasty and SeaORM model structs import and
