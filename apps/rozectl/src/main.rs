@@ -2168,10 +2168,12 @@ fn contract_rest_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
         .map(|route| {
             let key = format!("{} {}", contract_http_method(&route.method), route.path);
             let value = format!(
-                "{}; {} -> {}",
+                "{}; {} -> {}; success={:?}; errors={:?}",
                 if route.websocket { "WebSocket" } else { "HTTP" },
                 route.request,
-                route.response
+                route.response,
+                route.success_status,
+                route.errors
             );
             (key, value)
         })
@@ -2184,7 +2186,10 @@ fn contract_rpc_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
         .map(|method| {
             (
                 method.name.clone(),
-                format!("{} -> {}", method.request, method.response),
+                format!(
+                    "{} -> {}; errors={:?}",
+                    method.request, method.response, method.errors
+                ),
             )
         })
         .collect()
@@ -2660,6 +2665,12 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
         for permission in &route.permissions {
             out.push_str(&format!("    @permission {}\n", permission));
         }
+        if let Some(status) = route.success_status {
+            out.push_str(&format!("    @status {}\n", status));
+        }
+        for error in &route.errors {
+            out.push_str(&format!("    @error {} {}\n", error.code, error.status));
+        }
         if route.websocket {
             out.push_str("    @websocket\n");
         }
@@ -2677,6 +2688,9 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
     for method in &spec.rpc_methods {
         for permission in &method.permissions {
             out.push_str(&format!("    @permission {}\n", permission));
+        }
+        for error in &method.errors {
+            out.push_str(&format!("    @error {} {}\n", error.code, error.status));
         }
         out.push_str(&format!(
             "    rpc {} ({}) returns ({})\n",
@@ -2795,7 +2809,69 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_referenced_types(spec, &mut issues);
     validate_route_path_params(spec, &mut issues);
     validate_websocket_routes(spec, &mut issues);
+    validate_response_contracts(spec, &mut issues);
     issues
+}
+
+fn validate_response_contracts(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    let mut catalog = BTreeMap::<&str, u16>::new();
+    for route in &spec.rest_routes {
+        if route.success_status == Some(204) && route.response != "EmptyResp" {
+            issues.push(api_validation_issue(format!(
+                "route {} declares @status 204 but response is {}; use EmptyResp",
+                rest_route_key(spec, route),
+                route.response
+            )));
+        }
+        for error in &route.errors {
+            validate_business_error(error, &mut catalog, issues);
+        }
+    }
+    for method in &spec.rpc_methods {
+        for error in &method.errors {
+            validate_business_error(error, &mut catalog, issues);
+        }
+    }
+}
+
+fn validate_business_error<'a>(
+    error: &'a parser::BusinessError,
+    catalog: &mut BTreeMap<&'a str, u16>,
+    issues: &mut Vec<ApiValidationIssue>,
+) {
+    let parts = error.code.split('-').collect::<Vec<_>>();
+    let valid_code = parts.len() == 3
+        && parts[0].len() >= 2
+        && parts[1].len() >= 2
+        && parts[2].len() == 3
+        && parts[0..2].iter().all(|part| {
+            part.bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+        && parts[2].bytes().all(|byte| byte.is_ascii_digit());
+    if !valid_code {
+        issues.push(api_validation_issue(format!(
+            "business error code {} must match DOMAIN-CATEGORY-NNN",
+            error.code
+        )));
+    }
+    if !matches!(
+        error.status,
+        400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 502 | 503 | 504
+    ) {
+        issues.push(api_validation_issue(format!(
+            "business error {} uses unsupported HTTP status {}; expected 400, 401, 403, 404, 409, 422, 429, 500, 502, 503, or 504",
+            error.code, error.status
+        )));
+    }
+    if let Some(previous) = catalog.insert(error.code.as_str(), error.status) {
+        if previous != error.status {
+            issues.push(api_validation_issue(format!(
+                "business error {} has conflicting HTTP statuses {} and {}",
+                error.code, previous, error.status
+            )));
+        }
+    }
 }
 
 fn validate_websocket_routes(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
@@ -3466,6 +3542,20 @@ fn check_rest_routes(
                 old_route.response, new_route.response
             )));
         }
+        if old_route.success_status != new_route.success_status {
+            issues.push(breaking(format!(
+                "REST route {key} success contract changed: {:?} -> {:?}",
+                old_route.success_status, new_route.success_status
+            )));
+        }
+        for error in &old_route.errors {
+            if !new_route.errors.contains(error) {
+                issues.push(breaking(format!(
+                    "REST route {key} removed or changed business error {} ({})",
+                    error.code, error.status
+                )));
+            }
+        }
         if old_route.websocket != new_route.websocket {
             issues.push(breaking(format!(
                 "REST route {key} transport changed: {} -> {}",
@@ -3500,6 +3590,14 @@ fn check_rpc_methods(
             issues.push(breaking(format!("RPC method removed: {}", old_method.name)));
             continue;
         };
+        for error in &old_method.errors {
+            if !new_method.errors.contains(error) {
+                issues.push(breaking(format!(
+                    "RPC method {} removed or changed business error {} ({})",
+                    old_method.name, error.code, error.status
+                )));
+            }
+        }
         if old_method.request != new_method.request {
             issues.push(breaking(format!(
                 "RPC method {} request type changed: {} -> {}",
@@ -6906,6 +7004,38 @@ envFrom: []
 
         let issues = validate_api_spec(&spec);
         assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn api_validate_rejects_inconsistent_response_contracts() {
+        let spec = parser::parse_api(
+            r#"
+            service order {
+                @status 204
+                @error ORD-CONFLICT-001 409
+                delete /orders/:id (OrderReq) returns (OrderResp)
+
+                @error ORD-CONFLICT-001 422
+                rpc RejectOrder (OrderReq) returns (OrderResp)
+            }
+
+            type OrderReq {
+                id u64 `path:"id"`
+            }
+            type OrderResp {
+                id u64 `json:"id"`
+            }
+            "#,
+        )
+        .expect("annotations are syntactically valid");
+
+        let messages = validate_api_spec(&spec)
+            .into_iter()
+            .map(|issue| issue.detail)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(messages.contains("@status 204"));
+        assert!(messages.contains("conflicting HTTP statuses 409 and 422"));
     }
 
     #[test]

@@ -59,11 +59,19 @@ pub struct RestRoute {
     pub websocket: bool,
     pub middlewares: Vec<String>,
     pub permissions: Vec<String>,
+    pub success_status: Option<u16>,
+    pub errors: Vec<BusinessError>,
     pub server: Option<ServerSpec>,
     pub method: HttpMethod,
     pub path: String,
     pub request: String,
     pub response: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BusinessError {
+    pub code: String,
+    pub status: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +94,7 @@ pub struct RpcMethod {
     pub response: String,
     pub middlewares: Vec<String>,
     pub permissions: Vec<String>,
+    pub errors: Vec<BusinessError>,
 }
 
 #[derive(Debug, Error)]
@@ -191,6 +200,8 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                 let mut current_websocket = false;
                 let mut current_middlewares: Vec<String> = Vec::new();
                 let mut current_permissions: Vec<String> = Vec::new();
+                let mut current_success_status = None;
+                let mut current_errors = Vec::new();
                 let mut current_server = None;
                 let mut service_server = None;
 
@@ -228,6 +239,14 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         current_permissions.extend(parse_name_list(permission));
                         continue;
                     }
+                    if let Some(status) = parse_annotation_arg(svc_line, "@status") {
+                        current_success_status = Some(parse_success_status(status, svc_line_no)?);
+                        continue;
+                    }
+                    if let Some(error) = parse_annotation_arg(svc_line, "@error") {
+                        current_errors.push(parse_business_error(error, svc_line_no)?);
+                        continue;
+                    }
                     if matches!(svc_line, "@websocket" | "@websocket()") {
                         current_websocket = true;
                         continue;
@@ -239,9 +258,16 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                                 "`@websocket` can only annotate an HTTP GET route",
                             );
                         }
+                        if current_success_status.take().is_some() {
+                            return invalid(
+                                svc_line_no,
+                                "`@status` can only annotate an HTTP route",
+                            );
+                        }
                         let mut method = parse_rpc_method(method, svc_line_no)?;
                         method.middlewares = std::mem::take(&mut current_middlewares);
                         method.permissions = std::mem::take(&mut current_permissions);
+                        method.errors = std::mem::take(&mut current_errors);
                         rpc_methods.push(method);
                         continue;
                     }
@@ -254,6 +280,8 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         }
                         route.middlewares = std::mem::take(&mut current_middlewares);
                         route.permissions = std::mem::take(&mut current_permissions);
+                        route.success_status = current_success_status.take();
+                        route.errors = std::mem::take(&mut current_errors);
                         route.server = current_server.clone();
                         rest_routes.push(route);
                         continue;
@@ -261,7 +289,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
 
                     return invalid(
                         svc_line_no,
-                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, `@websocket`, RPC method or route declaration",
+                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, `@status code`, `@error code status`, `@websocket`, RPC method or route declaration",
                     );
                 }
 
@@ -393,6 +421,8 @@ fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, Par
         websocket: false,
         middlewares: Vec::new(),
         permissions: Vec::new(),
+        success_status: None,
+        errors: Vec::new(),
         server: None,
         method,
         path: path.to_string(),
@@ -625,7 +655,72 @@ fn parse_rpc_method(input: &str, line_no: usize) -> Result<RpcMethod, ParseError
         response,
         middlewares: Vec::new(),
         permissions: Vec::new(),
+        errors: Vec::new(),
     })
+}
+
+fn parse_success_status(input: &str, line_no: usize) -> Result<u16, ParseError> {
+    let status =
+        trim_annotation_string(input)
+            .parse::<u16>()
+            .map_err(|_| ParseError::InvalidLine {
+                line: line_no + 1,
+                message: "`@status` expects one of 200, 201, 202, or 204".to_string(),
+            })?;
+    if matches!(status, 200 | 201 | 202 | 204) {
+        Ok(status)
+    } else {
+        invalid(line_no, "`@status` expects one of 200, 201, 202, or 204")
+    }
+}
+
+fn parse_business_error(input: &str, line_no: usize) -> Result<BusinessError, ParseError> {
+    let values = input
+        .split(|ch: char| ch.is_whitespace() || ch == ',')
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.len() != 2 {
+        return invalid(
+            line_no,
+            "`@error` expects `DOMAIN-CATEGORY-NNN HTTP_STATUS`",
+        );
+    }
+    let status = values[1]
+        .parse::<u16>()
+        .map_err(|_| ParseError::InvalidLine {
+            line: line_no + 1,
+            message: "`@error` HTTP status must be an integer".to_string(),
+        })?;
+    let code = trim_annotation_string(values[0]);
+    if !is_business_error_code(code) {
+        return invalid(
+            line_no,
+            "`@error` code must match `DOMAIN-CATEGORY-NNN` using uppercase ASCII letters or digits",
+        );
+    }
+    if !matches!(
+        status,
+        400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 502 | 503 | 504
+    ) {
+        return invalid(line_no, "`@error` uses an unsupported HTTP status");
+    }
+    Ok(BusinessError {
+        code: code.to_string(),
+        status,
+    })
+}
+
+fn is_business_error_code(code: &str) -> bool {
+    let parts = code.split('-').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts[0].len() >= 2
+        && parts[1].len() >= 2
+        && parts[0..2].iter().all(|part| {
+            part.chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        })
+        && parts[2].len() == 3
+        && parts[2].chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn parse_signature(input: &str, _line_no: usize) -> Result<(String, String), ParseError> {
@@ -806,6 +901,7 @@ mod tests {
                 response: "UserResp".to_string(),
                 middlewares: Vec::new(),
                 permissions: Vec::new(),
+                errors: Vec::new(),
             }]
         );
     }
@@ -1252,6 +1348,42 @@ mod tests {
         assert_eq!(route.handler.as_deref(), Some("realtime"));
         assert_eq!(route.request, "EmptyReq");
         assert_eq!(route.response, "EmptyResp");
+    }
+
+    #[test]
+    fn parses_success_status_and_business_error_catalogs() {
+        let spec = parse_api(
+            r#"
+            service order-api {
+                @status 201
+                @error ORD-CONFLICT-001 409
+                post /orders (CreateOrderReq) returns (OrderResp)
+
+                @error ORD-NFD-001, 404
+                rpc GetOrder (GetOrderReq) returns (OrderResp)
+            }
+            "#,
+        )
+        .expect("valid response contracts");
+
+        assert_eq!(spec.rest_routes[0].success_status, Some(201));
+        assert_eq!(spec.rest_routes[0].errors[0].code, "ORD-CONFLICT-001");
+        assert_eq!(spec.rest_routes[0].errors[0].status, 409);
+        assert_eq!(spec.rpc_methods[0].errors[0].code, "ORD-NFD-001");
+        assert_eq!(spec.rpc_methods[0].errors[0].status, 404);
+    }
+
+    #[test]
+    fn rejects_invalid_business_error_annotations() {
+        for annotation in ["order-conflict-001 409", "ORD-CONFLICT-001 418"] {
+            let source = format!(
+                "service order-api {{\n@error {annotation}\nget /orders returns (OrderResp)\n}}"
+            );
+            assert!(
+                parse_api(&source).is_err(),
+                "annotation must fail: {annotation}"
+            );
+        }
     }
 
     #[test]

@@ -21,7 +21,9 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str(
         "  afterResponse?: (response: Response, attempt: number) => void | Promise<void>;\n",
     );
+    out.push_str("  onUnauthorized?: (error: RozeApiError) => void | Promise<void>;\n");
     out.push_str("}\n\n");
+    render_ts_business_codes(&mut out, spec);
     out.push_str("export interface IdempotentRequestOptions extends RequestOptions {\n");
     out.push_str("  /** Stable key to reuse when safely retrying the same mutation. */\n");
     out.push_str("  idempotencyKey: string;\n");
@@ -56,7 +58,7 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("    requestHeaders['content-type'] = requestHeaders['content-type'] ?? 'application/json';\n");
     out.push_str("    init.body = JSON.stringify(body);\n");
     out.push_str("  }\n");
-    out.push_str("  const idempotent = method === 'GET' || method === 'HEAD';\n");
+    out.push_str("  const idempotent = method === 'GET' || method === 'HEAD' || Object.keys(headers).some(name => name.toLowerCase() === 'idempotency-key');\n");
     out.push_str("  const maxAttempts = idempotent ? Math.max(1, Math.min(options.maxAttempts ?? 1, 5)) : 1;\n");
     out.push_str("  let response: Response | undefined;\n");
     out.push_str("  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n");
@@ -94,7 +96,9 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("    const code = typeof error.code === 'string' || typeof error.code === 'number' ? String(error.code) : `HTTP_${response.status}`;\n");
     out.push_str("    const message = typeof error.msg === 'string' ? error.msg : (typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`));\n");
     out.push_str("    const traceId = typeof error.trace_id === 'string' ? error.trace_id : (response.headers.get('x-trace-id') ?? undefined);\n");
-    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    const apiError = new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    if (response.status === 401) await options.onUnauthorized?.(apiError);\n");
+    out.push_str("    throw apiError;\n");
     out.push_str("  }\n");
     out.push_str("  if (response.status === 204 || method === 'HEAD') return undefined as T;\n");
     out.push_str("  const payload = await response.json() as unknown;\n");
@@ -102,7 +106,7 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("    const envelope = payload as { code: string | number; msg: unknown; data: unknown; trace_id?: unknown };\n");
     out.push_str("    const code = String(envelope.code);\n");
     out.push_str("    const message = typeof envelope.msg === 'string' ? envelope.msg : code;\n");
-    out.push_str("    if (code !== '0') throw new RozeApiError(response.status, code, message, typeof envelope.trace_id === 'string' ? envelope.trace_id : undefined, envelope.data, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    if (code !== '0' && code !== 'OK') throw new RozeApiError(response.status, code, message, typeof envelope.trace_id === 'string' ? envelope.trace_id : undefined, envelope.data, response.headers.get('retry-after') ?? undefined);\n");
     out.push_str("    return envelope.data as T;\n");
     out.push_str("  }\n");
     out.push_str("  return payload as T;\n");
@@ -136,6 +140,7 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str(" * @property {number} [retryBaseDelayMs]\n");
     out.push_str(" * @property {(url: string, init: RequestInit) => RequestInit|Promise<RequestInit>} [beforeRequest]\n");
     out.push_str(" * @property {(response: Response, attempt: number) => void|Promise<void>} [afterResponse]\n");
+    out.push_str(" * @property {(error: RozeApiError) => void|Promise<void>} [onUnauthorized]\n");
     out.push_str(" */\n\n");
     out.push_str("/**\n");
     out.push_str(
@@ -145,6 +150,7 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str("export class RozeApiError extends Error {\n");
     out.push_str("  constructor(status, code, message, traceId, details, retryAfter) { super(message); this.name = 'RozeApiError'; this.status = status; this.code = code; this.traceId = traceId; this.details = details; this.retryAfter = retryAfter; }\n");
     out.push_str("}\n\n");
+    render_js_business_codes(&mut out, spec);
 
     for ty in &spec.types {
         out.push_str(&render_js_typedef(spec, ty));
@@ -172,7 +178,7 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str("    requestHeaders['content-type'] = requestHeaders['content-type'] ?? 'application/json';\n");
     out.push_str("    init.body = JSON.stringify(body);\n");
     out.push_str("  }\n");
-    out.push_str("  const idempotent = method === 'GET' || method === 'HEAD';\n");
+    out.push_str("  const idempotent = method === 'GET' || method === 'HEAD' || Object.keys(headers).some(name => name.toLowerCase() === 'idempotency-key');\n");
     out.push_str("  const maxAttempts = idempotent ? Math.max(1, Math.min(options.maxAttempts ?? 1, 5)) : 1;\n");
     out.push_str("  let response;\n");
     out.push_str("  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n");
@@ -212,14 +218,16 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str("    const code = typeof error.code === 'string' || typeof error.code === 'number' ? String(error.code) : `HTTP_${response.status}`;\n");
     out.push_str("    const message = typeof error.msg === 'string' ? error.msg : (typeof error.message === 'string' ? error.message : (text || `HTTP ${response.status}`));\n");
     out.push_str("    const traceId = typeof error.trace_id === 'string' ? error.trace_id : (response.headers.get('x-trace-id') ?? undefined);\n");
-    out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    const apiError = new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    if (response.status === 401) await options.onUnauthorized?.(apiError);\n");
+    out.push_str("    throw apiError;\n");
     out.push_str("  }\n");
     out.push_str("  if (response.status === 204 || method === 'HEAD') return undefined;\n");
     out.push_str("  const payload = await response.json();\n");
     out.push_str("  if (payload && typeof payload === 'object' && 'code' in payload && 'msg' in payload && 'data' in payload) {\n");
     out.push_str("    const code = String(payload.code);\n");
     out.push_str("    const message = typeof payload.msg === 'string' ? payload.msg : code;\n");
-    out.push_str("    if (code !== '0') throw new RozeApiError(response.status, code, message, typeof payload.trace_id === 'string' ? payload.trace_id : undefined, payload.data, response.headers.get('retry-after') ?? undefined);\n");
+    out.push_str("    if (code !== '0' && code !== 'OK') throw new RozeApiError(response.status, code, message, typeof payload.trace_id === 'string' ? payload.trace_id : undefined, payload.data, response.headers.get('retry-after') ?? undefined);\n");
     out.push_str("    return payload.data;\n");
     out.push_str("  }\n");
     out.push_str("  return payload;\n");
@@ -236,6 +244,56 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str(&render_reporting_js(spec));
 
     out
+}
+
+fn business_error_codes(spec: &ApiSpec) -> Vec<String> {
+    let mut codes = spec
+        .rest_routes
+        .iter()
+        .flat_map(|route| route.errors.iter().map(|error| error.code.clone()))
+        .chain(
+            spec.rpc_methods
+                .iter()
+                .flat_map(|method| method.errors.iter().map(|error| error.code.clone())),
+        )
+        .collect::<Vec<_>>();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+fn render_ts_business_codes(out: &mut String, spec: &ApiSpec) {
+    out.push_str("export type RozeSuccessCode = 'OK';\n");
+    let codes = business_error_codes(spec);
+    if codes.is_empty() {
+        out.push_str("export type RozeBusinessErrorCode = never;\n\n");
+    } else {
+        out.push_str(&format!(
+            "export type RozeBusinessErrorCode = {};\n\n",
+            codes
+                .iter()
+                .map(|code| ts_string(code))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
+    }
+}
+
+fn render_js_business_codes(out: &mut String, spec: &ApiSpec) {
+    out.push_str("/** @typedef {'OK'} RozeSuccessCode */\n");
+    let codes = business_error_codes(spec);
+    if codes.is_empty() {
+        out.push_str("/** @typedef {never} RozeBusinessErrorCode */\n\n");
+    } else {
+        out.push_str(&format!(
+            "/** @typedef {{{}}} RozeBusinessErrorCode */\n\n",
+            codes
+                .iter()
+                .map(|code| ts_string(code))
+                .collect::<Vec<_>>()
+                .join("|")
+        ));
+    }
 }
 
 fn render_reporting_ts(spec: &ApiSpec) -> String {
@@ -373,15 +431,20 @@ fn render_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     } else {
         "options: RequestOptions = {}"
     };
+    let response = if route.success_status == Some(204) {
+        "void"
+    } else {
+        route.response.as_str()
+    };
 
     let mut out = String::new();
     out.push_str(&format!(
         "export async function {function_name}({req_param}, {options}): Promise<{response}> {{\n",
-        response = route.response,
+        response = response,
     ));
     out.push_str(&format!(
         "  return requestJson<{}>({}, {}, {}, {}, {}, options);\n",
-        route.response,
+        response,
         ts_string(http_method(&route.method)),
         path,
         query,
@@ -411,6 +474,11 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     };
 
     let mut out = String::new();
+    let response = if route.success_status == Some(204) {
+        "void"
+    } else {
+        route.response.as_str()
+    };
     out.push_str("/**\n");
     if expanded_client_fields(spec, request_ty).is_empty() {
         out.push_str(&format!(" * @param {{{}}} [req]\n", route.request));
@@ -422,7 +490,7 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     } else {
         out.push_str(" * @param {RequestOptions} [options]\n");
     }
-    out.push_str(&format!(" * @returns {{Promise<{}>}}\n", route.response));
+    out.push_str(&format!(" * @returns {{Promise<{}>}}\n", response));
     out.push_str(" */\n");
     let options = if uses_idempotency {
         "options"

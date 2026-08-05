@@ -473,10 +473,11 @@ responses remain supported for compatibility.
 
 TypeScript and JavaScript `RequestOptions` also support `authToken`,
 `timeoutMs`, an external `AbortSignal`, `beforeRequest`, `afterResponse`, and a
-bounded retry policy. Automatic retries are restricted to GET and HEAD,
-hard-capped at five attempts, and use `Retry-After` or full-jitter exponential
-backoff for HTTP 429/502/503/504 and transport failures. Mutating methods are
-never replayed automatically.
+bounded retry policy. Automatic retries are restricted to GET and HEAD or
+requests carrying an `Idempotency-Key`, hard-capped at five attempts, and use
+`Retry-After` or full-jitter exponential backoff for HTTP 429/502/503/504 and
+transport failures. `onUnauthorized` can initiate reauthentication after HTTP
+401.
 
 TypeScript interfaces preserve declared nested API types recursively, including
 custom objects, custom-object arrays, `Option<T>`, and JSON field renames.
@@ -1038,7 +1039,8 @@ The parser accepts Roze contracts plus go-zero-compatible API forms:
 - `service name` declarations and `service name { ... }` REST/RPC blocks.
 - Multiple `service name { ... }` blocks with the same name; routes are merged
   in declaration order.
-- `@server`, `@handler`, `@doc`, and `@middleware` annotations, including
+- `@server`, `@handler`, `@doc`, `@middleware`, `@status`, and `@error`
+  annotations, including
   compact go-zero forms such as `@handler(getUser)`, `@doc("Get user")`, and
   `@middleware(auth, trace)`.
 - `import (...)` blocks.
@@ -1071,6 +1073,8 @@ info (
 service user-api {
   @handler getUser
   @doc "Get a user"
+  @status 200
+  @error USER-NFD-001 404
   get /users/:id (GetUserReq) returns (UserResp)
 
   @handler ping
@@ -1340,6 +1344,14 @@ type GetUserReq {
   profile Profile `json:"profile"`
 }
 ```
+
+`@status 200|201|202|204` opts a REST route into the string success envelope
+with `code: "OK"`; 204 requires `EmptyResp` and emits no response body.
+Repeatable `@error DOMAIN-CATEGORY-NNN STATUS` annotations declare the bounded
+business-error catalog for the following REST route or RPC method. Unannotated
+routes preserve the legacy HTTP 200 response with numeric code `0`. See the
+[HTTP status and business code contract](../contracts/http-status-and-business-codes.md)
+for validation, OpenAPI, SDK, and runtime enforcement details.
 
 If no source tag is present, `rozectl` infers path parameters from route
 segments such as `:id`. Remaining untagged fields become query fields for

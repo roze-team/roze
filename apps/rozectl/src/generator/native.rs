@@ -1444,6 +1444,8 @@ fn route_json(route: &RestRoute) -> serde_json::Value {
         "path": route.path,
         "request": route.request,
         "response": route.response,
+        "success_status": route.success_status,
+        "errors": route.errors.iter().map(business_error_json).collect::<Vec<_>>(),
     })
 }
 
@@ -1453,7 +1455,12 @@ fn rpc_method_json(method: &RpcMethod) -> serde_json::Value {
         "request": method.request,
         "response": method.response,
         "permissions": method.permissions,
+        "errors": method.errors.iter().map(business_error_json).collect::<Vec<_>>(),
     })
+}
+
+fn business_error_json(error: &crate::parser::BusinessError) -> serde_json::Value {
+    serde_json::json!({ "code": error.code, "status": error.status })
 }
 
 fn field_source_name(source: FieldSource) -> &'static str {
@@ -1735,6 +1742,7 @@ fn parse_proto_rpcs(source: &str) -> anyhow::Result<Vec<RpcMethod>> {
             response: normalize_proto_rpc_type(response),
             middlewares: Vec::new(),
             permissions: Vec::new(),
+            errors: Vec::new(),
         });
         rest = after_response
             .split_once(';')

@@ -38,6 +38,78 @@ pub struct CodedErrorResponse {
     pub trace_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BusinessErrorCode {
+    pub code: &'static str,
+    pub status: u16,
+}
+
+impl BusinessErrorCode {
+    pub const fn new(code: &'static str, status: u16) -> Self {
+        Self { code, status }
+    }
+}
+
+pub fn validate_business_error_catalog(catalog: &[BusinessErrorCode]) -> Result<(), String> {
+    let mut codes = BTreeMap::new();
+    for entry in catalog {
+        if !is_valid_business_code(entry.code) {
+            return Err(format!(
+                "business error code {} must match DOMAIN-CATEGORY-NNN",
+                entry.code
+            ));
+        }
+        if !(400..=599).contains(&entry.status) {
+            return Err(format!(
+                "business error code {} has invalid HTTP status {}",
+                entry.code, entry.status
+            ));
+        }
+        if let Some(previous) = codes.insert(entry.code, entry.status) {
+            if previous != entry.status {
+                return Err(format!(
+                    "business error code {} has conflicting HTTP statuses {} and {}",
+                    entry.code, previous, entry.status
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn enforce_business_error_catalog(
+    error: RozeError,
+    catalog: &[BusinessErrorCode],
+) -> RozeError {
+    if catalog.is_empty() {
+        return error;
+    }
+    let RozeError::Coded { status, code, .. } = &error else {
+        return error;
+    };
+    if catalog
+        .iter()
+        .any(|entry| entry.code == code && entry.status == *status)
+    {
+        error
+    } else {
+        RozeError::Internal("unregistered business error".to_string())
+    }
+}
+
+fn is_valid_business_code(code: &str) -> bool {
+    let parts = code.split('-').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts[0].len() >= 2
+        && parts[1].len() >= 2
+        && parts[2].len() == 3
+        && parts[0..2].iter().all(|part| {
+            part.bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+        && parts[2].bytes().all(|byte| byte.is_ascii_digit())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 pub enum RozeError {
     #[error("bad request: {0}")]
@@ -133,6 +205,16 @@ impl RozeError {
             RozeError::Coded { message, .. } => message.clone(),
             RozeError::Fallback { body, .. } => fallback_message(body.as_ref()),
             _ => localized_error_message(self.kind(), locale.as_ref()).to_string(),
+        }
+    }
+
+    /// Returns a transport-safe message while retaining the full error in
+    /// `Display` for server-side diagnostics.
+    pub fn public_message_i18n(&self, locale: impl AsRef<str>) -> String {
+        if matches!(self, RozeError::Internal(_)) {
+            localized_error_message("internal", locale.as_ref()).to_string()
+        } else {
+            self.message_i18n(locale)
         }
     }
 
@@ -315,8 +397,8 @@ pub fn normalize_locale(raw: &str) -> Option<String> {
 impl RozeError {
     pub fn response_body(&self) -> ErrorResponse {
         let message = current_locale()
-            .map(|locale| self.message_i18n(locale))
-            .unwrap_or_else(|| self.message());
+            .map(|locale| self.public_message_i18n(locale))
+            .unwrap_or_else(|| self.public_message_i18n("en-US"));
         let ids = current_request_ids();
         ErrorResponse {
             code: self.code(),
@@ -445,6 +527,13 @@ mod tests {
     }
 
     #[test]
+    fn redacts_internal_details_from_transport_responses() {
+        let error = RozeError::Internal("database password appeared in an error".to_string());
+        assert_eq!(error.message(), "database password appeared in an error");
+        assert_eq!(error.response_body().msg, "internal server error");
+    }
+
+    #[test]
     fn builds_string_coded_error_response_without_changing_legacy_codes() {
         let error = RozeError::coded(StatusCode::NOT_FOUND, "ORD-NFD-001", "order not found");
         assert_eq!(error.kind(), "coded");
@@ -473,6 +562,27 @@ mod tests {
         );
         assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(error.retry_after_seconds(), Some(2));
+    }
+
+    #[test]
+    fn validates_and_enforces_bounded_business_error_catalogs() {
+        const CATALOG: &[BusinessErrorCode] = &[
+            BusinessErrorCode::new("ORD-NFD-001", 404),
+            BusinessErrorCode::new("COM-DEP-002", 502),
+        ];
+        assert!(validate_business_error_catalog(CATALOG).is_ok());
+        assert!(validate_business_error_catalog(&[BusinessErrorCode::new("bad", 404)]).is_err());
+
+        let declared = RozeError::coded(StatusCode::NOT_FOUND, "ORD-NFD-001", "missing");
+        assert_eq!(
+            enforce_business_error_catalog(declared.clone(), CATALOG),
+            declared
+        );
+        let unknown = RozeError::coded(StatusCode::NOT_FOUND, "ORD-NFD-999", "secret detail");
+        assert_eq!(
+            enforce_business_error_catalog(unknown, CATALOG),
+            RozeError::Internal("unregistered business error".to_string())
+        );
     }
 
     #[test]

@@ -992,7 +992,7 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
     }
     Status::with_metadata(
         code,
-        error.message_i18n(locale.as_deref().unwrap_or("en-US")),
+        error.public_message_i18n(locale.as_deref().unwrap_or("en-US")),
         metadata,
     )
 }

@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- Added backward-compatible string business-code responses and errors, exact
-  HTTP status propagation across RPC, `Retry-After` preservation, and the
-  documented 200/201/202/204 and 400-504 status mapping.
+- Added backward-compatible string business-code responses and errors, `.api`
+  `@status`/`@error` contracts, generated catalog enforcement, OpenAPI and SDK
+  projection, exact HTTP status propagation across RPC, `Retry-After`
+  preservation, and the documented 200/201/202/204 and 400-504 status mapping.
 - Configured REST request-body limits now raise the matching native extractor
   limit, and optional gzip decoding runs before decompressed-size enforcement.
 - Added backward-compatible `tokens_per_refill` governance rate limits with

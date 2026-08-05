@@ -1385,6 +1385,11 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
     .unwrap();
     writeln!(
         &mut out,
+        "| `src/error_catalog.rs` | contract | refreshed from `.api` |"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
         "| `src/logic/prelude.rs` | application | preserved during `--update` |"
     )
     .unwrap();
@@ -1923,11 +1928,19 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
         .unwrap();
         writeln!(&mut out, "    let response = request.send().await?;").unwrap();
         writeln!(&mut out).unwrap();
-        writeln!(
-            &mut out,
-            "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
-        )
-        .unwrap();
+        if let Some(status) = route.success_status {
+            writeln!(
+                &mut out,
+                "    assert_eq!(response.status().as_u16(), {status}, \"unexpected declared success status\");"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                &mut out,
+                "    assert!(response.status().is_success(), \"expected success, got {{}}\", response.status());"
+            )
+            .unwrap();
+        }
         writeln!(&mut out, "    let status = response.status();").unwrap();
         writeln!(
             &mut out,
@@ -1950,6 +1963,13 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
         )
         .unwrap();
         writeln!(&mut out, "    }} else {{ None }};").unwrap();
+        if route.success_status.is_some_and(|status| status != 204) {
+            writeln!(
+                &mut out,
+                "    assert_eq!(body.as_ref().and_then(|body| body.get(\"code\")).and_then(|code| code.as_str()), Some(\"OK\"), \"declared coded response must use OK\");"
+            )
+            .unwrap();
+        }
         writeln!(
             &mut out,
             "    assertions::assert_route({test_name:?}, status, body.as_ref()).await?;"
@@ -2678,18 +2698,73 @@ fn openapi_operation(spec: &ApiSpec, route: &crate::parser::RestRoute) -> serde_
         );
     }
 
-    operation.insert(
-        "responses".to_string(),
+    let success_status = route.success_status.unwrap_or(200);
+    let mut responses = serde_json::Map::new();
+    let success = if success_status == 204 {
+        serde_json::json!({ "description": "No Content" })
+    } else if route.success_status.is_some() {
         serde_json::json!({
-            "200": {
-                "description": "OK",
-                "content": {
-                    "application/json": {
-                        "schema": { "$ref": format!("#/components/schemas/{}", route.response) }
+            "description": "OK",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["code", "msg", "data"],
+                        "properties": {
+                            "code": { "type": "string", "enum": ["OK"] },
+                            "msg": { "type": "string", "enum": ["OK"] },
+                            "data": { "$ref": format!("#/components/schemas/{}", route.response) }
+                        }
                     }
                 }
             }
-        }),
+        })
+    } else {
+        serde_json::json!({
+            "description": "OK",
+            "content": {
+                "application/json": {
+                    "schema": { "$ref": format!("#/components/schemas/{}", route.response) }
+                }
+            }
+        })
+    };
+    responses.insert(success_status.to_string(), success);
+    let mut errors_by_status = BTreeMap::<u16, Vec<&str>>::new();
+    for error in &route.errors {
+        errors_by_status
+            .entry(error.status)
+            .or_default()
+            .push(error.code.as_str());
+    }
+    for (status, mut codes) in errors_by_status {
+        codes.sort_unstable();
+        codes.dedup();
+        responses.insert(
+            status.to_string(),
+            serde_json::json!({
+                "description": "Business error",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["code", "msg", "data"],
+                            "properties": {
+                                "code": { "type": "string", "enum": codes },
+                                "msg": { "type": "string" },
+                                "data": { "nullable": true },
+                                "request_id": { "type": "string" },
+                                "trace_id": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+    }
+    operation.insert(
+        "responses".to_string(),
+        serde_json::Value::Object(responses),
     );
 
     serde_json::Value::Object(operation)
@@ -3635,6 +3710,10 @@ fn generate_rest_project_in_place(
     write_preserved(&out.join("src/config/mod.rs"), config_rs(), options.mode)?;
     fs::write(out.join("src/openapi/mod.rs"), rest::render_openapi(spec))?;
     fs::write(
+        out.join("src/error_catalog.rs"),
+        render_business_error_catalog(spec),
+    )?;
+    fs::write(
         out.join("src/handler/mod.rs"),
         rest::render_handler_mod(spec),
     )?;
@@ -3939,6 +4018,10 @@ fn generate_rpc_project_in_place(
     let config_migration = migrate_legacy_config_module(out, options.mode)?;
     write_preserved(&out.join("src/config/mod.rs"), config_rs(), options.mode)?;
     fs::write(out.join("src/pb/mod.rs"), render_pb(spec))?;
+    fs::write(
+        out.join("src/error_catalog.rs"),
+        render_business_error_catalog(spec),
+    )?;
     fs::write(
         out.join("src/types/mod.rs"),
         types::render_types(&spec.types),
@@ -6736,7 +6819,6 @@ fn prometheus_rules_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         ProjectKind::Rest => "roze_http_requests_total",
         ProjectKind::Rpc => "roze_rpc_requests_total",
     };
-
     format!(
         r#"# Generated by rozectl. Review metric names against your Prometheus registry before enabling.
 groups:
@@ -9766,8 +9848,10 @@ fn error_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
       permission_denied: 403
       not_found: 404
       conflict: 409
+      business_rejected: 422
       rate_limited: 429
       timeout: 504
+      invalid_upstream_response: 502
       dependency_unavailable: 503
       internal: 500"
         }
@@ -9778,8 +9862,10 @@ fn error_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
       permission_denied: PERMISSION_DENIED
       not_found: NOT_FOUND
       conflict: ABORTED
+      business_rejected: FAILED_PRECONDITION
       rate_limited: RESOURCE_EXHAUSTED
       timeout: DEADLINE_EXCEEDED
+      invalid_upstream_response: UNAVAILABLE
       dependency_unavailable: UNAVAILABLE
       internal: INTERNAL"
         }
@@ -9796,6 +9882,21 @@ fn error_contract_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         ProjectKind::Rest => "roze_http_requests_total",
         ProjectKind::Rpc => "roze_rpc_requests_total",
     };
+    let business_codes = business_error_catalog(spec);
+    let business_code_catalog = if business_codes.is_empty() {
+        "    []".to_string()
+    } else {
+        business_codes
+            .iter()
+            .map(|error| {
+                format!(
+                    "    - code: {}\n      http_status: {}",
+                    error.code, error.status
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     format!(
         r#"# Generated by rozectl. Required for stable client behavior and incident triage.
@@ -9805,6 +9906,8 @@ endpoint_count: {endpoint_count}
 mode: error_contract
 catalog:
   typed_errors_required: true
+  business_codes:
+{business_code_catalog}
   fields:
     - code
     - message
@@ -9949,7 +10052,56 @@ blocking_findings:
         representative_probe = representative_probe,
         status_sample = status_sample,
         request_metric = request_metric,
+        business_code_catalog = business_code_catalog,
     )
+}
+
+fn business_error_catalog(spec: &ApiSpec) -> Vec<crate::parser::BusinessError> {
+    let mut catalog = BTreeMap::new();
+    for error in spec
+        .rest_routes
+        .iter()
+        .flat_map(|route| route.errors.iter())
+        .chain(
+            spec.rpc_methods
+                .iter()
+                .flat_map(|method| method.errors.iter()),
+        )
+    {
+        catalog.entry(error.code.clone()).or_insert(error.status);
+    }
+    catalog
+        .into_iter()
+        .map(|(code, status)| crate::parser::BusinessError { code, status })
+        .collect()
+}
+
+fn render_business_error_catalog(spec: &ApiSpec) -> String {
+    use std::fmt::Write as _;
+    let catalog = business_error_catalog(spec);
+    let mut out = String::from(
+        "// Generated by rozectl from the .api business error catalog.\n\
+use roze_error::{BusinessErrorCode, RozeError};\n\n",
+    );
+    if catalog.is_empty() {
+        out.push_str("pub const CATALOG: &[BusinessErrorCode] = &[];\n");
+    } else {
+        out.push_str("pub const CATALOG: &[BusinessErrorCode] = &[\n");
+        for error in catalog {
+            writeln!(
+                &mut out,
+                "    BusinessErrorCode::new({:?}, {}),",
+                error.code, error.status
+            )
+            .unwrap();
+        }
+        out.push_str("];\n");
+    }
+    out.push_str(
+        "\npub fn validate() -> anyhow::Result<()> {\n    roze_error::validate_business_error_catalog(CATALOG).map_err(anyhow::Error::msg)\n}\n\n\
+pub fn enforce(error: RozeError) -> RozeError {\n    roze_error::enforce_business_error_catalog(error, CATALOG)\n}\n",
+    );
+    out
 }
 
 fn deployment_topology_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
@@ -14580,6 +14732,105 @@ fn main() {
     }
 
     #[test]
+    fn response_contract_annotations_project_across_generated_artifacts() {
+        let spec = parse_api(
+            r#"
+            service order-api {
+                @handler createOrder
+                @status 201
+                @error COM-VAL-001 400
+                @error AUTH-AUTHN-001 401
+                @error AUTH-AUTHZ-001 403
+                @error ORD-NFD-001 404
+                @error ORD-CONFLICT-001 409
+                @error RISK-REJECT-001 422
+                @error COM-LIMIT-001 429
+                @error COM-INTERNAL-001 500
+                @error COM-DEP-002 502
+                @error COM-DEP-001 503
+                @error COM-TIMEOUT-001 504
+                post /orders (CreateOrderReq) returns (OrderResp)
+
+                @handler acceptOrder
+                @status 202
+                post /orders/:id/accept (OrderReq) returns (OrderResp)
+
+                @handler deleteOrder
+                @status 204
+                delete /orders/:id (OrderReq) returns (EmptyResp)
+            }
+
+            type CreateOrderReq {
+                name string `json:"name"`
+            }
+            type OrderReq {
+                id u64 `path:"id"`
+            }
+            type OrderResp {
+                id u64 `json:"id"`
+            }
+            "#,
+        )
+        .expect("valid response contracts");
+
+        let handlers = rest::render_handler_files(&spec)
+            .into_iter()
+            .map(|(_, _, content)| content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(handlers.contains("StatusCode::from_u16(201)"));
+        assert!(handlers.contains("StatusCode::from_u16(202)"));
+        assert!(handlers.contains("StatusCode::NO_CONTENT"));
+        assert!(handlers.contains("CodedApiResponse"));
+        assert!(handlers.contains("crate::error_catalog::enforce(err)"));
+
+        let openapi = openapi_document(&spec);
+        let create = &openapi["paths"]["/orders"]["post"]["responses"];
+        assert!(create.get("201").is_some());
+        assert_eq!(
+            create["201"]["content"]["application/json"]["schema"]["properties"]["code"]["enum"][0],
+            "OK"
+        );
+        for (status, code) in [
+            ("400", "COM-VAL-001"),
+            ("401", "AUTH-AUTHN-001"),
+            ("403", "AUTH-AUTHZ-001"),
+            ("404", "ORD-NFD-001"),
+            ("409", "ORD-CONFLICT-001"),
+            ("422", "RISK-REJECT-001"),
+            ("429", "COM-LIMIT-001"),
+            ("500", "COM-INTERNAL-001"),
+            ("502", "COM-DEP-002"),
+            ("503", "COM-DEP-001"),
+            ("504", "COM-TIMEOUT-001"),
+        ] {
+            assert_eq!(
+                create[status]["content"]["application/json"]["schema"]["properties"]["code"]
+                    ["enum"][0],
+                code
+            );
+        }
+        assert!(
+            openapi["paths"]["/orders/{id}"]["delete"]["responses"]["204"]
+                .get("content")
+                .is_none()
+        );
+
+        let typescript = client::render_ts_client(&spec);
+        assert!(typescript.contains("export type RozeSuccessCode = 'OK'"));
+        assert!(typescript.contains("ORD-CONFLICT-001"));
+        assert!(typescript.contains("onUnauthorized"));
+        assert!(typescript.contains("Promise<void>"));
+        assert!(typescript.contains("idempotency-key"));
+
+        let catalog = render_business_error_catalog(&spec);
+        assert!(catalog.contains("BusinessErrorCode::new(\"ORD-CONFLICT-001\", 409)"));
+        assert!(catalog.contains("BusinessErrorCode::new(\"COM-LIMIT-001\", 429)"));
+        let contract = error_contract_yaml(&spec, ProjectKind::Rest);
+        assert!(contract.contains("code: ORD-CONFLICT-001\n      http_status: 409"));
+    }
+
+    #[test]
     #[ignore = "compile-smoke: generates a REST project and runs cargo check/clippy"]
     fn generated_rest_project_compiles_with_model_and_search() {
         let root = generated_compile_workspace("rozectl-rest-compile-smoke");
@@ -14597,7 +14848,12 @@ fn main() {
                 @handler getUser
                 get /users/:id (GetUserReq) returns (UserResp)
                 @handler createUser
+                @status 201
+                @error USER-CONFLICT-001 409
                 post /users (CreateUserReq) returns (UserResp)
+                @handler deleteUser
+                @status 204
+                delete /users/:id (GetUserReq) returns (EmptyResp)
                 @websocket
                 @handler realtime
                 get /ws
@@ -14752,7 +15008,9 @@ fn main() {
             &api,
             r#"
             service user {
+                @error USER-NFD-001 404
                 rpc GetUser (GetUserReq) returns (GetUserResp)
+                @error USER-CONFLICT-001 409
                 rpc CreateUser (CreateUserReq) returns (CreateUserResp)
             }
 
@@ -18083,6 +18341,8 @@ tonic = "0.14.6"
             websocket: false,
             middlewares: Vec::new(),
             permissions: Vec::new(),
+            success_status: None,
+            errors: Vec::new(),
             server: None,
             method: HttpMethod::Get,
             path: "/users/:id".to_string(),
