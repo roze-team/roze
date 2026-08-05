@@ -168,6 +168,7 @@ logic.
 - [Production checklist](docs/production-checklist.md)
 - [Usage documentation](docs/usage/README.md)
 - [Middleware contract](docs/contracts/middleware.md)
+- [HTTP status and business code contract](docs/contracts/http-status-and-business-codes.md)
 - [AI runtime contract](docs/contracts/ai-runtime.md)
 - [rozectl generator guide](docs/usage/rozectl-api.md)
 - [Changelog](CHANGELOG.md)

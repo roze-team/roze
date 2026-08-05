@@ -316,6 +316,15 @@ where
     }
 }
 
+impl<T> IntoResponse for roze_result::CodedApiResponse<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> HttpResponse {
+        rest::coded_api_response(&self)
+    }
+}
+
 impl IntoResponse for roze_error::RozeError {
     fn into_response(self) -> HttpResponse {
         rest::error_response(&self)
@@ -585,10 +594,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coded_api_response_supports_created_and_accepted_statuses() {
+        for status in [StatusCode::CREATED, StatusCode::ACCEPTED] {
+            let response = (status, roze_result::CodedApiResponse::ok("resource")).into_response();
+            assert_eq!(response.status(), status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&body[..], br#"{"code":"OK","msg":"OK","data":"resource"}"#);
+        }
+    }
+
+    #[tokio::test]
     async fn unit_response_is_empty_ok() {
         let response = ().into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_content_status_has_an_empty_body() {
+        let response = StatusCode::NO_CONTENT.into_response();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert!(body.is_empty());
     }

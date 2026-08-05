@@ -398,13 +398,22 @@ pub fn error_response(error: &roze_error::RozeError) -> HttpResponse {
         apply_fallback_headers(&mut response, error);
         return response;
     }
+    if let Some(body) = error.coded_response_body() {
+        let mut response = json_response(error.status_code(), &body);
+        apply_retry_after_header(&mut response, error);
+        return response;
+    }
     let mut response = json_response(error.status_code(), &error.response_body());
+    apply_retry_after_header(&mut response, error);
+    response
+}
+
+fn apply_retry_after_header(response: &mut HttpResponse, error: &roze_error::RozeError) {
     if let Some(retry_after) = error.retry_after_seconds() {
         if let Ok(value) = HeaderValue::try_from(retry_after.to_string()) {
             response.headers_mut().insert(header::RETRY_AFTER, value);
         }
     }
-    response
 }
 
 fn apply_fallback_headers(response: &mut HttpResponse, error: &roze_error::RozeError) {
@@ -423,6 +432,10 @@ fn apply_fallback_headers(response: &mut HttpResponse, error: &roze_error::RozeE
 }
 
 pub fn api_response<T: Serialize>(value: &roze_result::ApiResponse<T>) -> HttpResponse {
+    json_response(StatusCode::OK, value)
+}
+
+pub fn coded_api_response<T: Serialize>(value: &roze_result::CodedApiResponse<T>) -> HttpResponse {
     json_response(StatusCode::OK, value)
 }
 
@@ -525,11 +538,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn coded_errors_use_string_codes_and_requested_http_statuses() {
+        for (status, code) in [
+            (StatusCode::BAD_REQUEST, "COM-VAL-001"),
+            (StatusCode::UNAUTHORIZED, "AUTH-AUTHN-001"),
+            (StatusCode::FORBIDDEN, "AUTH-AUTHZ-001"),
+            (StatusCode::NOT_FOUND, "ORD-NFD-001"),
+            (StatusCode::CONFLICT, "ORD-CONFLICT-001"),
+            (StatusCode::UNPROCESSABLE_ENTITY, "RISK-REJECT-001"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "COM-INTERNAL-001"),
+            (StatusCode::BAD_GATEWAY, "COM-DEP-002"),
+            (StatusCode::SERVICE_UNAVAILABLE, "COM-DEP-001"),
+            (StatusCode::GATEWAY_TIMEOUT, "COM-TIMEOUT-001"),
+        ] {
+            let response = error_response(&roze_error::RozeError::coded(status, code, "message"));
+            assert_eq!(response.status(), status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"code": code, "msg": "message", "data": null})
+            );
+        }
+    }
+
     #[test]
     fn rate_limited_error_response_sets_retry_after() {
         let response = error_response(&roze_error::RozeError::rate_limited(Duration::from_millis(
             1_250,
         )));
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(http::header::RETRY_AFTER),
+            Some(&http::HeaderValue::from_static("2"))
+        );
+    }
+
+    #[test]
+    fn coded_rate_limited_error_sets_retry_after() {
+        let response = error_response(&roze_error::RozeError::coded_rate_limited(
+            "COM-LIMIT-001",
+            "too many requests",
+            Duration::from_millis(1_250),
+        ));
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(

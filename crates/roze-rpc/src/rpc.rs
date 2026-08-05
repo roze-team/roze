@@ -42,6 +42,7 @@ static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 pub const ERROR_CODE_METADATA: &str = "x-roze-error-code";
 pub const ERROR_KIND_METADATA: &str = "x-roze-error-kind";
+pub const ERROR_HTTP_STATUS_METADATA: &str = "x-roze-http-status";
 pub const FALLBACK_STATUS_METADATA: &str = "x-roze-fallback-status";
 pub const FALLBACK_BODY_METADATA: &str = "x-roze-fallback-body";
 pub const FALLBACK_HEADERS_METADATA: &str = "x-roze-fallback-headers";
@@ -937,12 +938,15 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
     let code = grpc_code_from_error(&error);
     let locale = context.locale();
     let mut metadata = MetadataMap::new();
-    insert_metadata(
-        &mut metadata,
-        ERROR_CODE_METADATA,
-        &error.code().to_string(),
-    );
+    insert_metadata(&mut metadata, ERROR_CODE_METADATA, &error.wire_code());
     insert_metadata(&mut metadata, ERROR_KIND_METADATA, error.kind());
+    if let RozeError::Coded { status, .. } = &error {
+        insert_metadata(
+            &mut metadata,
+            ERROR_HTTP_STATUS_METADATA,
+            &status.to_string(),
+        );
+    }
     insert_metadata(
         &mut metadata,
         roze_context::REQUEST_ID_HEADER,
@@ -1004,6 +1008,7 @@ fn grpc_code_from_error(error: &RozeError) -> Code {
         RozeError::NotFound(_) => Code::NotFound,
         RozeError::Unavailable(_) => Code::Unavailable,
         RozeError::Internal(_) => Code::Internal,
+        RozeError::Coded { status, .. } => grpc_code_from_http_status(*status),
         RozeError::Fallback { status, .. } => match *status {
             400 | 422 => Code::InvalidArgument,
             401 => Code::Unauthenticated,
@@ -1014,6 +1019,38 @@ fn grpc_code_from_error(error: &RozeError) -> Code {
             500 => Code::Internal,
             _ => Code::Unavailable,
         },
+    }
+}
+
+fn grpc_code_from_http_status(status: u16) -> Code {
+    match status {
+        400 => Code::InvalidArgument,
+        401 => Code::Unauthenticated,
+        403 => Code::PermissionDenied,
+        404 => Code::NotFound,
+        409 => Code::AlreadyExists,
+        412 | 422 => Code::FailedPrecondition,
+        429 => Code::ResourceExhausted,
+        500 => Code::Internal,
+        504 => Code::DeadlineExceeded,
+        502 | 503 => Code::Unavailable,
+        _ => Code::Unknown,
+    }
+}
+
+fn http_status_from_grpc_code(code: Code) -> u16 {
+    match code {
+        Code::InvalidArgument => 400,
+        Code::Unauthenticated => 401,
+        Code::PermissionDenied => 403,
+        Code::NotFound => 404,
+        Code::AlreadyExists | Code::Aborted => 409,
+        Code::FailedPrecondition => 422,
+        Code::ResourceExhausted => 429,
+        Code::DeadlineExceeded => 504,
+        Code::Unavailable => 503,
+        Code::Internal => 500,
+        _ => 500,
     }
 }
 
@@ -1038,6 +1075,22 @@ where
 
 pub fn error_from_status(status: &Status) -> RozeError {
     let error_kind = metadata_value(status.metadata(), ERROR_KIND_METADATA);
+    if error_kind == Some("coded") {
+        let code = metadata_value(status.metadata(), ERROR_CODE_METADATA)
+            .unwrap_or("COM-INTERNAL-001")
+            .to_string();
+        let http_status = metadata_value(status.metadata(), ERROR_HTTP_STATUS_METADATA)
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or_else(|| http_status_from_grpc_code(status.code()));
+        let retry_after_seconds = metadata_value(status.metadata(), RETRY_AFTER_METADATA)
+            .and_then(|value| value.parse::<u64>().ok());
+        return RozeError::Coded {
+            status: http_status,
+            code,
+            message: status.message().to_string(),
+            retry_after_seconds,
+        };
+    }
     if error_kind == Some("fallback") {
         let fallback_status = metadata_value(status.metadata(), FALLBACK_STATUS_METADATA)
             .and_then(|value| value.parse::<u16>().ok())
@@ -1969,6 +2022,51 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("3")
         );
+    }
+
+    #[test]
+    fn coded_errors_round_trip_http_status_business_code_and_retry_after() {
+        let context = Context::background_with_request_id_and_trace_id("request-1", "trace-1");
+        let cases = [
+            (422, "RISK-REJECT-001", Code::FailedPrecondition),
+            (502, "COM-DEP-002", Code::Unavailable),
+            (504, "COM-TIMEOUT-001", Code::DeadlineExceeded),
+        ];
+
+        for (http_status, business_code, grpc_code) in cases {
+            let error = RozeError::Coded {
+                status: http_status,
+                code: business_code.to_string(),
+                message: "business error".to_string(),
+                retry_after_seconds: None,
+            };
+            let status = status_from_error(error.clone(), &context);
+            let expected_http_status = http_status.to_string();
+
+            assert_eq!(status.code(), grpc_code);
+            assert_eq!(
+                metadata_value(status.metadata(), ERROR_CODE_METADATA),
+                Some(business_code)
+            );
+            assert_eq!(
+                metadata_value(status.metadata(), ERROR_HTTP_STATUS_METADATA),
+                Some(expected_http_status.as_str())
+            );
+            assert_eq!(error_from_status(&status), error);
+        }
+
+        let error = RozeError::coded_rate_limited(
+            "COM-LIMIT-001",
+            "too many requests",
+            Duration::from_millis(1_001),
+        );
+        let status = status_from_error(error.clone(), &context);
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(
+            metadata_value(status.metadata(), RETRY_AFTER_METADATA),
+            Some("2")
+        );
+        assert_eq!(error_from_status(&status), error);
     }
 
     #[test]
