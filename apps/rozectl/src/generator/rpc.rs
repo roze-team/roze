@@ -19,7 +19,6 @@ pub fn render_main(spec: &ApiSpec, config_owns_application_config: bool) -> Stri
 mod config;
 __ROZE_APPLICATION_CONFIG_MODULE__
 mod client;
-mod error_catalog;
 mod logic;
 mod model;
 mod pb;
@@ -35,7 +34,6 @@ use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {{
-    error_catalog::validate()?;
     let config = config::load(config_path())?;
     roze_log::init_tracing_with_config(&config)?;
     let rpc = config
@@ -400,7 +398,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
             handler = handler
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                err = crate::error_catalog::enforce(err);\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             handler = handler
         ));
     } else {
@@ -409,7 +407,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
             app_to_proto(spec, resp_ty, "resp")
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                err = crate::error_catalog::enforce(err);\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {handler:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             handler = handler
         ));
     }
@@ -486,7 +484,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
             method = method.name
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                err = crate::error_catalog::enforce(err);\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                roze_middleware::fail_idempotency(self.ctx.idempotency.as_ref(), {method:?}, &idempotency_key, &idempotency_fingerprint).await;\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             method = method.name
         ));
     } else {
@@ -495,7 +493,7 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
             app_to_proto(spec, resp_ty, "resp")
         ));
         out.push_str(&format!(
-            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                err = crate::error_catalog::enforce(err);\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
+            "            Err(mut err) => {{\n                err = roze_rpc::rpc::apply_fallback(\n                    self.ctx.config.name.as_str(),\n                    err,\n                    roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), {method:?}),\n                );\n                roze_rpc::rpc::finish_method(method_guard, err.kind());\n                Err(roze_rpc::rpc::status_from_error(err, &request_ctx))\n            }}\n        }}\n",
             method = method.name
         ));
     }

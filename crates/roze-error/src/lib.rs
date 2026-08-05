@@ -27,89 +27,6 @@ pub struct ErrorResponse {
     pub trace_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodedErrorResponse {
-    pub code: String,
-    pub msg: String,
-    pub data: Option<()>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct BusinessErrorCode {
-    pub code: &'static str,
-    pub status: u16,
-}
-
-impl BusinessErrorCode {
-    pub const fn new(code: &'static str, status: u16) -> Self {
-        Self { code, status }
-    }
-}
-
-pub fn validate_business_error_catalog(catalog: &[BusinessErrorCode]) -> Result<(), String> {
-    let mut codes = BTreeMap::new();
-    for entry in catalog {
-        if !is_valid_business_code(entry.code) {
-            return Err(format!(
-                "business error code {} must match DOMAIN-CATEGORY-NNN",
-                entry.code
-            ));
-        }
-        if !(400..=599).contains(&entry.status) {
-            return Err(format!(
-                "business error code {} has invalid HTTP status {}",
-                entry.code, entry.status
-            ));
-        }
-        if let Some(previous) = codes.insert(entry.code, entry.status) {
-            if previous != entry.status {
-                return Err(format!(
-                    "business error code {} has conflicting HTTP statuses {} and {}",
-                    entry.code, previous, entry.status
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn enforce_business_error_catalog(
-    error: RozeError,
-    catalog: &[BusinessErrorCode],
-) -> RozeError {
-    if catalog.is_empty() {
-        return error;
-    }
-    let RozeError::Coded { status, code, .. } = &error else {
-        return error;
-    };
-    if catalog
-        .iter()
-        .any(|entry| entry.code == code && entry.status == *status)
-    {
-        error
-    } else {
-        RozeError::Internal("unregistered business error".to_string())
-    }
-}
-
-fn is_valid_business_code(code: &str) -> bool {
-    let parts = code.split('-').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts[0].len() >= 2
-        && parts[1].len() >= 2
-        && parts[2].len() == 3
-        && parts[0..2].iter().all(|part| {
-            part.bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-        })
-        && parts[2].bytes().all(|byte| byte.is_ascii_digit())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 pub enum RozeError {
     #[error("bad request: {0}")]
@@ -130,13 +47,6 @@ pub enum RozeError {
     Unavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
-    #[error("coded error {code}: {message}")]
-    Coded {
-        status: u16,
-        code: String,
-        message: String,
-        retry_after_seconds: Option<u64>,
-    },
     #[error("fallback response: {status}")]
     Fallback {
         status: u16,
@@ -157,7 +67,6 @@ impl RozeError {
             RozeError::NotFound(_) => "not_found",
             RozeError::Unavailable(_) => "unavailable",
             RozeError::Internal(_) => "internal",
-            RozeError::Coded { .. } => "coded",
             RozeError::Fallback { .. } => "fallback",
         }
     }
@@ -173,7 +82,6 @@ impl RozeError {
             RozeError::NotFound(_) => 404,
             RozeError::Unavailable(_) => 503,
             RozeError::Internal(_) => 500,
-            RozeError::Coded { status, .. } => i32::from(*status),
             RozeError::Fallback { status, .. } => i32::from(*status),
         }
     }
@@ -189,7 +97,6 @@ impl RozeError {
             RozeError::NotFound(msg) => msg.clone(),
             RozeError::Unavailable(msg) => msg.clone(),
             RozeError::Internal(msg) => msg.clone(),
-            RozeError::Coded { message, .. } => message.clone(),
             RozeError::Fallback { body, .. } => fallback_message(body.as_ref()),
         }
     }
@@ -202,19 +109,8 @@ impl RozeError {
             RozeError::NotFound(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Unavailable(msg) if !msg.is_empty() => msg.clone(),
             RozeError::Internal(msg) if !msg.is_empty() => msg.clone(),
-            RozeError::Coded { message, .. } => message.clone(),
             RozeError::Fallback { body, .. } => fallback_message(body.as_ref()),
             _ => localized_error_message(self.kind(), locale.as_ref()).to_string(),
-        }
-    }
-
-    /// Returns a transport-safe message while retaining the full error in
-    /// `Display` for server-side diagnostics.
-    pub fn public_message_i18n(&self, locale: impl AsRef<str>) -> String {
-        if matches!(self, RozeError::Internal(_)) {
-            localized_error_message("internal", locale.as_ref()).to_string()
-        } else {
-            self.message_i18n(locale)
         }
     }
 
@@ -228,10 +124,6 @@ impl RozeError {
                 | RozeError::Forbidden
                 | RozeError::RateLimited { .. }
                 | RozeError::NotFound(_)
-                | RozeError::Coded {
-                    status: 400..=499,
-                    ..
-                }
         )
     }
 
@@ -246,9 +138,6 @@ impl RozeError {
             RozeError::NotFound(_) => StatusCode::NOT_FOUND,
             RozeError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             RozeError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            RozeError::Coded { status, .. } => {
-                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
-            }
             RozeError::Fallback { status, .. } => {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
             }
@@ -267,42 +156,6 @@ impl RozeError {
         }
     }
 
-    pub fn coded(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Coded {
-            status: status.as_u16(),
-            code: code.into(),
-            message: message.into(),
-            retry_after_seconds: None,
-        }
-    }
-
-    pub fn coded_rate_limited(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        retry_after: std::time::Duration,
-    ) -> Self {
-        let retry_after_seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
-        Self::Coded {
-            status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
-            code: code.into(),
-            message: message.into(),
-            retry_after_seconds: Some(retry_after_seconds.max(1)),
-        }
-    }
-
-    pub fn business_code(&self) -> Option<&str> {
-        match self {
-            Self::Coded { code, .. } => Some(code),
-            _ => None,
-        }
-    }
-
-    pub fn wire_code(&self) -> String {
-        self.business_code()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| self.code().to_string())
-    }
-
     pub fn rate_limited(retry_after: std::time::Duration) -> Self {
         let retry_after_seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
         Self::RateLimited {
@@ -315,10 +168,6 @@ impl RozeError {
             Self::RateLimited {
                 retry_after_seconds,
             } => Some(*retry_after_seconds),
-            Self::Coded {
-                retry_after_seconds,
-                ..
-            } => *retry_after_seconds,
             _ => None,
         }
     }
@@ -397,8 +246,8 @@ pub fn normalize_locale(raw: &str) -> Option<String> {
 impl RozeError {
     pub fn response_body(&self) -> ErrorResponse {
         let message = current_locale()
-            .map(|locale| self.public_message_i18n(locale))
-            .unwrap_or_else(|| self.public_message_i18n("en-US"));
+            .map(|locale| self.message_i18n(locale))
+            .unwrap_or_else(|| self.message());
         let ids = current_request_ids();
         ErrorResponse {
             code: self.code(),
@@ -407,18 +256,6 @@ impl RozeError {
             request_id: ids.as_ref().map(|ids| ids.request_id.clone()),
             trace_id: ids.as_ref().map(|ids| ids.trace_id.clone()),
         }
-    }
-
-    pub fn coded_response_body(&self) -> Option<CodedErrorResponse> {
-        let code = self.business_code()?.to_string();
-        let ids = current_request_ids();
-        Some(CodedErrorResponse {
-            code,
-            msg: self.message(),
-            data: None,
-            request_id: ids.as_ref().map(|ids| ids.request_id.clone()),
-            trace_id: ids.as_ref().map(|ids| ids.trace_id.clone()),
-        })
     }
 }
 
@@ -505,15 +342,6 @@ mod tests {
         assert_eq!(RozeError::Unavailable("x".into()).code(), 503);
         assert_eq!(RozeError::Internal("x".into()).code(), 500);
         assert_eq!(
-            RozeError::coded(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "RISK-REJECT-001",
-                "rejected"
-            )
-            .code(),
-            422
-        );
-        assert_eq!(
             RozeError::fallback_response(598, None, BTreeMap::new()).code(),
             598
         );
@@ -524,65 +352,6 @@ mod tests {
         let err = RozeError::Unauthorized;
         assert_eq!(err.status_code(), StatusCode::UNAUTHORIZED);
         assert_eq!(err.response_body().code, 401);
-    }
-
-    #[test]
-    fn redacts_internal_details_from_transport_responses() {
-        let error = RozeError::Internal("database password appeared in an error".to_string());
-        assert_eq!(error.message(), "database password appeared in an error");
-        assert_eq!(error.response_body().msg, "internal server error");
-    }
-
-    #[test]
-    fn builds_string_coded_error_response_without_changing_legacy_codes() {
-        let error = RozeError::coded(StatusCode::NOT_FOUND, "ORD-NFD-001", "order not found");
-        assert_eq!(error.kind(), "coded");
-        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(error.code(), 404);
-        assert_eq!(error.wire_code(), "ORD-NFD-001");
-        assert_eq!(
-            error.coded_response_body().expect("coded body"),
-            CodedErrorResponse {
-                code: "ORD-NFD-001".to_string(),
-                msg: "order not found".to_string(),
-                data: None,
-                request_id: None,
-                trace_id: None,
-            }
-        );
-        assert_eq!(RozeError::NotFound("missing".into()).wire_code(), "404");
-    }
-
-    #[test]
-    fn coded_rate_limit_preserves_retry_after() {
-        let error = RozeError::coded_rate_limited(
-            "COM-LIMIT-001",
-            "too many requests",
-            std::time::Duration::from_millis(1_001),
-        );
-        assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(error.retry_after_seconds(), Some(2));
-    }
-
-    #[test]
-    fn validates_and_enforces_bounded_business_error_catalogs() {
-        const CATALOG: &[BusinessErrorCode] = &[
-            BusinessErrorCode::new("ORD-NFD-001", 404),
-            BusinessErrorCode::new("COM-DEP-002", 502),
-        ];
-        assert!(validate_business_error_catalog(CATALOG).is_ok());
-        assert!(validate_business_error_catalog(&[BusinessErrorCode::new("bad", 404)]).is_err());
-
-        let declared = RozeError::coded(StatusCode::NOT_FOUND, "ORD-NFD-001", "missing");
-        assert_eq!(
-            enforce_business_error_catalog(declared.clone(), CATALOG),
-            declared
-        );
-        let unknown = RozeError::coded(StatusCode::NOT_FOUND, "ORD-NFD-999", "secret detail");
-        assert_eq!(
-            enforce_business_error_catalog(unknown, CATALOG),
-            RozeError::Internal("unregistered business error".to_string())
-        );
     }
 
     #[test]

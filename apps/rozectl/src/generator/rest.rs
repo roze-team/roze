@@ -14,7 +14,6 @@ pub fn render_rest_main(_spec: &ApiSpec, config_owns_application_config: bool) -
     r#"mod application;
 mod config;
 __ROZE_APPLICATION_CONFIG_MODULE__
-mod error_catalog;
 mod handler;
 mod logic;
 mod middleware;
@@ -29,7 +28,6 @@ use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    error_catalog::validate()?;
     let config = config::load(config_path())?;
     roze_log::init_tracing_with_config(&config)?;
     let mut rest = config
@@ -158,7 +156,7 @@ fn config_path() -> std::path::PathBuf {
 pub fn render_handlers(spec: &ApiSpec) -> String {
     let mut out = String::from("#![allow(unused_imports)]\n\n");
     out.push_str(
-        "use roze_http::{extract::{Extension, Form, Path, Query, State}, http::{HeaderMap, StatusCode}, routing::{delete, get, head, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::{ApiResponse, CodedApiResponse};\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+        "use roze_http::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, routing::{delete, get, head, patch, post, put}, Json, Router};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::openapi;\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
     out.push_str("pub fn router(ctx: ServiceContext) -> Router {\n");
     out.push_str("    Router::new()\n");
@@ -289,7 +287,7 @@ pub fn render_handler_mod(spec: &ApiSpec) -> String {
         out.push('\n');
     }
     out.push_str(
-        "use roze_http::{extract::{Extension, Form, Path, Query, State}, http::{HeaderMap, StatusCode}, Json};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::{ApiResponse, CodedApiResponse};\n\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
+        "use roze_http::{extract::{Extension, Form, Path, Query, State}, http::HeaderMap, Json};\nuse serde::Deserialize;\nuse roze_validation::Validate;\nuse roze_context::Context;\nuse roze_error::RozeError;\nuse roze_result::ApiResponse;\n\nuse crate::svc::ServiceContext;\nuse crate::types::*;\n\n",
     );
     if spec.rest_routes.iter().any(|route| {
         route_request_spec(spec, route).is_some_and(|spec| spec.has_header)
@@ -1291,39 +1289,10 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
             out.push_str(&format!(".request_body({:?})", route.request));
         }
 
-        match route.success_status {
-            Some(204) => out.push_str(".empty_response(\"204\", \"No Content\")"),
-            Some(status) => out.push_str(&format!(
-                ".response_with_schema({:?}, \"OK\", \"application/json\", {{ let mut properties = BTreeMap::new(); properties.insert(\"code\".to_string(), Schema::string().enumeration([\"OK\"])); properties.insert(\"msg\".to_string(), Schema::string().enumeration([\"OK\"])); properties.insert(\"data\".to_string(), Schema::reference({:?})); Schema::object(properties, vec![\"code\".to_string(), \"msg\".to_string(), \"data\".to_string()]) }})",
-                status.to_string(),
-                route.response
-            )),
-            None => out.push_str(&format!(
-                ".response(\"200\", \"OK\", {:?})",
-                route.response
-            )),
-        }
-        let mut errors_by_status = BTreeMap::<u16, Vec<&str>>::new();
-        for error in &route.errors {
-            errors_by_status
-                .entry(error.status)
-                .or_default()
-                .push(error.code.as_str());
-        }
-        for (status, mut codes) in errors_by_status {
-            codes.sort_unstable();
-            codes.dedup();
-            out.push_str(&format!(
-                ".response_with_schema({:?}, \"Business error\", \"application/json\", {{ let mut properties = BTreeMap::new(); properties.insert(\"code\".to_string(), Schema::string().enumeration([{}])); properties.insert(\"msg\".to_string(), Schema::string()); let mut data = Schema::object(BTreeMap::new(), Vec::new()); data.nullable = Some(true); properties.insert(\"data\".to_string(), data); properties.insert(\"request_id\".to_string(), Schema::string()); properties.insert(\"trace_id\".to_string(), Schema::string()); Schema::object(properties, vec![\"code\".to_string(), \"msg\".to_string(), \"data\".to_string()]) }})",
-                status.to_string(),
-                codes
-                    .iter()
-                    .map(|code| format!("{code:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        out.push_str(";\n");
+        out.push_str(&format!(
+            ".response_with_schema(\"200\", \"OK\", \"application/json\", {{ let mut properties = BTreeMap::new(); properties.insert(\"code\".to_string(), Schema::integer(\"int32\")); properties.insert(\"msg\".to_string(), Schema::string()); properties.insert(\"data\".to_string(), Schema::reference({:?})); Schema::object(properties, vec![\"code\".to_string(), \"msg\".to_string(), \"data\".to_string()]) }});\n",
+            route.response
+        ));
         out.push_str(&format!(
             "    builder.add_operation({:?}, HttpMethod::{}, op);\n",
             full_route_path_for_route(spec, route),
@@ -1470,26 +1439,15 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         matches!(item.key.as_str(), "response" | "response_mode")
             && item.value.eq_ignore_ascii_case("raw")
     });
-    let success_status = route.success_status.unwrap_or(200);
-    let response_type = if success_status == 204 {
-        "StatusCode".to_string()
-    } else if route.success_status.is_some() {
-        format!("(StatusCode, CodedApiResponse<{}>)", route.response)
-    } else if raw_response {
+    let response_type = if raw_response {
         format!("Json<{}>", route.response)
     } else {
         format!("ApiResponse<{}>", route.response)
     };
-    let wrapped_response = if success_status == 204 {
-        "{ let _ = resp; StatusCode::NO_CONTENT }".to_string()
-    } else if route.success_status.is_some() {
-        format!(
-            "(StatusCode::from_u16({success_status}).expect(\"validated success status\"), CodedApiResponse::ok(resp))"
-        )
-    } else if raw_response {
-        "Json(resp)".to_string()
+    let wrapped_response = if raw_response {
+        "Json(resp)"
     } else {
-        "ApiResponse::ok(resp)".to_string()
+        "ApiResponse::ok(resp)"
     };
 
     let mut out = String::new();
@@ -1612,10 +1570,9 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     out.push_str(&render_request_validation_checks(&request_ty.fields));
     if uses_idempotency {
         out.push_str(&format!(
-            "    let idempotency_key: String = header_value(&headers, \"idempotency-key\").map_err(|_| roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing Idempotency-Key header\"))?;\n    let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req)?;\n    match roze_middleware::begin_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await? {{\n        roze_middleware::IdempotencyDecision::Execute => {{}}\n        roze_middleware::IdempotencyDecision::Replay(value) => {{\n            let resp = serde_json::from_value(value).map_err(|err| roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")))?;\n            roze_middleware::finish_route(route_guard, true, {success_status:?});\n            return Ok({wrapped_response});\n        }}\n        roze_middleware::IdempotencyDecision::InFlight => {{\n            let err = roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\");\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n        roze_middleware::IdempotencyDecision::Conflict => {{\n            let err = roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\");\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n    }}\n",
+            "    let idempotency_key: String = header_value(&headers, \"idempotency-key\").map_err(|_| roze_middleware::idempotency_error(400, roze_middleware::IDEMPOTENCY_MISSING_KEY, \"missing Idempotency-Key header\"))?;\n    let idempotency_fingerprint = roze_middleware::idempotency_fingerprint(&req)?;\n    match roze_middleware::begin_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, roze_middleware::idempotency_now_millis()).await? {{\n        roze_middleware::IdempotencyDecision::Execute => {{}}\n        roze_middleware::IdempotencyDecision::Replay(value) => {{\n            let resp = serde_json::from_value(value).map_err(|err| roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency replay response: {{err}}\")))?;\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            return Ok({wrapped_response});\n        }}\n        roze_middleware::IdempotencyDecision::InFlight => {{\n            let err = roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_IN_FLIGHT, \"idempotency request is in progress\");\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n        roze_middleware::IdempotencyDecision::Conflict => {{\n            let err = roze_middleware::idempotency_error(409, roze_middleware::IDEMPOTENCY_KEY_REUSED, \"idempotency key was reused with a different request\");\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            return Err(err);\n        }}\n    }}\n",
             handler = handler,
             wrapped_response = wrapped_response,
-            success_status = success_status.to_string(),
         ));
     }
     out.push_str(&format!(
@@ -1624,17 +1581,15 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     ));
     if uses_idempotency {
         out.push_str(&format!(
-            "    match result {{\n        Ok(resp) => {{\n            let value = serde_json::to_value(&resp).map_err(|err| roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")))?;\n            roze_middleware::complete_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, value).await?;\n            roze_middleware::finish_route(route_guard, true, {success_status:?});\n            Ok({wrapped_response})\n        }}\n        Err(mut err) => {{\n            roze_middleware::fail_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n            err = roze_middleware::apply_fallback(\n                ctx.config.name.as_str(),\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            err = crate::error_catalog::enforce(err);\n            roze_middleware::finish_route(route_guard, false, err.wire_code());\n            Err(err)\n        }}\n    }}\n",
+            "    match result {{\n        Ok(resp) => {{\n            let value = serde_json::to_value(&resp).map_err(|err| roze_middleware::idempotency_error(500, roze_middleware::IDEMPOTENCY_REPLAY_INVALID, &format!(\"invalid idempotency response: {{err}}\")))?;\n            roze_middleware::complete_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint, value).await?;\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok({wrapped_response})\n        }}\n        Err(mut err) => {{\n            roze_middleware::fail_idempotency(ctx.idempotency.as_ref(), {handler:?}, &idempotency_key, &idempotency_fingerprint).await;\n            err = roze_middleware::apply_fallback(\n                ctx.config.name.as_str(),\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
             handler = handler,
             wrapped_response = wrapped_response,
-            success_status = success_status.to_string(),
         ));
     } else {
         out.push_str(&format!(
-            "    match result {{\n        Ok(resp) => {{\n            roze_middleware::finish_route(route_guard, true, {success_status:?});\n            Ok({wrapped_response})\n        }}\n        Err(mut err) => {{\n            err = roze_middleware::apply_fallback(\n                ctx.config.name.as_str(),\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            err = crate::error_catalog::enforce(err);\n            roze_middleware::finish_route(route_guard, false, err.wire_code());\n            Err(err)\n        }}\n    }}\n",
+            "    match result {{\n        Ok(resp) => {{\n            roze_middleware::finish_route(route_guard, true, \"200\");\n            Ok({wrapped_response})\n        }}\n        Err(mut err) => {{\n            err = roze_middleware::apply_fallback(\n                ctx.config.name.as_str(),\n                err,\n                roze_middleware::route_fallback(Some(&ctx.config.governance), {handler:?}),\n            );\n            roze_middleware::finish_route(route_guard, false, err.code().to_string());\n            Err(err)\n        }}\n    }}\n",
             handler = handler,
             wrapped_response = wrapped_response,
-            success_status = success_status.to_string(),
         ));
     }
     out.push_str("}\n\n");
@@ -3177,7 +3132,8 @@ mod tests {
         let openapi = render_openapi(&spec);
         assert!(openapi.contains("builder.add_operation(\"/health\", HttpMethod::Get"));
         assert!(openapi.contains("builder.add_operation(\"/ping-head\", HttpMethod::Head"));
-        assert!(openapi.contains(".response(\"200\", \"OK\", \"EmptyResp\")"));
+        assert!(openapi.contains(".response_with_schema(\"200\", \"OK\""));
+        assert!(openapi.contains("Schema::integer(\"int32\")"));
         assert!(!openapi.contains(".request_body(\"EmptyReq\")"));
     }
 

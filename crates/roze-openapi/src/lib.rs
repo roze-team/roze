@@ -149,8 +149,6 @@ pub struct Schema {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
-    #[serde(rename = "enum", default, skip_serializing_if = "Vec::is_empty")]
-    pub enum_values: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -397,7 +395,6 @@ impl Schema {
             required: Vec::new(),
             description: None,
             nullable: None,
-            enum_values: Vec::new(),
         }
     }
 
@@ -431,7 +428,6 @@ impl Schema {
             required: Vec::new(),
             description: None,
             nullable: None,
-            enum_values: Vec::new(),
         }
     }
 
@@ -445,7 +441,6 @@ impl Schema {
             required,
             description: None,
             nullable: None,
-            enum_values: Vec::new(),
         }
     }
 
@@ -459,16 +454,7 @@ impl Schema {
             required: Vec::new(),
             description: None,
             nullable: None,
-            enum_values: Vec::new(),
         }
-    }
-
-    pub fn enumeration(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.enum_values = values
-            .into_iter()
-            .map(|value| serde_json::Value::String(value.into()))
-            .collect();
-        self
     }
 }
 
