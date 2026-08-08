@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added always-on Veil `Debug` redaction and a `roze_config::redaction`
+  re-export; AI provider keys, JWT signing secrets, and newly generated typed
+  application configuration now use fixed-length masking, generated manifests
+  declare Veil directly, and runtime bypass features remain disabled.
 - Critical lifecycle, REST, RPC, and Stream boundaries now emit stable
   structured `event` fields at production-visible levels, including startup,
   readiness, application logic, completion, cancellation, settlement, shutdown,

@@ -18,6 +18,15 @@ pub use roze_resilience::GovernancePolicy;
 
 pub mod config_center;
 
+/// Derives and traits for redacting sensitive values from `Debug` output.
+///
+/// Redaction is always enabled: Roze intentionally does not enable Veil's
+/// runtime `toggle` feature. This protects `Debug` (`?value`) formatting only;
+/// callers must not log sensitive fields through `Display` (`%value`).
+pub mod redaction {
+    pub use veil::{Redact, Redactable};
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub name: String,
@@ -169,12 +178,13 @@ pub enum AiProviderKind {
     OpenaiCompatible,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, veil::Redact)]
 pub struct AiProviderConfig {
     #[serde(default)]
     pub kind: AiProviderKind,
     pub base_url: String,
     #[serde(default)]
+    #[redact(fixed = 12)]
     pub api_key: Option<String>,
     pub model: String,
     #[serde(default = "default_ai_timeout_ms")]
@@ -200,19 +210,6 @@ impl AiProviderConfig {
         anyhow::ensure!(!self.model.trim().is_empty(), "model must not be empty");
         anyhow::ensure!(self.timeout_ms > 0, "timeout_ms must be greater than zero");
         Ok(())
-    }
-}
-
-impl fmt::Debug for AiProviderConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AiProviderConfig")
-            .field("kind", &self.kind)
-            .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
-            .field("model", &self.model)
-            .field("timeout_ms", &self.timeout_ms)
-            .finish()
     }
 }
 
@@ -907,20 +904,11 @@ pub struct AuthConfig {
     pub api_keys: Option<roze_auth::ApiKeyConfig>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, veil::Redact)]
 pub struct JwtKeyConfig {
     pub id: String,
+    #[redact(fixed = 12)]
     pub secret: String,
-}
-
-impl fmt::Debug for JwtKeyConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("JwtKeyConfig")
-            .field("id", &self.id)
-            .field("secret", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2885,7 +2873,8 @@ tenant = "acme"
 
         let rendered = format!("{key:?}");
         assert!(!rendered.contains("super-secret-jwt-key"));
-        assert!(rendered.contains("[REDACTED]"));
+        assert!(rendered.contains("************"));
+        assert!(rendered.contains("active"));
     }
 
     #[test]
@@ -3426,8 +3415,29 @@ governance: {}
             "example-model"
         );
         let debug = format!("{:?}", ai.default_provider_config().unwrap());
-        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("************"));
         assert!(!debug.contains("secret-value"));
+    }
+
+    #[test]
+    fn public_redaction_derive_masks_debug_without_runtime_toggle() {
+        #[derive(redaction::Redact)]
+        struct Credentials {
+            name: &'static str,
+            #[redact(fixed = 12)]
+            secret: &'static str,
+        }
+
+        let debug = format!(
+            "{:?}",
+            Credentials {
+                name: "primary",
+                secret: "must-not-leak",
+            }
+        );
+        assert!(debug.contains("primary"));
+        assert!(debug.contains("************"));
+        assert!(!debug.contains("must-not-leak"));
     }
 
     #[test]

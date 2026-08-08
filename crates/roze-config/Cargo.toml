@@ -16,6 +16,7 @@ serde_ignored.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+veil.workspace = true
 thiserror.workspace = true
 roze-auth = { path = "../roze-auth" }
 roze-nats = { path = "../roze-nats" }

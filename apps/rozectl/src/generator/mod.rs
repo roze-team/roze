@@ -4780,13 +4780,15 @@ config = { version = "0.15.24", default-features = false, features = ["json", "y
 serde_json.workspace = true
 validator.workspace = true
 tokio.workspace = true
-tracing.workspace = true"#
+tracing.workspace = true
+veil.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 validator = { version = "0.20", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "0.1""#
+tracing = "0.1"
+veil = { version = "0.3.0", default-features = false }"#
             },
             "",
         ),
@@ -4808,7 +4810,8 @@ tokio.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 validator.workspace = true
-tracing.workspace = true"#
+tracing.workspace = true
+veil.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -4817,7 +4820,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 validator = { version = "0.20", features = ["derive"] }
-tracing = "0.1""#
+tracing = "0.1"
+veil = { version = "0.3.0", default-features = false }"#
             },
             if in_workspace {
                 r#"protoc-bin-vendored.workspace = true
@@ -11579,10 +11583,16 @@ fn application_config_rs() -> String {
     r#"use serde::Deserialize;
 
 /// Application-owned typed configuration loaded from the top-level `application` section.
-/// Secret references are resolved before deserialization and debug output redacts this value.
+/// Secret references are resolved before deserialization and every field is redacted from Debug.
 /// This file is preserved by `rozectl ... generate --update`.
-#[derive(Clone, Default, Deserialize)]
-pub struct ApplicationConfig {}
+#[derive(Clone, Default, Deserialize, veil::Redact)]
+#[redact(all, fixed = 12)]
+pub struct ApplicationConfig {
+    /// Keeps always-on redaction valid before application fields are added.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub _roze_redaction_marker: std::marker::PhantomData<()>,
+}
 "#
     .to_string()
 }
@@ -14170,6 +14180,7 @@ fn main() {
             cargo.contains(r#"roze-config = { git = "https://github.com/roze-team/roze.git" }"#)
         );
         assert!(cargo.contains(r#"roze-rpc = { git = "https://github.com/roze-team/roze.git" }"#));
+        assert!(cargo.contains("veil.workspace = true"));
         assert!(cargo.contains(r#"roze-db = { git = "https://github.com/roze-team/roze.git" }"#));
         assert!(cargo.contains(
             r#"roze-transaction-sql = { git = "https://github.com/roze-team/roze.git" }"#
@@ -14218,6 +14229,7 @@ fn main() {
         assert!(cargo.contains(r#"version = "0.1.0""#));
         assert!(cargo.contains(r#"anyhow = "1""#));
         assert!(cargo.contains(r#"tokio = { version = "1""#));
+        assert!(cargo.contains(r#"veil = { version = "0.3.0", default-features = false }"#));
         assert!(cargo.contains(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#));
         assert_eq!(
             cargo
@@ -17035,6 +17047,16 @@ pub fn register_services(
             .contains("pub(crate) use auth_me::auth_me;"));
 
         fs::remove_dir_all(root).expect("remove test output");
+    }
+
+    #[test]
+    fn generated_application_config_uses_always_on_debug_redaction() {
+        let rendered = application_config_rs();
+        assert!(rendered.contains("veil::Redact"));
+        assert!(rendered.contains("#[redact(all, fixed = 12)]"));
+        assert!(rendered.contains("#[serde(skip)]"));
+        assert!(rendered.contains("_roze_redaction_marker"));
+        assert!(!rendered.contains("VEIL_DISABLE_REDACTION"));
     }
 
     #[test]

@@ -37,6 +37,28 @@ Resolved keys are redacted from `AiProviderConfig` and `ServiceConfig` debug
 output. Provider base URLs containing embedded usernames or passwords are
 rejected.
 
+Roze re-exports Veil's derive macros through `roze_config::redaction`, and
+generated service manifests include Veil with default features disabled. The
+runtime `toggle` feature is therefore absent, so production redaction cannot be
+disabled by an environment variable. Application crates using the derive must
+keep `veil` as a direct dependency because its generated code references the
+crate. Use fixed-length masking for secrets:
+
+```rust
+use roze_config::redaction::Redact;
+
+#[derive(Redact)]
+struct ProviderCredentials {
+    name: String,
+    #[redact(fixed = 12)]
+    api_key: String,
+}
+```
+
+This contract protects only `Debug` formatting such as `tracing::info!(?value)`.
+`Display` fields (`%value`), Serde output, response bodies, and storage remain
+separate security boundaries; never log a secret field directly.
+
 Generated REST/RPC services also load a typed top-level `application` section
 through the preserved `src/application_config.rs` declaration. Its values use
 the same `env://`, `${NAME}`, `file://`, and custom `SecretProvider` resolution
@@ -45,6 +67,14 @@ built-in service config, exposes the typed value as `config.application`, and
 redacts the entire application value from `Debug` output. Production unknown
 fields are rejected against both schemas and built-in service validation runs
 before a listener is bound.
+
+Newly generated `ApplicationConfig` types also derive `veil::Redact` with
+fixed-length masking for every field, so
+direct `Debug` logging remains fail-safe. Existing application-owned files are
+preserved by `--update`; adopt the derive explicitly when migrating them.
+The initial empty type contains a public, documentation-hidden, Serde-skipped
+zero-sized marker so Veil can derive redaction before application fields exist;
+keep the marker when extending the type.
 
 When updating an older generated REST/RPC service, `rozectl --update` migrates
 only exact historical generated config-loader shapes (`load`, `load_service`,
