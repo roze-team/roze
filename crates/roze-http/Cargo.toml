@@ -33,3 +33,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio-websockets = { workspace = true, features = ["client", "rand"] }
+tracing-subscriber.workspace = true

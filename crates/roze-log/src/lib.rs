@@ -16,10 +16,13 @@ pub fn init_tracing_with_filter(filter: impl AsRef<str>) {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter.as_ref()));
 
-    let _ = tracing_subscriber::registry()
+    if let Err(error) = tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
-        .try_init();
+        .try_init()
+    {
+        eprintln!("failed to initialize tracing subscriber: {error}");
+    }
 }
 
 pub fn init_tracing_with_config(config: &ServiceConfig) -> anyhow::Result<()> {
@@ -38,7 +41,9 @@ pub fn init_tracing_with_config_and_filter(
         .with(tracing_subscriber::fmt::layer());
 
     let Some(provider) = roze_opentelemetry::build_tracer_provider(config)? else {
-        let _ = subscriber.try_init();
+        subscriber
+            .try_init()
+            .map_err(|error| anyhow::anyhow!("failed to initialize tracing subscriber: {error}"))?;
         return Ok(());
     };
 
@@ -49,12 +54,13 @@ pub fn init_tracing_with_config_and_filter(
     let service_name = roze_opentelemetry::service_name(config, telemetry);
     let tracer = provider.tracer(service_name.to_string());
 
+    subscriber
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("failed to initialize tracing subscriber: {error}"))?;
+
     let _ = TRACER_PROVIDER.set(provider.clone());
     global::set_tracer_provider(provider);
-
-    let _ = subscriber
-        .with(tracing_opentelemetry::layer().with_tracer(tracer))
-        .try_init();
 
     Ok(())
 }

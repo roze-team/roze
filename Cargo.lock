@@ -4155,6 +4155,7 @@ dependencies = [
  "tokio-websockets 0.13.3",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

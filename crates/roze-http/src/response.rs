@@ -318,7 +318,44 @@ where
 
 impl IntoResponse for roze_error::RozeError {
     fn into_response(self) -> HttpResponse {
+        log_roze_error(&self);
         rest::error_response(&self)
+    }
+}
+
+fn log_roze_error(error: &roze_error::RozeError) {
+    let status = error.status_code();
+    let ids = roze_error::current_request_ids();
+    let request_id = ids
+        .as_ref()
+        .map(|ids| ids.request_id.as_str())
+        .unwrap_or_default();
+    let trace_id = ids
+        .as_ref()
+        .map(|ids| ids.trace_id.as_str())
+        .unwrap_or_default();
+    if status.is_server_error() {
+        tracing::error!(
+            protocol = "http",
+            status = status.as_u16(),
+            code = error.code(),
+            error_kind = error.kind(),
+            request_id,
+            trace_id,
+            error = %error,
+            "HTTP request failed"
+        );
+    } else {
+        tracing::warn!(
+            protocol = "http",
+            status = status.as_u16(),
+            code = error.code(),
+            error_kind = error.kind(),
+            request_id,
+            trace_id,
+            error = %error,
+            "HTTP request rejected"
+        );
     }
 }
 
@@ -557,6 +594,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use http::{HeaderMap, HeaderValue, StatusCode};
     use http_body_util::BodyExt;
     use serde::Serialize;
@@ -564,6 +603,39 @@ mod tests {
     use crate::extract::{Extension, Form};
 
     use super::{AppendHeaders, ErrorResponse, Html, IntoResponse, Json, Redirect};
+
+    #[derive(Clone, Default)]
+    struct LogBuffer {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct LogWriter(LogBuffer);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut buffer = self.0.bytes.lock().expect("log buffer lock");
+            std::io::Write::write(&mut *buffer, bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogBuffer {
+        type Writer = LogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            LogWriter(self.clone())
+        }
+    }
+
+    impl LogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(self.bytes.lock().expect("log buffer lock").clone())
+                .expect("UTF-8 tracing output")
+        }
+    }
 
     #[derive(Serialize)]
     struct Payload {
@@ -574,6 +646,32 @@ mod tests {
     struct FormPayload {
         name: &'static str,
         role: &'static str,
+    }
+
+    #[test]
+    fn roze_errors_emit_structured_boundary_logs() {
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = roze_error::RozeError::Internal("database failed".to_string()).into_response();
+            let _ = roze_error::RozeError::BadRequest("invalid name".to_string()).into_response();
+        });
+
+        let output = logs.contents();
+        assert!(output.contains("ERROR"));
+        assert!(output.contains("HTTP request failed"));
+        assert!(output.contains("error_kind=\"internal\""));
+        assert!(output.contains("database failed"));
+        assert!(output.contains("WARN"));
+        assert!(output.contains("HTTP request rejected"));
+        assert!(output.contains("error_kind=\"bad_request\""));
+        assert!(output.contains("invalid name"));
     }
 
     #[tokio::test]

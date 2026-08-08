@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- REST and RPC error boundaries now emit structured warning/error events with
+  status, error kind, request ID, and trace ID; REST error rendering remains
+  inside the request context scope, and tracing initialization failures are no
+  longer silently ignored.
 - Generated Toasty PostgreSQL `TIMESTAMP` and `TIMESTAMPTZ` fields now use
   native `jiff::civil::DateTime` and `jiff::Timestamp` values across models,
   mutations, predicates, ordering, projections, and grouped counts.

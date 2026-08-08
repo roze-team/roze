@@ -398,9 +398,18 @@ async fn inject_request_context(
         .collect::<BTreeMap<_, _>>();
     let context = Context::from_propagation_headers(&headers);
     let propagation_headers = context.propagation_headers();
+    let locale = context.locale();
+    let request_id = context.request_id();
+    let trace_id = context.trace_id();
     request.extensions_mut().insert(context);
 
-    let mut response = next.run(request).await;
+    let mut response = roze_error::scope_error_context(
+        locale,
+        Some(request_id),
+        Some(trace_id),
+        next.run(request),
+    )
+    .await;
     for name in [
         roze_context::REQUEST_ID_HEADER,
         roze_context::TRACE_ID_HEADER,
@@ -1519,6 +1528,35 @@ mod tests {
             .await
             .expect("response body");
         assert_eq!(&body[..], b"request-123");
+    }
+
+    #[tokio::test]
+    async fn common_middleware_scopes_error_response_context() {
+        use roze_http::{routing::get, Router};
+        use tower::ServiceExt as _;
+
+        let app = apply_common(Router::new().route(
+            "/failure",
+            get(|| async { Err::<(), _>(RozeError::Internal("database failed".to_string())) }),
+        ));
+        let request = roze_http::http::Request::builder()
+            .uri("/failure")
+            .header(roze_context::REQUEST_ID_HEADER, "request-error-123")
+            .header(roze_context::TRACE_ID_HEADER, "trace-error-456")
+            .body(roze_http::body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("infallible router");
+        assert_eq!(
+            response.status(),
+            roze_http::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = roze_http::body::to_bytes(response.into_body(), 1_024)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON error body");
+        assert_eq!(body["request_id"], "request-error-123");
+        assert_eq!(body["trace_id"], "trace-error-456");
     }
 
     #[tokio::test]

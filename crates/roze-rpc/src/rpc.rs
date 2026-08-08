@@ -936,6 +936,7 @@ pub fn reconcile_retry_budget<T>(context: &Context, result: &Result<Response<T>,
 pub fn status_from_error(error: RozeError, context: &Context) -> Status {
     let code = grpc_code_from_error(&error);
     let locale = context.locale();
+    log_rpc_error(&error, code, context);
     let mut metadata = MetadataMap::new();
     insert_metadata(
         &mut metadata,
@@ -991,6 +992,37 @@ pub fn status_from_error(error: RozeError, context: &Context) -> Status {
         error.message_i18n(locale.as_deref().unwrap_or("en-US")),
         metadata,
     )
+}
+
+fn log_rpc_error(error: &RozeError, grpc_code: Code, context: &Context) {
+    let status = error.status_code();
+    let request_id = context.request_id();
+    let trace_id = context.trace_id();
+    if status.is_server_error() {
+        tracing::error!(
+            protocol = "rpc",
+            status = status.as_u16(),
+            grpc_code = ?grpc_code,
+            code = error.code(),
+            error_kind = error.kind(),
+            request_id = %request_id,
+            trace_id = %trace_id,
+            error = %error,
+            "RPC method failed"
+        );
+    } else {
+        tracing::warn!(
+            protocol = "rpc",
+            status = status.as_u16(),
+            grpc_code = ?grpc_code,
+            code = error.code(),
+            error_kind = error.kind(),
+            request_id = %request_id,
+            trace_id = %trace_id,
+            error = %error,
+            "RPC method rejected"
+        );
+    }
 }
 
 fn grpc_code_from_error(error: &RozeError) -> Code {

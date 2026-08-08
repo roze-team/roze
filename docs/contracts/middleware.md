@@ -163,6 +163,15 @@ observation, and does not count the cancellation as a circuit-breaker failure.
 This prevents cancelled work from leaking concurrency capacity and causing a
 healthy operation to remain permanently shed.
 
+Protocol error conversion is also an observability boundary. Converting a
+`RozeError` to an HTTP response or gRPC status emits one structured event:
+client-side 4xx failures use `WARN`, server-side 5xx failures use `ERROR`, and
+both include the bounded status/code/kind plus request and trace IDs. REST
+request-context middleware scopes response conversion so these IDs also remain
+available while the error body is rendered. Tracing subscriber installation
+failures must fail configured service startup instead of silently disabling the
+expected log pipeline.
+
 ## Resilience Metrics
 
 REST and RPC governance decisions use one Prometheus label contract:
