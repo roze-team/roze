@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     tracing::info!(
+        event = "service.config.loaded",
         service = %config.name,
         protocol = "rest",
         listen_addr = %rest.addr,
@@ -60,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
             rest.addr,
         )
         .await?;
-        tracing::info!(service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
+        tracing::info!(event = "service.registry.registered", service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
         (Some(registration), Some(registry))
     } else {
         (None, None)
@@ -71,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let service_shutdown = group.shutdown_listener();
     let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;
     let ctx = application::configure_context(ctx).await?;
-    tracing::info!(service = %service_name, protocol = "rest", "service context initialized");
+    tracing::info!(event = "service.context.initialized", service = %service_name, protocol = "rest", "service context initialized");
     application::register_services(&mut group, &ctx)?;
     let health = ctx.health.clone();
     if let Some(registry) = registry_health {
@@ -89,7 +90,8 @@ async fn main() -> anyhow::Result<()> {
         &rest.middlewares,
         auth_config.as_ref(),
     )?;
-    tracing::debug!(
+    tracing::info!(
+        event = "rest.middleware.resolved",
         protocol = "rest",
         request_context = middleware_config.request_context,
         request_tracing = middleware_config.tracing,
@@ -102,11 +104,11 @@ async fn main() -> anyhow::Result<()> {
     let app = route::router(ctx.clone()).layer(roze_http::middleware::AddExtensionLayer::new(
         roze_http::ws::WebSocketShutdown::new(service_shutdown),
     ));
-    tracing::debug!(protocol = "rest", "REST router constructed");
+    tracing::info!(event = "rest.router.constructed", protocol = "rest", "REST router constructed");
     let app = middleware::app::apply(app, ctx);
-    tracing::debug!(protocol = "rest", "application middleware hook applied");
+    tracing::info!(event = "rest.middleware.application_applied", protocol = "rest", "application middleware hook applied");
     let app = roze_middleware::apply_common_with_config(app, middleware_config);
-    tracing::debug!(protocol = "rest", "Roze common middleware applied");
+    tracing::info!(event = "rest.middleware.common_applied", protocol = "rest", "Roze common middleware applied");
     if rest.connect_info {
         group.add(RestService::new(
             service_name.clone(),
@@ -122,20 +124,20 @@ async fn main() -> anyhow::Result<()> {
         let health = health.clone();
         async move {
             shutdown.wait().await;
-            tracing::info!(protocol = "rest", "shutdown requested; marking service draining");
+            tracing::info!(event = "service.health.draining", protocol = "rest", "shutdown requested; marking service draining");
             health.mark_draining();
             Ok(())
         }
     });
-    tracing::info!(service = %service_name, protocol = "rest", listen_addr = %rest.addr, "service starting");
+    tracing::info!(event = "service.starting", service = %service_name, protocol = "rest", listen_addr = %rest.addr, "service starting");
     let result = group.start().await;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
-        tracing::info!(service = %service_name, protocol = "rest", "service unregistered");
+        tracing::info!(event = "service.registry.unregistered", service = %service_name, protocol = "rest", "service unregistered");
     }
     match &result {
-        Ok(()) => tracing::info!(service = %service_name, protocol = "rest", "service stopped"),
-        Err(error) => tracing::error!(service = %service_name, protocol = "rest", error = %error, "service failed"),
+        Ok(()) => tracing::info!(event = "service.stopped", service = %service_name, protocol = "rest", "service stopped"),
+        Err(error) => tracing::error!(event = "service.failed", service = %service_name, protocol = "rest", error = %error, "service failed"),
     }
     result?;
 
@@ -1576,7 +1578,7 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         ));
     }
     out.push_str(&format!(
-        "    let timeout_enabled = ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n",
+        "    let logic_request_id = request_ctx.request_id();\n    let logic_trace_id = request_ctx.trace_id();\n    tracing::info!(event = \"application.logic.started\", protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic started\");\n    let timeout_enabled = ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n    tracing::info!(event = \"application.logic.completed\", protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, success = result.is_ok(), request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic completed\");\n",
         handler = handler
     ));
     if uses_idempotency {
@@ -1655,7 +1657,7 @@ fn render_websocket_route_handler(spec: &ApiSpec, route: &crate::parser::RestRou
     }
     out.push_str("    roze_middleware::finish_route(route_guard, true, \"101\");\n");
     out.push_str(&format!(
-        "    Ok(upgrade.with_shutdown(websocket_shutdown.listener()).on_upgrade(move |socket| async move {{\n        if let Err(error) = crate::logic::{handler}(ctx, request_ctx, socket).await {{\n            tracing::warn!(handler = {handler:?}, code = %error.code(), \"WebSocket application handler failed\");\n        }}\n    }}))\n",
+        "    Ok(upgrade.with_shutdown(websocket_shutdown.listener()).on_upgrade(move |socket| async move {{\n        let request_id = request_ctx.request_id();\n        let trace_id = request_ctx.trace_id();\n        tracing::info!(event = \"application.logic.started\", protocol = \"websocket\", operation = {handler:?}, request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic started\");\n        match crate::logic::{handler}(ctx, request_ctx, socket).await {{\n            Ok(()) => tracing::info!(event = \"application.logic.completed\", protocol = \"websocket\", operation = {handler:?}, success = true, request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic completed\"),\n            Err(error) => tracing::warn!(event = \"application.logic.completed\", protocol = \"websocket\", operation = {handler:?}, success = false, code = %error.code(), request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic failed\"),\n        }}\n    }}))\n",
         handler = handler,
     ));
     out.push_str("}\n\n");
@@ -2974,6 +2976,10 @@ mod tests {
         .expect("valid api");
 
         let handlers = render_handlers(&spec);
+        assert!(handlers.contains("event = \"application.logic.started\""));
+        assert!(handlers.contains("event = \"application.logic.completed\""));
+        assert!(handlers.contains("request_id = %logic_request_id"));
+        assert!(handlers.contains("trace_id = %logic_trace_id"));
         assert!(handlers.contains("GetUserReqPath"));
         assert!(handlers.contains("GetUserReqQuery"));
         assert!(handlers.contains("GetUserReqForm"));
@@ -3362,6 +3368,9 @@ mod tests {
         assert!(rendered.contains("RestService::new("));
         assert!(rendered.contains("health.mark_draining();"));
         assert!(rendered.contains("\"service configuration loaded\""));
+        assert!(rendered.contains("event = \"service.config.loaded\""));
+        assert!(rendered.contains("event = \"rest.middleware.resolved\""));
+        assert!(rendered.contains("event = \"service.stopped\""));
         assert!(rendered.contains("\"service context initialized\""));
         assert!(rendered.contains("\"service starting\""));
         assert!(rendered.contains("\"service stopped\""));

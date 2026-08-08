@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Critical lifecycle, REST, RPC, and Stream boundaries now emit stable
+  structured `event` fields at production-visible levels, including startup,
+  readiness, application logic, completion, cancellation, settlement, shutdown,
+  and failure; payloads and credentials remain excluded.
 - REST and RPC error boundaries now emit structured warning/error events with
   status, error kind, request ID, and trace ID; REST error rendering remains
   inside the request context scope, and tracing initialization failures are no

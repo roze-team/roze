@@ -267,7 +267,11 @@ impl LifecycleState {
     fn mark(&self, phase: LifecyclePhase) {
         let previous = phase_from_code(self.phase.swap(phase_code(phase), Ordering::SeqCst));
         if previous != phase {
-            tracing::debug!(from = ?previous, to = ?phase, "service group lifecycle changed");
+            if phase == LifecyclePhase::Failed {
+                tracing::error!(event = "service.lifecycle.changed", from = ?previous, to = ?phase, "service group lifecycle changed");
+            } else {
+                tracing::info!(event = "service.lifecycle.changed", from = ?previous, to = ?phase, "service group lifecycle changed");
+            }
         }
     }
 }
@@ -388,7 +392,8 @@ pub struct ServiceGroupHandle {
 
 impl ServiceGroupHandle {
     pub fn shutdown(&self) {
-        tracing::debug!(
+        tracing::info!(
+            event = "service.lifecycle.shutdown_requested",
             service_count = self.service_count.load(Ordering::SeqCst),
             "service group shutdown requested"
         );
@@ -526,7 +531,8 @@ impl ServiceGroup {
             .iter()
             .map(|service| service.name())
             .collect::<Vec<_>>();
-        tracing::debug!(
+        tracing::info!(
+            event = "service.lifecycle.starting",
             service_count = service_names.len(),
             services = ?service_names,
             shutdown_timeout_ms = self.config.shutdown_timeout.as_millis(),
@@ -568,12 +574,12 @@ impl ServiceGroup {
         while active > 0 {
             tokio::select! {
                 _ = &mut shutdown => {
-                    tracing::debug!(source = "external_signal", "service group draining");
+                    tracing::info!(event = "service.lifecycle.draining", source = "external_signal", "service group draining");
                     self.lifecycle.mark(LifecyclePhase::Draining);
                     break;
                 }
                 _ = self.shutdown_request_listener.clone().wait() => {
-                    tracing::debug!(source = "shutdown_handle", "service group draining");
+                    tracing::info!(event = "service.lifecycle.draining", source = "shutdown_handle", "service group draining");
                     self.lifecycle.mark(LifecyclePhase::Draining);
                     break;
                 }
@@ -583,7 +589,7 @@ impl ServiceGroup {
                     };
                     active -= 1;
                     if handle_service_exit(joined, &mut errors) && self.config.stop_on_first_error {
-                        tracing::debug!(source = "service_error", "service group draining");
+                        tracing::warn!(event = "service.lifecycle.draining", source = "service_error", "service group draining");
                         self.lifecycle.mark(LifecyclePhase::Draining);
                         self.shutdown_request.trigger();
                         break;
@@ -638,24 +644,31 @@ async fn run_lifecycle_hooks(
     let future = async {
         let mut errors = Vec::new();
         for service in ordered_services(services, matches!(hook, LifecycleHook::Drain)) {
+            tracing::info!(event = "service.lifecycle.hook_started", service = service.name(), hook = ?hook, "service lifecycle hook started");
             let result = match hook {
                 LifecycleHook::Ready => service.ready().await,
                 LifecycleHook::Drain => service.drain().await,
             };
             if let Err(error) = result {
+                tracing::error!(event = "service.lifecycle.hook_failed", service = service.name(), hook = ?hook, error = %error, "service lifecycle hook failed");
                 errors.push(format!(
                     "service {} {hook:?} hook failed: {error:#}",
                     service.name()
                 ));
+            } else {
+                tracing::info!(event = "service.lifecycle.hook_completed", service = service.name(), hook = ?hook, "service lifecycle hook completed");
             }
         }
         errors
     };
     match tokio::time::timeout(timeout, future).await {
         Ok(errors) => errors,
-        Err(_) => vec![format!(
-            "service group {hook:?} hooks timed out after {timeout:?}"
-        )],
+        Err(_) => {
+            tracing::error!(event = "service.lifecycle.hooks_timed_out", hook = ?hook, timeout_ms = timeout.as_millis(), "service lifecycle hooks timed out");
+            vec![format!(
+                "service group {hook:?} hooks timed out after {timeout:?}"
+            )]
+        }
     }
 }
 
@@ -673,7 +686,7 @@ fn spawn_services(
         let service = Arc::clone(service);
         let listener = shutdown.clone();
         let name = service.name().to_string();
-        tracing::debug!(service = %name, "service task spawning");
+        tracing::info!(event = "service.task.starting", service = %name, "service task starting");
         tasks.spawn(async move {
             let result = service.start(listener).await;
             ServiceTaskExit { name, result }
@@ -689,17 +702,17 @@ fn handle_service_exit(
     match joined {
         Ok(exit) => match exit.result {
             Ok(()) => {
-                tracing::debug!(service = %exit.name, outcome = "completed", "service task exited");
+                tracing::info!(event = "service.task.completed", service = %exit.name, outcome = "completed", "service task completed");
                 false
             }
             Err(error) => {
-                tracing::debug!(service = %exit.name, outcome = "failed", "service task exited");
+                tracing::error!(event = "service.task.failed", service = %exit.name, outcome = "failed", error = %error, "service task failed");
                 errors.push(format!("service {} failed: {error:#}", exit.name));
                 true
             }
         },
         Err(error) => {
-            tracing::debug!(outcome = "join_failed", "service task exited");
+            tracing::error!(event = "service.task.join_failed", outcome = "join_failed", error = %error, "service task join failed");
             errors.push(format!("service task failed: {error}"));
             true
         }
@@ -713,9 +726,17 @@ async fn stop_services(
 ) {
     match tokio::time::timeout(timeout, run_stop_hooks(services)).await {
         Ok(stop_errors) => errors.extend(stop_errors),
-        Err(_) => errors.push(format!(
-            "service group stop hooks timed out after {timeout:?}"
-        )),
+        Err(_) => {
+            tracing::error!(
+                event = "service.lifecycle.hooks_timed_out",
+                hook = "stop",
+                timeout_ms = timeout.as_millis(),
+                "service lifecycle hooks timed out"
+            );
+            errors.push(format!(
+                "service group stop hooks timed out after {timeout:?}"
+            ));
+        }
     }
 }
 
@@ -723,13 +744,16 @@ async fn run_stop_hooks(services: &[Arc<dyn RuntimeService>]) -> Vec<String> {
     let mut errors = Vec::new();
     for service in ordered_services(services, true) {
         let name = service.name().to_string();
-        tracing::debug!(service = %name, "service stop hook starting");
+        tracing::info!(event = "service.lifecycle.hook_started", service = %name, hook = "stop", "service lifecycle hook started");
         if let Err(error) = service
             .stop()
             .await
             .with_context(|| format!("service {name} stop hook failed"))
         {
+            tracing::error!(event = "service.lifecycle.hook_failed", service = %name, hook = "stop", error = %error, "service lifecycle hook failed");
             errors.push(format!("{error:#}"));
+        } else {
+            tracing::info!(event = "service.lifecycle.hook_completed", service = %name, hook = "stop", "service lifecycle hook completed");
         }
     }
     errors
@@ -766,6 +790,12 @@ async fn wait_for_tasks(
     .await;
 
     if result.is_err() {
+        tracing::error!(
+            event = "service.tasks.shutdown_timed_out",
+            active,
+            timeout_ms = timeout.as_millis(),
+            "service tasks timed out during shutdown"
+        );
         errors.push(format!(
             "service group tasks timed out after shutdown timeout {timeout:?}"
         ));

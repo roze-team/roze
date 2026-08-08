@@ -336,6 +336,7 @@ fn log_roze_error(error: &roze_error::RozeError) {
         .unwrap_or_default();
     if status.is_server_error() {
         tracing::error!(
+            event = "http.request.failed",
             protocol = "http",
             status = status.as_u16(),
             code = error.code(),
@@ -347,6 +348,7 @@ fn log_roze_error(error: &roze_error::RozeError) {
         );
     } else {
         tracing::warn!(
+            event = "http.request.rejected",
             protocol = "http",
             status = status.as_u16(),
             code = error.code(),
@@ -665,10 +667,12 @@ mod tests {
 
         let output = logs.contents();
         assert!(output.contains("ERROR"));
+        assert!(output.contains("event=\"http.request.failed\""));
         assert!(output.contains("HTTP request failed"));
         assert!(output.contains("error_kind=\"internal\""));
         assert!(output.contains("database failed"));
         assert!(output.contains("WARN"));
+        assert!(output.contains("event=\"http.request.rejected\""));
         assert!(output.contains("HTTP request rejected"));
         assert!(output.contains("error_kind=\"bad_request\""));
         assert!(output.contains("invalid name"));

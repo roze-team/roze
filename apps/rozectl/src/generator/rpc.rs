@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {{
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rpc config"))?;
     tracing::info!(
+        event = "service.config.loaded",
         service = %config.name,
         protocol = "rpc",
         listen_addr = %rpc.addr,
@@ -56,12 +57,12 @@ async fn main() -> anyhow::Result<()> {{
         rpc.advertise_addr.unwrap_or(rpc.addr),
     )
     .await?;
-    tracing::info!(service = %config.name, protocol = "rpc", addr = %rpc.advertise_addr.unwrap_or(rpc.addr), "service registered");
+    tracing::info!(event = "service.registry.registered", service = %config.name, protocol = "rpc", addr = %rpc.advertise_addr.unwrap_or(rpc.addr), "service registered");
     let service_name = config.name.clone();
     let rpc_addr = rpc.addr;
     let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;
     let ctx = application::configure_context(ctx).await?;
-    tracing::info!(service = %service_name, protocol = "rpc", "service context initialized");
+    tracing::info!(event = "service.context.initialized", service = %service_name, protocol = "rpc", "service context initialized");
     let health = ctx.health.clone();
     let registry_service = service_name.clone();
     health.register_dependency("registry", move || {{
@@ -80,20 +81,20 @@ async fn main() -> anyhow::Result<()> {{
         let ctx = ctx.clone();
             let grpc_health_service = grpc_health_service.clone();
             async move {{
-                tracing::info!(protocol = "rpc", listen_addr = %rpc_addr, "RPC server listening");
+                tracing::info!(event = "rpc.server.listening", protocol = "rpc", listen_addr = %rpc_addr, "RPC server listening");
                 let routes = roze_grpc::GrpcRouter::new(grpc_health_service)
                     .add_service({service}Server::new(server::RpcService::new(ctx)));
                 RpcServer::new(rpc_addr)
                     .builder()
                     .serve_with_shutdown(rpc_addr, routes, async move {{
                         shutdown.wait().await;
-                        tracing::info!(protocol = "rpc", "RPC shutdown requested");
+                        tracing::info!(event = "rpc.server.shutdown_requested", protocol = "rpc", "RPC shutdown requested");
                     }})
                     .await
                     .map_err(|error| anyhow::anyhow!("RPC service failed: {{error}}"))
             }}
     }});
-    tracing::info!(service = %service_name, protocol = "rpc", listen_addr = %rpc_addr, "service starting");
+    tracing::info!(event = "service.starting", service = %service_name, protocol = "rpc", listen_addr = %rpc_addr, "service starting");
     group.add_fn("grpc-health-sync", move |shutdown| {{
         let rpc_health = rpc_health.clone();
         async move {{
@@ -105,10 +106,10 @@ async fn main() -> anyhow::Result<()> {{
     }});
     let result = group.start().await;
     registration.shutdown().await?;
-    tracing::info!(service = %service_name, protocol = "rpc", "service unregistered");
+    tracing::info!(event = "service.registry.unregistered", service = %service_name, protocol = "rpc", "service unregistered");
     match &result {{
-        Ok(()) => tracing::info!(service = %service_name, protocol = "rpc", "service stopped"),
-        Err(error) => tracing::error!(service = %service_name, protocol = "rpc", error = %error, "service failed"),
+        Ok(()) => tracing::info!(event = "service.stopped", service = %service_name, protocol = "rpc", "service stopped"),
+        Err(error) => tracing::error!(event = "service.failed", service = %service_name, protocol = "rpc", error = %error, "service failed"),
     }}
     result?;
 
@@ -386,7 +387,7 @@ fn render_route_method(spec: &ApiSpec, route: &RestRoute) -> String {
         ));
     }
     out.push_str(&format!(
-        "        let result = crate::logic::{handler}({args}).await;\n",
+        "        tracing::info!(event = \"application.logic.started\", protocol = \"rpc\", service = %self.ctx.config.name, operation = {handler:?}, request_id = %request_ctx.request_id(), trace_id = %request_ctx.trace_id(), \"RPC application logic started\");\n        let result = crate::logic::{handler}({args}).await;\n        tracing::info!(event = \"application.logic.completed\", protocol = \"rpc\", service = %self.ctx.config.name, operation = {handler:?}, success = result.is_ok(), request_id = %request_ctx.request_id(), trace_id = %request_ctx.trace_id(), \"RPC application logic completed\");\n",
         handler = handler,
         args = "self.ctx.clone(), request_ctx.clone(), req"
     ));
@@ -473,8 +474,9 @@ fn render_rpc_method(spec: &ApiSpec, method: &RpcMethod) -> String {
         ));
     }
     out.push_str(&format!(
-        "        let result = crate::logic::{method_name}(self.ctx.clone(), request_ctx.clone(), req).await;\n",
-        method_name = method_name
+        "        tracing::info!(event = \"application.logic.started\", protocol = \"rpc\", service = %self.ctx.config.name, operation = {method:?}, request_id = %request_ctx.request_id(), trace_id = %request_ctx.trace_id(), \"RPC application logic started\");\n        let result = crate::logic::{method_name}(self.ctx.clone(), request_ctx.clone(), req).await;\n        tracing::info!(event = \"application.logic.completed\", protocol = \"rpc\", service = %self.ctx.config.name, operation = {method:?}, success = result.is_ok(), request_id = %request_ctx.request_id(), trace_id = %request_ctx.trace_id(), \"RPC application logic completed\");\n",
+        method_name = method_name,
+        method = method.name
     ));
     out.push_str("        match result {\n");
     if uses_idempotency {
@@ -1492,6 +1494,9 @@ mod tests {
         assert!(rendered.contains("group.add_fn(\"grpc-health-sync\""));
         assert!(rendered.contains("run_until(std::time::Duration::from_secs(1)"));
         assert!(rendered.contains("\"service configuration loaded\""));
+        assert!(rendered.contains("event = \"service.config.loaded\""));
+        assert!(rendered.contains("event = \"rpc.server.listening\""));
+        assert!(rendered.contains("event = \"service.stopped\""));
         assert!(rendered.contains("\"service registered\""));
         assert!(rendered.contains("\"RPC server listening\""));
         assert!(rendered.contains("roze_config::service_config_path(env!(\"CARGO_MANIFEST_DIR\"))"));
@@ -1580,6 +1585,10 @@ mod tests {
             "roze_rpc::rpc::method_fallback(Some(&self.ctx.config.governance), \"GetUser\")"
         ));
         assert!(rendered.contains("finish_method(method_guard, err.kind())"));
+        assert!(rendered.contains("event = \"application.logic.started\""));
+        assert!(rendered.contains("event = \"application.logic.completed\""));
+        assert!(rendered.contains("request_id = %request_ctx.request_id()"));
+        assert!(rendered.contains("trace_id = %request_ctx.trace_id()"));
         assert!(rendered.contains("if ![\"active\", \"disabled\"].contains(&value.as_str())"));
         assert!(
             rendered.contains("if (!req.account.to_string().is_empty()) && req.backup.is_empty()")

@@ -301,6 +301,7 @@ async fn trace_http_request(
         .unwrap_or_else(|| (String::new(), String::new()));
     let started = Instant::now();
     tracing::info!(
+        event = "http.request.started",
         protocol = "http",
         method = %method,
         path = %path,
@@ -311,6 +312,7 @@ async fn trace_http_request(
 
     let response = next.run(request).await;
     tracing::info!(
+        event = "http.request.completed",
         protocol = "http",
         method = %method,
         path = %path,
@@ -622,6 +624,8 @@ pub struct RouteGuard {
     service: String,
     route: String,
     method: String,
+    request_id: String,
+    trace_id: String,
     started: Instant,
     breaker: Option<RouteBreakerConfig>,
     breaker_permit: Option<BreakerPermit>,
@@ -636,6 +640,17 @@ impl Drop for RouteGuard {
         }
 
         let elapsed = self.started.elapsed();
+        tracing::warn!(
+            event = "rest.route.cancelled",
+            protocol = "rest",
+            service = %self.service,
+            route = %self.route,
+            method = %self.method,
+            elapsed_ms = elapsed.as_millis(),
+            request_id = %self.request_id,
+            trace_id = %self.trace_id,
+            "REST route cancelled"
+        );
         if let (Some(config), Some(permit)) = (self.breaker, self.breaker_permit) {
             route_breaker_cancel(&self.key, permit, &config);
             if permit == BreakerPermit::Probe {
@@ -848,6 +863,18 @@ pub fn begin_route(
         Some(timeout) => request_ctx.with_timeout(timeout),
         None => request_ctx,
     };
+    let request_id = request_ctx.request_id();
+    let trace_id = request_ctx.trace_id();
+    tracing::info!(
+        event = "rest.route.started",
+        protocol = "rest",
+        service = %service,
+        route = %route,
+        method = %method,
+        request_id = %request_id,
+        trace_id = %trace_id,
+        "REST route started"
+    );
     Ok((
         request_ctx,
         RouteGuard {
@@ -855,6 +882,8 @@ pub fn begin_route(
             service,
             route,
             method,
+            request_id,
+            trace_id,
             started: Instant::now(),
             breaker: policy.breaker,
             breaker_permit,
@@ -876,6 +905,19 @@ pub fn finish_route(mut guard: RouteGuard, success: bool, status: impl Into<Stri
         route_shedding_record(&guard.key, shedding_success, elapsed, &config);
     }
     guard.finished = true;
+    tracing::info!(
+        event = "rest.route.completed",
+        protocol = "rest",
+        service = %guard.service,
+        route = %guard.route,
+        method = %guard.method,
+        status = %status,
+        success,
+        elapsed_ms = elapsed.as_millis(),
+        request_id = %guard.request_id,
+        trace_id = %guard.trace_id,
+        "REST route completed"
+    );
     roze_metrics::record_http_request(success, elapsed);
     roze_metrics::record_http_route(
         guard.service.as_str(),

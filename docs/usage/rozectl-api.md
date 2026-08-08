@@ -1259,24 +1259,23 @@ Business logic should not pass or construct `trace_id` values. Use
 `trace_id`. Use `ServiceContext` for global resources and Roze native HTTP `Extension<T>`
 for per-request user/session objects injected by custom middleware.
 
-Generated REST, RPC, and Stream entrypoints emit structured lifecycle logs for
-configuration readiness, dependency context initialization, registry changes,
-listener/subscription readiness, shutdown, stop, and failure. Native HTTP logs
-request start/completion with method, path, status, latency, request ID, and
-trace ID. RPC governance logs method start/completion/cancellation with service,
-method, code, latency, request ID, and trace ID. Generated logging never prints
-request or message payloads; application logic remains responsible for
-domain-specific events and must redact secrets and personal data.
+Generated REST, RPC, and Stream entrypoints emit production-visible structured
+events for configuration readiness, dependency context initialization, registry
+changes, listener/subscription readiness, application-logic start/completion,
+shutdown, stop, and failure. `ServiceGroup` emits lifecycle phase, hook, and task
+events. Native HTTP emits `http.request.*` and `rest.route.*`; RPC emits
+`rpc.method.*`; Stream emits `stream.message.*`, including ack/nack settlement.
+Normal milestones use `INFO`, cancellation and client rejection use `WARN`, and
+failures use `ERROR`. Request-scoped events include request and trace IDs where
+available. The `event` field is stable and intended for log queries and alerts.
 
-With `RUST_LOG=debug`, Roze also reports safe framework decisions: REST router
-construction, middleware plans, and route-match outcomes; RPC endpoint labels,
-retry attempts, deadlines, and governance flags; Stream topic bindings,
-message IDs, attempts, and ack/nack decisions; Model query kinds, pagination,
-eager-load edge paths, and transaction phases; and ServiceGroup membership and
-health phase changes. These events deliberately omit request/message bodies,
-authorization values, SQL arguments, fallback payloads, and dependency error
-messages. Endpoint labels are reduced to scheme and authority without userinfo,
-path, query, or fragment.
+Generated logging never prints request/message payloads, authorization values,
+SQL arguments, credentials, or fallback payloads. Application logic remains
+responsible for domain-specific events and must redact secrets and personal
+data. With `RUST_LOG=debug`, Roze additionally reports lower-level decisions such
+as route matching, RPC retries and deadlines, model query kinds, pagination,
+eager-load edge paths, and transaction phases. Endpoint labels are reduced to
+scheme and authority without userinfo, path, query, or fragment.
 
 Generated REST services pass their Router through
 `roze_middleware::apply_common_with_config`. Its request-context layer restores

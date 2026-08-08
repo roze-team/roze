@@ -1000,6 +1000,7 @@ fn log_rpc_error(error: &RozeError, grpc_code: Code, context: &Context) {
     let trace_id = context.trace_id();
     if status.is_server_error() {
         tracing::error!(
+            event = "rpc.method.failed",
             protocol = "rpc",
             status = status.as_u16(),
             grpc_code = ?grpc_code,
@@ -1012,6 +1013,7 @@ fn log_rpc_error(error: &RozeError, grpc_code: Code, context: &Context) {
         );
     } else {
         tracing::warn!(
+            event = "rpc.method.rejected",
             protocol = "rpc",
             status = status.as_u16(),
             grpc_code = ?grpc_code,
@@ -1285,6 +1287,7 @@ impl Drop for MethodGuard {
         }
 
         tracing::warn!(
+            event = "rpc.method.cancelled",
             protocol = "rpc",
             service = %self.service,
             method = %self.method,
@@ -1465,6 +1468,7 @@ pub fn begin_method(
     let request_id = request_ctx.request_id();
     let trace_id = request_ctx.trace_id();
     tracing::info!(
+        event = "rpc.method.started",
         protocol = "rpc",
         service = %service,
         method = %method,
@@ -1507,6 +1511,7 @@ pub fn finish_method(mut guard: MethodGuard, code: impl Into<String>) {
     }
     guard.finished = true;
     tracing::info!(
+        event = "rpc.method.completed",
         protocol = "rpc",
         service = %guard.service,
         method = %guard.method,
