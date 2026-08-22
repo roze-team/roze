@@ -2861,7 +2861,9 @@ fn oneof_values(rules: &str) -> Option<Vec<&str>> {
 fn condition_pairs(value: &str) -> Vec<(&str, &str)> {
     let parts = condition_names(value);
     parts
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (pair[0], pair[1]))
         .collect::<Vec<_>>()
 }

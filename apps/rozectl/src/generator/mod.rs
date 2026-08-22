@@ -6190,7 +6190,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Verify generated service on Linux
         if: runner.os != 'Windows'

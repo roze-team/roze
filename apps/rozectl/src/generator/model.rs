@@ -18086,7 +18086,9 @@ fn parse_ent_named_value_list(value: &str, line_no: usize) -> anyhow::Result<Vec
         bail!("line {line_no}: named enum values must include name/value pairs");
     }
     Ok(values
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| pair[1].clone())
         .collect::<Vec<_>>())
 }

@@ -21,6 +21,7 @@ static REPORT_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static WEBSOCKET_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static OUTBOX_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static DATABASE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static SMS_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 const LATENCY_BUCKETS: usize = 65;
 
 /// Fixed-memory, power-of-two latency histogram for long-running evidence.
@@ -262,6 +263,39 @@ pub fn record_rpc_client_attempt(
         .insert("method", method.into())
         .insert("outcome", outcome);
     rpc_metrics_registry().inc_counter("roze_rpc_client_attempts_total", labels, 1);
+}
+
+/// Records an SMS delivery attempt using bounded labels only.
+pub fn record_sms_send(
+    provider: impl AsRef<str>,
+    outcome: impl AsRef<str>,
+    category: impl AsRef<str>,
+    elapsed: Duration,
+) {
+    let provider = match provider.as_ref() {
+        "aliyun" | "mock" => provider.as_ref(),
+        _ => "other",
+    };
+    let outcome = match outcome.as_ref() {
+        "success" | "failure" => outcome.as_ref(),
+        _ => "failure",
+    };
+    let category = match category.as_ref() {
+        "none" | "configuration" | "authentication" | "rate_limit" | "invalid_parameter"
+        | "provider_rejected" | "network" | "timeout" | "unknown_outcome" => category.as_ref(),
+        _ => "provider_rejected",
+    };
+    let labels = MetricLabels::new()
+        .insert("provider", provider)
+        .insert("outcome", outcome)
+        .insert("category", category);
+    let registry = sms_metrics_registry();
+    registry.inc_counter("roze_sms_send_attempts_total", labels.clone(), 1);
+    registry.inc_counter(
+        "roze_sms_send_duration_ms_total",
+        labels,
+        elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+    );
 }
 
 fn normalize_rpc_client_attempt_outcome(outcome: String) -> String {
@@ -521,6 +555,7 @@ pub fn http_metrics() -> String {
     out.push_str(&websocket_metrics_registry().render());
     out.push_str(&outbox_metrics_registry().render());
     out.push_str(&database_metrics_registry().render());
+    out.push_str(&sms_metrics_registry().render());
     out
 }
 
@@ -562,6 +597,10 @@ pub fn outbox_metrics_registry() -> &'static MetricRegistry {
 
 pub fn database_metrics_registry() -> &'static MetricRegistry {
     DATABASE_METRICS.get_or_init(MetricRegistry::new)
+}
+
+pub fn sms_metrics_registry() -> &'static MetricRegistry {
+    SMS_METRICS.get_or_init(MetricRegistry::new)
 }
 
 fn escape_label_value(value: &str) -> String {
@@ -793,5 +832,15 @@ mod tests {
         assert!(metrics.contains(r#"boundary="rest""#));
         assert!(metrics.contains(r#"kind="breaker""#));
         assert!(metrics.contains(r#"decision="open""#));
+    }
+
+    #[test]
+    fn sms_metrics_normalize_untrusted_labels() {
+        let secret = format!("13900000000-123456-{}", std::process::id());
+        record_sms_send(&secret, &secret, &secret, Duration::from_millis(3));
+        let metrics = http_metrics();
+        assert!(metrics.contains("roze_sms_send_attempts_total"));
+        assert!(metrics.contains(r#"provider="other""#));
+        assert!(!metrics.contains(&secret));
     }
 }

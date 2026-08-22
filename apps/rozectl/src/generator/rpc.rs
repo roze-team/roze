@@ -321,7 +321,7 @@ pub fn render_client(spec: &ApiSpec) -> String {
             request = proto_type_name(&method.request),
             response = proto_type_name(&method.response),
             retry_request_expr = retry_request_expr,
-            governance_key = &method.name,
+            governance_key = method.name,
             service_name = service_name,
         ));
     }
@@ -1287,7 +1287,9 @@ fn oneof_values(rules: &str) -> Option<Vec<&str>> {
 fn condition_pairs(value: &str) -> Vec<(&str, &str)> {
     let parts = condition_names(value);
     parts
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (pair[0], pair[1]))
         .collect::<Vec<_>>()
 }

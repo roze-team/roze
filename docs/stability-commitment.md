@@ -45,10 +45,11 @@ battle-tested until `docs/production-evidence.md` is satisfied.
 
 ## Toolchain Policy
 
-Roze 1.0 is tested on the latest stable Rust channel. No fixed MSRV is claimed
-until CI adds and continuously verifies one. Once declared, raising the MSRV in
-the 1.x line requires the compatibility treatment documented by the release
-policy.
+Roze 1.0 development and release gates are pinned to Rust 1.98.0, with a
+scheduled latest-stable canary for forward compatibility. The compiler pin is
+not an MSRV declaration. No fixed MSRV is claimed until CI continuously
+verifies one; once declared, raising it in the 1.x line requires the
+compatibility treatment documented by the release policy.
 
 ## Release Commitment
 

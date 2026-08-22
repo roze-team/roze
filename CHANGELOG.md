@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Pinned development, generated production verification, and release CI to
+  Rust 1.98.0; added a scheduled latest-stable compatibility canary, resolved
+  Rust 1.98 Clippy findings, and synchronized generated cache cluster wiring.
 - Added always-on Veil `Debug` redaction and a `roze_config::redaction`
   re-export; AI provider keys, JWT signing secrets, and newly generated typed
   application configuration now use fixed-length masking, generated manifests

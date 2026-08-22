@@ -56,14 +56,18 @@ The current workspace uses Rust 2021. Generated REST/RPC services also pin
 `edition = "2021"` so they do not inherit a parent workspace's Rust 2024
 edition.
 
-Roze 1.0 supports the latest stable Rust channel used by CI. It does not claim
-a fixed MSRV until a pinned compiler is continuously verified.
+Roze 1.0 development and release gates use the pinned Rust 1.98.0 toolchain.
+A scheduled latest-stable canary provides early warning for future compiler
+and Clippy changes. This compiler pin is a reproducible-build policy, not a
+fixed MSRV claim; Roze does not claim an MSRV until that compiler is
+continuously verified in a dedicated CI lane.
 
 Toolchain policy:
 
 | Channel | Purpose | 1.0 policy |
 | --- | --- | --- |
-| latest stable | Primary development and release build | Required |
+| Rust 1.98.0 | Primary development and release build | Required and pinned |
+| latest stable | Scheduled forward-compatibility canary | Required |
 | pinned MSRV | Proves a future minimum supported compiler | Not yet declared |
 | beta | Early warning for upcoming Rust changes | Recommended |
 

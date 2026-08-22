@@ -11,6 +11,7 @@ members = [
     "crates/roze-metrics",
     "crates/roze-resilience",
     "crates/roze-rate-limit",
+    "crates/roze-sms",
     "crates/roze-middleware",
     "crates/roze-utils",
     "crates/roze-grpc",

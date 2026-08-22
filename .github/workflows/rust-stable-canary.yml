@@ -1,0 +1,33 @@
+name: Rust stable canary
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  stable:
+    runs-on: ubuntu-latest
+    env:
+      # Override rust-toolchain.toml so this lane actually follows latest stable.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install latest stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Check Clippy compatibility
+        run: cargo clippy --workspace --all-targets -- -D warnings

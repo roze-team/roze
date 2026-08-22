@@ -24,6 +24,7 @@ impl ServiceContext {
             Some(cache) => Some(
                 roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
                     url: cache.url.clone(),
+                    cluster_urls: cache.cluster_urls.clone(),
                     namespace: cache.namespace.clone(),
                     default_ttl_secs: cache.default_ttl_secs,
                 })

@@ -1,0 +1,19 @@
+[package]
+name = "roze-sms"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+hmac.workspace = true
+reqwest.workspace = true
+roze-error = { path = "../roze-error" }
+roze-metrics = { path = "../roze-metrics" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
