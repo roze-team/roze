@@ -1332,7 +1332,13 @@ fn render_service_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
             writeln!(
                 &mut out,
                 "| {} | {} | `{}` | `{}` | `{}` | `{}` |",
-                if route.websocket { "WebSocket" } else { "HTTP" },
+                if route.websocket {
+                    "WebSocket"
+                } else if route.maud {
+                    "Maud HTML"
+                } else {
+                    "HTTP"
+                },
                 http_method_name(&route.method),
                 route.path,
                 route.handler.as_deref().unwrap_or("-"),
@@ -1576,7 +1582,13 @@ fn render_ai_context_markdown_doc(spec: &ApiSpec, api: &Path) -> String {
             writeln!(
                 &mut out,
                 "  - [{}] {} `{}` -> `{}`",
-                if route.websocket { "WebSocket" } else { "HTTP" },
+                if route.websocket {
+                    "WebSocket"
+                } else if route.maud {
+                    "Maud HTML"
+                } else {
+                    "HTTP"
+                },
                 http_method_name(&route.method),
                 route.path,
                 route.response
@@ -1620,9 +1632,14 @@ tokio = {{ version = "1", features = ["macros", "net", "rt-multi-thread"] }}
 fn render_mock_main(spec: &ApiSpec) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    let response_imports = if spec.rest_routes.iter().any(|route| route.maud) {
+        "Html, Json"
+    } else {
+        "Json"
+    };
     writeln!(
         &mut out,
-        "use roze_http::{{routing::{{delete, get, head, patch, post, put}}, Json, Router}};"
+        "use roze_http::{{routing::{{delete, get, head, patch, post, put}}, {response_imports}, Router}};"
     )
     .unwrap();
     writeln!(&mut out).unwrap();
@@ -1672,18 +1689,27 @@ fn render_mock_main(spec: &ApiSpec) -> String {
         .filter(|(_, route)| !route.websocket)
     {
         let handler = mock_handler_ident(route, idx);
-        let value = serde_json::json!({
-            "code": 0,
-            "msg": "OK",
-            "data": mock_json_for_type(spec, &route.response),
-        });
-        let json = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
-        writeln!(
-            &mut out,
-            "async fn {handler}() -> Json<serde_json::Value> {{"
-        )
-        .unwrap();
-        writeln!(&mut out, "    Json(serde_json::json!({json}))").unwrap();
+        if route.maud {
+            writeln!(&mut out, "async fn {handler}() -> Html<&'static str> {{").unwrap();
+            writeln!(
+                &mut out,
+                "    Html(\"<!DOCTYPE html><html><body><h1>Roze + Maud</h1></body></html>\")"
+            )
+            .unwrap();
+        } else {
+            let value = serde_json::json!({
+                "code": 0,
+                "msg": "OK",
+                "data": mock_json_for_type(spec, &route.response),
+            });
+            let json = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+            writeln!(
+                &mut out,
+                "async fn {handler}() -> Json<serde_json::Value> {{"
+            )
+            .unwrap();
+            writeln!(&mut out, "    Json(serde_json::json!({json}))").unwrap();
+        }
         writeln!(&mut out, "}}").unwrap();
         writeln!(&mut out).unwrap();
     }
@@ -1717,7 +1743,13 @@ fn render_mock_readme(spec: &ApiSpec, api: &Path) -> String {
         writeln!(&mut out, "- No REST routes declared.").unwrap();
     } else {
         for route in &spec.rest_routes {
-            let transport = if route.websocket { "WebSocket" } else { "HTTP" };
+            let transport = if route.websocket {
+                "WebSocket"
+            } else if route.maud {
+                "Maud HTML"
+            } else {
+                "HTTP"
+            };
             writeln!(
                 &mut out,
                 "- [{transport}] `{}` `{}` -> `{}`",
@@ -1934,6 +1966,33 @@ fn render_http_smoke_tests(spec: &ApiSpec, base_url: &str) -> String {
         )
         .unwrap();
         writeln!(&mut out, "    let status = response.status();").unwrap();
+        if route.maud {
+            writeln!(
+                &mut out,
+                "    let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or(\"\");"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "    assert!(content_type.starts_with(\"text/html\"), \"expected HTML response, got {{content_type}}\");"
+            )
+            .unwrap();
+            writeln!(&mut out, "    let body = response.text().await?;").unwrap();
+            writeln!(
+                &mut out,
+                "    assert!(!body.is_empty(), \"generated Maud route returned an empty document\");"
+            )
+            .unwrap();
+            writeln!(
+                &mut out,
+                "    assertions::assert_route({test_name:?}, status, None).await?;"
+            )
+            .unwrap();
+            writeln!(&mut out, "    Ok(())").unwrap();
+            writeln!(&mut out, "}}").unwrap();
+            writeln!(&mut out).unwrap();
+            continue;
+        }
         writeln!(
             &mut out,
             "    let body = if status != StatusCode::NO_CONTENT {{"
@@ -2690,24 +2749,37 @@ fn openapi_operation(spec: &ApiSpec, route: &crate::parser::RestRoute) -> serde_
 
     operation.insert(
         "responses".to_string(),
-        serde_json::json!({
-            "200": {
-                "description": "OK",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "required": ["code", "msg", "data"],
-                            "properties": {
-                                "code": { "type": "integer", "format": "int32", "enum": [0] },
-                                "msg": { "type": "string" },
-                                "data": { "$ref": format!("#/components/schemas/{}", route.response) }
+        if route.maud {
+            serde_json::json!({
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "text/html": {
+                            "schema": { "type": "string" }
+                        }
+                    }
+                }
+            })
+        } else {
+            serde_json::json!({
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["code", "msg", "data"],
+                                "properties": {
+                                    "code": { "type": "integer", "format": "int32", "enum": [0] },
+                                    "msg": { "type": "string" },
+                                    "data": { "$ref": format!("#/components/schemas/{}", route.response) }
+                                }
                             }
                         }
                     }
                 }
-            }
-        }),
+            })
+        },
     );
 
     serde_json::Value::Object(operation)
@@ -4173,6 +4245,13 @@ fn is_generated_default_logic_stub(content: &str) -> bool {
             || *line == "let _ = req;"
             || line.starts_with("Ok(")
             || line.starts_with("})")
+            || matches!(
+                *line,
+                "(maud::DOCTYPE)"
+                    | "html {"
+                    | "head { meta charset=\"utf-8\"; title { \"Roze\" } }"
+                    | "body { h1 { \"Roze + Maud\" } }"
+            )
             || is_default_stub_field_line(line)
     })
 }
@@ -4256,7 +4335,10 @@ fn write_cargo_toml_with_rpc_clients(
         false,
         kind,
         logical_out,
-        rpc_clients,
+        CargoTemplateOptions {
+            rpc_clients,
+            with_maud: spec.rest_routes.iter().any(|route| route.maud),
+        },
     );
     if options.mode != GenerateMode::Update || !path.exists() {
         let mut manifest = cargo_toml(
@@ -4266,7 +4348,10 @@ fn write_cargo_toml_with_rpc_clients(
             in_workspace,
             kind,
             logical_out,
-            rpc_clients,
+            CargoTemplateOptions {
+                rpc_clients,
+                with_maud: spec.rest_routes.iter().any(|route| route.maud),
+            },
         );
         normalize_generated_workspace_dependencies(
             &mut manifest,
@@ -4304,6 +4389,18 @@ fn write_cargo_toml_with_rpc_clients(
                 "path",
                 toml_edit::Value::from(rpc_client_dependency_path(logical_out, client)),
             )])),
+        );
+    }
+    if kind == ProjectKind::Rest && spec.rest_routes.iter().any(|route| route.maud) {
+        dependencies.insert(
+            "maud",
+            if in_workspace {
+                let mut dependency = toml_edit::InlineTable::new();
+                dependency.insert("workspace", true.into());
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(dependency))
+            } else {
+                toml_edit::value("0.27")
+            },
         );
     }
 
@@ -4743,6 +4840,12 @@ git-fetch-with-cli = true
 "#
 }
 
+#[derive(Clone, Copy)]
+struct CargoTemplateOptions<'a> {
+    rpc_clients: &'a [RpcClientBinding],
+    with_maud: bool,
+}
+
 fn cargo_toml(
     package_name: &str,
     dependency_source: DependencySource,
@@ -4750,7 +4853,7 @@ fn cargo_toml(
     in_workspace: bool,
     kind: ProjectKind,
     out: &Path,
-    rpc_clients: &[RpcClientBinding],
+    cargo_options: CargoTemplateOptions<'_>,
 ) -> String {
     let roze_dependencies = roze_dependencies(
         dependency_source,
@@ -4840,7 +4943,16 @@ tonic-prost-build = "0.14.6""#
         format!("\n[build-dependencies]\n{build_dependencies}\n")
     };
     let workspace_boundary = if in_workspace { "" } else { "\n[workspace]\n" };
-    let rpc_client_dependencies = render_rpc_client_dependencies(out, rpc_clients);
+    let rpc_client_dependencies = render_rpc_client_dependencies(out, cargo_options.rpc_clients);
+    let maud_dependency = if kind == ProjectKind::Rest && cargo_options.with_maud {
+        if in_workspace {
+            "maud.workspace = true\n"
+        } else {
+            "maud = \"0.27\"\n"
+        }
+    } else {
+        ""
+    };
 
     format!(
         r#"[package]
@@ -4851,6 +4963,7 @@ name = "{package_name}"
 {dependencies}
 {roze_dependencies}
 {rpc_client_dependencies}
+{maud_dependency}
 {remaining_dependencies}
 {build_dependencies_section}{workspace_boundary}"#,
         package_name = package_name,
@@ -4858,6 +4971,7 @@ name = "{package_name}"
         dependencies = dependencies,
         roze_dependencies = roze_dependencies,
         rpc_client_dependencies = rpc_client_dependencies,
+        maud_dependency = maud_dependency,
         remaining_dependencies = remaining_dependencies,
         build_dependencies_section = build_dependencies_section,
         workspace_boundary = workspace_boundary,
@@ -14173,7 +14287,10 @@ fn main() {
             true,
             ProjectKind::Rest,
             Path::new("user-api"),
-            &[],
+            CargoTemplateOptions {
+                rpc_clients: &[],
+                with_maud: false,
+            },
         );
 
         assert!(
@@ -14200,7 +14317,10 @@ fn main() {
             true,
             ProjectKind::Rest,
             Path::new("user-api"),
-            &[],
+            CargoTemplateOptions {
+                rpc_clients: &[],
+                with_maud: false,
+            },
         );
 
         assert!(cargo.contains(r#"roze-config = { path = "../../crates/roze-config" }"#));
@@ -14222,7 +14342,10 @@ fn main() {
             false,
             ProjectKind::Rpc,
             Path::new("user"),
-            &[],
+            CargoTemplateOptions {
+                rpc_clients: &[],
+                with_maud: false,
+            },
         );
 
         assert!(cargo.contains(r#"edition = "2021""#));
@@ -14250,7 +14373,10 @@ fn main() {
             false,
             ProjectKind::Rest,
             Path::new("user-api"),
-            &[],
+            CargoTemplateOptions {
+                rpc_clients: &[],
+                with_maud: false,
+            },
         );
         let document = cargo
             .parse::<toml_edit::DocumentMut>()
@@ -14261,6 +14387,86 @@ fn main() {
 
         assert!(dependencies.contains_key("roze-http"));
         assert!(!dependencies.contains_key("roze_http"));
+    }
+
+    #[test]
+    fn generated_maud_rest_cargo_adds_the_template_dependency() {
+        let workspace_cargo = cargo_toml(
+            "web",
+            DependencySource::Path,
+            Some("../../crates"),
+            true,
+            ProjectKind::Rest,
+            Path::new("web"),
+            CargoTemplateOptions {
+                rpc_clients: &[],
+                with_maud: true,
+            },
+        );
+        assert!(workspace_cargo.contains("maud.workspace = true"));
+
+        let standalone_cargo = cargo_toml(
+            "web",
+            DependencySource::Git,
+            None,
+            false,
+            ProjectKind::Rest,
+            Path::new("web"),
+            CargoTemplateOptions {
+                rpc_clients: &[],
+                with_maud: true,
+            },
+        );
+        assert!(standalone_cargo.contains("maud = \"0.27\""));
+    }
+
+    #[test]
+    fn maud_routes_generate_html_openapi_mock_and_contract_tests() {
+        let spec = parse_api(
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (EmptyReq)
+            }
+            "#,
+        )
+        .expect("valid Maud API");
+
+        let openapi = openapi_document(&spec);
+        assert_eq!(
+            openapi["paths"]["/"]["get"]["responses"]["200"]["content"]["text/html"]["schema"]
+                ["type"],
+            "string"
+        );
+
+        let mock = render_mock_main(&spec);
+        assert!(mock.contains("Html<&'static str>"));
+        assert!(mock.contains("Roze + Maud"));
+
+        let tests = render_http_smoke_tests(&spec, "http://127.0.0.1:3000");
+        assert!(tests.contains("expected HTML response"));
+        assert!(tests.contains("generated Maud route returned an empty document"));
+    }
+
+    #[test]
+    fn generated_maud_stub_is_refreshable_until_application_code_changes() {
+        let spec = parse_api(
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (EmptyReq)
+            }
+            "#,
+        )
+        .expect("valid Maud API");
+        let generated = rest::render_logic_files(&spec)[0].2.clone();
+
+        assert!(is_generated_default_logic_stub(&generated));
+        assert!(!is_generated_default_logic_stub(
+            &generated.replace("Roze + Maud", "Application home")
+        ));
     }
 
     #[test]
@@ -14775,6 +14981,50 @@ fn main() {
         cargo_check_generated(&out.join("Cargo.toml"));
         cargo_clippy_generated(&out.join("Cargo.toml"));
         fs::remove_dir_all(root).expect("remove compile workspace");
+    }
+
+    #[test]
+    #[ignore = "compile-smoke: generates a Maud REST project and runs cargo check"]
+    fn generated_maud_rest_project_compiles_and_updates() {
+        let root = generated_compile_workspace("rozectl-maud-rest-compile-smoke");
+        let api = root.join("web.api");
+        let out = root.join("apps/web");
+        fs::write(
+            &api,
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (HomeReq)
+            }
+
+            type HomeReq {
+                name string `query:"name" validate:"optional"`
+            }
+            "#,
+        )
+        .expect("write Maud API");
+
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api: api.clone(),
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Create, DependencySource::Path),
+            })
+            .expect("generate Maud REST project");
+        register_workspace_member(&out).expect("register Maud REST workspace member");
+        registry()
+            .dispatch(GeneratorCommand::ApiGenerate {
+                api,
+                out: out.clone(),
+                options: GenerateOptions::new(GenerateMode::Update, DependencySource::Path),
+            })
+            .expect("update Maud REST project");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
+        assert!(manifest.contains("maud"));
+        cargo_check_generated(&out.join("Cargo.toml"));
+        fs::remove_dir_all(root).expect("remove Maud compile workspace");
     }
 
     #[test]
@@ -18136,6 +18386,7 @@ tonic = "0.14.6"
             handler: None,
             doc: None,
             websocket: false,
+            maud: false,
             middlewares: Vec::new(),
             permissions: Vec::new(),
             server: None,

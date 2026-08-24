@@ -223,6 +223,50 @@ application handler must authenticate the session before accepting business
 frames, commonly in the first frame. See the
 [native HTTP WebSocket contract](../contracts/websocket.md).
 
+## Maud HTML routes
+
+Use `@maud` on a REST route when the application-owned logic should render a
+server-side HTML document with [Maud](https://maud.lambda.xyz/):
+
+```text
+service web {
+    @maud
+    @handler home
+    get / (HomeReq)
+}
+
+type HomeReq {
+    name string `query:"name" validate:"optional"`
+}
+```
+
+The route must omit its response DTO (or explicitly use `EmptyResp`) because
+the generated logic returns `maud::Markup` instead. `rozectl api generate`
+adds `maud = "0.27"` to standalone projects, or `maud.workspace = true` when
+the parent workspace declares it. The preserved logic file starts with a
+complete `maud::html!` document and can use all normal Maud features including
+escaped interpolation, attributes, conditions, loops, partials, `Render`,
+`PreEscaped`, and `DOCTYPE`.
+
+Generated handlers retain the normal Roze request extraction, validation,
+authentication, authorization, rate limiting, timeout, fallback, tracing, and
+request-context behavior, then return `text/html; charset=utf-8`. OpenAPI
+describes the response as a `text/html` string; generated TypeScript and
+JavaScript clients return `string`; mock servers and generated contract tests
+also use HTML semantics. Maud routes cannot be combined with `@websocket` or
+idempotency middleware.
+
+`roze-http` also provides `Html<T>` for any template engine that renders into
+a string. Enable its optional `maud` feature when a hand-written Roze handler
+should return `maud::Markup` directly:
+
+```toml
+roze-http = { version = "1", features = ["maud"] }
+maud = "0.27"
+```
+
+Do not enable Maud's `axum` feature in a Roze service.
+
 ## Runtime configuration path
 
 Generated REST and RPC binaries resolve configuration in this order:

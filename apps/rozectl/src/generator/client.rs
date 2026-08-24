@@ -36,7 +36,7 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     }
 
     out.push_str(
-        "async function requestJson<T>(method: string, path: string, query: Record<string, unknown>, body: unknown, headers: Record<string, string>, options: RequestOptions): Promise<T> {\n",
+        "async function requestJson<T>(method: string, path: string, query: Record<string, unknown>, body: unknown, headers: Record<string, string>, options: RequestOptions, responseKind: 'json' | 'text' = 'json'): Promise<T> {\n",
     );
     out.push_str("  const fetchImpl = options.fetch ?? fetch;\n");
     out.push_str("  const baseUrl = (options.baseUrl ?? '').replace(/\\/$/, '');\n");
@@ -97,6 +97,7 @@ pub fn render_ts_client(spec: &ApiSpec) -> String {
     out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
     out.push_str("  }\n");
     out.push_str("  if (response.status === 204 || method === 'HEAD') return undefined as T;\n");
+    out.push_str("  if (responseKind === 'text') return await response.text() as T;\n");
     out.push_str("  const payload = await response.json() as unknown;\n");
     out.push_str("  if (payload && typeof payload === 'object' && 'code' in payload && 'msg' in payload && 'data' in payload) {\n");
     out.push_str("    const envelope = payload as { code: string | number; msg: unknown; data: unknown; trace_id?: unknown };\n");
@@ -152,7 +153,7 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     }
 
     out.push_str(
-        "async function requestJson(method, path, query, body, headers, options = {}) {\n",
+        "async function requestJson(method, path, query, body, headers, options = {}, responseKind = 'json') {\n",
     );
     out.push_str("  const fetchImpl = options.fetch ?? fetch;\n");
     out.push_str("  const baseUrl = (options.baseUrl ?? '').replace(/\\/$/, '');\n");
@@ -215,6 +216,7 @@ pub fn render_js_client(spec: &ApiSpec) -> String {
     out.push_str("    throw new RozeApiError(response.status, code, message, traceId, error.data ?? error.details, response.headers.get('retry-after') ?? undefined);\n");
     out.push_str("  }\n");
     out.push_str("  if (response.status === 204 || method === 'HEAD') return undefined;\n");
+    out.push_str("  if (responseKind === 'text') return await response.text();\n");
     out.push_str("  const payload = await response.json();\n");
     out.push_str("  if (payload && typeof payload === 'object' && 'code' in payload && 'msg' in payload && 'data' in payload) {\n");
     out.push_str("    const code = String(payload.code);\n");
@@ -375,18 +377,23 @@ fn render_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     };
 
     let mut out = String::new();
+    let response = if route.maud {
+        "string"
+    } else {
+        route.response.as_str()
+    };
     out.push_str(&format!(
         "export async function {function_name}({req_param}, {options}): Promise<{response}> {{\n",
-        response = route.response,
     ));
     out.push_str(&format!(
-        "  return requestJson<{}>({}, {}, {}, {}, {}, options);\n",
-        route.response,
+        "  return requestJson<{}>({}, {}, {}, {}, {}, options{});\n",
+        response,
         ts_string(http_method(&route.method)),
         path,
         query,
         body,
-        headers
+        headers,
+        if route.maud { ", 'text'" } else { "" }
     ));
     out.push_str("}\n");
     out
@@ -422,7 +429,14 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
     } else {
         out.push_str(" * @param {RequestOptions} [options]\n");
     }
-    out.push_str(&format!(" * @returns {{Promise<{}>}}\n", route.response));
+    out.push_str(&format!(
+        " * @returns {{Promise<{}>}}\n",
+        if route.maud {
+            "string"
+        } else {
+            route.response.as_str()
+        }
+    ));
     out.push_str(" */\n");
     let options = if uses_idempotency {
         "options"
@@ -433,12 +447,13 @@ fn render_js_route_function(spec: &ApiSpec, route: &RestRoute) -> String {
         "export async function {function_name}({req_param}, {options}) {{\n"
     ));
     out.push_str(&format!(
-        "  return requestJson({}, {}, {}, {}, {}, options);\n",
+        "  return requestJson({}, {}, {}, {}, {}, options{});\n",
         ts_string(http_method(&route.method)),
         path,
         query,
         body,
-        headers
+        headers,
+        if route.maud { ", 'text'" } else { "" }
     ));
     out.push_str("}\n");
     out
@@ -1077,5 +1092,30 @@ mod tests {
         assert!(js.contains("@typedef {{ report: string"));
         assert!(js.contains("export async function createReportExport"));
         assert!(js.contains("requestJson('POST', \"/api/v1/charts/query\""));
+    }
+
+    #[test]
+    fn maud_routes_generate_text_clients() {
+        let spec = parse_api(
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (EmptyReq)
+            }
+            "#,
+        )
+        .expect("valid Maud API");
+
+        let ts = render_ts_client(&spec);
+        assert!(ts.contains("Promise<string>"));
+        assert!(
+            ts.contains("requestJson<string>(\"GET\", `/`, {}, undefined, {}, options, 'text')")
+        );
+        assert!(ts.contains("responseKind === 'text'"));
+
+        let js = render_js_client(&spec);
+        assert!(js.contains("@returns {Promise<string>}"));
+        assert!(js.contains("requestJson(\"GET\", `/`, {}, undefined, {}, options, 'text')"));
     }
 }

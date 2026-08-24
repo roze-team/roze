@@ -2169,7 +2169,13 @@ fn contract_rest_surfaces(spec: &parser::ApiSpec) -> BTreeMap<String, String> {
             let key = format!("{} {}", contract_http_method(&route.method), route.path);
             let value = format!(
                 "{}; {} -> {}",
-                if route.websocket { "WebSocket" } else { "HTTP" },
+                if route.websocket {
+                    "WebSocket"
+                } else if route.maud {
+                    "Maud HTML"
+                } else {
+                    "HTTP"
+                },
                 route.request,
                 route.response
             );
@@ -2663,6 +2669,9 @@ fn format_api_spec(spec: &parser::ApiSpec) -> String {
         if route.websocket {
             out.push_str("    @websocket\n");
         }
+        if route.maud {
+            out.push_str("    @maud\n");
+        }
         if let Some(handler) = &route.handler {
             out.push_str(&format!("    @handler {}\n", handler));
         }
@@ -2795,7 +2804,28 @@ fn validate_api_spec(spec: &parser::ApiSpec) -> Vec<ApiValidationIssue> {
     validate_referenced_types(spec, &mut issues);
     validate_route_path_params(spec, &mut issues);
     validate_websocket_routes(spec, &mut issues);
+    validate_maud_routes(spec, &mut issues);
     issues
+}
+
+fn validate_maud_routes(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
+    for route in spec.rest_routes.iter().filter(|route| route.maud) {
+        if route.response != "EmptyResp" {
+            issues.push(api_validation_issue(format!(
+                "Maud route {} renders maud::Markup and must use EmptyResp",
+                rest_route_key(spec, route)
+            )));
+        }
+        if validation_route_middlewares(spec, route)
+            .iter()
+            .any(|middleware| middleware.eq_ignore_ascii_case("idempotency"))
+        {
+            issues.push(api_validation_issue(format!(
+                "Maud route {} cannot use idempotency middleware",
+                rest_route_key(spec, route)
+            )));
+        }
+    }
 }
 
 fn validate_websocket_routes(spec: &parser::ApiSpec, issues: &mut Vec<ApiValidationIssue>) {
@@ -3479,6 +3509,13 @@ fn check_rest_routes(
                 } else {
                     "HTTP"
                 }
+            )));
+        }
+        if old_route.maud != new_route.maud {
+            issues.push(breaking(format!(
+                "REST route {key} response representation changed: {} -> {}",
+                if old_route.maud { "Maud HTML" } else { "JSON" },
+                if new_route.maud { "Maud HTML" } else { "JSON" }
             )));
         }
     }
@@ -7486,5 +7523,54 @@ type (
         assert!(report.contains("## TypeScript SDK"));
         assert!(report.contains("Added `function postUsers`"));
         assert!(report.contains("Changed `interface UserResp`"));
+    }
+
+    #[test]
+    fn maud_routes_format_validate_and_report_representation_changes() {
+        let spec = parser::parse_api(
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (EmptyReq)
+            }
+            "#,
+        )
+        .expect("valid Maud API");
+        assert!(validate_api_spec(&spec).is_empty());
+        assert!(format_api_spec(&spec).contains("    @maud\n"));
+
+        let invalid = parser::parse_api(
+            r#"
+            service web {
+                @maud
+                @middleware idempotency
+                get /submit (EmptyReq) returns (PageResp)
+            }
+            type PageResp {
+            }
+            "#,
+        )
+        .expect("parse invalid Maud API before semantic validation");
+        let issues = validate_api_spec(&invalid)
+            .into_iter()
+            .map(|issue| issue.detail)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(issues.contains("must use EmptyResp"));
+        assert!(issues.contains("cannot use idempotency middleware"));
+
+        let json = parser::parse_api(
+            r#"
+            service web {
+                get / (EmptyReq) returns (EmptyResp)
+            }
+            "#,
+        )
+        .expect("valid JSON API");
+        let contract = check_contract_breaking_changes(&json, &spec);
+        assert!(contract
+            .iter()
+            .any(|issue| issue.detail.contains("response representation changed")));
     }
 }

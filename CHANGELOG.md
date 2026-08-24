@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added native Maud integration: `roze_http::Html<T>`, optional direct
+  `maud::Markup` responses, and generated `@maud` REST routes with preserved
+  markup logic, HTML OpenAPI/client/mock/contract-test behavior, and managed
+  Cargo dependencies.
+
 - Pinned development, generated production verification, and release CI to
   Rust 1.98.0; added a scheduled latest-stable compatibility canary, resolved
   Rust 1.98 Clippy findings, and synchronized generated cache cluster wiring.

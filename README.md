@@ -171,6 +171,7 @@ logic.
 - [HTTP status and numeric business code contract](docs/contracts/http-status-and-business-codes.md)
 - [AI runtime contract](docs/contracts/ai-runtime.md)
 - [rozectl generator guide](docs/usage/rozectl-api.md)
+- [Generated Maud HTML routes](docs/usage/rozectl-api.md#maud-html-routes)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)

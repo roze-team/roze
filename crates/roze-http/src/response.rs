@@ -564,6 +564,12 @@ where
     }
 }
 
+/// An HTML response with a UTF-8 content type.
+///
+/// Use this wrapper for template engines that render into a string. With the
+/// `maud` feature enabled, `maud::Markup` can be returned directly instead.
+#[must_use = "needs to be returned from a handler or otherwise turned into a response"]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Html<T>(pub T);
 
 impl<T> Deref for Html<T> {
@@ -591,6 +597,13 @@ where
             HeaderValue::from_static("text/html; charset=utf-8"),
         );
         response
+    }
+}
+
+#[cfg(feature = "maud")]
+impl IntoResponse for maud::Markup {
+    fn into_response(self) -> HttpResponse {
+        Html(self.into_string()).into_response()
     }
 }
 
@@ -1037,5 +1050,18 @@ mod tests {
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"created");
+    }
+
+    #[cfg(feature = "maud")]
+    #[tokio::test]
+    async fn maud_markup_is_a_native_html_response() {
+        let response = maud::html! { p { "Roze & Maud" } }.into_response();
+
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/html; charset=utf-8"))
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"<p>Roze &amp; Maud</p>");
     }
 }

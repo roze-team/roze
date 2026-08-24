@@ -39,6 +39,7 @@ services.
   SQL/Mongo model generation and inspection, Elasticsearch/OpenSearch/
   Meilisearch search generation and inspection, client SDKs, OpenAPI output,
   Docker/Kubernetes manifests, type mapping, and validator tag support.
+  It also documents generated `@maud` server-rendered HTML routes.
 - [AI module generation](./rozectl-ai.md): adds a provider-neutral AI runtime,
   agent composition, tools, prompts, optional resumable DAG workflows,
   multi-agent teams, and Roze Search-backed RAG scaffolds to an existing

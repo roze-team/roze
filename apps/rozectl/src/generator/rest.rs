@@ -1087,6 +1087,25 @@ fn render_logic_fn(route: &RestRoute) -> String {
         out.push_str("}\n");
         return out;
     }
+    if route.maud {
+        out.push_str(&format!(
+            "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<maud::Markup, RozeError> {{\n",
+            handler = handler,
+            request = route.request,
+        ));
+        out.push_str("    let _ = ctx;\n");
+        out.push_str("    let _ = request_ctx;\n");
+        out.push_str("    let _ = req;\n");
+        out.push_str("    Ok(maud::html! {\n");
+        out.push_str("        (maud::DOCTYPE)\n");
+        out.push_str("        html {\n");
+        out.push_str("            head { meta charset=\"utf-8\"; title { \"Roze\" } }\n");
+        out.push_str("            body { h1 { \"Roze + Maud\" } }\n");
+        out.push_str("        }\n");
+        out.push_str("    })\n");
+        out.push_str("}\n");
+        return out;
+    }
     out.push_str(&format!(
         "pub async fn {handler}(ctx: ServiceContext, request_ctx: roze_context::Context, req: {request}) -> Result<{response}, RozeError> {{\n",
         handler = handler,
@@ -1291,10 +1310,16 @@ pub fn render_openapi(spec: &ApiSpec) -> String {
             out.push_str(&format!(".request_body({:?})", route.request));
         }
 
-        out.push_str(&format!(
-            ".response_with_schema(\"200\", \"OK\", \"application/json\", {{ let mut properties = BTreeMap::new(); properties.insert(\"code\".to_string(), Schema::integer(\"int32\")); properties.insert(\"msg\".to_string(), Schema::string()); properties.insert(\"data\".to_string(), Schema::reference({:?})); Schema::object(properties, vec![\"code\".to_string(), \"msg\".to_string(), \"data\".to_string()]) }});\n",
-            route.response
-        ));
+        if route.maud {
+            out.push_str(
+                ".response_with_schema(\"200\", \"OK\", \"text/html\", Schema::string());\n",
+            );
+        } else {
+            out.push_str(&format!(
+                ".response_with_schema(\"200\", \"OK\", \"application/json\", {{ let mut properties = BTreeMap::new(); properties.insert(\"code\".to_string(), Schema::integer(\"int32\")); properties.insert(\"msg\".to_string(), Schema::string()); properties.insert(\"data\".to_string(), Schema::reference({:?})); Schema::object(properties, vec![\"code\".to_string(), \"msg\".to_string(), \"data\".to_string()]) }});\n",
+                route.response
+            ));
+        }
         out.push_str(&format!(
             "    builder.add_operation({:?}, HttpMethod::{}, op);\n",
             full_route_path_for_route(spec, route),
@@ -1441,12 +1466,16 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         matches!(item.key.as_str(), "response" | "response_mode")
             && item.value.eq_ignore_ascii_case("raw")
     });
-    let response_type = if raw_response {
+    let response_type = if route.maud {
+        "roze_http::Html<String>".to_string()
+    } else if raw_response {
         format!("Json<{}>", route.response)
     } else {
         format!("ApiResponse<{}>", route.response)
     };
-    let wrapped_response = if raw_response {
+    let wrapped_response = if route.maud {
+        "roze_http::Html(resp.into_string())"
+    } else if raw_response {
         "Json(resp)"
     } else {
         "ApiResponse::ok(resp)"
@@ -3593,5 +3622,38 @@ mod tests {
 
         let openapi = render_openapi(&spec);
         assert!(!openapi.contains("builder.add_operation(\"/ws\""));
+    }
+
+    #[test]
+    fn maud_routes_generate_markup_logic_html_handlers_and_openapi() {
+        let spec = crate::parser::parse_api(
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (HomeReq)
+            }
+            type HomeReq {
+                name string `query:"name" validate:"optional"`
+            }
+            "#,
+        )
+        .expect("valid Maud API");
+
+        let handlers = render_handler_files(&spec);
+        assert!(handlers[0]
+            .2
+            .contains("Result<roze_http::Html<String>, RozeError>"));
+        assert!(handlers[0]
+            .2
+            .contains("roze_http::Html(resp.into_string())"));
+
+        let logic = render_logic_files(&spec);
+        assert!(logic[0].2.contains("Result<maud::Markup, RozeError>"));
+        assert!(logic[0].2.contains("Ok(maud::html!"));
+
+        let openapi = render_openapi(&spec);
+        assert!(openapi.contains("\"text/html\", Schema::string()"));
+        assert!(!openapi.contains("Schema::reference(\"EmptyResp\")"));
     }
 }

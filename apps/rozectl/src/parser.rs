@@ -57,6 +57,7 @@ pub struct RestRoute {
     pub handler: Option<String>,
     pub doc: Option<String>,
     pub websocket: bool,
+    pub maud: bool,
     pub middlewares: Vec<String>,
     pub permissions: Vec<String>,
     pub server: Option<ServerSpec>,
@@ -189,6 +190,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                 let mut current_handler = None;
                 let mut current_doc = None;
                 let mut current_websocket = false;
+                let mut current_maud = false;
                 let mut current_middlewares: Vec<String> = Vec::new();
                 let mut current_permissions: Vec<String> = Vec::new();
                 let mut current_server = None;
@@ -232,12 +234,19 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         current_websocket = true;
                         continue;
                     }
+                    if matches!(svc_line, "@maud" | "@maud()") {
+                        current_maud = true;
+                        continue;
+                    }
                     if let Some(method) = svc_line.strip_prefix("rpc ") {
                         if current_websocket {
                             return invalid(
                                 svc_line_no,
                                 "`@websocket` can only annotate an HTTP GET route",
                             );
+                        }
+                        if current_maud {
+                            return invalid(svc_line_no, "`@maud` can only annotate an HTTP route");
                         }
                         let mut method = parse_rpc_method(method, svc_line_no)?;
                         method.middlewares = std::mem::take(&mut current_middlewares);
@@ -249,6 +258,13 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
                         route.handler = current_handler.take();
                         route.doc = current_doc.take();
                         route.websocket = std::mem::take(&mut current_websocket);
+                        route.maud = std::mem::take(&mut current_maud);
+                        if route.websocket && route.maud {
+                            return invalid(
+                                svc_line_no,
+                                "`@maud` and `@websocket` cannot annotate the same route",
+                            );
+                        }
                         if route.websocket && route.method != HttpMethod::Get {
                             return invalid(svc_line_no, "`@websocket` requires an HTTP GET route");
                         }
@@ -261,7 +277,7 @@ pub fn parse_api(source: &str) -> Result<ApiSpec, ParseError> {
 
                     return invalid(
                         svc_line_no,
-                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, `@websocket`, RPC method or route declaration",
+                        "expected `@server (...)`, `@handler name`, `@doc text`, `@middleware name`, `@permission name`, `@websocket`, `@maud`, RPC method or route declaration",
                     );
                 }
 
@@ -391,6 +407,7 @@ fn parse_rest_route(line: &str, line_no: usize) -> Result<Option<RestRoute>, Par
         handler: None,
         doc: None,
         websocket: false,
+        maud: false,
         middlewares: Vec::new(),
         permissions: Vec::new(),
         server: None,
@@ -1267,5 +1284,44 @@ mod tests {
         .expect_err("POST WebSocket route must fail");
 
         assert!(error.to_string().contains("requires an HTTP GET route"));
+    }
+
+    #[test]
+    fn parses_maud_route_annotation() {
+        let spec = parse_api(
+            r#"
+            service web {
+                @maud
+                @handler home
+                get / (HomeReq)
+            }
+            type HomeReq {
+                name string `query:"name"`
+            }
+            "#,
+        )
+        .expect("valid Maud API");
+
+        let route = &spec.rest_routes[0];
+        assert!(route.maud);
+        assert!(!route.websocket);
+        assert_eq!(route.response, "EmptyResp");
+    }
+
+    #[test]
+    fn rejects_maud_annotation_on_rpc_method() {
+        let error = parse_api(
+            r#"
+            service web {
+                @maud
+                rpc Render (EmptyReq) returns (EmptyResp)
+            }
+            "#,
+        )
+        .expect_err("RPC Maud annotation must fail");
+
+        assert!(error
+            .to_string()
+            .contains("can only annotate an HTTP route"));
     }
 }
