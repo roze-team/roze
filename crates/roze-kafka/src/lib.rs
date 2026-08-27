@@ -1166,8 +1166,14 @@ async fn publish_recover(cfg: KafkaConfig, mut message: KafkaRecord) -> anyhow::
         }
         RecoverAction::Drop { reason } => {
             record_kafka_event(&message.topic, message.group.as_deref(), reason);
+            let event = match reason {
+                "retry_topic_missing" => "kafka.message.retry_topic_missing",
+                "dead_letter_missing" => "kafka.message.dead_letter_missing",
+                _ => "kafka.message.recovery_dropped",
+            };
             tracing::warn!(
-                event = %format!("kafka.message.{reason}"),
+                event,
+                reason,
                 topic = %message.topic,
                 attempt = %message.attempt,
                 max_retries = cfg.max_retries,

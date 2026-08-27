@@ -705,6 +705,11 @@ enum ConfigCommands {
         #[arg(short = 'f', long = "file")]
         file: Option<PathBuf>,
     },
+    /// Parse, resolve secrets, and validate a service configuration.
+    Validate {
+        #[arg(short = 'f', long = "file")]
+        file: PathBuf,
+    },
     Path,
 }
 
@@ -3804,13 +3809,24 @@ fn tool_version_command(tool: &str) -> Command {
 }
 
 fn check_config(path: &Path) -> DoctorCheck {
-    if path.is_file() {
-        DoctorCheck::ok("config", format!("{} exists", path.display()))
-    } else if path.exists() {
+    if path.exists() && !path.is_file() {
         DoctorCheck::fail("config", format!("{} is not a file", path.display()))
-    } else {
+    } else if !path.exists() {
         DoctorCheck::fail("config", format!("{} does not exist", path.display()))
+    } else {
+        match validate_service_config(path) {
+            Ok(()) => DoctorCheck::ok("config", format!("{} is valid", path.display())),
+            Err(error) => {
+                DoctorCheck::fail("config", format!("{} is invalid: {error}", path.display()))
+            }
+        }
     }
+}
+
+fn validate_service_config(path: &Path) -> anyhow::Result<()> {
+    roze_config::load_service_with_application::<serde_json::Value>(path)
+        .map(|_| ())
+        .with_context(|| format!("failed to validate service config {}", path.display()))
 }
 
 fn check_port(port: u16) -> DoctorCheck {
@@ -3866,12 +3882,11 @@ fn validate_dockerfile_content(content: &str) -> Vec<String> {
         "cargo build --release --bin",
         "LABEL org.opencontainers.image.title=",
         "ENV TZ=",
-        "ROZE_CONFIG_PATH=/app/config.yaml",
+        "ROZE_CONFIG_PATH=/etc/roze/config.yaml",
         "WORKDIR /app",
         "groupadd --system roze",
         "useradd --system --gid roze",
         "COPY --from=builder --chown=roze:roze",
-        "COPY --chown=roze:roze config.yaml",
         "EXPOSE ",
         "USER roze:roze",
         "CMD [\"/usr/local/bin/",
@@ -4797,6 +4812,10 @@ fn run_config(command: ConfigCommands) -> anyhow::Result<()> {
                 print!("{}", default_config());
             }
         }
+        ConfigCommands::Validate { file } => {
+            validate_service_config(&file)?;
+            println!("service config is valid: {}", file.display());
+        }
         ConfigCommands::Path => {
             println!("{}", default_config_path().display());
         }
@@ -5069,6 +5088,32 @@ mod tests {
     }
 
     #[test]
+    fn doctor_config_check_parses_and_validates_service_config() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let valid = directory.path().join("valid.yaml");
+        fs::write(
+            &valid,
+            r#"name: doctor-test
+profile: development
+rest:
+  addr: 127.0.0.1:3000
+  register: false
+governance: {}
+application:
+  feature: enabled
+"#,
+        )
+        .expect("write valid config");
+        assert_eq!(check_config(&valid).status, DoctorStatus::Ok);
+
+        let invalid = directory.path().join("invalid.yaml");
+        fs::write(&invalid, "name: [not-valid").expect("write invalid config");
+        let check = check_config(&invalid);
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains("is invalid"));
+    }
+
+    #[test]
     fn dockerfile_validator_accepts_production_dockerfile() {
         let dockerfile = r#"
 FROM rust:1-bookworm AS builder
@@ -5079,12 +5124,11 @@ RUN cargo build --release --bin user-api
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="user-api"
 ENV TZ=UTC \
-    ROZE_CONFIG_PATH=/app/config.yaml
+    ROZE_CONFIG_PATH=/etc/roze/config.yaml
 WORKDIR /app
 RUN groupadd --system roze \
     && useradd --system --gid roze --home-dir /app --shell /usr/sbin/nologin roze
 COPY --from=builder --chown=roze:roze /app/target/release/user-api /usr/local/bin/user-api
-COPY --chown=roze:roze config.yaml ./config.yaml
 EXPOSE 8080
 USER roze:roze
 CMD ["/usr/local/bin/user-api"]
@@ -5100,10 +5144,9 @@ RUN cargo build --release --bin user-api
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="user-api"
 ENV TZ=UTC \
-    ROZE_CONFIG_PATH=/app/config.yaml
+    ROZE_CONFIG_PATH=/etc/roze/config.yaml
 WORKDIR /app
 COPY --from=builder --chown=roze:roze /app/target/release/user-api /usr/local/bin/user-api
-COPY --chown=roze:roze config.yaml ./config.yaml
 EXPOSE 8080
 CMD ["/usr/local/bin/user-api"]
 "#;

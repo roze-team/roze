@@ -343,7 +343,6 @@ fn log_roze_error(error: &roze_error::RozeError) {
             error_kind = error.kind(),
             request_id,
             trace_id,
-            error = %error,
             "HTTP request failed"
         );
     } else {
@@ -355,7 +354,6 @@ fn log_roze_error(error: &roze_error::RozeError) {
             error_kind = error.kind(),
             request_id,
             trace_id,
-            error = %error,
             "HTTP request rejected"
         );
     }
@@ -683,12 +681,12 @@ mod tests {
         assert!(output.contains("event=\"http.request.failed\""));
         assert!(output.contains("HTTP request failed"));
         assert!(output.contains("error_kind=\"internal\""));
-        assert!(output.contains("database failed"));
+        assert!(!output.contains("database failed"));
         assert!(output.contains("WARN"));
         assert!(output.contains("event=\"http.request.rejected\""));
         assert!(output.contains("HTTP request rejected"));
         assert!(output.contains("error_kind=\"bad_request\""));
-        assert!(output.contains("invalid name"));
+        assert!(!output.contains("invalid name"));
     }
 
     #[tokio::test]

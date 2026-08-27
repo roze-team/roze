@@ -650,7 +650,7 @@ async fn run_lifecycle_hooks(
                 LifecycleHook::Drain => service.drain().await,
             };
             if let Err(error) = result {
-                tracing::error!(event = "service.lifecycle.hook_failed", service = service.name(), hook = ?hook, error = %error, "service lifecycle hook failed");
+                tracing::error!(event = "service.lifecycle.hook_failed", service = service.name(), hook = ?hook, error_kind = "hook_failed", "service lifecycle hook failed");
                 errors.push(format!(
                     "service {} {hook:?} hook failed: {error:#}",
                     service.name()
@@ -706,13 +706,18 @@ fn handle_service_exit(
                 false
             }
             Err(error) => {
-                tracing::error!(event = "service.task.failed", service = %exit.name, outcome = "failed", error = %error, "service task failed");
+                tracing::error!(event = "service.task.failed", service = %exit.name, outcome = "failed", error_kind = "service_failed", "service task failed");
                 errors.push(format!("service {} failed: {error:#}", exit.name));
                 true
             }
         },
         Err(error) => {
-            tracing::error!(event = "service.task.join_failed", outcome = "join_failed", error = %error, "service task join failed");
+            tracing::error!(
+                event = "service.task.join_failed",
+                outcome = "join_failed",
+                error_kind = "join_failed",
+                "service task join failed"
+            );
             errors.push(format!("service task failed: {error}"));
             true
         }
@@ -750,7 +755,7 @@ async fn run_stop_hooks(services: &[Arc<dyn RuntimeService>]) -> Vec<String> {
             .await
             .with_context(|| format!("service {name} stop hook failed"))
         {
-            tracing::error!(event = "service.lifecycle.hook_failed", service = %name, hook = "stop", error = %error, "service lifecycle hook failed");
+            tracing::error!(event = "service.lifecycle.hook_failed", service = %name, hook = "stop", error_kind = "hook_failed", "service lifecycle hook failed");
             errors.push(format!("{error:#}"));
         } else {
             tracing::info!(event = "service.lifecycle.hook_completed", service = %name, hook = "stop", "service lifecycle hook completed");

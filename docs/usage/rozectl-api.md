@@ -62,6 +62,7 @@ rozectl bug
 rozectl bug --verbose
 rozectl config init --o rozectl.yaml
 rozectl config show --file rozectl.yaml
+rozectl config validate --file deploy/config/rest.production.yaml
 rozectl config path
 rozectl migrate api --from go-zero --api user.api --o roze.api
 rozectl migrate api user.api --write
@@ -632,6 +633,11 @@ rozectl doctor --tcp 127.0.0.1:6379 --tcp 127.0.0.1:9092
 rozectl doctor --tool helm --tool etcdctl
 ```
 
+`doctor --config` and `config validate --file` read the complete service
+configuration, resolve supported secret references, reject unknown production
+fields, and run `ServiceConfig` semantic validation. Validation never prints
+the resolved configuration or secret values.
+
 Start, stop, or inspect the local dependency stack:
 
 ```bash
@@ -646,7 +652,7 @@ to enable Docker Compose profiles.
 
 `rozectl doctor` checks the default local tools `rustc`, `cargo`, `docker`, and
 `kubectl`. Extra `--tool` values are checked with `--version`. `--config`
-verifies that a config file exists, and each `--port` verifies that the port is
+loads and validates the service config, and each `--port` verifies that the port is
 available on `127.0.0.1`. Each `--tcp host:port` verifies that a dependency
 endpoint is reachable with a TCP connection, which is enough for local Redis,
 Kafka, NATS, etcd, Consul, or database smoke checks. Missing optional tools are
@@ -2657,11 +2663,13 @@ rozectl docker \
 ```
 
 The generated Dockerfile builds the release binary in a builder stage, copies
-the binary and development `config.yaml` with non-root ownership, sets
-`ROZE_CONFIG_PATH=/app/config.yaml`, adds OCI image labels, exposes the service
-port, and runs as `roze:roze`. Production platforms should override that path
-with a read-only mounted ConfigMap or deployment-owned file. The runtime binary
-is controlled by `--binary`.
+only the binary with non-root ownership, sets
+`ROZE_CONFIG_PATH=/etc/roze/config.yaml`, adds OCI image labels, exposes the
+service port, and runs as `roze:roze`. It deliberately does not bake the local
+development `config.yaml` into the image. Production platforms must mount a
+deployment-owned configuration file at that path (preferably read-only), so a
+missing deployment configuration fails closed. The runtime binary is controlled
+by `--binary`.
 
 ## Kubernetes generation
 

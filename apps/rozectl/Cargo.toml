@@ -16,8 +16,12 @@ futures-util.workspace = true
 reqwest.workspace = true
 roze-sqlx = { path = "../../crates/roze-sqlx" }
 roze-middleware = { path = "../../crates/roze-middleware" }
+roze-config = { path = "../../crates/roze-config" }
 serde_json.workspace = true
 serde.workspace = true
 sha2.workspace = true
 regex.workspace = true
 config.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

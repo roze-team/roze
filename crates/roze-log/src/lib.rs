@@ -37,6 +37,14 @@ pub mod events {
     pub const SERVICE_FAILED: &str = "service.failed";
     pub const SERVICE_HEALTH_DRAINING: &str = "service.health.draining";
     pub const SERVICE_CONTEXT_INITIALIZED: &str = "service.context.initialized";
+    pub const SERVICE_LIFECYCLE_HOOK_STARTED: &str = "service.lifecycle.hook_started";
+    pub const SERVICE_LIFECYCLE_HOOK_COMPLETED: &str = "service.lifecycle.hook_completed";
+    pub const SERVICE_LIFECYCLE_HOOK_FAILED: &str = "service.lifecycle.hook_failed";
+    pub const SERVICE_LIFECYCLE_HOOKS_TIMED_OUT: &str = "service.lifecycle.hooks_timed_out";
+    pub const SERVICE_TASK_STARTING: &str = "service.task.starting";
+    pub const SERVICE_TASK_COMPLETED: &str = "service.task.completed";
+    pub const SERVICE_TASK_FAILED: &str = "service.task.failed";
+    pub const SERVICE_TASK_JOIN_FAILED: &str = "service.task.join_failed";
     pub const SERVICE_REGISTRY_REGISTERED: &str = "service.registry.registered";
     pub const SERVICE_REGISTRY_UNREGISTERED: &str = "service.registry.unregistered";
     pub const HTTP_REQUEST_STARTED: &str = "http.request.started";
@@ -55,6 +63,12 @@ pub mod events {
     pub const STREAM_MESSAGE_RECEIVED: &str = "stream.message.received";
     pub const STREAM_MESSAGE_COMPLETED: &str = "stream.message.completed";
     pub const STREAM_MESSAGE_NACKED: &str = "stream.message.nacked";
+    pub const GATEWAY_CONFIG_RELOAD_FAILED: &str = "gateway.config.reload.failed";
+    pub const GATEWAY_CONFIG_RELOAD_SKIPPED: &str = "gateway.config.hot_reloaded.skipped";
+    pub const GATEWAY_CONFIG_RELOADED: &str = "gateway.config.hot_reloaded";
+    pub const KAFKA_MESSAGE_RETRY_TOPIC_MISSING: &str = "kafka.message.retry_topic_missing";
+    pub const KAFKA_MESSAGE_DEAD_LETTER_MISSING: &str = "kafka.message.dead_letter_missing";
+    pub const KAFKA_MESSAGE_RECOVERY_DROPPED: &str = "kafka.message.recovery_dropped";
     pub const LOG_MAINTENANCE_FAILED: &str = "log.maintenance.failed";
 }
 

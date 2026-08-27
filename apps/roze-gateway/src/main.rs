@@ -33,11 +33,11 @@ async fn main() -> anyhow::Result<()> {
                 if !result.success {
                     roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
                     tracing::warn!(
-                        event = "gateway.config.reload.failed",
+                        event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                         version = result.version,
                         old_version = result.old_version,
                         hash = %result.hash,
-                        error = %result.error.as_deref().unwrap_or("config reload failed"),
+                        error_kind = "config_reload_rejected",
                         "gateway keeps the last valid runtime snapshot"
                     );
                     return;
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
                         roze_gateway::GatewayReloadOutcome::Skipped,
                     );
                     tracing::info!(
-                        event = "gateway.config.hot_reloaded.skipped",
+                        event = roze_log::events::GATEWAY_CONFIG_RELOAD_SKIPPED,
                         version = result.version,
                         hash = %result.hash,
                         "gateway runtime sections are unchanged"
@@ -57,18 +57,18 @@ async fn main() -> anyhow::Result<()> {
                 let Some(updated) = result.config.as_ref() else {
                     roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
                     tracing::warn!(
-                        event = "gateway.config.reload.failed",
+                        event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                         version = result.version,
                         "successful reload result has no config snapshot"
                     );
                     return;
                 };
-                if let Err(error) = updated.validate() {
+                if updated.validate().is_err() {
                     roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
                     tracing::warn!(
-                        event = "gateway.config.reload.failed",
+                        event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                         version = result.version,
-                        error = %error,
+                        error_kind = "config_validation_failed",
                         "gateway keeps the last valid runtime snapshot"
                     );
                     return;
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
                 let Some(gateway) = updated.gateway.clone() else {
                     roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
                     tracing::warn!(
-                        event = "gateway.config.reload.failed",
+                        event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                         version = result.version,
                         "reloaded config removed the gateway section"
                     );
@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
                 if updated_listen != listen {
                     roze_gateway::record_reload_outcome(roze_gateway::GatewayReloadOutcome::Failed);
                     tracing::warn!(
-                        event = "gateway.config.reload.failed",
+                        event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                         version = result.version,
                         current_addr = %listen,
                         requested_addr = %updated_listen,
@@ -96,14 +96,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let registry = match roze_rpc::registry::build_service_registry(updated) {
                     Ok(registry) => registry,
-                    Err(error) => {
+                    Err(_) => {
                         roze_gateway::record_reload_outcome(
                             roze_gateway::GatewayReloadOutcome::Failed,
                         );
                         tracing::warn!(
-                            event = "gateway.config.reload.failed",
+                            event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                             version = result.version,
-                            error = %error,
+                            error_kind = "registry_rebuild_failed",
                             "gateway registry reload failed"
                         );
                         return;
@@ -123,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
                             roze_gateway::GatewayReloadOutcome::Applied,
                         );
                         tracing::info!(
-                            event = "gateway.config.hot_reloaded",
+                            event = roze_log::events::GATEWAY_CONFIG_RELOADED,
                             version = result.version,
                             old_version = result.old_version,
                             hash = %result.hash,
@@ -131,14 +131,14 @@ async fn main() -> anyhow::Result<()> {
                             "gateway runtime snapshot atomically replaced"
                         );
                     }
-                    Err(error) => {
+                    Err(_) => {
                         roze_gateway::record_reload_outcome(
                             roze_gateway::GatewayReloadOutcome::Failed,
                         );
                         tracing::warn!(
-                            event = "gateway.config.reload.failed",
+                            event = roze_log::events::GATEWAY_CONFIG_RELOAD_FAILED,
                             version = result.version,
-                            error = %error,
+                            error_kind = "runtime_rebuild_failed",
                             "gateway keeps the last valid runtime snapshot"
                         );
                     }
