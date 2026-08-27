@@ -22,6 +22,7 @@ static WEBSOCKET_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static OUTBOX_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static DATABASE_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 static SMS_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
+static LOG_METRICS: OnceLock<MetricRegistry> = OnceLock::new();
 const LATENCY_BUCKETS: usize = 65;
 
 /// Fixed-memory, power-of-two latency histogram for long-running evidence.
@@ -210,6 +211,14 @@ pub fn record_http_request(success: bool, elapsed: Duration) {
         REQUEST_FAILED.fetch_add(1, Ordering::Relaxed);
     }
     REQUEST_ELAPSED_MS.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+}
+
+pub fn record_log_dropped_lines(sink: impl Into<String>, count: u64) {
+    if count == 0 {
+        return;
+    }
+    let labels = MetricLabels::new().insert("sink", sink.into());
+    log_metrics_registry().inc_counter("roze_log_lines_dropped_total", labels, count);
 }
 
 pub fn record_http_route(
@@ -556,6 +565,7 @@ pub fn http_metrics() -> String {
     out.push_str(&outbox_metrics_registry().render());
     out.push_str(&database_metrics_registry().render());
     out.push_str(&sms_metrics_registry().render());
+    out.push_str(&log_metrics_registry().render());
     out
 }
 
@@ -603,6 +613,10 @@ pub fn sms_metrics_registry() -> &'static MetricRegistry {
     SMS_METRICS.get_or_init(MetricRegistry::new)
 }
 
+pub fn log_metrics_registry() -> &'static MetricRegistry {
+    LOG_METRICS.get_or_init(MetricRegistry::new)
+}
+
 fn escape_label_value(value: &str) -> String {
     value
         .replace('\\', r"\\")
@@ -640,6 +654,13 @@ mod tests {
         let metrics = http_metrics();
         assert!(metrics.contains("roze_http_requests_total"));
         assert!(metrics.contains("roze_http_requests_failed_total"));
+    }
+
+    #[test]
+    fn renders_log_drop_counter() {
+        record_log_dropped_lines("file-test", 3);
+        let metrics = http_metrics();
+        assert!(metrics.contains("roze_log_lines_dropped_total{sink=\"file-test\"} 3"));
     }
 
     #[test]

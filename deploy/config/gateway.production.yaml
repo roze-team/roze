@@ -15,6 +15,17 @@ logging:
   utc_time: true
   non_blocking_buffer: 8192
   lossy: true
+  # Container deployments normally keep stdout only. For a writable host mount:
+  # file:
+  #   directory: /var/log/roze
+  #   file_name_pattern: "roze-gateway.{date}.log"
+  #   rotation: hourly
+  #   date_format: "%Y-%m-%d-%H"
+  #   max_file_size_bytes: 104857600
+  #   compression: gzip
+  #   compression_level: 6
+  #   retention_days: 7
+  #   maintenance_interval_secs: 3600
 
 auth:
   jwt_keys:

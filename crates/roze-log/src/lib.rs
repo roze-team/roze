@@ -1,10 +1,13 @@
 use std::{
     ffi::OsStr,
     fmt,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter},
-    path::Path,
-    sync::mpsc,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime},
 };
@@ -14,7 +17,8 @@ use chrono::{Local, Utc};
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use roze_config::{
-    LogFileConfig, LogFormat, LogRotation, LogSpanEvents, LoggingConfig, ServiceConfig,
+    LogCompression, LogFileConfig, LogFormat, LogRotation, LogSpanEvents, LoggingConfig,
+    ServiceConfig,
 };
 use roze_opentelemetry::SdkTracerProvider;
 use tracing_subscriber::{
@@ -70,6 +74,7 @@ pub mod events {
     pub const KAFKA_MESSAGE_DEAD_LETTER_MISSING: &str = "kafka.message.dead_letter_missing";
     pub const KAFKA_MESSAGE_RECOVERY_DROPPED: &str = "kafka.message.recovery_dropped";
     pub const LOG_MAINTENANCE_FAILED: &str = "log.maintenance.failed";
+    pub const LOG_LINES_DROPPED: &str = "log.lines.dropped";
 }
 
 /// A display/debug wrapper that never reveals its inner value.
@@ -110,8 +115,13 @@ struct MaintenanceWorker {
 }
 
 impl MaintenanceWorker {
-    fn spawn(config: LogFileConfig, utc_time: bool) -> anyhow::Result<Option<Self>> {
-        run_log_maintenance(&config, utc_time)?;
+    fn spawn(
+        config: LogFileConfig,
+        active_file: ActiveFile,
+        error_counters: Vec<tracing_appender::non_blocking::ErrorCounter>,
+        reported_dropped_lines: Arc<AtomicU64>,
+    ) -> anyhow::Result<Option<Self>> {
+        run_log_maintenance(&config, &active_file)?;
         if config.maintenance_interval_secs == 0 {
             return Ok(None);
         }
@@ -123,7 +133,8 @@ impl MaintenanceWorker {
                 match receiver.recv_timeout(interval) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if let Err(error) = run_log_maintenance(&config, utc_time) {
+                        report_dropped_lines(&error_counters, &reported_dropped_lines);
+                        if let Err(error) = run_log_maintenance(&config, &active_file) {
                             tracing::warn!(
                                 event = events::LOG_MAINTENANCE_FAILED,
                                 error = %error,
@@ -148,6 +159,202 @@ impl MaintenanceWorker {
     }
 }
 
+type ActiveFile = Arc<Mutex<PathBuf>>;
+
+#[derive(Clone)]
+struct ConfigurableRollingWriter {
+    config: LogFileConfig,
+    utc_time: bool,
+    state: Arc<Mutex<RollingState>>,
+    active_file: ActiveFile,
+}
+
+struct RollingState {
+    bucket: String,
+    sequence: u32,
+    file: File,
+    bytes: u64,
+}
+
+impl ConfigurableRollingWriter {
+    fn new(config: LogFileConfig, utc_time: bool) -> anyhow::Result<Self> {
+        let bucket = current_bucket(config.rotation, utc_time);
+        let base_name = current_file_name(&config, utc_time);
+        let (sequence, path, file, bytes) = open_writable_file(&config, &base_name)?;
+        let active_file = Arc::new(Mutex::new(path.clone()));
+        Ok(Self {
+            config,
+            utc_time,
+            state: Arc::new(Mutex::new(RollingState {
+                bucket,
+                sequence,
+                file,
+                bytes,
+            })),
+            active_file,
+        })
+    }
+
+    fn active_file(&self) -> ActiveFile {
+        Arc::clone(&self.active_file)
+    }
+
+    fn prepare(&self, incoming: usize) -> std::io::Result<std::sync::MutexGuard<'_, RollingState>> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let bucket = current_bucket(self.config.rotation, self.utc_time);
+        if state.bucket != bucket {
+            let base_name = current_file_name(&self.config, self.utc_time);
+            let (sequence, path, file, bytes) =
+                open_writable_file(&self.config, &base_name).map_err(std::io::Error::other)?;
+            state = self.replace_state(state, bucket, sequence, path, file, bytes);
+        } else if self.config.max_file_size_bytes > 0
+            && state.bytes > 0
+            && state.bytes.saturating_add(incoming as u64) > self.config.max_file_size_bytes
+        {
+            let base_name = current_file_name(&self.config, self.utc_time);
+            let (sequence, path, file, bytes) =
+                open_writable_file_from(&self.config, &base_name, state.sequence.saturating_add(1))
+                    .map_err(std::io::Error::other)?;
+            state = self.replace_state(state, bucket, sequence, path, file, bytes);
+        }
+        Ok(state)
+    }
+
+    fn replace_state<'a>(
+        &self,
+        mut state: std::sync::MutexGuard<'a, RollingState>,
+        bucket: String,
+        sequence: u32,
+        path: PathBuf,
+        file: File,
+        bytes: u64,
+    ) -> std::sync::MutexGuard<'a, RollingState> {
+        *self
+            .active_file
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = path.clone();
+        *state = RollingState {
+            bucket,
+            sequence,
+            file,
+            bytes,
+        };
+        state
+    }
+}
+
+impl std::io::Write for ConfigurableRollingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut state = self.prepare(bytes.len())?;
+        let written = state.file.write(bytes)?;
+        state.bytes = state.bytes.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .file
+            .flush()
+    }
+}
+
+fn current_bucket(rotation: LogRotation, utc_time: bool) -> String {
+    let format = match rotation {
+        LogRotation::Hourly => "%Y-%m-%d-%H",
+        LogRotation::Daily => "%Y-%m-%d",
+        LogRotation::Never => return "never".to_string(),
+    };
+    if utc_time {
+        Utc::now().format(format).to_string()
+    } else {
+        Local::now().format(format).to_string()
+    }
+}
+
+fn current_file_name(config: &LogFileConfig, utc_time: bool) -> String {
+    if !config.file_name_pattern.contains("{date}") {
+        return config.file_name_pattern.clone();
+    }
+    let date = if utc_time {
+        Utc::now().format(&config.date_format).to_string()
+    } else {
+        Local::now().format(&config.date_format).to_string()
+    };
+    config.file_name_pattern.replace("{date}", &date)
+}
+
+fn open_writable_file(
+    config: &LogFileConfig,
+    base_name: &str,
+) -> anyhow::Result<(u32, PathBuf, File, u64)> {
+    open_writable_file_from(config, base_name, 0)
+}
+
+fn open_writable_file_from(
+    config: &LogFileConfig,
+    base_name: &str,
+    mut sequence: u32,
+) -> anyhow::Result<(u32, PathBuf, File, u64)> {
+    loop {
+        let name = if sequence == 0 {
+            base_name.to_string()
+        } else {
+            sequenced_file_name(base_name, sequence)
+        };
+        let path = config.directory.join(name);
+        let (file, bytes) = open_append(&path)?;
+        if config.max_file_size_bytes == 0 || bytes < config.max_file_size_bytes {
+            return Ok((sequence, path, file, bytes));
+        }
+        sequence = sequence
+            .checked_add(1)
+            .context("log file sequence exhausted")?;
+    }
+}
+
+fn open_append(path: &Path) -> anyhow::Result<(File, u64)> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open log file {}", path.display()))?;
+    let bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    Ok((file, bytes))
+}
+
+fn sequenced_file_name(base_name: &str, sequence: u32) -> String {
+    let path = Path::new(base_name);
+    match (
+        path.file_stem().and_then(OsStr::to_str),
+        path.extension().and_then(OsStr::to_str),
+    ) {
+        (Some(stem), Some(extension)) => format!("{stem}.{sequence}.{extension}"),
+        _ => format!("{base_name}.{sequence}"),
+    }
+}
+
+fn is_sequenced_name(name: &str, base_name: &str) -> bool {
+    let path = Path::new(base_name);
+    match (
+        path.file_stem().and_then(OsStr::to_str),
+        path.extension().and_then(OsStr::to_str),
+    ) {
+        (Some(stem), Some(extension)) => name
+            .strip_prefix(&format!("{stem}."))
+            .and_then(|value| value.strip_suffix(&format!(".{extension}")))
+            .is_some_and(|sequence| {
+                !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())
+            }),
+        _ => name
+            .strip_prefix(&format!("{base_name}."))
+            .is_some_and(|sequence| {
+                !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())
+            }),
+    }
+}
+
 /// Owns asynchronous writer and telemetry resources for a service lifetime.
 #[must_use = "dropping the tracing guard immediately disables asynchronous log flushing"]
 pub struct TracingGuard {
@@ -155,15 +362,13 @@ pub struct TracingGuard {
     tracer_provider: Option<SdkTracerProvider>,
     writer_guards: Vec<tracing_appender::non_blocking::WorkerGuard>,
     error_counters: Vec<tracing_appender::non_blocking::ErrorCounter>,
+    reported_dropped_lines: Arc<AtomicU64>,
 }
 
 impl TracingGuard {
     /// Number of lines dropped by lossy asynchronous file writers.
     pub fn dropped_lines(&self) -> u64 {
-        self.error_counters
-            .iter()
-            .map(|counter| counter.dropped_lines() as u64)
-            .sum()
+        report_dropped_lines(&self.error_counters, &self.reported_dropped_lines)
     }
 }
 
@@ -172,6 +377,7 @@ impl Drop for TracingGuard {
         if let Some(mut maintenance) = self.maintenance.take() {
             maintenance.shutdown();
         }
+        report_dropped_lines(&self.error_counters, &self.reported_dropped_lines);
         if let Some(provider) = self.tracer_provider.take() {
             if let Err(error) = provider.shutdown() {
                 eprintln!("failed to shut down OpenTelemetry provider: {error}");
@@ -251,6 +457,7 @@ fn init_logging_pipeline(
     let mut layers: Vec<BoxLayer> = Vec::new();
     let mut writer_guards = Vec::new();
     let mut error_counters = Vec::new();
+    let reported_dropped_lines = Arc::new(AtomicU64::new(0));
     let mut maintenance = None;
 
     if logging.enabled && logging.stdout {
@@ -275,22 +482,25 @@ fn init_logging_pipeline(
                     file.directory.display()
                 )
             })?;
-            maintenance = MaintenanceWorker::spawn(file.clone(), logging.utc_time)?;
-            let appender = tracing_appender::rolling::RollingFileAppender::builder()
-                .rotation(rotation(file.rotation))
-                .filename_prefix(&file.file_name)
-                .build(&file.directory)
+            let appender = ConfigurableRollingWriter::new(file.clone(), logging.utc_time)
                 .with_context(|| {
                     format!(
                         "failed to open rolling log file in {}",
                         file.directory.display()
                     )
                 })?;
+            let active_file = appender.active_file();
             let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
                 .buffered_lines_limit(logging.non_blocking_buffer)
                 .lossy(logging.lossy)
                 .finish(appender);
             error_counters.push(writer.error_counter());
+            maintenance = MaintenanceWorker::spawn(
+                file.clone(),
+                active_file,
+                error_counters.clone(),
+                Arc::clone(&reported_dropped_lines),
+            )?;
             writer_guards.push(guard);
             layers.push(
                 format_layer(logging, timer.clone(), span_events, false, writer)
@@ -317,7 +527,31 @@ fn init_logging_pipeline(
         tracer_provider,
         writer_guards,
         error_counters,
+        reported_dropped_lines,
     })
+}
+
+fn report_dropped_lines(
+    counters: &[tracing_appender::non_blocking::ErrorCounter],
+    reported: &AtomicU64,
+) -> u64 {
+    let total = counters
+        .iter()
+        .map(|counter| counter.dropped_lines() as u64)
+        .sum::<u64>();
+    let previous = reported.swap(total, Ordering::Relaxed);
+    if total > previous {
+        let dropped = total - previous;
+        roze_metrics::record_log_dropped_lines("file", dropped);
+        tracing::warn!(
+            event = events::LOG_LINES_DROPPED,
+            sink = "file",
+            dropped_lines = dropped,
+            dropped_lines_total = total,
+            "asynchronous log lines dropped"
+        );
+    }
+    total
 }
 
 fn resolve_filter(config: &LoggingConfig, fallback: &str) -> anyhow::Result<EnvFilter> {
@@ -378,18 +612,13 @@ fn span_events(value: LogSpanEvents) -> FmtSpan {
     }
 }
 
-fn rotation(value: LogRotation) -> tracing_appender::rolling::Rotation {
-    match value {
-        LogRotation::Hourly => tracing_appender::rolling::Rotation::HOURLY,
-        LogRotation::Daily => tracing_appender::rolling::Rotation::DAILY,
-        LogRotation::Never => tracing_appender::rolling::Rotation::NEVER,
-    }
-}
-
-fn run_log_maintenance(config: &LogFileConfig, utc_time: bool) -> anyhow::Result<()> {
+fn run_log_maintenance(config: &LogFileConfig, active_file: &ActiveFile) -> anyhow::Result<()> {
     let now = SystemTime::now();
     let retention = Duration::from_secs(config.retention_days.saturating_mul(86_400));
-    let active_names = active_log_file_names(config, utc_time);
+    let active_file = active_file
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     for entry in fs::read_dir(&config.directory).with_context(|| {
         format!(
             "failed to read log directory {}",
@@ -398,13 +627,10 @@ fn run_log_maintenance(config: &LogFileConfig, utc_time: bool) -> anyhow::Result
     })? {
         let entry = entry.context("failed to read log directory entry")?;
         let path = entry.path();
-        if !path.is_file() || !is_owned_log_file(&path, &config.file_name) {
+        if !path.is_file() || !is_owned_log_file(&path, config) {
             continue;
         }
-        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
-            continue;
-        };
-        if active_names.iter().any(|active| active == name) {
+        if path == active_file {
             continue;
         }
 
@@ -420,44 +646,60 @@ fn run_log_maintenance(config: &LogFileConfig, utc_time: bool) -> anyhow::Result
             }
         }
 
-        if config.compress_rotated && path.extension().and_then(OsStr::to_str) != Some("gz") {
-            compress_file(&path)?;
+        if config.compression == LogCompression::Gzip
+            && path.extension().and_then(OsStr::to_str) != Some("gz")
+        {
+            compress_file(&path, config.compression_level)?;
         }
     }
     Ok(())
 }
 
-fn is_owned_log_file(path: &Path, file_name: &str) -> bool {
+fn is_owned_log_file(path: &Path, config: &LogFileConfig) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
         .is_some_and(|name| {
-            !name.ends_with(".tmp")
-                && (name == file_name || name.starts_with(&format!("{file_name}.")))
+            if name.ends_with(".tmp") {
+                return false;
+            }
+            let name = name.strip_suffix(".gz").unwrap_or(name);
+            if let Some((prefix, suffix)) = config.file_name_pattern.split_once("{date}") {
+                let Some(middle) = name
+                    .strip_prefix(prefix)
+                    .and_then(|value| value.strip_suffix(suffix))
+                else {
+                    return false;
+                };
+                valid_date_segment(middle, &config.date_format)
+            } else {
+                name == config.file_name_pattern
+                    || is_sequenced_name(name, &config.file_name_pattern)
+            }
         })
 }
 
-fn active_log_file_names(config: &LogFileConfig, _utc_time: bool) -> Vec<String> {
-    let suffix_format = match config.rotation {
-        LogRotation::Never => return vec![config.file_name.clone()],
-        LogRotation::Daily => "%Y-%m-%d",
-        LogRotation::Hourly => "%Y-%m-%d-%H",
-    };
-    let utc = format!("{}.{}", config.file_name, Utc::now().format(suffix_format));
-    let local = format!(
-        "{}.{}",
-        config.file_name,
-        Local::now().format(suffix_format)
-    );
-    if utc == local {
-        vec![utc]
-    } else {
-        // tracing-appender rotates in UTC. Keep local too so a future backend
-        // change cannot cause the active file to be compressed.
-        vec![utc, local]
+fn valid_date_segment(value: &str, date_format: &str) -> bool {
+    if parses_date_segment(value, date_format) {
+        return true;
     }
+    value.rsplit_once('.').is_some_and(|(date, sequence)| {
+        !sequence.is_empty()
+            && sequence.bytes().all(|byte| byte.is_ascii_digit())
+            && parses_date_segment(date, date_format)
+    })
 }
 
-fn compress_file(path: &Path) -> anyhow::Result<()> {
+fn parses_date_segment(value: &str, date_format: &str) -> bool {
+    let mut parsed = chrono::format::Parsed::new();
+    chrono::format::parse(
+        &mut parsed,
+        value,
+        chrono::format::StrftimeItems::new(date_format),
+    )
+    .is_ok()
+}
+
+fn compress_file(path: &Path, level: u32) -> anyhow::Result<()> {
     let name = path
         .file_name()
         .and_then(OsStr::to_str)
@@ -481,7 +723,7 @@ fn compress_file(path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to create compressed log {}", temporary.display()))?;
     let mut reader = BufReader::new(input);
     let writer = BufWriter::new(output);
-    let mut encoder = flate2::write::GzEncoder::new(writer, flate2::Compression::default());
+    let mut encoder = flate2::write::GzEncoder::new(writer, flate2::Compression::new(level));
     std::io::copy(&mut reader, &mut encoder)
         .with_context(|| format!("failed to compress rotated log {}", path.display()))?;
     encoder
@@ -508,46 +750,53 @@ mod tests {
 
     #[test]
     fn maintenance_only_owns_exact_log_prefix() {
+        let config = LogFileConfig {
+            file_name_pattern: "roze.{date}.log".to_string(),
+            date_format: "%Y-%m-%d".to_string(),
+            ..LogFileConfig::default()
+        };
+        assert!(is_owned_log_file(Path::new("roze.2026-01-01.log"), &config));
         assert!(is_owned_log_file(
-            Path::new("roze.log.2026-01-01"),
-            "roze.log"
-        ));
-        assert!(is_owned_log_file(
-            Path::new("roze.log.2026-01-01.gz"),
-            "roze.log"
+            Path::new("roze.2026-01-01.2.log.gz"),
+            &config
         ));
         assert!(!is_owned_log_file(
-            Path::new("roze.logger.2026-01-01"),
-            "roze.log"
+            Path::new("roze.not-a-date.log"),
+            &config
         ));
         assert!(!is_owned_log_file(
-            Path::new("roze.log.2026-01-01.gz.tmp"),
-            "roze.log"
+            Path::new("roze.2026-01-01.log.gz.tmp"),
+            &config
         ));
-        assert!(!is_owned_log_file(Path::new("other.log"), "roze.log"));
+        assert!(!is_owned_log_file(Path::new("other.log"), &config));
     }
 
     #[test]
     fn maintenance_compresses_rotated_logs_and_preserves_unrelated_files() {
         let directory = tempfile::tempdir().expect("temp directory");
-        let rotated = directory.path().join("roze.log.2000-01-01");
-        let unrelated = directory.path().join("other.log.2000-01-01");
+        let rotated = directory.path().join("roze.2000-01-01.log");
+        let active = directory.path().join("roze.2099-01-01.log");
+        let unrelated = directory.path().join("other.2000-01-01.log");
         fs::write(&rotated, b"structured log\n").expect("rotated log");
+        fs::write(&active, b"active\n").expect("active log");
         fs::write(&unrelated, b"unrelated\n").expect("unrelated log");
         let config = LogFileConfig {
             directory: directory.path().to_path_buf(),
-            file_name: "roze.log".to_string(),
-            compress_rotated: true,
+            file_name_pattern: "roze.{date}.log".to_string(),
+            compression: LogCompression::Gzip,
             retention_days: 0,
             maintenance_interval_secs: 0,
             ..LogFileConfig::default()
         };
 
-        run_log_maintenance(&config, true).expect("maintenance");
+        let active_file = Arc::new(Mutex::new(active.clone()));
+        run_log_maintenance(&config, &active_file).expect("maintenance");
 
         assert!(!rotated.exists());
+        assert!(active.exists());
+        assert!(!directory.path().join("roze.2099-01-01.log.gz").exists());
         assert!(unrelated.exists());
-        let compressed = directory.path().join("roze.log.2000-01-01.gz");
+        let compressed = directory.path().join("roze.2000-01-01.log.gz");
         let mut decoder =
             flate2::read::GzDecoder::new(File::open(compressed).expect("compressed log"));
         let mut body = String::new();
@@ -566,7 +815,7 @@ mod tests {
             lossy: false,
             file: Some(LogFileConfig {
                 directory: directory.path().to_path_buf(),
-                file_name: "service.log".to_string(),
+                file_name_pattern: "service.log".to_string(),
                 rotation: LogRotation::Never,
                 maintenance_interval_secs: 0,
                 ..LogFileConfig::default()
@@ -592,5 +841,30 @@ mod tests {
         assert_eq!(record["fields"]["service"], "test-service");
         assert_eq!(record["fields"]["protocol"], "test");
         assert!(record["timestamp"].is_string());
+    }
+
+    #[test]
+    fn size_rotation_preserves_extension_and_existing_segments() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let config = LogFileConfig {
+            directory: directory.path().to_path_buf(),
+            file_name_pattern: "service.log".to_string(),
+            rotation: LogRotation::Never,
+            max_file_size_bytes: 5,
+            ..LogFileConfig::default()
+        };
+        let mut writer = ConfigurableRollingWriter::new(config, true).expect("rolling writer");
+        std::io::Write::write_all(&mut writer, b"first").expect("first segment");
+        std::io::Write::write_all(&mut writer, b"second").expect("second segment");
+        std::io::Write::flush(&mut writer).expect("flush");
+
+        assert_eq!(
+            fs::read(directory.path().join("service.log")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(directory.path().join("service.1.log")).unwrap(),
+            b"second"
+        );
     }
 }

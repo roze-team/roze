@@ -1119,15 +1119,22 @@ pub enum LogSpanEvents {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LogFileConfig {
     #[serde(default = "default_log_directory")]
     pub directory: PathBuf,
-    #[serde(default = "default_log_file_name")]
-    pub file_name: String,
+    #[serde(default = "default_log_file_name_pattern")]
+    pub file_name_pattern: String,
     #[serde(default)]
     pub rotation: LogRotation,
+    #[serde(default = "default_log_date_format")]
+    pub date_format: String,
     #[serde(default)]
-    pub compress_rotated: bool,
+    pub max_file_size_bytes: u64,
+    #[serde(default)]
+    pub compression: LogCompression,
+    #[serde(default = "default_log_compression_level")]
+    pub compression_level: u32,
     #[serde(default = "default_log_retention_days")]
     pub retention_days: u64,
     #[serde(default = "default_log_maintenance_interval_secs")]
@@ -1138,9 +1145,12 @@ impl Default for LogFileConfig {
     fn default() -> Self {
         Self {
             directory: default_log_directory(),
-            file_name: default_log_file_name(),
+            file_name_pattern: default_log_file_name_pattern(),
             rotation: LogRotation::Daily,
-            compress_rotated: false,
+            date_format: default_log_date_format(),
+            max_file_size_bytes: 0,
+            compression: LogCompression::None,
+            compression_level: default_log_compression_level(),
             retention_days: default_log_retention_days(),
             maintenance_interval_secs: default_log_maintenance_interval_secs(),
         }
@@ -1153,17 +1163,60 @@ impl LogFileConfig {
             !self.directory.as_os_str().is_empty(),
             "logging.file.directory must not be empty"
         );
-        let file_name = self.file_name.trim();
+        let file_name = self.file_name_pattern.trim();
         anyhow::ensure!(
             !file_name.is_empty() && file_name != "." && file_name != "..",
-            "logging.file.file_name must be a non-empty file name"
+            "logging.file.file_name_pattern must be a non-empty file name"
         );
         anyhow::ensure!(
             Path::new(file_name)
                 .file_name()
                 .is_some_and(|name| name == file_name)
                 && !file_name.contains(['/', '\\']),
-            "logging.file.file_name must not contain a directory"
+            "logging.file.file_name_pattern must not contain a directory"
+        );
+        let date_tokens = file_name.matches("{date}").count();
+        match self.rotation {
+            LogRotation::Never => anyhow::ensure!(
+                date_tokens == 0,
+                "logging.file.file_name_pattern must not contain {{date}} when rotation is never"
+            ),
+            LogRotation::Hourly | LogRotation::Daily => anyhow::ensure!(
+                date_tokens == 1,
+                "logging.file.file_name_pattern must contain exactly one {{date}} token"
+            ),
+        }
+        anyhow::ensure!(
+            !self.date_format.trim().is_empty()
+                && !chrono::format::StrftimeItems::new(&self.date_format)
+                    .any(|item| matches!(item, chrono::format::Item::Error)),
+            "logging.file.date_format must be a valid chrono strftime format"
+        );
+        if self.rotation != LogRotation::Never {
+            let sample = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+                .and_then(|date| date.and_hms_opt(12, 0, 0))
+                .expect("valid log format validation timestamp");
+            let next = match self.rotation {
+                LogRotation::Hourly => sample + chrono::Duration::hours(1),
+                LogRotation::Daily => sample + chrono::Duration::days(1),
+                LogRotation::Never => unreachable!(),
+            };
+            let sample_name = sample.format(&self.date_format).to_string();
+            let next_name = next.format(&self.date_format).to_string();
+            anyhow::ensure!(
+                !sample_name.is_empty()
+                    && !sample_name.contains(['/', '\\'])
+                    && !next_name.contains(['/', '\\']),
+                "logging.file.date_format must render a safe file-name segment"
+            );
+            anyhow::ensure!(
+                sample_name != next_name,
+                "logging.file.date_format must change for every configured rotation period"
+            );
+        }
+        anyhow::ensure!(
+            self.compression_level <= 9,
+            "logging.file.compression_level must be between 0 and 9"
         );
         anyhow::ensure!(
             self.retention_days <= 36_500,
@@ -1184,6 +1237,14 @@ pub enum LogRotation {
     #[default]
     Daily,
     Never,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogCompression {
+    #[default]
+    None,
+    Gzip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1898,8 +1959,16 @@ fn default_log_directory() -> PathBuf {
     PathBuf::from("logs")
 }
 
-fn default_log_file_name() -> String {
-    "roze.log".to_string()
+fn default_log_file_name_pattern() -> String {
+    "roze.{date}.log".to_string()
+}
+
+fn default_log_date_format() -> String {
+    "%Y-%m-%d".to_string()
+}
+
+fn default_log_compression_level() -> u32 {
+    6
 }
 
 fn default_log_retention_days() -> u64 {
@@ -3178,9 +3247,12 @@ lossy = false
 
 [logging.file]
 directory = "var/log/roze"
-file_name = "demo.log"
+file_name_pattern = "demo.{date}.log"
 rotation = "hourly"
-compress_rotated = true
+date_format = "%Y-%m-%d-%H"
+max_file_size_bytes = 104857600
+compression = "gzip"
+compression_level = 7
 retention_days = 14
 maintenance_interval_secs = 60
 
@@ -3200,9 +3272,12 @@ maintenance_interval_secs = 60
         assert!(!config.logging.lossy);
         let file = config.logging.file.expect("file logging");
         assert_eq!(file.directory, PathBuf::from("var/log/roze"));
-        assert_eq!(file.file_name, "demo.log");
+        assert_eq!(file.file_name_pattern, "demo.{date}.log");
         assert_eq!(file.rotation, LogRotation::Hourly);
-        assert!(file.compress_rotated);
+        assert_eq!(file.date_format, "%Y-%m-%d-%H");
+        assert_eq!(file.max_file_size_bytes, 104_857_600);
+        assert_eq!(file.compression, LogCompression::Gzip);
+        assert_eq!(file.compression_level, 7);
         assert_eq!(file.retention_days, 14);
     }
 
@@ -3215,14 +3290,44 @@ maintenance_interval_secs = 60
         assert!(logging.validate().is_err());
 
         logging.file = Some(LogFileConfig {
-            file_name: "../escape.log".to_string(),
+            file_name_pattern: "../escape.{date}.log".to_string(),
             ..LogFileConfig::default()
         });
         assert!(logging.validate().is_err());
 
-        logging.file.as_mut().expect("file").file_name = "demo.log".to_string();
+        logging.file.as_mut().expect("file").file_name_pattern = "demo.{date}.log".to_string();
+        logging.file.as_mut().expect("file").rotation = LogRotation::Hourly;
+        logging.file.as_mut().expect("file").date_format = "%Y-%m-%d".to_string();
+        assert!(logging.validate().is_err());
+
+        logging.file.as_mut().expect("file").date_format = "%Y-%m-%d-%H".to_string();
         logging.level = "verbose".to_string();
         assert!(logging.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_removed_log_file_fields_without_compatibility_aliases() {
+        let source = r#"
+name = "demo"
+
+[logging]
+stdout = false
+
+[logging.file]
+file_name = "demo.log"
+compress_rotated = true
+
+[governance]
+"#;
+        let error = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize::<ServiceConfig>()
+            .expect_err("removed logging fields must fail");
+        let message = error.to_string();
+        assert!(message.contains("unknown field"));
+        assert!(message.contains("file_name") || message.contains("compress_rotated"));
     }
 
     #[derive(Debug)]
@@ -3239,6 +3344,7 @@ maintenance_interval_secs = 60
                 "env://ROZE_REGISTRY_USER" => "roze",
                 "env://ROZE_REGISTRY_PASSWORD" => "registry-password",
                 "env://ROZE_JWT_SECRET" => "0123456789abcdef0123456789abcdef",
+                "env://ROZE_DTM_DATABASE_URL" => "sqlite://roze-dtm.db?mode=rwc",
                 _ => return Ok(None),
             };
             Ok(Some(value.to_string()))
@@ -3248,16 +3354,20 @@ maintenance_interval_secs = 60
     #[test]
     fn checked_in_service_configs_and_production_templates_are_valid() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/config");
-        for file_name in ["rest.production.yaml", "gateway.production.yaml"] {
-            let config = load_service_with_secret_provider(
+        for file_name in [
+            "rest.production.yaml",
+            "gateway.production.yaml",
+            "dtm.production.yaml",
+        ] {
+            let config = load_service_with_application_and_secret_provider::<serde_json::Value>(
                 directory.join(file_name),
                 &DeploymentTemplateSecretProvider,
             )
             .unwrap_or_else(|error| panic!("invalid deployment template {file_name}: {error}"));
-            assert_eq!(config.profile, ServiceProfile::Production);
-            assert_eq!(config.logging.format, LogFormat::Json);
-            assert!(config.logging.stdout);
-            assert!(!config.logging.ansi);
+            assert_eq!(config.service.profile, ServiceProfile::Production);
+            assert_eq!(config.service.logging.format, LogFormat::Json);
+            assert!(config.service.logging.stdout);
+            assert!(!config.service.logging.ansi);
         }
 
         let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps");

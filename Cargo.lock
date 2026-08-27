@@ -3920,6 +3920,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
+ "chrono",
  "config",
  "futures-util",
  "reqwest 0.13.4",
@@ -4250,6 +4251,7 @@ dependencies = [
  "flate2",
  "opentelemetry",
  "roze-config",
+ "roze-metrics",
  "roze-opentelemetry",
  "serde_json",
  "tempfile",

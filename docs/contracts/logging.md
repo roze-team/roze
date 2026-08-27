@@ -29,9 +29,12 @@ logging:
   lossy: true
   file:
     directory: logs
-    file_name: service.log
+    file_name_pattern: "service.{date}.log"
     rotation: daily
-    compress_rotated: true
+    date_format: "%Y-%m-%d"
+    max_file_size_bytes: 104857600
+    compression: gzip
+    compression_level: 6
     retention_days: 7
     maintenance_interval_secs: 3600
 ```
@@ -39,13 +42,28 @@ logging:
 Filter precedence is `logging.env_filter`, then `RUST_LOG`, then
 `logging.level`. File output uses a bounded asynchronous writer. With
 `lossy: true`, a full queue drops lines instead of blocking service work;
-`TracingGuard::dropped_lines` exposes the writer count. Keep the returned guard
-alive until service shutdown so pending lines and OpenTelemetry spans flush.
+`TracingGuard::dropped_lines` exposes the writer count. Roze also publishes
+`roze_log_lines_dropped_total{sink="file"}` and emits the bounded
+`log.lines.dropped` event when maintenance observes new drops. Keep the returned
+guard alive until service shutdown so pending lines and OpenTelemetry spans flush.
 
-Rotated files are compressed and expired only when their names belong to the
-configured `file_name` prefix. The active file and unrelated files are never
-maintained. Startup fails when the configured sink cannot be prepared or the
-subscriber cannot be installed.
+Hourly and daily rotation require exactly one `{date}` token in
+`file_name_pattern`; `rotation: never` forbids it. `date_format` uses Chrono
+strftime syntax and follows `logging.utc_time`. A non-zero
+`max_file_size_bytes` adds numeric segments before the extension, for example
+`service.2026-08-28.1.log`. Set it to `0` to disable size rotation.
+
+`compression: gzip` compresses each inactive segment independently using
+`compression_level` from `0` through `9`; `compression: none` disables it.
+This is per-file gzip compression, not a multi-file tar/zip archive. Rotated
+files are compressed and expired only when the date segment matches the
+configured pattern. The active file and unrelated files are never maintained.
+Startup fails when the configured sink cannot be prepared or the subscriber
+cannot be installed.
+
+The former `file_name` and `compress_rotated` fields are removed rather than
+aliased. `LogFileConfig` rejects unknown fields in every profile, so deployments
+must migrate atomically to `file_name_pattern` and `compression`.
 
 ## Event schema
 

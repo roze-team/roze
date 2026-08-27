@@ -10,6 +10,7 @@ chrono.workspace = true
 flate2.workspace = true
 opentelemetry = "0.31"
 roze-config = { path = "../roze-config" }
+roze-metrics = { path = "../roze-metrics" }
 roze-opentelemetry = { path = "../roze-opentelemetry" }
 tracing.workspace = true
 tracing-appender.workspace = true

@@ -8,8 +8,9 @@ it with `ROZE_CONFIG_PATH`:
 ROZE_CONFIG_PATH=/etc/roze/service.yaml
 ```
 
-Use `rest.production.yaml` for generated REST services and
-`gateway.production.yaml` for `roze-gateway`. Copy a template into the
+Use `rest.production.yaml` for generated REST services,
+`gateway.production.yaml` for `roze-gateway`, and `dtm.production.yaml` for the
+standalone DTM service. Copy a template into the
 deployment repository, adjust service names, routes, endpoints, capacity, and
 timeouts, then review it as versioned deployment configuration. Do not modify
 the source-tree development file during deployment.
@@ -70,6 +71,7 @@ rozectl doctor --config /etc/roze/service.yaml --port 3000
 rozectl service sync --project services/user-api --check
 ```
 
-The current `roze-dtm` binary is an incomplete native-HTTP migration and reads
-`ROZE_DTM_ADDR` directly; its checked-in YAML is a development design example,
-not a production deployment contract.
+`roze-dtm` uses the same `ROZE_CONFIG_PATH` resolution as other services. Its
+typed settings live under `application.dtm`; production rejects the memory
+store and requires a resolved SQLite `database_url`. The storage backend is
+probed by `/readyz` before a deployment is considered ready.

@@ -15,6 +15,17 @@ logging:
   utc_time: true
   non_blocking_buffer: 8192
   lossy: true
+  # For VM/systemd deployments, enable a writable file sink explicitly:
+  # file:
+  #   directory: /var/log/roze
+  #   file_name_pattern: "user-api.{date}.log"
+  #   rotation: daily
+  #   date_format: "%Y-%m-%d"
+  #   max_file_size_bytes: 104857600
+  #   compression: gzip
+  #   compression_level: 6
+  #   retention_days: 7
+  #   maintenance_interval_secs: 3600
 
 rest:
   addr: 0.0.0.0:3000
