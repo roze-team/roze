@@ -279,6 +279,10 @@ Use the same variable in deployment managers. For example, a systemd unit can
 set `Environment=ROZE_CONFIG_PATH=/etc/example/service.yaml`; Supervisor can
 set `environment=ROZE_CONFIG_PATH="/etc/example/service.yaml"`. An explicitly
 configured path is authoritative and is not replaced by a source-tree file.
+Repository `config.yaml` files are development defaults. For production,
+mount a deployment-owned YAML read-only and inject secret references through
+the platform secret manager. Reusable REST and Gateway examples live under
+[`deploy/config`](../../deploy/config/README.md).
 
 ## Permission annotations and request context
 
@@ -2653,9 +2657,11 @@ rozectl docker \
 ```
 
 The generated Dockerfile builds the release binary in a builder stage, copies
-the binary and `config.yaml` with non-root ownership, sets OCI image labels,
-exposes the service port, and runs as `roze:roze`. The runtime binary is
-controlled by `--binary`.
+the binary and development `config.yaml` with non-root ownership, sets
+`ROZE_CONFIG_PATH=/app/config.yaml`, adds OCI image labels, exposes the service
+port, and runs as `roze:roze`. Production platforms should override that path
+with a read-only mounted ConfigMap or deployment-owned file. The runtime binary
+is controlled by `--binary`.
 
 ## Kubernetes generation
 

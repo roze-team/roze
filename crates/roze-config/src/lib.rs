@@ -3225,6 +3225,58 @@ maintenance_interval_secs = 60
         assert!(logging.validate().is_err());
     }
 
+    #[derive(Debug)]
+    struct DeploymentTemplateSecretProvider;
+
+    impl SecretProvider for DeploymentTemplateSecretProvider {
+        fn resolve(
+            &self,
+            reference: &str,
+            _base_dir: &Path,
+        ) -> Result<Option<String>, SecretProviderError> {
+            let value = match reference {
+                "env://REDIS_URL" => "redis://redis:6379/",
+                "env://ROZE_REGISTRY_USER" => "roze",
+                "env://ROZE_REGISTRY_PASSWORD" => "registry-password",
+                "env://ROZE_JWT_SECRET" => "0123456789abcdef0123456789abcdef",
+                _ => return Ok(None),
+            };
+            Ok(Some(value.to_string()))
+        }
+    }
+
+    #[test]
+    fn checked_in_service_configs_and_production_templates_are_valid() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/config");
+        for file_name in ["rest.production.yaml", "gateway.production.yaml"] {
+            let config = load_service_with_secret_provider(
+                directory.join(file_name),
+                &DeploymentTemplateSecretProvider,
+            )
+            .unwrap_or_else(|error| panic!("invalid deployment template {file_name}: {error}"));
+            assert_eq!(config.profile, ServiceProfile::Production);
+            assert_eq!(config.logging.format, LogFormat::Json);
+            assert!(config.logging.stdout);
+            assert!(!config.logging.ansi);
+        }
+
+        let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps");
+        for relative_path in [
+            "roze-example/config.yaml",
+            "roze-gateway/config.yaml",
+            "roze-sample/config.yaml",
+            "user/config.yaml",
+        ] {
+            let config = load_service_with_secret_provider(
+                apps.join(relative_path),
+                &DeploymentTemplateSecretProvider,
+            )
+            .unwrap_or_else(|error| panic!("invalid development config {relative_path}: {error}"));
+            assert_eq!(config.profile, ServiceProfile::Development);
+            assert_eq!(config.logging.format, LogFormat::Text);
+        }
+    }
+
     #[test]
     fn loads_storage_config() {
         let source = r#"

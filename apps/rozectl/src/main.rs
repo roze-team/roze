@@ -3866,6 +3866,7 @@ fn validate_dockerfile_content(content: &str) -> Vec<String> {
         "cargo build --release --bin",
         "LABEL org.opencontainers.image.title=",
         "ENV TZ=",
+        "ROZE_CONFIG_PATH=/app/config.yaml",
         "WORKDIR /app",
         "groupadd --system roze",
         "useradd --system --gid roze",
@@ -5077,7 +5078,8 @@ RUN cargo build --release --bin user-api
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="user-api"
-ENV TZ=UTC
+ENV TZ=UTC \
+    ROZE_CONFIG_PATH=/app/config.yaml
 WORKDIR /app
 RUN groupadd --system roze \
     && useradd --system --gid roze --home-dir /app --shell /usr/sbin/nologin roze
@@ -5097,7 +5099,8 @@ FROM rust:1-bookworm AS builder
 RUN cargo build --release --bin user-api
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="user-api"
-ENV TZ=UTC
+ENV TZ=UTC \
+    ROZE_CONFIG_PATH=/app/config.yaml
 WORKDIR /app
 COPY --from=builder --chown=roze:roze /app/target/release/user-api /usr/local/bin/user-api
 COPY --chown=roze:roze config.yaml ./config.yaml

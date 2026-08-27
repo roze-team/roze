@@ -1,0 +1,95 @@
+name: roze-gateway
+profile: production
+
+logging:
+  enabled: true
+  level: info
+  env_filter: "info,hyper=warn,tower_http=warn"
+  format: json
+  stdout: true
+  ansi: false
+  target: true
+  caller: false
+  thread_ids: false
+  span_events: none
+  utc_time: true
+  non_blocking_buffer: 8192
+  lossy: true
+
+auth:
+  jwt_keys:
+    - id: current
+      secret: env://ROZE_JWT_SECRET
+  jwt_active_key_id: current
+  jwt_issuer: roze-gateway
+  jwt_audience: roze-services
+  jwt_expiration_secs: 7200
+  jwt_clock_skew_secs: 30
+
+gateway:
+  listen: 0.0.0.0:8081
+  trusted_proxy_cidrs: []
+  middlewares: [trace]
+  timeout_ms: 8000
+  stream_idle_timeout_ms: 60000
+  max_stream_connections: 1000
+  request_body_limit_bytes: 1048576
+  services:
+    - name: user
+      upstream: http://user-api:3000
+      outlier:
+        failure_threshold: 3
+        ejection_ms: 30000
+      health_check:
+        path: /healthz
+        interval_ms: 10000
+        timeout_ms: 1000
+        unhealthy_threshold: 3
+        healthy_threshold: 1
+        expected_status: 200
+  routes:
+    - path: /user
+      service: user
+      methods: [GET, POST, PUT, DELETE]
+      rewrite: /user
+      retries: 2
+      retry_backoff_ms: 100
+      middlewares: [trace, rate, breaker, auth]
+      rate_limit:
+        burst: 20
+        refill_ms: 200
+        key:
+          dimensions: [route]
+          missing: reject
+      breaker:
+        failure_threshold: 5
+        reset_timeout_ms: 5000
+  fallback:
+    status: 503
+    body:
+      code: 503
+      message: gateway fallback
+    headers:
+      content-type: application/json
+  cors:
+    allow_origins: ["https://app.example.com"]
+    allow_methods: [GET, POST, PUT, DELETE, OPTIONS]
+    allow_headers: [authorization, content-type, x-request-id, x-trace-id]
+
+cache:
+  url: env://REDIS_URL
+  namespace: roze-gateway
+
+governance:
+  rate_limiter:
+    store: auto
+    key_prefix: roze:rate-limit:v1
+    namespace: roze-gateway
+    timeout_ms: 100
+    unavailable_policy: fail-closed
+
+telemetry:
+  name: roze-gateway
+  endpoint: http://otel-collector:4317
+  sampler: 0.1
+  batcher: otlpgrpc

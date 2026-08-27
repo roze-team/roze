@@ -1036,10 +1036,14 @@ fn render_stream_config_yaml(spec: &ApiSpec, broker: StreamBroker) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(&mut out, "name: {}-stream", to_snake_case(&spec.service)).unwrap();
+    writeln!(&mut out, "profile: development").unwrap();
     writeln!(&mut out, "logging:").unwrap();
+    writeln!(&mut out, "  enabled: true").unwrap();
     writeln!(&mut out, "  level: info").unwrap();
     writeln!(&mut out, "  format: text").unwrap();
     writeln!(&mut out, "  stdout: true").unwrap();
+    writeln!(&mut out, "  ansi: true").unwrap();
+    writeln!(&mut out, "  target: true").unwrap();
     writeln!(&mut out, "kafka:").unwrap();
     writeln!(&mut out, "  provider: {}", broker.runtime_provider_name()).unwrap();
     writeln!(&mut out, "  brokers: [\"127.0.0.1:9092\"]").unwrap();
@@ -1091,6 +1095,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub name: String,
+    #[serde(default)]
+    pub profile: roze_config::ServiceProfile,
     #[serde(default)]
     pub logging: roze_config::LoggingConfig,
     pub kafka: roze_kafka::KafkaConfig,
@@ -11059,6 +11065,13 @@ fn config_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         ProjectKind::Rest => format!(
             r#"name: {}
 profile: development # development, test, production
+logging:
+  enabled: true
+  level: info
+  format: text # use json for container deployments
+  stdout: true
+  ansi: true # disable for non-interactive runtimes
+  target: true
 rest:
   addr: 127.0.0.1:3000
   register: false
@@ -11194,28 +11207,6 @@ governance:
 #   jwt_audience: {}
 #   jwt_expiration_secs: 86400
 #   jwt_clock_skew_secs: 30
-# logging:
-#   enabled: true
-#   level: info
-#   # env_filter: "info,hyper=warn"
-#   format: json # text or json
-#   stdout: true
-#   ansi: false
-#   target: true
-#   caller: false
-#   thread_ids: false
-#   span_events: none # none, new, enter, exit, close, active, full
-#   utc_time: true
-#   time_format: "%Y-%m-%dT%H:%M:%S%.3f%:z"
-#   non_blocking_buffer: 8192
-#   lossy: true
-#   file:
-#     directory: logs
-#     file_name: roze.log
-#     rotation: daily # hourly, daily, never
-#     compress_rotated: true
-#     retention_days: 7
-#     maintenance_interval_secs: 3600
 # telemetry:
 #   name: {}
 #   endpoint: http://127.0.0.1:4317
@@ -11237,6 +11228,13 @@ governance:
         ProjectKind::Rpc => format!(
             r#"name: {}
 profile: development # development, test, production
+logging:
+  enabled: true
+  level: info
+  format: text # use json for container deployments
+  stdout: true
+  ansi: true # disable for non-interactive runtimes
+  target: true
 rpc:
   addr: 127.0.0.1:4000
   # advertise_addr: 127.0.0.1:4000
@@ -11346,28 +11344,6 @@ governance:
 #   jwt_audience: {}
 #   jwt_expiration_secs: 86400
 #   jwt_clock_skew_secs: 30
-# logging:
-#   enabled: true
-#   level: info
-#   # env_filter: "info,hyper=warn"
-#   format: json # text or json
-#   stdout: true
-#   ansi: false
-#   target: true
-#   caller: false
-#   thread_ids: false
-#   span_events: none # none, new, enter, exit, close, active, full
-#   utc_time: true
-#   time_format: "%Y-%m-%dT%H:%M:%S%.3f%:z"
-#   non_blocking_buffer: 8192
-#   lossy: true
-#   file:
-#     directory: logs
-#     file_name: roze.log
-#     rotation: daily # hourly, daily, never
-#     compress_rotated: true
-#     retention_days: 7
-#     maintenance_interval_secs: 3600
 # telemetry:
 #   name: {}
 #   endpoint: http://127.0.0.1:4317
@@ -14650,6 +14626,8 @@ fn main() {
         assert!(svc.contains("pub rate_limiter: Arc<roze_rate_limit::RateLimiter>"));
         assert!(svc.contains("production services with rate limiting require"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
+        assert!(config.contains("profile: development"));
+        assert!(config.contains("logging:\n  enabled: true"));
         assert!(config.contains("database:"));
         assert!(config.contains("rate_limiter:"));
         assert!(config.contains("store: auto"));
@@ -14802,6 +14780,8 @@ fn main() {
         assert!(lib.contains("pub mod client;"));
         assert!(lib.contains("pub mod pb;"));
         let config = fs::read_to_string(out.join("config.yaml")).expect("read config");
+        assert!(config.contains("profile: development"));
+        assert!(config.contains("logging:\n  enabled: true"));
         assert!(config.contains("url: env://DATABASE_URL"));
         assert!(config.contains("rate_limiter:"));
         assert!(config.contains("store: auto"));
@@ -15682,6 +15662,8 @@ fn main() {
                 .expect("read provider manifest");
             let config =
                 fs::read_to_string(provider_out.join("config.yaml")).expect("read provider config");
+            assert!(config.contains("profile: development"));
+            assert!(config.contains("logging:\n  enabled: true"));
             assert_eq!(
                 fs::read_to_string(provider_out.join("src/main.rs")).expect("reread provider main"),
                 first_main

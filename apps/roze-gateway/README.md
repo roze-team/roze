@@ -1,5 +1,15 @@
 # roze-gateway
 
+## Deployment configuration
+
+`ROZE_CONFIG_PATH` is the deployment override used by the Gateway and other
+Roze services. The checked-in `config.yaml` is a development default and
+requires `ROZE_JWT_SECRET` to run. Production should
+mount a deployment-owned file such as
+[`deploy/config/gateway.production.yaml`](../../deploy/config/gateway.production.yaml),
+bind `gateway.listen` to `0.0.0.0`, and inject credentials through Secret
+references rather than committing values.
+
 `roze-gateway-app` 是 Roze native HTTP + Tower 的可运行网关示例。它覆盖：
 
 - 静态 upstream 与 registry 服务发现；
@@ -19,7 +29,7 @@ cargo run -p roze-gateway-app
 ```
 
 默认读取 `apps/roze-gateway/config.yaml`。可用
-`ROZE_GATEWAY_CONFIG_FILE=/path/to/config.yaml` 指定其他文件。监听地址由
+`ROZE_CONFIG_PATH=/path/to/config.yaml` 指定其他文件。监听地址由
 `gateway.listen` 决定，未配置时使用 `127.0.0.1:8081`。
 
 ## 配置

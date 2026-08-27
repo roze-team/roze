@@ -316,7 +316,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 
-ROZE_GATEWAY_CONFIG_FILE="$BASE/config.yaml" \
+ROZE_CONFIG_PATH="$BASE/config.yaml" \
 ROZE_CONFIG_CENTER_APP="gateway-smoke" \
 ROZE_CONFIG_CENTER_FILE="$BASE/config.yaml" \
 ROZE_CONFIG_CENTER_POLL_SECS=1 \

@@ -1,0 +1,78 @@
+name: user-api
+profile: production
+
+logging:
+  enabled: true
+  level: info
+  env_filter: "info,hyper=warn,tower_http=warn"
+  format: json
+  stdout: true
+  ansi: false
+  target: true
+  caller: false
+  thread_ids: false
+  span_events: none
+  utc_time: true
+  non_blocking_buffer: 8192
+  lossy: true
+
+rest:
+  addr: 0.0.0.0:3000
+  register: true
+  connect_info: true
+  middlewares:
+    recover: true
+    trace: true
+    stat: true
+    prometheus: true
+    cors: true
+    timeout: true
+    auth_public_routes: ["/healthz", "/readyz", "/startupz", "/metrics"]
+    trust_forwarded_identity_headers: false
+    trusted_proxy_cidrs: []
+
+registry:
+  kind: etcd
+  endpoints: ["http://etcd:2379"]
+  prefix: /roze/services
+  ttl_seconds: 10
+  renew_interval_secs: 3
+  user: env://ROZE_REGISTRY_USER
+  pass: env://ROZE_REGISTRY_PASSWORD
+  insecure_skip_verify: false
+
+cache:
+  url: env://REDIS_URL
+  namespace: user-api
+
+governance:
+  timeout_ms: 5000
+  rate_limiter:
+    store: auto
+    key_prefix: roze:rate-limit:v1
+    namespace: user-api
+    timeout_ms: 100
+    unavailable_policy: fail-closed
+  rate_limit:
+    burst: 100
+    refill_ms: 100
+    key:
+      dimensions: [route]
+      missing: reject
+  breaker:
+    failure_threshold: 5
+    reset_timeout_ms: 30000
+  shedding:
+    concurrency: 1000
+    window_ms: 1000
+    min_samples: 100
+    max_avg_latency_ms: 500
+    max_failure_ratio_per_mille: 500
+    cool_down_ms: 1000
+  routes: {}
+
+telemetry:
+  name: user-api
+  endpoint: http://otel-collector:4317
+  sampler: 0.1
+  batcher: otlpgrpc

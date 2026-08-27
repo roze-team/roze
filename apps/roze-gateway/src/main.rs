@@ -174,15 +174,5 @@ fn gateway_reload_relevant(diff: &[roze_config::ConfigDiffEntry]) -> bool {
 }
 
 fn config_path() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("ROZE_GATEWAY_CONFIG_FILE") {
-        return std::path::PathBuf::from(path);
-    }
-
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let manifest_config = manifest_dir.join("config.yaml");
-    if manifest_config.exists() {
-        manifest_config
-    } else {
-        std::path::PathBuf::from("config.yaml")
-    }
+    roze_config::service_config_path(env!("CARGO_MANIFEST_DIR"))
 }

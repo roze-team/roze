@@ -1,8 +1,12 @@
 name: user
+profile: development
 logging:
+  enabled: true
   level: info
   format: text
   stdout: true
+  ansi: true
+  target: true
 rest:
   addr: 127.0.0.1:3000
   register: false
@@ -70,7 +74,7 @@ governance:
 # auth:
 #   jwt_keys:
 #     - id: "2026-07"
-#       secret: change-me
+#       secret: env://ROZE_JWT_SECRET
 #   jwt_active_key_id: "2026-07"
 #   jwt_issuer: user
 #   jwt_audience: user
