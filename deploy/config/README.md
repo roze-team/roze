@@ -73,5 +73,9 @@ rozectl service sync --project services/user-api --check
 
 `roze-dtm` uses the same `ROZE_CONFIG_PATH` resolution as other services. Its
 typed settings live under `application.dtm`; production rejects the memory
-store and requires a resolved SQLite `database_url`. The storage backend is
-probed by `/readyz` before a deployment is considered ready.
+store and requires a resolved SQLite `database_url`, a control token of at
+least 32 bytes, and a deployment-unique recovery worker id. Inject
+`ROZE_DTM_DATABASE_URL`, `ROZE_DTM_CONTROL_TOKEN`, and `ROZE_DTM_WORKER_ID`;
+do not place their values in the ConfigMap. The storage backend and unified
+lifecycle state are probed by `/readyz` before a deployment is considered
+ready.

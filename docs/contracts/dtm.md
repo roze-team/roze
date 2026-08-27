@@ -1,64 +1,68 @@
-# Roze DTM 基础服务契约
+# Roze DTM 服务契约
 
-Roze DTM 是内置分布式事务管理基础服务，设计参考 DTM 的核心思想：由独立协调器保存全局事务状态，并驱动各业务服务的分支动作。
+Roze DTM 是内置的分布式事务协调服务。默认模式为 TCC，Saga 用于长流程和最终一致场景。协调器持久化全局事务和分支状态，并通过分支屏障保证重复确认、取消和补偿不会重复执行。
 
-参考来源：[dtm-labs/dtm helper README-cn](https://github.com/dtm-labs/dtm/blob/main/helper/README-cn.md)。DTM README 描述了多语言分布式事务管理器，支持 Saga、TCC、XA、二阶段消息、多存储和高可用；Roze 当前先内置默认 TCC + Saga 的 Rust 原生基础实现。
+## 部署配置
 
-## 默认模式
-
-默认事务模式是 **TCC**。
-
-- Try: 预留资源，例如冻结余额、锁库存、占用额度。
-- Confirm: 提交资源变更。
-- Cancel: 释放 Try 阶段预留资源。
-
-Saga 作为可选模式保留，适合长流程和最终一致场景。
-
-## 服务入口
-
-默认监听：
+生产环境必须使用持久化存储、独立控制令牌和部署实例唯一的 worker id：
 
 ```yaml
 rest:
-  addr: 127.0.0.1:8090
+  addr: 0.0.0.0:8090
   register: false
-governance: {}
-dtm:
-  recover_interval_ms: 1000
-  recovery_lease_ttl_ms: 5000
-  worker_id: roze-dtm-local
-  store:
-    kind: memory
-    # kind: sqlite
-    # database_url: sqlite://roze-dtm.db?mode=rwc
-  max_attempts: 5
-  retry_backoff_ms: 1000
-  max_retry_backoff_ms: 30000
-  branch_call_timeout_ms: 5000
-  transaction_timeout_ms: 60000
+
+application:
+  dtm:
+    control_token: env://ROZE_DTM_CONTROL_TOKEN
+    recover_interval_ms: 1000
+    recovery_lease_ttl_ms: 5000
+    worker_id: env://ROZE_DTM_WORKER_ID
+    store:
+      kind: sqlite
+      database_url: env://ROZE_DTM_DATABASE_URL
+    max_attempts: 5
+    retry_backoff_ms: 1000
+    max_retry_backoff_ms: 30000
+    branch_call_timeout_ms: 5000
+    transaction_timeout_ms: 60000
 ```
 
-API：
+生产环境禁止 `store.kind: memory`。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
-- `POST /v1/tcc`：提交默认 TCC 全局事务。
-- `POST /v1/tcc/{gid}/prepare`：执行所有 Try 分支。
-- `POST /v1/tcc/{gid}/confirm`：执行所有 Confirm 分支。
-- `POST /v1/tcc/{gid}/cancel`：执行所有 Cancel 分支。
-- `POST /v1/saga`：提交 Saga 全局事务。
+除健康、启动、就绪和指标接口外，所有 `/v1/**` 请求必须携带：
+
+```http
+Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
+```
+
+建议仅在服务网格或管理网络内暴露 DTM，并在入口层同时启用 TLS、访问控制和限流。
+
+## HTTP API
+
+- `POST /v1/tcc`：提交 TCC 事务。
+- `POST /v1/tcc/{gid}/prepare`：执行 Try 分支。
+- `POST /v1/tcc/{gid}/confirm`：执行 Confirm 分支。
+- `POST /v1/tcc/{gid}/cancel`：执行 Cancel 分支。
+- `POST /v1/saga`：提交 Saga 事务。
 - `POST /v1/saga/{gid}/start`：执行 Saga 正向分支。
-- `POST /v1/saga/{gid}/abort`：反向执行 Saga 补偿分支。
-- `GET /v1/transactions`：列出事务，支持 `gid`、`kind`、`status`、`offset`、`limit` 过滤分页。
+- `POST /v1/saga/{gid}/abort`：执行反向补偿。
+- `GET /v1/transactions`：过滤并分页查询事务。
 - `GET /v1/transactions/{gid}`：查询单个事务。
-- `POST /v1/transactions/{gid}/recover`：人工推进单个未终态事务。
-- `POST /v1/recover`：人工触发一次全局恢复 tick。
-- `GET /v1/stats`：查询事务状态统计。
-- `GET /healthz`、`GET /readyz`：健康检查。
+- `POST /v1/transactions/{gid}/recover`：强制推进一个可安全重放的状态。
+- `POST /v1/recover`：触发一次全局恢复扫描。
+- `GET /v1/stats`：按类型和状态统计事务。
+- `GET /healthz`、`GET /startupz`、`GET /readyz`：运行状态探针。
+- `GET /metrics`：Prometheus 指标。
 
-## TCC 提交格式
+所有业务响应使用 Roze 数字信封：成功 `code: 0`，错误 code 与 HTTP 状态一致。查询参数支持 `gid`、`kind`、`status`、`offset`、`limit`；默认 limit 为 50，最大为 200。
+
+## TCC 请求
 
 ```json
 {
   "gid": "order-1001",
+  "timeout_millis": 60000,
+  "metadata": { "tenant": "tenant-1" },
   "branches": [
     {
       "id": "inventory",
@@ -72,9 +76,9 @@ API：
 }
 ```
 
-`POST /v1/tcc` 不传 `kind` 时即为 TCC。
+`kind` 可省略；TCC 端点只接受 `TccTry` 分支。每个分支必须提供合法的 HTTP(S) Try、Confirm 和 Cancel 地址。
 
-## Saga 提交格式
+## Saga 请求
 
 ```json
 {
@@ -91,60 +95,32 @@ API：
 }
 ```
 
-## 分支屏障
+Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
-Roze DTM 内置分支屏障：
+## 输入边界
 
-- 同一个 `gid + branch_id + op` 只能执行一次。
-- `cancel` 早于 `try` 到达时识别为空回滚并跳过。
-- 重复 `confirm/cancel/compensate` 会被跳过，保证幂等边界。
+- gid 和分支 id 为 1–128 字节；同一事务内分支 id 不可重复。
+- 每个事务包含 1–100 个分支。
+- 分支 URL 最长 2048 字节，只接受 `http://` 或 `https://`。
+- metadata 最多 32 项；键最长 64 字节，值最长 256 字节。
+- `timeout_millis` 范围为 1 秒至 24 小时。
+- 原生 JSON 提取器默认限制请求体为 2 MiB。
 
-## 当前实现范围
+## 状态恢复与屏障
 
-已实现：
+恢复 worker 随 HTTP 服务一起由 `ServiceGroup` 管理，统一响应关闭信号。每轮恢复先竞争持久化租约，同一时刻只有一个实例推进事务。安全恢复路径为：
 
-- 默认 TCC。
-- Saga/TCC 全局事务状态机。
-- HTTP 分支调用器。
-- 内存存储。
-- SQLite 持久化存储。
-- 分支屏障。
-- 分支失败指数退避重试计划。
-- 分支调用超时。
-- 全局事务超时后自动 Cancel/Compensate。
-- 后台恢复 worker。
-- 恢复 worker 租约，避免多实例重复调度。
-- 控制面 API：查询、过滤分页、统计、人工恢复。
-- 独立基础服务 `apps/roze-dtm`。
+- TCC：`Submitted -> Prepared -> Succeeded`，或超时/Aborting 后 Cancel。
+- Saga：`Submitted -> Succeeded`，或超时/Aborting 后补偿。
+- 终态事务原样返回。
+- `Trying`、`Succeeding` 等无法安全整体重放的状态拒绝手工强推，避免重复调用分支。
 
-后续扩展：
+分支屏障以 `gid + branch_id + operation` 去重；Cancel 早于 Try 时按空回滚处理。失败分支记录下次重试时间并使用有上限的指数退避。
 
-- Redis/etcd 持久化或租约后端。
-- XA。
-- 二阶段消息。
-- Dashboard。
+## 日志与审计
 
-## 可靠性边界
+提交、状态推进、手工恢复和自动恢复均使用稳定事件名。控制面成功或失败事件通过 `roze.audit` 目标输出；配置独立审计 sink 时写入非丢弃 JSONL 文件，否则进入普通日志 sink。日志不得包含控制令牌、请求载荷、分支响应体或原始依赖错误。
 
-当前服务具备可靠事务协调的核心状态机。默认内存存储只适合开发和单实例测试；生产部署应切换到 SQLite 或后续 SQL/Redis 后端，并为多副本使用恢复租约。
+## 当前边界
 
-已保证：
-
-- 分支屏障防重复执行。
-- Cancel 早于 Try 到达时识别为空回滚。
-- 失败分支记录 `next_retry_millis`。
-- 失败分支按指数退避重试，并受 `max_retry_backoff_ms` 限制。
-- HTTP 分支调用受 `branch_call_timeout_ms` 限制。
-- 后台 worker 周期恢复未终态事务。
-- 后台 worker 获取租约后才执行恢复 tick。
-- 全局超时触发 TCC Cancel 或 Saga Compensate。
-- SQLite store 提供事务、barrier、recovery lease 持久表。
-- 控制面支持按 gid 查询、按状态/类型过滤、分页、统计和人工恢复。
-
-生产增强方向：
-
-- PostgreSQL/MySQL/Redis 后端。
-- 基于 etcd/Redis 的跨进程租约后端。
-- 分支调用熔断、限流和观测指标。
-- 更完整的人工补偿审批流。
-- 管理 Dashboard。
+已支持内存与 SQLite 存储、TCC/Saga 状态机、HTTP 分支调用、超时、重试、分支屏障、恢复租约、自动恢复 worker、原生 Roze HTTP 控制面和审计事件。PostgreSQL/MySQL/Redis 后端、跨进程外部租约后端、XA、二阶段消息和管理 Dashboard 仍属于后续扩展。

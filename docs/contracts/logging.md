@@ -63,7 +63,9 @@ guard alive until service shutdown so pending lines and OpenTelemetry spans flus
 
 `logging.audit` is an optional independent JSON-lines sink. Emit audit records
 with `roze_log::audit_info!`, `audit_warn!`, or `audit_error!`; only events with
-the reserved `roze.audit` target enter this file. Its queue is always
+the reserved `roze.audit` target enter this file. When the dedicated sink is
+not configured, audit-target events remain in ordinary stdout/file output so
+they are not silently discarded. Its queue is always
 non-lossy: producers wait when the audit buffer is full instead of silently
 dropping a record. Audit sink preparation is fail-closed at startup and the
 guard flushes accepted records during orderly shutdown. Give audit files a

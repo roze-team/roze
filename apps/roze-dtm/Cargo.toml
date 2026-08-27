@@ -13,7 +13,9 @@ roze-config = { path = "../../crates/roze-config" }
 roze-health = { path = "../../crates/roze-health" }
 roze-http = { path = "../../crates/roze-http" }
 roze-log = { path = "../../crates/roze-log" }
+roze-metrics = { path = "../../crates/roze-metrics" }
 roze-result = { path = "../../crates/roze-result" }
+roze-service = { path = "../../crates/roze-service" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

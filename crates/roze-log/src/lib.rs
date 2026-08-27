@@ -501,6 +501,7 @@ fn init_logging_pipeline(
     let mut writer_guards = Vec::new();
     let mut drop_counters = Vec::new();
     let mut maintenance = Vec::new();
+    let dedicated_audit = logging.audit.is_some();
 
     if logging.enabled && logging.stdout {
         let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
@@ -512,7 +513,9 @@ fn init_logging_pipeline(
         layers.push(
             format_layer(logging, timer.clone(), span_events.clone(), true, writer)
                 .with_filter(filter.clone())
-                .with_filter(filter_fn(|metadata| metadata.target() != AUDIT_TARGET))
+                .with_filter(filter_fn(move |metadata| {
+                    !dedicated_audit || metadata.target() != AUDIT_TARGET
+                }))
                 .boxed(),
         );
     }
@@ -547,7 +550,9 @@ fn init_logging_pipeline(
             layers.push(
                 format_layer(logging, timer.clone(), span_events, false, writer)
                     .with_filter(filter.clone())
-                    .with_filter(filter_fn(|metadata| metadata.target() != AUDIT_TARGET))
+                    .with_filter(filter_fn(move |metadata| {
+                        !dedicated_audit || metadata.target() != AUDIT_TARGET
+                    }))
                     .boxed(),
             );
         }

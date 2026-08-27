@@ -215,6 +215,7 @@ pub trait TransactionStore: Send + Sync + 'static {
     async fn update_transaction(&self, tx: Transaction) -> anyhow::Result<()>;
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>>;
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision>;
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()>;
     async fn try_acquire_recovery_lease(
         &self,
         _name: &str,
@@ -248,6 +249,10 @@ where
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
         (**self).barrier(barrier).await
+    }
+
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        (**self).release_barrier(barrier).await
     }
 
     async fn try_acquire_recovery_lease(
@@ -374,6 +379,11 @@ impl TransactionStore for InMemoryTransactionStore {
 
         barriers.insert(key);
         Ok(BarrierDecision::Execute)
+    }
+
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        self.barriers.write().await.remove(&barrier.key());
+        Ok(())
     }
 
     async fn try_acquire_recovery_lease(
@@ -548,6 +558,14 @@ impl TransactionStore for SqliteTransactionStore {
         Ok(BarrierDecision::Execute)
     }
 
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM roze_dtm_barriers WHERE barrier_key = ?")
+            .bind(barrier.key())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn try_acquire_recovery_lease(
         &self,
         name: &str,
@@ -656,6 +674,10 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         ensure_kind(&tx, TransactionKind::Saga)?;
+        if tx.status == TransactionStatus::Succeeded {
+            return Ok(tx);
+        }
+        ensure_status(&tx, &[TransactionStatus::Submitted])?;
         tx.status = TransactionStatus::Succeeding;
         let mut applied = Vec::new();
         for (idx, branch) in tx.branches.iter_mut().enumerate() {
@@ -668,9 +690,8 @@ where
                     branch.next_retry_millis = None;
                     applied.push(idx);
                 }
-                Err(err) => {
+                Err(_) => {
                     branch.status = BranchStatus::Failed;
-                    branch.last_error = Some(err.to_string());
                     tx.status = TransactionStatus::Aborting;
                     for idx in applied.into_iter().rev() {
                         let previous = &mut tx.branches[idx];
@@ -697,16 +718,29 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         ensure_kind(&tx, TransactionKind::Saga)?;
+        if tx.status == TransactionStatus::Aborted {
+            return Ok(tx);
+        }
+        ensure_status(
+            &tx,
+            &[TransactionStatus::Submitted, TransactionStatus::Aborting],
+        )?;
         tx.status = TransactionStatus::Aborting;
         for branch in tx.branches.iter_mut().rev() {
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "compensate");
-            match self.store.barrier(barrier).await? {
+            match self.store.barrier(barrier.clone()).await? {
                 BarrierDecision::Execute => {
                     if let Some(compensate) = branch.compensate.clone() {
-                        self.invoke_url(branch, &compensate).await?;
+                        branch.attempts = branch.attempts.saturating_add(1);
+                        if self.invoke_url(branch, &compensate).await.is_err() {
+                            branch.status = BranchStatus::Failed;
+                            self.store.release_barrier(&barrier).await?;
+                            self.store.update_transaction(tx.clone()).await?;
+                            return Ok(tx);
+                        }
                     }
                     branch.status = BranchStatus::Skipped;
-                    branch.attempts = branch.attempts.saturating_add(1);
+                    branch.next_retry_millis = None;
                 }
                 BarrierDecision::SkipDuplicate | BarrierDecision::SkipNullCompensation => {}
             }
@@ -723,12 +757,20 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         ensure_kind(&tx, TransactionKind::Tcc)?;
+        if tx.status == TransactionStatus::Prepared {
+            return Ok(tx);
+        }
+        ensure_status(
+            &tx,
+            &[TransactionStatus::Submitted, TransactionStatus::Trying],
+        )?;
         tx.status = TransactionStatus::Trying;
         for branch in &mut tx.branches {
-            let decision = self
-                .store
-                .barrier(BranchBarrier::new(&tx.gid, &branch.id, "try"))
-                .await?;
+            if branch.status == BranchStatus::Succeeded {
+                continue;
+            }
+            let barrier = BranchBarrier::new(&tx.gid, &branch.id, "try");
+            let decision = self.store.barrier(barrier.clone()).await?;
             if decision == BarrierDecision::Execute {
                 branch.status = BranchStatus::Running;
                 branch.attempts = branch.attempts.saturating_add(1);
@@ -738,9 +780,9 @@ where
                         branch.status = BranchStatus::Succeeded;
                         branch.next_retry_millis = None;
                     }
-                    Err(err) => {
+                    Err(_) => {
                         branch.status = BranchStatus::Failed;
-                        branch.last_error = Some(err.to_string());
+                        self.store.release_barrier(&barrier).await?;
                         if branch.attempts >= self.options.max_attempts {
                             tx.status = TransactionStatus::Aborting;
                         }
@@ -762,19 +804,34 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         ensure_kind(&tx, TransactionKind::Tcc)?;
+        if tx.status == TransactionStatus::Succeeded {
+            return Ok(tx);
+        }
+        ensure_status(
+            &tx,
+            &[TransactionStatus::Prepared, TransactionStatus::Succeeding],
+        )?;
         tx.status = TransactionStatus::Succeeding;
         for branch in &mut tx.branches {
-            let decision = self
-                .store
-                .barrier(BranchBarrier::new(&tx.gid, &branch.id, "confirm"))
-                .await?;
+            let barrier = BranchBarrier::new(&tx.gid, &branch.id, "confirm");
+            let decision = self.store.barrier(barrier.clone()).await?;
             if decision == BarrierDecision::Execute {
                 let confirm = branch.confirm.clone().ok_or_else(|| {
                     anyhow::anyhow!("missing confirm action for branch {}", branch.id)
                 })?;
-                self.invoke_url(branch, &confirm).await?;
-                branch.status = BranchStatus::Succeeded;
                 branch.attempts = branch.attempts.saturating_add(1);
+                match self.invoke_url(branch, &confirm).await {
+                    Ok(()) => {
+                        branch.status = BranchStatus::Succeeded;
+                        branch.next_retry_millis = None;
+                    }
+                    Err(_) => {
+                        branch.status = BranchStatus::Failed;
+                        self.store.release_barrier(&barrier).await?;
+                        self.store.update_transaction(tx.clone()).await?;
+                        return Ok(tx);
+                    }
+                }
             }
         }
         tx.status = TransactionStatus::Succeeded;
@@ -789,13 +846,22 @@ where
             .await?
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         ensure_kind(&tx, TransactionKind::Tcc)?;
+        if tx.status == TransactionStatus::Aborted {
+            return Ok(tx);
+        }
+        ensure_status(
+            &tx,
+            &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Trying,
+                TransactionStatus::Prepared,
+                TransactionStatus::Aborting,
+            ],
+        )?;
         tx.status = TransactionStatus::Aborting;
         for branch in &mut tx.branches {
-            match self
-                .store
-                .barrier(BranchBarrier::new(&tx.gid, &branch.id, "cancel"))
-                .await?
-            {
+            let barrier = BranchBarrier::new(&tx.gid, &branch.id, "cancel");
+            match self.store.barrier(barrier.clone()).await? {
                 BarrierDecision::Execute => {
                     let cancel = branch
                         .cancel
@@ -804,12 +870,23 @@ where
                         .ok_or_else(|| {
                             anyhow::anyhow!("missing cancel action for branch {}", branch.id)
                         })?;
-                    self.invoke_url(branch, &cancel).await?;
-                    branch.status = BranchStatus::Skipped;
                     branch.attempts = branch.attempts.saturating_add(1);
+                    match self.invoke_url(branch, &cancel).await {
+                        Ok(()) => {
+                            branch.status = BranchStatus::Skipped;
+                            branch.next_retry_millis = None;
+                        }
+                        Err(_) => {
+                            branch.status = BranchStatus::Failed;
+                            self.store.release_barrier(&barrier).await?;
+                            self.store.update_transaction(tx.clone()).await?;
+                            return Ok(tx);
+                        }
+                    }
                 }
                 BarrierDecision::SkipNullCompensation => {
                     branch.status = BranchStatus::Skipped;
+                    branch.next_retry_millis = None;
                 }
                 BarrierDecision::SkipDuplicate => {}
             }
@@ -821,6 +898,39 @@ where
 
     pub async fn list(&self) -> anyhow::Result<Vec<Transaction>> {
         self.store.list_transactions().await
+    }
+
+    /// Forces one recoverable transaction through its next state transition.
+    ///
+    /// Terminal transactions are returned unchanged. In-flight states that
+    /// cannot be replayed safely are rejected instead of re-invoking branches.
+    pub async fn recover(&self, gid: &str) -> anyhow::Result<Transaction> {
+        let tx = self
+            .store
+            .get_transaction(gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        if tx.status.is_terminal() {
+            return Ok(tx);
+        }
+        if is_expired(&tx, current_millis()) {
+            return match tx.kind {
+                TransactionKind::Tcc => self.cancel_tcc(gid).await,
+                TransactionKind::Saga => self.abort_saga(gid).await,
+            };
+        }
+        match (tx.kind, tx.status) {
+            (TransactionKind::Tcc, TransactionStatus::Submitted | TransactionStatus::Trying) => {
+                self.prepare_tcc(gid).await
+            }
+            (TransactionKind::Tcc, TransactionStatus::Prepared | TransactionStatus::Succeeding) => {
+                self.confirm_tcc(gid).await
+            }
+            (TransactionKind::Tcc, TransactionStatus::Aborting) => self.cancel_tcc(gid).await,
+            (TransactionKind::Saga, TransactionStatus::Submitted) => self.start_saga(gid).await,
+            (TransactionKind::Saga, TransactionStatus::Aborting) => self.abort_saga(gid).await,
+            (_, status) => anyhow::bail!("transaction {gid} is in non-replayable state {status:?}"),
+        }
     }
 
     pub async fn tick_recover_once(&self) -> anyhow::Result<Vec<Transaction>> {
@@ -842,12 +952,14 @@ where
                 continue;
             }
             let next = match (tx.kind, tx.status) {
-                (TransactionKind::Tcc, TransactionStatus::Submitted) => {
-                    self.prepare_tcc(&tx.gid).await?
-                }
-                (TransactionKind::Tcc, TransactionStatus::Prepared) => {
-                    self.confirm_tcc(&tx.gid).await?
-                }
+                (
+                    TransactionKind::Tcc,
+                    TransactionStatus::Submitted | TransactionStatus::Trying,
+                ) => self.prepare_tcc(&tx.gid).await?,
+                (
+                    TransactionKind::Tcc,
+                    TransactionStatus::Prepared | TransactionStatus::Succeeding,
+                ) => self.confirm_tcc(&tx.gid).await?,
                 (TransactionKind::Tcc, TransactionStatus::Aborting) => {
                     self.cancel_tcc(&tx.gid).await?
                 }
@@ -882,17 +994,14 @@ where
     async fn invoke_branch(&self, branch: &mut Branch, url: &str) -> anyhow::Result<()> {
         match self.invoker.invoke(url, &branch.payload).await {
             Ok(()) => Ok(()),
-            Err(err) => {
+            Err(_) => {
                 record_branch_failure(
                     branch,
-                    err.to_string(),
+                    "branch_call_failed".to_string(),
                     self.options.retry_backoff_millis,
                     self.options.max_retry_backoff_millis,
                 );
-                Err(anyhow::anyhow!(
-                    "{}",
-                    branch.last_error.clone().unwrap_or_default()
-                ))
+                Err(anyhow::anyhow!("branch call failed"))
             }
         }
     }
@@ -911,6 +1020,16 @@ fn ensure_kind(tx: &Transaction, expected: TransactionKind) -> anyhow::Result<()
             expected
         );
     }
+    Ok(())
+}
+
+fn ensure_status(tx: &Transaction, allowed: &[TransactionStatus]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        allowed.contains(&tx.status),
+        "transaction {} is in non-replayable state {:?}",
+        tx.gid,
+        tx.status
+    );
     Ok(())
 }
 
@@ -988,12 +1107,29 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
+    struct FailOnCallInvoker {
+        calls: Arc<AtomicUsize>,
+        fail_on: usize,
+    }
+
     #[async_trait]
     impl BranchInvoker for FailingOnceInvoker {
         async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
             let calls = self.calls.fetch_add(1, Ordering::SeqCst);
             if calls == 0 {
                 anyhow::bail!("temporary failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BranchInvoker for FailOnCallInvoker {
+        async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == self.fail_on {
+                anyhow::bail!("injected branch failure");
             }
             Ok(())
         }
@@ -1038,6 +1174,31 @@ mod tests {
         assert_eq!(prepared.status, TransactionStatus::Prepared);
         let confirmed = dtm.confirm_tcc("gid-2").await.expect("confirm");
         assert_eq!(confirmed.status, TransactionStatus::Succeeded);
+        let duplicate = dtm.confirm_tcc("gid-2").await.expect("idempotent confirm");
+        assert_eq!(duplicate.status, TransactionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn tcc_rejects_confirm_before_prepare() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::tcc(
+            "gid-early-confirm",
+            vec![Branch::tcc_try(
+                "b1",
+                "try",
+                "confirm",
+                "cancel",
+                serde_json::json!({}),
+            )],
+        ))
+        .await
+        .expect("submit");
+
+        let error = dtm
+            .confirm_tcc("gid-early-confirm")
+            .await
+            .expect_err("confirm must require prepared state");
+        assert!(error.to_string().contains("non-replayable state"));
     }
 
     #[tokio::test]
@@ -1104,7 +1265,92 @@ mod tests {
 
         assert_eq!(prepared.status, TransactionStatus::Trying);
         assert_eq!(prepared.branches[0].status, BranchStatus::Failed);
+        assert_eq!(
+            prepared.branches[0].last_error.as_deref(),
+            Some("branch_call_failed")
+        );
         assert!(prepared.branches[0].next_retry_millis.is_some());
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let recovered = dtm.tick_recover_once().await.expect("recover retry");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, TransactionStatus::Prepared);
+    }
+
+    #[tokio::test]
+    async fn exhausted_try_clears_retry_schedule_after_null_cancel() {
+        let dtm = Dtm::with_options(
+            InMemoryTransactionStore::new(),
+            FailingOnceInvoker {
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            DtmOptions {
+                max_attempts: 1,
+                retry_backoff_millis: 1,
+                max_retry_backoff_millis: 10,
+                ..DtmOptions::default()
+            },
+        );
+        dtm.submit(Transaction::tcc(
+            "gid-exhausted",
+            vec![Branch::tcc_try(
+                "b1",
+                "try",
+                "confirm",
+                "cancel",
+                serde_json::json!({}),
+            )],
+        ))
+        .await
+        .expect("submit");
+
+        let aborting = dtm.prepare_tcc("gid-exhausted").await.expect("prepare");
+        assert_eq!(aborting.status, TransactionStatus::Aborting);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let aborted = dtm.tick_recover_once().await.expect("cancel");
+        assert_eq!(aborted[0].status, TransactionStatus::Aborted);
+        assert_eq!(aborted[0].branches[0].next_retry_millis, None);
+    }
+
+    #[tokio::test]
+    async fn failed_confirm_releases_barrier_for_recovery_retry() {
+        let dtm = Dtm::with_options(
+            InMemoryTransactionStore::new(),
+            FailOnCallInvoker {
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail_on: 1,
+            },
+            DtmOptions {
+                retry_backoff_millis: 1,
+                max_retry_backoff_millis: 10,
+                ..DtmOptions::default()
+            },
+        );
+        dtm.submit(Transaction::tcc(
+            "gid-confirm-retry",
+            vec![Branch::tcc_try(
+                "b1",
+                "try",
+                "confirm",
+                "cancel",
+                serde_json::json!({}),
+            )],
+        ))
+        .await
+        .expect("submit");
+        dtm.prepare_tcc("gid-confirm-retry").await.expect("prepare");
+
+        let pending = dtm
+            .confirm_tcc("gid-confirm-retry")
+            .await
+            .expect("failed confirm state");
+        assert_eq!(pending.status, TransactionStatus::Succeeding);
+        assert_eq!(pending.branches[0].status, BranchStatus::Failed);
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let recovered = dtm.tick_recover_once().await.expect("confirm retry");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, TransactionStatus::Succeeded);
     }
 
     #[tokio::test]
@@ -1137,6 +1383,33 @@ mod tests {
         let recovered = dtm.tick_recover_once().await.expect("recover");
 
         assert_eq!(recovered[0].status, TransactionStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_advances_one_safe_transition() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::tcc(
+            "gid-manual-recover",
+            vec![Branch::tcc_try(
+                "b1",
+                "try",
+                "confirm",
+                "cancel",
+                serde_json::json!({}),
+            )],
+        ))
+        .await
+        .expect("submit");
+
+        let prepared = dtm.recover("gid-manual-recover").await.expect("prepare");
+        assert_eq!(prepared.status, TransactionStatus::Prepared);
+        let succeeded = dtm.recover("gid-manual-recover").await.expect("confirm");
+        assert_eq!(succeeded.status, TransactionStatus::Succeeded);
+        let unchanged = dtm
+            .recover("gid-manual-recover")
+            .await
+            .expect("terminal transaction");
+        assert_eq!(unchanged.status, TransactionStatus::Succeeded);
     }
 
     #[tokio::test]

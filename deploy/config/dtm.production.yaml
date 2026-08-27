@@ -15,7 +15,7 @@ logging:
   utc_time: true
   non_blocking_buffer: 8192
   lossy: true
-  # Enable after DTM mutation routes emit roze.audit events:
+  # Enable a dedicated durable sink for DTM control and recovery audit events:
   # audit:
   #   non_blocking_buffer: 4096
   #   file:
@@ -37,6 +37,10 @@ governance: {}
 
 application:
   dtm:
+    control_token: env://ROZE_DTM_CONTROL_TOKEN
+    recover_interval_ms: 1000
+    recovery_lease_ttl_ms: 5000
+    worker_id: env://ROZE_DTM_WORKER_ID
     store:
       kind: sqlite
       database_url: env://ROZE_DTM_DATABASE_URL
