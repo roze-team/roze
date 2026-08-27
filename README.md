@@ -17,7 +17,9 @@ Roze is a Rust service framework with:
 - `crates/roze-rate-limit`: shared memory/Redis token buckets, composite identity policies, and bounded failure behavior for REST, RPC, and Gateway.
 - `crates/roze-validation`: request parameter validation helpers.
 - `crates/roze-config`: YAML/TOML/env configuration loading.
-- `crates/roze-log`: tracing and `trace_id` plumbing.
+- `crates/roze-log`: configurable text/JSON tracing, asynchronous rolling files,
+  retention/compression, safe shutdown, stable events, and OpenTelemetry integration
+  ([logging contract](docs/contracts/logging.md)).
 - `crates/roze-metrics`: in-process metrics registry; labeled metric state uses DashMap for concurrent hot paths.
 - `crates/roze-auth`: JWT and auth helpers.
 - `crates/roze-db`: database connection helpers.

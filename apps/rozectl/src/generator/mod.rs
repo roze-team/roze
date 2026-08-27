@@ -77,8 +77,10 @@ const RPC_ROZE_CRATES: [&str; 24] = [
     "roze-validation",
 ];
 
-const STREAM_ROZE_CRATES: [&str; 5] = [
+const STREAM_ROZE_CRATES: [&str; 7] = [
+    "roze-config",
     "roze-kafka",
+    "roze-log",
     "roze-mq",
     "roze-service",
     "roze-shutdown",
@@ -927,7 +929,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 validator.workspace = true"#
     } else {
         r#"anyhow = "1"
@@ -936,7 +937,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 validator = { version = "0.20", features = ["derive"] }"#
     };
     let workspace_boundary = if in_workspace { "" } else { "\n[workspace]\n" };
@@ -1036,6 +1036,10 @@ fn render_stream_config_yaml(spec: &ApiSpec, broker: StreamBroker) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(&mut out, "name: {}-stream", to_snake_case(&spec.service)).unwrap();
+    writeln!(&mut out, "logging:").unwrap();
+    writeln!(&mut out, "  level: info").unwrap();
+    writeln!(&mut out, "  format: text").unwrap();
+    writeln!(&mut out, "  stdout: true").unwrap();
     writeln!(&mut out, "kafka:").unwrap();
     writeln!(&mut out, "  provider: {}", broker.runtime_provider_name()).unwrap();
     writeln!(&mut out, "  brokers: [\"127.0.0.1:9092\"]").unwrap();
@@ -1087,6 +1091,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub name: String,
+    #[serde(default)]
+    pub logging: roze_config::LoggingConfig,
     pub kafka: roze_kafka::KafkaConfig,
     pub stream: StreamConfig,
 }
@@ -1126,13 +1132,10 @@ use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let config = config::load(config_path())?;
+    let _tracing_guard = roze_log::init_tracing_with_logging(&config.logging)?;
     let kafka = roze_kafka::build_runtime(&config.kafka).await?;
-    tracing::info!(event = "service.config.loaded", service = %config.name, protocol = "stream", provider = %kafka.provider, group = %config.stream.consumer_group, topics = config.stream.topics.len(), "service configuration loaded");
+    tracing::info!(event = roze_log::events::SERVICE_CONFIG_LOADED, service = %config.name, protocol = "stream", provider = %kafka.provider, group = %config.stream.consumer_group, topics = config.stream.topics.len(), "service configuration loaded");
     let service_name = config.name.clone();
     let stream_config = config.stream.clone();
     let subscriber = kafka.subscriber;
@@ -1144,11 +1147,11 @@ async fn main() -> anyhow::Result<()> {
             stream::consumer::run(subscriber.as_ref(), &stream_config, shutdown).await
         }
     });
-    tracing::info!(event = "service.starting", service = %service_name, protocol = "stream", "service starting");
+    tracing::info!(event = roze_log::events::SERVICE_STARTING, service = %service_name, protocol = "stream", "service starting");
     let result = group.start().await;
     match &result {
-        Ok(()) => tracing::info!(event = "service.stopped", service = %service_name, protocol = "stream", "service stopped"),
-        Err(error) => tracing::error!(event = "service.failed", service = %service_name, protocol = "stream", error = %error, "service failed"),
+        Ok(()) => tracing::info!(event = roze_log::events::SERVICE_STOPPED, service = %service_name, protocol = "stream", "service stopped"),
+        Err(_) => tracing::error!(event = roze_log::events::SERVICE_FAILED, service = %service_name, protocol = "stream", error_kind = "lifecycle", "service failed"),
     }
     result
 }
@@ -1240,12 +1243,36 @@ fn render_stream_consumer(spec: &ApiSpec) -> String {
         "use roze_mq::{Delivery, Subscriber};\nuse roze_shutdown::ShutdownListener;\n\nuse crate::stream::envelope::*;\nuse crate::types::*;\n\npub async fn run<S>(subscriber: &S, config: &crate::config::StreamConfig, shutdown: ShutdownListener) -> anyhow::Result<()>\nwhere\n    S: Subscriber + ?Sized,\n{\n    tracing::info!(event = \"stream.subscriptions.starting\", protocol = \"stream\", group = %config.consumer_group, topics = config.topics.len(), \"subscribing stream topics\");\n    let mut workers = Vec::new();\n    for binding in BINDINGS {\n        let mut rx = subscriber.subscribe(binding.topic).await?;\n        let topic = binding.topic;\n        tracing::info!(event = \"stream.subscription.ready\", protocol = \"stream\", topic = %topic, \"stream subscription ready\");\n        let worker_shutdown = shutdown.clone();\n        workers.push(tokio::spawn(async move {\n            loop {\n                tokio::select! {\n                    _ = worker_shutdown.clone().wait() => {\n                        tracing::info!(event = \"stream.worker.stopping\", protocol = \"stream\", topic = %topic, \"stream worker stopping\");\n                        break;\n                    },\n                    received = rx.recv() => {\n                        match received {\n                            Ok(delivery) => {\n                                if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(event = \"stream.message.failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), ?error, \"stream message failed\");\n                                    if let Err(error) = delivery.nack().await {\n                                        tracing::error!(event = \"stream.message.nack_failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), ?error, \"failed to nack stream message\");\n                                    } else {\n                                        tracing::warn!(event = \"stream.message.nacked\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), \"stream message nacked\");\n                                    }\n                                } else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(event = \"stream.message.ack_failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), ?error, \"failed to ack stream message\");\n                                } else {\n                                    tracing::info!(event = \"stream.message.completed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), \"stream message completed\");\n                                }\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {\n                                tracing::warn!(event = \"stream.receiver.lagged\", protocol = \"stream\", topic = %topic, skipped, \"stream receiver lagged\");\n                            }\n                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,\n                        }\n                    }\n                }\n            }\n        }));\n    }\n\n    shutdown.wait().await;\n    tracing::info!(event = \"stream.shutdown.requested\", protocol = \"stream\", workers = workers.len(), \"stream shutdown requested\");\n    for worker in workers {\n        worker.await?;\n    }\n    tracing::info!(event = \"stream.workers.stopped\", protocol = \"stream\", \"stream workers stopped\");\n    Ok(())\n}\n\nasync fn dispatch(delivery: &Delivery) -> anyhow::Result<()> {\n    match delivery.message().topic.as_str() {\n",
     );
     out = out.replace(
+        "use roze_shutdown::ShutdownListener;\n",
+        "use roze_shutdown::ShutdownListener;\nuse tracing::Instrument as _;\n",
+    );
+    out = out.replace(
         "        let topic = binding.topic;\n",
         "        let topic = binding.topic;\n        tracing::info!(event = \"stream.binding.resolved\", protocol = \"stream\", topic = %topic, consumer_group = %config.consumer_group, \"stream topic binding resolved\");\n",
     );
     out = out.replace(
         "                            Ok(delivery) => {\n",
-        "                            Ok(delivery) => {\n                                tracing::info!(event = \"stream.message.received\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), attempt = delivery.message().attempt, partition = ?delivery.message().partition, offset = ?delivery.message().offset, \"stream message received\");\n",
+        "                            Ok(delivery) => {\n                                let message_ctx = delivery.message().context();\n                                let request_id = message_ctx.request_id();\n                                let trace_id = message_ctx.trace_id();\n                                let message_span = tracing::info_span!(\"stream.message\", request_id = %request_id, trace_id = %trace_id);\n                                tracing::info!(event = \"stream.message.received\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), attempt = delivery.message().attempt, partition = ?delivery.message().partition, offset = ?delivery.message().offset, request_id = %request_id, trace_id = %trace_id, \"stream message received\");\n",
+    );
+    out = out.replace(
+        "if let Err(error) = dispatch(&delivery).await {\n                                    tracing::error!(event = \"stream.message.failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), ?error, \"stream message failed\");",
+        "let dispatch_started = std::time::Instant::now();\n                                if dispatch(&delivery).instrument(message_span).await.is_err() {\n                                    tracing::error!(event = \"stream.message.failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), elapsed_ms = dispatch_started.elapsed().as_millis(), error_kind = \"dispatch\", request_id = %request_id, trace_id = %trace_id, \"stream message failed\");",
+    );
+    out = out.replace(
+        "if let Err(error) = delivery.nack().await {\n                                        tracing::error!(event = \"stream.message.nack_failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), ?error, \"failed to nack stream message\");",
+        "if delivery.nack().await.is_err() {\n                                        tracing::error!(event = \"stream.message.nack_failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), error_kind = \"broker\", request_id = %request_id, trace_id = %trace_id, \"failed to nack stream message\");",
+    );
+    out = out.replace(
+        "tracing::warn!(event = \"stream.message.nacked\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), \"stream message nacked\");",
+        "tracing::warn!(event = \"stream.message.nacked\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), request_id = %request_id, trace_id = %trace_id, \"stream message nacked\");",
+    );
+    out = out.replace(
+        "} else if let Err(error) = delivery.ack().await {\n                                    tracing::error!(event = \"stream.message.ack_failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), ?error, \"failed to ack stream message\");",
+        "} else if delivery.ack().await.is_err() {\n                                    tracing::error!(event = \"stream.message.ack_failed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), error_kind = \"broker\", request_id = %request_id, trace_id = %trace_id, \"failed to ack stream message\");",
+    );
+    out = out.replace(
+        "tracing::info!(event = \"stream.message.completed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), \"stream message completed\");",
+        "tracing::info!(event = \"stream.message.completed\", protocol = \"stream\", topic = %topic, message_id = %delivery.message().debug_id(), elapsed_ms = dispatch_started.elapsed().as_millis(), request_id = %request_id, trace_id = %trace_id, \"stream message completed\");",
     );
     for method in &spec.rpc_methods {
         writeln!(
@@ -11167,6 +11194,28 @@ governance:
 #   jwt_audience: {}
 #   jwt_expiration_secs: 86400
 #   jwt_clock_skew_secs: 30
+# logging:
+#   enabled: true
+#   level: info
+#   # env_filter: "info,hyper=warn"
+#   format: json # text or json
+#   stdout: true
+#   ansi: false
+#   target: true
+#   caller: false
+#   thread_ids: false
+#   span_events: none # none, new, enter, exit, close, active, full
+#   utc_time: true
+#   time_format: "%Y-%m-%dT%H:%M:%S%.3f%:z"
+#   non_blocking_buffer: 8192
+#   lossy: true
+#   file:
+#     directory: logs
+#     file_name: roze.log
+#     rotation: daily # hourly, daily, never
+#     compress_rotated: true
+#     retention_days: 7
+#     maintenance_interval_secs: 3600
 # telemetry:
 #   name: {}
 #   endpoint: http://127.0.0.1:4317
@@ -11297,6 +11346,28 @@ governance:
 #   jwt_audience: {}
 #   jwt_expiration_secs: 86400
 #   jwt_clock_skew_secs: 30
+# logging:
+#   enabled: true
+#   level: info
+#   # env_filter: "info,hyper=warn"
+#   format: json # text or json
+#   stdout: true
+#   ansi: false
+#   target: true
+#   caller: false
+#   thread_ids: false
+#   span_events: none # none, new, enter, exit, close, active, full
+#   utc_time: true
+#   time_format: "%Y-%m-%dT%H:%M:%S%.3f%:z"
+#   non_blocking_buffer: 8192
+#   lossy: true
+#   file:
+#     directory: logs
+#     file_name: roze.log
+#     rotation: daily # hourly, daily, never
+#     compress_rotated: true
+#     retention_days: 7
+#     maintenance_interval_secs: 3600
 # telemetry:
 #   name: {}
 #   endpoint: http://127.0.0.1:4317
@@ -15543,13 +15614,14 @@ fn main() {
         let main = fs::read_to_string(out.join("src/main.rs")).expect("read main");
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
         assert!(main.contains("use roze_service::ServiceGroup;"));
+        assert!(main.contains("let _tracing_guard = roze_log::init_tracing_with_logging"));
         assert!(main.contains("roze_kafka::build_runtime(&config.kafka).await?"));
         assert!(main.contains(
             "stream::consumer::run(subscriber.as_ref(), &stream_config, shutdown).await"
         ));
         assert!(main.contains("\"service configuration loaded\""));
-        assert!(main.contains("event = \"service.config.loaded\""));
-        assert!(main.contains("event = \"service.stopped\""));
+        assert!(main.contains("event = roze_log::events::SERVICE_CONFIG_LOADED"));
+        assert!(main.contains("event = roze_log::events::SERVICE_STOPPED"));
         assert!(main.contains("\"service starting\""));
         assert!(main.contains("\"service stopped\""));
         assert!(main.contains("\"service failed\""));
@@ -15562,6 +15634,10 @@ fn main() {
         assert!(consumer.contains("event = \"stream.message.received\""));
         assert!(consumer.contains("event = \"stream.message.completed\""));
         assert!(consumer.contains("event = \"stream.message.nacked\""));
+        assert!(consumer.contains("request_id = %request_id"));
+        assert!(consumer.contains("trace_id = %trace_id"));
+        assert!(consumer.contains("elapsed_ms = dispatch_started.elapsed().as_millis()"));
+        assert!(!consumer.contains("?error"));
         assert!(consumer.contains("event = \"application.logic.started\""));
         assert!(consumer.contains("event = \"application.logic.completed\""));
         assert!(consumer.contains("\"stream shutdown requested\""));
@@ -15569,6 +15645,8 @@ fn main() {
         assert!(consumer.contains("handle_user_created"));
         assert!(manifest.contains("roze-service"));
         assert!(manifest.contains("roze-shutdown"));
+        assert!(manifest.contains("roze-config"));
+        assert!(manifest.contains("roze-log"));
         assert!(manifest.contains(r#"features = ["memory"]"#));
         assert!(fs::read_to_string(out.join("README.md"))
             .expect("read readme")

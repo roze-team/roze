@@ -1,4 +1,8 @@
 name: roze-gateway
+logging:
+  level: info
+  format: text
+  stdout: true
 auth:
   jwt_keys:
     - id: "2026-07"

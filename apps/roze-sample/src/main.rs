@@ -11,7 +11,7 @@ use roze_http::rest::RestServer;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = config::load(config_path())?;
-    roze_log::init_tracing_with_config(&config)?;
+    let _tracing_guard = roze_log::init_tracing_with_config(&config)?;
     let rest = config
         .rest
         .clone()

@@ -1,4 +1,8 @@
 name: user-api
+logging:
+  level: info
+  format: text
+  stdout: true
 rest:
   addr: 127.0.0.1:3000
   register: false

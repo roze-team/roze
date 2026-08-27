@@ -29,7 +29,7 @@ use roze_service::ServiceGroup;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = config::load(config_path())?;
-    roze_log::init_tracing_with_config(&config)?;
+    let _tracing_guard = roze_log::init_tracing_with_config(&config)?;
     let mut rest = config
         .rest
         .clone()
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     tracing::info!(
-        event = "service.config.loaded",
+        event = roze_log::events::SERVICE_CONFIG_LOADED,
         service = %config.name,
         protocol = "rest",
         listen_addr = %rest.addr,
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
             rest.addr,
         )
         .await?;
-        tracing::info!(event = "service.registry.registered", service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
+        tracing::info!(event = roze_log::events::SERVICE_REGISTRY_REGISTERED, service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
         (Some(registration), Some(registry))
     } else {
         (None, None)
@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let service_shutdown = group.shutdown_listener();
     let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;
     let ctx = application::configure_context(ctx).await?;
-    tracing::info!(event = "service.context.initialized", service = %service_name, protocol = "rest", "service context initialized");
+    tracing::info!(event = roze_log::events::SERVICE_CONTEXT_INITIALIZED, service = %service_name, protocol = "rest", "service context initialized");
     application::register_services(&mut group, &ctx)?;
     let health = ctx.health.clone();
     if let Some(registry) = registry_health {
@@ -124,20 +124,20 @@ async fn main() -> anyhow::Result<()> {
         let health = health.clone();
         async move {
             shutdown.wait().await;
-            tracing::info!(event = "service.health.draining", protocol = "rest", "shutdown requested; marking service draining");
+            tracing::info!(event = roze_log::events::SERVICE_HEALTH_DRAINING, protocol = "rest", "shutdown requested; marking service draining");
             health.mark_draining();
             Ok(())
         }
     });
-    tracing::info!(event = "service.starting", service = %service_name, protocol = "rest", listen_addr = %rest.addr, "service starting");
+    tracing::info!(event = roze_log::events::SERVICE_STARTING, service = %service_name, protocol = "rest", listen_addr = %rest.addr, "service starting");
     let result = group.start().await;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
-        tracing::info!(event = "service.registry.unregistered", service = %service_name, protocol = "rest", "service unregistered");
+        tracing::info!(event = roze_log::events::SERVICE_REGISTRY_UNREGISTERED, service = %service_name, protocol = "rest", "service unregistered");
     }
     match &result {
-        Ok(()) => tracing::info!(event = "service.stopped", service = %service_name, protocol = "rest", "service stopped"),
-        Err(error) => tracing::error!(event = "service.failed", service = %service_name, protocol = "rest", error = %error, "service failed"),
+        Ok(()) => tracing::info!(event = roze_log::events::SERVICE_STOPPED, service = %service_name, protocol = "rest", "service stopped"),
+        Err(_) => tracing::error!(event = roze_log::events::SERVICE_FAILED, service = %service_name, protocol = "rest", error_kind = "lifecycle", "service failed"),
     }
     result?;
 
@@ -739,12 +739,12 @@ async fn create_report_export(
                 roze_metrics::record_report_export(task_format.clone(), "completed", size, started.elapsed());
                 tracing::info!(event = "report.export.completed", export_id = %task_id, tenant = %task_tenant, "report export completed");
             }
-            Err(error) => {
+            Err(_) => {
                 export.status = "failed".to_string();
                 export.error = Some("report export failed".to_string());
                 export.terminal_at_millis = Some(report_now_millis());
                 roze_metrics::record_report_export(task_format.clone(), "failed", 0, started.elapsed());
-                tracing::warn!(event = "report.export.failed", export_id = %task_id, tenant = %task_tenant, error = %error, "report export failed");
+                tracing::warn!(event = "report.export.failed", export_id = %task_id, tenant = %task_tenant, error_kind = "export", "report export failed");
             }
         }
         drop(exports);
@@ -756,8 +756,8 @@ async fn create_report_export(
                         REPORT_EXPORT_EXPIRY_SECS,
                     ))
                     .await;
-                    if let Err(error) = storage.delete_object(&key).await {
-                        tracing::warn!(event = "report.export.cleanup_failed", export_id = %cleanup_id, object_key = %key, error = %error, "expired report object cleanup failed");
+                    if storage.delete_object(&key).await.is_err() {
+                        tracing::warn!(event = "report.export.cleanup_failed", export_id = %cleanup_id, object_key = %key, error_kind = "storage", "expired report object cleanup failed");
                         return;
                     }
                     report_exports().write().await.remove(&cleanup_id);
@@ -872,7 +872,7 @@ async fn chart_query(
     )
     .await
     .map_err(|error| {
-        tracing::warn!(event = "chart.query.failed", tenant = %tenant, subject = %subject, error = %error, "chart query failed");
+        tracing::warn!(event = "chart.query.failed", tenant = %tenant, subject = %subject, error_kind = "query", "chart query failed");
         if error.to_string().contains("timed out") {
             RozeError::Unavailable("chart query timed out".to_string())
         } else {
@@ -1473,8 +1473,9 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
     } else {
         format!("ApiResponse<{}>", route.response)
     };
+    let response_kind = if route.maud { "html" } else { "json" };
     let wrapped_response = if route.maud {
-        "roze_http::Html(resp.into_string())"
+        "{ let render_started = std::time::Instant::now(); let html = resp.into_string(); tracing::info!(event = roze_log::events::HTML_RENDER_COMPLETED, protocol = \"rest\", service = %ctx.config.name, operation = \"html\", response_kind = \"html\", content_type = \"text/html; charset=utf-8\", render_elapsed_ms = render_started.elapsed().as_millis(), request_id = %logic_request_id, trace_id = %logic_trace_id, \"HTML rendering completed\"); roze_http::Html(html) }"
     } else if raw_response {
         "Json(resp)"
     } else {
@@ -1607,8 +1608,9 @@ fn render_route_handler(spec: &ApiSpec, route: &crate::parser::RestRoute) -> Str
         ));
     }
     out.push_str(&format!(
-        "    let logic_request_id = request_ctx.request_id();\n    let logic_trace_id = request_ctx.trace_id();\n    tracing::info!(event = \"application.logic.started\", protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic started\");\n    let timeout_enabled = ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n    tracing::info!(event = \"application.logic.completed\", protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, success = result.is_ok(), request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic completed\");\n",
-        handler = handler
+        "    let logic_request_id = request_ctx.request_id();\n    let logic_trace_id = request_ctx.trace_id();\n    tracing::info!(event = roze_log::events::APPLICATION_LOGIC_STARTED, protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, response_kind = {response_kind:?}, request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic started\");\n    let logic_started = std::time::Instant::now();\n    let timeout_enabled = ctx.config.rest.as_ref().is_none_or(|rest| rest.middlewares.timeout);\n    let timeout = timeout_enabled.then(|| request_ctx.remaining_timeout()).flatten();\n    let logic = crate::logic::{handler}(ctx.clone(), request_ctx, req);\n    let result = match timeout {{\n        Some(timeout) => match tokio::time::timeout(timeout, logic).await {{\n            Ok(result) => result,\n            Err(_) => Err(RozeError::Internal(\"request timeout\".to_string())),\n        }},\n        None => logic.await,\n    }};\n    match &result {{\n        Ok(_) => tracing::info!(event = roze_log::events::APPLICATION_LOGIC_COMPLETED, protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, response_kind = {response_kind:?}, elapsed_ms = logic_started.elapsed().as_millis(), request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic completed\"),\n        Err(error) => tracing::error!(event = roze_log::events::APPLICATION_LOGIC_FAILED, protocol = \"rest\", service = %ctx.config.name, operation = {handler:?}, response_kind = {response_kind:?}, elapsed_ms = logic_started.elapsed().as_millis(), code = error.code(), error_kind = error.kind(), request_id = %logic_request_id, trace_id = %logic_trace_id, \"REST application logic failed\"),\n    }}\n",
+        handler = handler,
+        response_kind = response_kind,
     ));
     if uses_idempotency {
         out.push_str(&format!(
@@ -1686,7 +1688,7 @@ fn render_websocket_route_handler(spec: &ApiSpec, route: &crate::parser::RestRou
     }
     out.push_str("    roze_middleware::finish_route(route_guard, true, \"101\");\n");
     out.push_str(&format!(
-        "    Ok(upgrade.with_shutdown(websocket_shutdown.listener()).on_upgrade(move |socket| async move {{\n        let request_id = request_ctx.request_id();\n        let trace_id = request_ctx.trace_id();\n        tracing::info!(event = \"application.logic.started\", protocol = \"websocket\", operation = {handler:?}, request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic started\");\n        match crate::logic::{handler}(ctx, request_ctx, socket).await {{\n            Ok(()) => tracing::info!(event = \"application.logic.completed\", protocol = \"websocket\", operation = {handler:?}, success = true, request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic completed\"),\n            Err(error) => tracing::warn!(event = \"application.logic.completed\", protocol = \"websocket\", operation = {handler:?}, success = false, code = %error.code(), request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic failed\"),\n        }}\n    }}))\n",
+        "    Ok(upgrade.with_shutdown(websocket_shutdown.listener()).on_upgrade(move |socket| async move {{\n        let request_id = request_ctx.request_id();\n        let trace_id = request_ctx.trace_id();\n        tracing::info!(event = roze_log::events::APPLICATION_LOGIC_STARTED, protocol = \"websocket\", operation = {handler:?}, request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic started\");\n        let logic_started = std::time::Instant::now();\n        match crate::logic::{handler}(ctx, request_ctx, socket).await {{\n            Ok(()) => tracing::info!(event = roze_log::events::APPLICATION_LOGIC_COMPLETED, protocol = \"websocket\", operation = {handler:?}, elapsed_ms = logic_started.elapsed().as_millis(), request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic completed\"),\n            Err(error) => tracing::error!(event = roze_log::events::APPLICATION_LOGIC_FAILED, protocol = \"websocket\", operation = {handler:?}, elapsed_ms = logic_started.elapsed().as_millis(), code = error.code(), error_kind = error.kind(), request_id = %request_id, trace_id = %trace_id, \"WebSocket application logic failed\"),\n        }}\n    }}))\n",
         handler = handler,
     ));
     out.push_str("}\n\n");
@@ -3007,8 +3009,9 @@ mod tests {
         .expect("valid api");
 
         let handlers = render_handlers(&spec);
-        assert!(handlers.contains("event = \"application.logic.started\""));
-        assert!(handlers.contains("event = \"application.logic.completed\""));
+        assert!(handlers.contains("event = roze_log::events::APPLICATION_LOGIC_STARTED"));
+        assert!(handlers.contains("event = roze_log::events::APPLICATION_LOGIC_COMPLETED"));
+        assert!(handlers.contains("event = roze_log::events::APPLICATION_LOGIC_FAILED"));
         assert!(handlers.contains("request_id = %logic_request_id"));
         assert!(handlers.contains("trace_id = %logic_trace_id"));
         assert!(handlers.contains("GetUserReqPath"));
@@ -3399,9 +3402,9 @@ mod tests {
         assert!(rendered.contains("RestService::new("));
         assert!(rendered.contains("health.mark_draining();"));
         assert!(rendered.contains("\"service configuration loaded\""));
-        assert!(rendered.contains("event = \"service.config.loaded\""));
+        assert!(rendered.contains("event = roze_log::events::SERVICE_CONFIG_LOADED"));
         assert!(rendered.contains("event = \"rest.middleware.resolved\""));
-        assert!(rendered.contains("event = \"service.stopped\""));
+        assert!(rendered.contains("event = roze_log::events::SERVICE_STOPPED"));
         assert!(rendered.contains("\"service context initialized\""));
         assert!(rendered.contains("\"service starting\""));
         assert!(rendered.contains("\"service stopped\""));
@@ -3646,7 +3649,9 @@ mod tests {
             .contains("Result<roze_http::Html<String>, RozeError>"));
         assert!(handlers[0]
             .2
-            .contains("roze_http::Html(resp.into_string())"));
+            .contains("event = roze_log::events::HTML_RENDER_COMPLETED"));
+        assert!(handlers[0].2.contains("resp.into_string()"));
+        assert!(!handlers[0].2.contains("html = %"));
 
         let logic = render_logic_files(&spec);
         assert!(logic[0].2.contains("Result<maud::Markup, RozeError>"));

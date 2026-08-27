@@ -138,7 +138,9 @@ tonic-prost-build = "0.14.6"
 tower = { version = "0.5.3", features = ["limit", "timeout", "util"] }
 tower-http = { version = "0.7.0", features = ["catch-panic", "cors", "decompression-gzip", "limit", "timeout", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+flate2 = "1"
 veil = { version = "0.3.0", default-features = false }
 toml_edit = "0.25.12"
 futures-util = "0.3"

@@ -65,6 +65,8 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub gateway: Option<GatewayConfig>,
     #[serde(default)]
+    pub logging: LoggingConfig,
+    #[serde(default)]
     pub telemetry: Option<TelemetryConfig>,
     pub governance: GovernanceConfig,
 }
@@ -255,6 +257,7 @@ impl ServiceConfig {
         if let Some(ai) = &self.ai {
             ai.validate()?;
         }
+        self.logging.validate()?;
         if let Some(cache) = &self.cache {
             anyhow::ensure!(
                 !cache.url.trim().is_empty() || !cache.cluster_urls.is_empty(),
@@ -323,6 +326,7 @@ impl fmt::Debug for ServiceConfig {
             .field("idempotency", &self.idempotency.is_some())
             .field("storage", &self.storage.is_some())
             .field("gateway", &self.gateway.is_some())
+            .field("logging", &self.logging)
             .field("telemetry", &self.telemetry.is_some())
             .field("governance", &self.governance)
             .finish()
@@ -999,6 +1003,187 @@ impl fmt::Debug for KafkaConfig {
             .field("consumer_workers", &self.consumer_workers)
             .finish()
     }
+}
+
+/// Process-wide structured logging configuration.
+///
+/// Logging is intentionally separate from distributed tracing: `logging`
+/// controls local sinks and formatting, while `telemetry` controls span export.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoggingConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub env_filter: Option<String>,
+    #[serde(default)]
+    pub format: LogFormat,
+    #[serde(default = "default_true")]
+    pub stdout: bool,
+    #[serde(default = "default_true")]
+    pub ansi: bool,
+    #[serde(default = "default_true")]
+    pub target: bool,
+    #[serde(default)]
+    pub caller: bool,
+    #[serde(default)]
+    pub thread_ids: bool,
+    #[serde(default)]
+    pub span_events: LogSpanEvents,
+    #[serde(default = "default_true")]
+    pub utc_time: bool,
+    #[serde(default = "default_log_time_format")]
+    pub time_format: String,
+    #[serde(default = "default_log_buffer")]
+    pub non_blocking_buffer: usize,
+    #[serde(default = "default_true")]
+    pub lossy: bool,
+    #[serde(default)]
+    pub file: Option<LogFileConfig>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            level: default_log_level(),
+            env_filter: None,
+            format: LogFormat::Text,
+            stdout: true,
+            ansi: true,
+            target: true,
+            caller: false,
+            thread_ids: false,
+            span_events: LogSpanEvents::None,
+            utc_time: true,
+            time_format: default_log_time_format(),
+            non_blocking_buffer: default_log_buffer(),
+            lossy: true,
+            file: None,
+        }
+    }
+}
+
+impl LoggingConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        const LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error", "off"];
+        anyhow::ensure!(
+            LEVELS.contains(&self.level.trim().to_ascii_lowercase().as_str()),
+            "logging.level must be one of trace, debug, info, warn, error, or off"
+        );
+        if let Some(filter) = &self.env_filter {
+            anyhow::ensure!(
+                !filter.trim().is_empty(),
+                "logging.env_filter must not be empty when configured"
+            );
+        }
+        anyhow::ensure!(
+            !self.enabled || self.stdout || self.file.is_some(),
+            "logging requires stdout or file output when enabled"
+        );
+        anyhow::ensure!(
+            (1..=16_777_216).contains(&self.non_blocking_buffer),
+            "logging.non_blocking_buffer must be between 1 and 16777216"
+        );
+        anyhow::ensure!(
+            !self.time_format.trim().is_empty(),
+            "logging.time_format must not be empty"
+        );
+        if let Some(file) = &self.file {
+            file.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogSpanEvents {
+    #[default]
+    None,
+    New,
+    Enter,
+    Exit,
+    Close,
+    Active,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogFileConfig {
+    #[serde(default = "default_log_directory")]
+    pub directory: PathBuf,
+    #[serde(default = "default_log_file_name")]
+    pub file_name: String,
+    #[serde(default)]
+    pub rotation: LogRotation,
+    #[serde(default)]
+    pub compress_rotated: bool,
+    #[serde(default = "default_log_retention_days")]
+    pub retention_days: u64,
+    #[serde(default = "default_log_maintenance_interval_secs")]
+    pub maintenance_interval_secs: u64,
+}
+
+impl Default for LogFileConfig {
+    fn default() -> Self {
+        Self {
+            directory: default_log_directory(),
+            file_name: default_log_file_name(),
+            rotation: LogRotation::Daily,
+            compress_rotated: false,
+            retention_days: default_log_retention_days(),
+            maintenance_interval_secs: default_log_maintenance_interval_secs(),
+        }
+    }
+}
+
+impl LogFileConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.directory.as_os_str().is_empty(),
+            "logging.file.directory must not be empty"
+        );
+        let file_name = self.file_name.trim();
+        anyhow::ensure!(
+            !file_name.is_empty() && file_name != "." && file_name != "..",
+            "logging.file.file_name must be a non-empty file name"
+        );
+        anyhow::ensure!(
+            Path::new(file_name)
+                .file_name()
+                .is_some_and(|name| name == file_name)
+                && !file_name.contains(['/', '\\']),
+            "logging.file.file_name must not contain a directory"
+        );
+        anyhow::ensure!(
+            self.retention_days <= 36_500,
+            "logging.file.retention_days must not exceed 36500"
+        );
+        anyhow::ensure!(
+            self.maintenance_interval_secs <= 86_400,
+            "logging.file.maintenance_interval_secs must not exceed 86400"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogRotation {
+    Hourly,
+    #[default]
+    Daily,
+    Never,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1695,6 +1880,34 @@ fn default_idempotency_record_ttl_millis() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_time_format() -> String {
+    "%Y-%m-%dT%H:%M:%S%.3f%:z".to_string()
+}
+
+fn default_log_buffer() -> usize {
+    8_192
+}
+
+fn default_log_directory() -> PathBuf {
+    PathBuf::from("logs")
+}
+
+fn default_log_file_name() -> String {
+    "roze.log".to_string()
+}
+
+fn default_log_retention_days() -> u64 {
+    7
+}
+
+fn default_log_maintenance_interval_secs() -> u64 {
+    3_600
 }
 
 fn default_mongo_max_pool_size() -> u32 {
@@ -2949,6 +3162,67 @@ endpoint = "http://127.0.0.1:4317"
         assert_eq!(telemetry.sampler, default_telemetry_sampler());
         assert_eq!(telemetry.batcher, TelemetryBatcher::OtlpGrpc);
         assert_eq!(telemetry.propagator, TelemetryPropagator::TraceContext);
+    }
+
+    #[test]
+    fn loads_logging_defaults_and_file_configuration() {
+        let source = r#"
+name = "demo"
+
+[logging]
+level = "debug"
+format = "json"
+stdout = false
+non_blocking_buffer = 4096
+lossy = false
+
+[logging.file]
+directory = "var/log/roze"
+file_name = "demo.log"
+rotation = "hourly"
+compress_rotated = true
+retention_days = 14
+maintenance_interval_secs = 60
+
+[governance]
+"#;
+        let config: ServiceConfig = config::Config::builder()
+            .add_source(config::File::from_str(source, config::FileFormat::Toml))
+            .build()
+            .expect("build")
+            .try_deserialize()
+            .expect("deserialize");
+
+        assert_eq!(config.logging.level, "debug");
+        assert_eq!(config.logging.format, LogFormat::Json);
+        assert!(!config.logging.stdout);
+        assert_eq!(config.logging.non_blocking_buffer, 4096);
+        assert!(!config.logging.lossy);
+        let file = config.logging.file.expect("file logging");
+        assert_eq!(file.directory, PathBuf::from("var/log/roze"));
+        assert_eq!(file.file_name, "demo.log");
+        assert_eq!(file.rotation, LogRotation::Hourly);
+        assert!(file.compress_rotated);
+        assert_eq!(file.retention_days, 14);
+    }
+
+    #[test]
+    fn rejects_invalid_logging_configuration() {
+        let mut logging = LoggingConfig {
+            stdout: false,
+            ..LoggingConfig::default()
+        };
+        assert!(logging.validate().is_err());
+
+        logging.file = Some(LogFileConfig {
+            file_name: "../escape.log".to_string(),
+            ..LogFileConfig::default()
+        });
+        assert!(logging.validate().is_err());
+
+        logging.file.as_mut().expect("file").file_name = "demo.log".to_string();
+        logging.level = "verbose".to_string();
+        assert!(logging.validate().is_err());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use tokio::time::{sleep, timeout, Duration};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (config, center) = config::load_with_config_center_with_center(config_path()).await?;
-    roze_log::init_tracing_with_config(&config)?;
+    let _tracing_guard = roze_log::init_tracing_with_config(&config)?;
     let rest = config
         .rest
         .clone()

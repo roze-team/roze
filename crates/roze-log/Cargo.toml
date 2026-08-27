@@ -6,9 +6,16 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+flate2.workspace = true
 opentelemetry = "0.31"
 roze-config = { path = "../roze-config" }
 roze-opentelemetry = { path = "../roze-opentelemetry" }
 tracing.workspace = true
+tracing-appender.workspace = true
 tracing-opentelemetry = "0.32"
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

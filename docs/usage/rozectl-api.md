@@ -1312,6 +1312,12 @@ events. Native HTTP emits `http.request.*` and `rest.route.*`; RPC emits
 Normal milestones use `INFO`, cancellation and client rejection use `WARN`, and
 failures use `ERROR`. Request-scoped events include request and trace IDs where
 available. The `event` field is stable and intended for log queries and alerts.
+Generated binaries keep the `roze_log::TracingGuard` returned by
+`init_tracing_with_config` alive until shutdown. Configure stdout/file output,
+text or JSON formatting, filtering, asynchronous buffering, rotation,
+compression, and retention under `logging`; see the
+[logging contract](../contracts/logging.md). Explicit `logging.env_filter`
+wins over `RUST_LOG`, which wins over `logging.level`.
 
 Generated logging never prints request/message payloads, authorization values,
 SQL arguments, credentials, or fallback payloads. Application logic remains
