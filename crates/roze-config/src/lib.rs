@@ -1041,6 +1041,8 @@ pub struct LoggingConfig {
     pub lossy: bool,
     #[serde(default)]
     pub file: Option<LogFileConfig>,
+    #[serde(default)]
+    pub audit: Option<AuditLogConfig>,
 }
 
 impl Default for LoggingConfig {
@@ -1061,6 +1063,7 @@ impl Default for LoggingConfig {
             non_blocking_buffer: default_log_buffer(),
             lossy: true,
             file: None,
+            audit: None,
         }
     }
 }
@@ -1079,8 +1082,8 @@ impl LoggingConfig {
             );
         }
         anyhow::ensure!(
-            !self.enabled || self.stdout || self.file.is_some(),
-            "logging requires stdout or file output when enabled"
+            !self.enabled || self.stdout || self.file.is_some() || self.audit.is_some(),
+            "logging requires stdout, file, or audit output when enabled"
         );
         anyhow::ensure!(
             (1..=16_777_216).contains(&self.non_blocking_buffer),
@@ -1093,7 +1096,46 @@ impl LoggingConfig {
         if let Some(file) = &self.file {
             file.validate()?;
         }
+        if let Some(audit) = &self.audit {
+            anyhow::ensure!(
+                self.enabled,
+                "logging.audit requires logging.enabled = true"
+            );
+            audit.validate()?;
+            if let Some(file) = &self.file {
+                anyhow::ensure!(
+                    file.directory != audit.file.directory
+                        || file.file_name_pattern != audit.file.file_name_pattern,
+                    "logging.file and logging.audit.file must not resolve to the same files"
+                );
+            }
+        }
         Ok(())
+    }
+}
+
+/// Dedicated, lossless JSON audit log sink.
+///
+/// Audit events use their own bounded queue. When the queue is full producers
+/// block instead of dropping records, so this capacity must be sized for the
+/// service's audited mutation rate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuditLogConfig {
+    #[serde(default = "default_log_buffer")]
+    pub non_blocking_buffer: usize,
+    pub file: LogFileConfig,
+}
+
+impl AuditLogConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=16_777_216).contains(&self.non_blocking_buffer),
+            "logging.audit.non_blocking_buffer must be between 1 and 16777216"
+        );
+        self.file
+            .validate()
+            .context("invalid logging.audit.file configuration")
     }
 }
 
@@ -3256,6 +3298,18 @@ compression_level = 7
 retention_days = 14
 maintenance_interval_secs = 60
 
+[logging.audit]
+non_blocking_buffer = 2048
+
+[logging.audit.file]
+directory = "var/log/roze/audit"
+file_name_pattern = "audit.{date}.jsonl"
+rotation = "daily"
+date_format = "%Y-%m-%d"
+compression = "gzip"
+retention_days = 90
+maintenance_interval_secs = 300
+
 [governance]
 "#;
         let config: ServiceConfig = config::Config::builder()
@@ -3279,6 +3333,12 @@ maintenance_interval_secs = 60
         assert_eq!(file.compression, LogCompression::Gzip);
         assert_eq!(file.compression_level, 7);
         assert_eq!(file.retention_days, 14);
+        let audit = config.logging.audit.expect("audit logging");
+        assert_eq!(audit.non_blocking_buffer, 2048);
+        assert_eq!(audit.file.directory, PathBuf::from("var/log/roze/audit"));
+        assert_eq!(audit.file.file_name_pattern, "audit.{date}.jsonl");
+        assert_eq!(audit.file.compression, LogCompression::Gzip);
+        assert_eq!(audit.file.retention_days, 90);
     }
 
     #[test]
@@ -3302,6 +3362,29 @@ maintenance_interval_secs = 60
 
         logging.file.as_mut().expect("file").date_format = "%Y-%m-%d-%H".to_string();
         logging.level = "verbose".to_string();
+        assert!(logging.validate().is_err());
+
+        let mut logging = LoggingConfig {
+            audit: Some(AuditLogConfig {
+                non_blocking_buffer: 0,
+                file: LogFileConfig::default(),
+            }),
+            ..LoggingConfig::default()
+        };
+        assert!(logging.validate().is_err());
+        logging.audit.as_mut().expect("audit").non_blocking_buffer = 1024;
+        logging.enabled = false;
+        assert!(logging.validate().is_err());
+
+        let shared_file = LogFileConfig::default();
+        let logging = LoggingConfig {
+            file: Some(shared_file.clone()),
+            audit: Some(AuditLogConfig {
+                non_blocking_buffer: 1024,
+                file: shared_file,
+            }),
+            ..LoggingConfig::default()
+        };
         assert!(logging.validate().is_err());
     }
 

@@ -26,6 +26,19 @@ logging:
   #   compression_level: 6
   #   retention_days: 7
   #   maintenance_interval_secs: 3600
+  # Enable for security-sensitive gateway administration events:
+  # audit:
+  #   non_blocking_buffer: 4096
+  #   file:
+  #     directory: /var/log/roze/audit
+  #     file_name_pattern: "roze-gateway-audit.{date}.jsonl"
+  #     rotation: daily
+  #     date_format: "%Y-%m-%d"
+  #     max_file_size_bytes: 104857600
+  #     compression: gzip
+  #     compression_level: 6
+  #     retention_days: 90
+  #     maintenance_interval_secs: 3600
 
 auth:
   jwt_keys:

@@ -26,6 +26,19 @@ logging:
   #   compression_level: 6
   #   retention_days: 7
   #   maintenance_interval_secs: 3600
+  # Enable for audited mutations and mount this directory on durable storage:
+  # audit:
+  #   non_blocking_buffer: 4096
+  #   file:
+  #     directory: /var/log/roze/audit
+  #     file_name_pattern: "user-api-audit.{date}.jsonl"
+  #     rotation: daily
+  #     date_format: "%Y-%m-%d"
+  #     max_file_size_bytes: 104857600
+  #     compression: gzip
+  #     compression_level: 6
+  #     retention_days: 90
+  #     maintenance_interval_secs: 3600
 
 rest:
   addr: 0.0.0.0:3000

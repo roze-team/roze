@@ -17,11 +17,12 @@ use chrono::{Local, Utc};
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 use roze_config::{
-    LogCompression, LogFileConfig, LogFormat, LogRotation, LogSpanEvents, LoggingConfig,
-    ServiceConfig,
+    AuditLogConfig, LogCompression, LogFileConfig, LogFormat, LogRotation, LogSpanEvents,
+    LoggingConfig, ServiceConfig,
 };
 use roze_opentelemetry::SdkTracerProvider;
 use tracing_subscriber::{
+    filter::filter_fn,
     fmt::{
         format::{FmtSpan, Writer},
         time::FormatTime,
@@ -32,6 +33,33 @@ use tracing_subscriber::{
 };
 
 type BoxLayer = Box<dyn Layer<Registry> + Send + Sync>;
+
+/// Reserved tracing target routed to the dedicated audit sink.
+pub const AUDIT_TARGET: &str = "roze.audit";
+
+/// Emits an informational audit event to the dedicated audit sink.
+#[macro_export]
+macro_rules! audit_info {
+    ($($fields:tt)*) => {
+        tracing::info!(target: $crate::AUDIT_TARGET, $($fields)*);
+    };
+}
+
+/// Emits a warning audit event to the dedicated audit sink.
+#[macro_export]
+macro_rules! audit_warn {
+    ($($fields:tt)*) => {
+        tracing::warn!(target: $crate::AUDIT_TARGET, $($fields)*);
+    };
+}
+
+/// Emits an error audit event to the dedicated audit sink.
+#[macro_export]
+macro_rules! audit_error {
+    ($($fields:tt)*) => {
+        tracing::error!(target: $crate::AUDIT_TARGET, $($fields)*);
+    };
+}
 
 /// Stable event names emitted by Roze framework and generated boundaries.
 pub mod events {
@@ -118,8 +146,7 @@ impl MaintenanceWorker {
     fn spawn(
         config: LogFileConfig,
         active_file: ActiveFile,
-        error_counters: Vec<tracing_appender::non_blocking::ErrorCounter>,
-        reported_dropped_lines: Arc<AtomicU64>,
+        drop_counters: Vec<DropCounter>,
     ) -> anyhow::Result<Option<Self>> {
         run_log_maintenance(&config, &active_file)?;
         if config.maintenance_interval_secs == 0 {
@@ -133,7 +160,7 @@ impl MaintenanceWorker {
                 match receiver.recv_timeout(interval) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        report_dropped_lines(&error_counters, &reported_dropped_lines);
+                        report_dropped_lines(&drop_counters);
                         if let Err(error) = run_log_maintenance(&config, &active_file) {
                             tracing::warn!(
                                 event = events::LOG_MAINTENANCE_FAILED,
@@ -155,6 +182,23 @@ impl MaintenanceWorker {
         let _ = self.stop.send(());
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DropCounter {
+    sink: &'static str,
+    counter: tracing_appender::non_blocking::ErrorCounter,
+    reported: Arc<AtomicU64>,
+}
+
+impl DropCounter {
+    fn new(sink: &'static str, counter: tracing_appender::non_blocking::ErrorCounter) -> Self {
+        Self {
+            sink,
+            counter,
+            reported: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -358,26 +402,25 @@ fn is_sequenced_name(name: &str, base_name: &str) -> bool {
 /// Owns asynchronous writer and telemetry resources for a service lifetime.
 #[must_use = "dropping the tracing guard immediately disables asynchronous log flushing"]
 pub struct TracingGuard {
-    maintenance: Option<MaintenanceWorker>,
+    maintenance: Vec<MaintenanceWorker>,
     tracer_provider: Option<SdkTracerProvider>,
     writer_guards: Vec<tracing_appender::non_blocking::WorkerGuard>,
-    error_counters: Vec<tracing_appender::non_blocking::ErrorCounter>,
-    reported_dropped_lines: Arc<AtomicU64>,
+    drop_counters: Vec<DropCounter>,
 }
 
 impl TracingGuard {
-    /// Number of lines dropped by lossy asynchronous file writers.
+    /// Number of lines dropped by all lossy asynchronous log writers.
     pub fn dropped_lines(&self) -> u64 {
-        report_dropped_lines(&self.error_counters, &self.reported_dropped_lines)
+        report_dropped_lines(&self.drop_counters)
     }
 }
 
 impl Drop for TracingGuard {
     fn drop(&mut self) {
-        if let Some(mut maintenance) = self.maintenance.take() {
+        for mut maintenance in self.maintenance.drain(..) {
             maintenance.shutdown();
         }
-        report_dropped_lines(&self.error_counters, &self.reported_dropped_lines);
+        report_dropped_lines(&self.drop_counters);
         if let Some(provider) = self.tracer_provider.take() {
             if let Err(error) = provider.shutdown() {
                 eprintln!("failed to shut down OpenTelemetry provider: {error}");
@@ -456,21 +499,21 @@ fn init_logging_pipeline(
     let span_events = span_events(logging.span_events);
     let mut layers: Vec<BoxLayer> = Vec::new();
     let mut writer_guards = Vec::new();
-    let mut error_counters = Vec::new();
-    let reported_dropped_lines = Arc::new(AtomicU64::new(0));
-    let mut maintenance = None;
+    let mut drop_counters = Vec::new();
+    let mut maintenance = Vec::new();
 
     if logging.enabled && logging.stdout {
+        let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .buffered_lines_limit(logging.non_blocking_buffer)
+            .lossy(logging.lossy)
+            .finish(std::io::stdout());
+        drop_counters.push(DropCounter::new("stdout", writer.error_counter()));
+        writer_guards.push(guard);
         layers.push(
-            format_layer(
-                logging,
-                timer.clone(),
-                span_events.clone(),
-                true,
-                std::io::stdout,
-            )
-            .with_filter(filter.clone())
-            .boxed(),
+            format_layer(logging, timer.clone(), span_events.clone(), true, writer)
+                .with_filter(filter.clone())
+                .with_filter(filter_fn(|metadata| metadata.target() != AUDIT_TARGET))
+                .boxed(),
         );
     }
 
@@ -494,17 +537,34 @@ fn init_logging_pipeline(
                 .buffered_lines_limit(logging.non_blocking_buffer)
                 .lossy(logging.lossy)
                 .finish(appender);
-            error_counters.push(writer.error_counter());
-            maintenance = MaintenanceWorker::spawn(
-                file.clone(),
-                active_file,
-                error_counters.clone(),
-                Arc::clone(&reported_dropped_lines),
-            )?;
+            drop_counters.push(DropCounter::new("file", writer.error_counter()));
+            if let Some(worker) =
+                MaintenanceWorker::spawn(file.clone(), active_file, drop_counters.clone())?
+            {
+                maintenance.push(worker);
+            }
             writer_guards.push(guard);
             layers.push(
                 format_layer(logging, timer.clone(), span_events, false, writer)
                     .with_filter(filter.clone())
+                    .with_filter(filter_fn(|metadata| metadata.target() != AUDIT_TARGET))
+                    .boxed(),
+            );
+        }
+
+        if let Some(audit) = &logging.audit {
+            let (writer, guard, active_file) = build_audit_writer(audit, logging.utc_time)?;
+            drop_counters.push(DropCounter::new("audit", writer.error_counter()));
+            if let Some(worker) =
+                MaintenanceWorker::spawn(audit.file.clone(), active_file, drop_counters.clone())?
+            {
+                maintenance.push(worker);
+            }
+            writer_guards.push(guard);
+            layers.push(
+                audit_json_layer(logging, timer.clone(), writer)
+                    .with_filter(filter.clone())
+                    .with_filter(filter_fn(|metadata| metadata.target() == AUDIT_TARGET))
                     .boxed(),
             );
         }
@@ -526,32 +586,58 @@ fn init_logging_pipeline(
         maintenance,
         tracer_provider,
         writer_guards,
-        error_counters,
-        reported_dropped_lines,
+        drop_counters,
     })
 }
 
-fn report_dropped_lines(
-    counters: &[tracing_appender::non_blocking::ErrorCounter],
-    reported: &AtomicU64,
-) -> u64 {
-    let total = counters
-        .iter()
-        .map(|counter| counter.dropped_lines() as u64)
-        .sum::<u64>();
-    let previous = reported.swap(total, Ordering::Relaxed);
-    if total > previous {
-        let dropped = total - previous;
-        roze_metrics::record_log_dropped_lines("file", dropped);
-        tracing::warn!(
-            event = events::LOG_LINES_DROPPED,
-            sink = "file",
-            dropped_lines = dropped,
-            dropped_lines_total = total,
-            "asynchronous log lines dropped"
-        );
+fn build_audit_writer(
+    audit: &AuditLogConfig,
+    utc_time: bool,
+) -> anyhow::Result<(
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+    ActiveFile,
+)> {
+    fs::create_dir_all(&audit.file.directory).with_context(|| {
+        format!(
+            "failed to create audit log directory {}",
+            audit.file.directory.display()
+        )
+    })?;
+    let appender =
+        ConfigurableRollingWriter::new(audit.file.clone(), utc_time).with_context(|| {
+            format!(
+                "failed to open rolling audit log file in {}",
+                audit.file.directory.display()
+            )
+        })?;
+    let active_file = appender.active_file();
+    let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(audit.non_blocking_buffer)
+        .lossy(false)
+        .finish(appender);
+    Ok((writer, guard, active_file))
+}
+
+fn report_dropped_lines(counters: &[DropCounter]) -> u64 {
+    let mut combined = 0;
+    for item in counters {
+        let total = item.counter.dropped_lines() as u64;
+        combined += total;
+        let previous = item.reported.swap(total, Ordering::Relaxed);
+        if total > previous {
+            let dropped = total - previous;
+            roze_metrics::record_log_dropped_lines(item.sink, dropped);
+            tracing::warn!(
+                event = events::LOG_LINES_DROPPED,
+                sink = item.sink,
+                dropped_lines = dropped,
+                dropped_lines_total = total,
+                "asynchronous log lines dropped"
+            );
+        }
     }
-    total
+    combined
 }
 
 fn resolve_filter(config: &LoggingConfig, fallback: &str) -> anyhow::Result<EnvFilter> {
@@ -598,6 +684,22 @@ where
             .with_line_number(config.caller)
             .boxed(),
     }
+}
+
+fn audit_json_layer<W>(config: &LoggingConfig, timer: ConfigTimer, writer: W) -> BoxLayer
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_subscriber::fmt::layer()
+        .json()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_timer(timer)
+        .with_thread_ids(config.thread_ids)
+        .with_file(config.caller)
+        .with_line_number(config.caller)
+        .boxed()
 }
 
 fn span_events(value: LogSpanEvents) -> FmtSpan {
@@ -841,6 +943,78 @@ mod tests {
         assert_eq!(record["fields"]["service"], "test-service");
         assert_eq!(record["fields"]["protocol"], "test");
         assert!(record["timestamp"].is_string());
+    }
+
+    #[test]
+    fn audit_sink_writes_only_reserved_target_as_json() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let audit = AuditLogConfig {
+            non_blocking_buffer: 64,
+            file: LogFileConfig {
+                directory: directory.path().to_path_buf(),
+                file_name_pattern: "audit.jsonl".to_string(),
+                rotation: LogRotation::Never,
+                maintenance_interval_secs: 0,
+                ..LogFileConfig::default()
+            },
+        };
+        let logging = LoggingConfig {
+            stdout: false,
+            audit: Some(audit.clone()),
+            ..LoggingConfig::default()
+        };
+        let timer = ConfigTimer {
+            utc: true,
+            format: "%Y-%m-%dT%H:%M:%S%.3fZ".to_string(),
+        };
+        let (writer, guard, _) = build_audit_writer(&audit, true).expect("audit writer");
+        let subscriber = tracing_subscriber::registry().with(
+            audit_json_layer(&logging, timer, writer)
+                .with_filter(filter_fn(|metadata| metadata.target() == AUDIT_TARGET)),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(event = "ordinary.event", "ordinary log");
+            audit_info!(
+                event = "security.permission.changed",
+                actor = "operator-42",
+                resource_type = "role",
+                outcome = "success",
+                "permission changed"
+            );
+        });
+        drop(guard);
+
+        let body =
+            fs::read_to_string(directory.path().join("audit.jsonl")).expect("read audit log");
+        let lines = body.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let record: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("structured audit JSON");
+        assert_eq!(record["target"], AUDIT_TARGET);
+        assert_eq!(record["fields"]["event"], "security.permission.changed");
+        assert_eq!(record["fields"]["actor"], "operator-42");
+        assert_eq!(record["fields"]["outcome"], "success");
+    }
+
+    #[test]
+    fn audit_writer_fails_closed_when_directory_is_a_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let invalid_directory = directory.path().join("not-a-directory");
+        fs::write(&invalid_directory, b"occupied").expect("sentinel file");
+        let audit = AuditLogConfig {
+            non_blocking_buffer: 64,
+            file: LogFileConfig {
+                directory: invalid_directory,
+                ..LogFileConfig::default()
+            },
+        };
+
+        let error = match build_audit_writer(&audit, true) {
+            Ok(_) => panic!("audit initialization must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("audit log directory"));
     }
 
     #[test]

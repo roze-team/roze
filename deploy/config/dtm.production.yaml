@@ -15,6 +15,19 @@ logging:
   utc_time: true
   non_blocking_buffer: 8192
   lossy: true
+  # Enable after DTM mutation routes emit roze.audit events:
+  # audit:
+  #   non_blocking_buffer: 4096
+  #   file:
+  #     directory: /var/log/roze/audit
+  #     file_name_pattern: "roze-dtm-audit.{date}.jsonl"
+  #     rotation: daily
+  #     date_format: "%Y-%m-%d"
+  #     max_file_size_bytes: 104857600
+  #     compression: gzip
+  #     compression_level: 6
+  #     retention_days: 180
+  #     maintenance_interval_secs: 3600
 
 rest:
   addr: 0.0.0.0:8090

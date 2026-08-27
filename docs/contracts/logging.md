@@ -37,15 +37,44 @@ logging:
     compression_level: 6
     retention_days: 7
     maintenance_interval_secs: 3600
+  audit:
+    non_blocking_buffer: 4096
+    file:
+      directory: logs/audit
+      file_name_pattern: "audit.{date}.jsonl"
+      rotation: daily
+      date_format: "%Y-%m-%d"
+      max_file_size_bytes: 104857600
+      compression: gzip
+      compression_level: 6
+      retention_days: 90
+      maintenance_interval_secs: 3600
 ```
 
 Filter precedence is `logging.env_filter`, then `RUST_LOG`, then
-`logging.level`. File output uses a bounded asynchronous writer. With
-`lossy: true`, a full queue drops lines instead of blocking service work;
+`logging.level`. Stdout and ordinary file output use separate bounded
+asynchronous writers. With `lossy: true`, a full queue drops lines instead of
+blocking service work;
 `TracingGuard::dropped_lines` exposes the writer count. Roze also publishes
-`roze_log_lines_dropped_total{sink="file"}` and emits the bounded
+`roze_log_lines_dropped_total` with a bounded `sink` label of `stdout`, `file`,
+or `audit`, and emits the bounded
 `log.lines.dropped` event when maintenance observes new drops. Keep the returned
 guard alive until service shutdown so pending lines and OpenTelemetry spans flush.
+
+`logging.audit` is an optional independent JSON-lines sink. Emit audit records
+with `roze_log::audit_info!`, `audit_warn!`, or `audit_error!`; only events with
+the reserved `roze.audit` target enter this file. Its queue is always
+non-lossy: producers wait when the audit buffer is full instead of silently
+dropping a record. Audit sink preparation is fail-closed at startup and the
+guard flushes accepted records during orderly shutdown. Give audit files a
+separate directory or filename pattern, a longer retention policy where
+required, and restrict filesystem access at the deployment layer.
+
+Audit records must include a stable `event`, bounded actor/subject identity,
+resource type and identifier, operation, and outcome. Add `tenant_id`,
+`request_id`, and `trace_id` when available. Never place credentials, tokens,
+request bodies, before/after object snapshots, or raw dependency errors in an
+audit record.
 
 Hourly and daily rotation require exactly one `{date}` token in
 `file_name_pattern`; `rotation: never` forbids it. `date_format` uses Chrono
