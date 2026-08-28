@@ -41,6 +41,10 @@ application:
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
     worker_id: env://ROZE_DTM_WORKER_ID
+    # Replace with deployment-owned service origins. Paths and wildcards are invalid.
+    allowed_branch_origins:
+      - http://inventory:8080
+      - http://account:8080
     store:
       kind: sqlite
       database_url: env://ROZE_DTM_DATABASE_URL

@@ -17,6 +17,9 @@ application:
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
     worker_id: env://ROZE_DTM_WORKER_ID
+    allowed_branch_origins:
+      - http://inventory:8080
+      - http://account:8080
     store:
       kind: sqlite
       database_url: env://ROZE_DTM_DATABASE_URL
@@ -26,6 +29,11 @@ application:
     branch_call_timeout_ms: 5000
     transaction_timeout_ms: 60000
 ```
+
+`allowed_branch_origins` 是所有环境的必填项，只接受精确的 HTTP(S) Origin，例如
+`http://inventory:8080`。不得填写路径、通配符或用户凭据。提交事务时会校验
+Action、Confirm、Cancel 和 Compensate URL；实际分支调用会再次校验，并禁止
+HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。
 
 生产环境禁止 `store.kind: memory`。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 

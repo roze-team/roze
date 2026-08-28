@@ -24,6 +24,10 @@ application:
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
     worker_id: roze-dtm-local
+    # Exact HTTP(S) origins only; paths, wildcards, credentials, and redirects are rejected.
+    allowed_branch_origins:
+      - http://inventory
+      - http://account
     store:
       kind: memory
       # Production example:

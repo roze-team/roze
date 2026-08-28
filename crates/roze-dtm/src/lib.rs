@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +47,7 @@ pub enum BranchKind {
 pub enum BranchStatus {
     Pending,
     Running,
+    Compensating,
     Succeeded,
     Failed,
     Skipped,
@@ -206,6 +207,7 @@ pub enum BarrierDecision {
     Execute,
     SkipDuplicate,
     SkipNullCompensation,
+    SkipCancelledTry,
 }
 
 #[async_trait]
@@ -285,18 +287,67 @@ impl BranchInvoker for NoopBranchInvoker {
 #[derive(Debug, Clone)]
 pub struct HttpBranchInvoker {
     client: reqwest::Client,
+    url_policy: BranchUrlPolicy,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BranchUrlPolicy {
+    allowed_origins: Option<Arc<BTreeSet<String>>>,
+}
+
+impl BranchUrlPolicy {
+    pub fn allow_all() -> Self {
+        Self::default()
+    }
+
+    pub fn from_allowed_origins(
+        origins: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> anyhow::Result<Self> {
+        let mut allowed_origins = BTreeSet::new();
+        for origin in origins {
+            let url = parse_branch_url(origin.as_ref())?;
+            anyhow::ensure!(
+                url.path() == "/" && url.query().is_none() && url.fragment().is_none(),
+                "branch origin must not contain a path, query, or fragment"
+            );
+            allowed_origins.insert(url.origin().ascii_serialization());
+        }
+        Ok(Self {
+            allowed_origins: Some(Arc::new(allowed_origins)),
+        })
+    }
+
+    pub fn validate(&self, value: &str) -> anyhow::Result<()> {
+        let url = parse_branch_url(value)?;
+        if let Some(allowed_origins) = &self.allowed_origins {
+            anyhow::ensure!(
+                allowed_origins.contains(&url.origin().ascii_serialization()),
+                "branch URL origin is not allowed"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl HttpBranchInvoker {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: branch_http_client(None).expect("default HTTP client configuration is valid"),
+            url_policy: BranchUrlPolicy::allow_all(),
         }
     }
 
     pub fn with_timeout(timeout: Duration) -> anyhow::Result<Self> {
+        Self::with_timeout_and_policy(timeout, BranchUrlPolicy::allow_all())
+    }
+
+    pub fn with_timeout_and_policy(
+        timeout: Duration,
+        url_policy: BranchUrlPolicy,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: branch_http_client(Some(timeout))?,
+            url_policy,
         })
     }
 }
@@ -310,6 +361,7 @@ impl Default for HttpBranchInvoker {
 #[async_trait]
 impl BranchInvoker for HttpBranchInvoker {
     async fn invoke(&self, url: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
+        self.url_policy.validate(url)?;
         let response = self.client.post(url).json(payload).send().await?;
         if response.status().is_success() {
             Ok(())
@@ -317,6 +369,31 @@ impl BranchInvoker for HttpBranchInvoker {
             anyhow::bail!("branch call {url} failed with status {}", response.status())
         }
     }
+}
+
+fn branch_http_client(timeout: Option<Duration>) -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    Ok(builder.build()?)
+}
+
+fn parse_branch_url(value: &str) -> anyhow::Result<reqwest::Url> {
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 2_048,
+        "invalid branch URL"
+    );
+    let url = reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("invalid branch URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none(),
+        "invalid branch URL"
+    );
+    Ok(url)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -372,6 +449,9 @@ impl TransactionStore for InMemoryTransactionStore {
 
         let cancel_key = format!("{}:{}:cancel", barrier.gid, barrier.branch_id);
         let try_key = format!("{}:{}:try", barrier.gid, barrier.branch_id);
+        if barrier.op == "try" && barriers.contains(&cancel_key) {
+            return Ok(BarrierDecision::SkipCancelledTry);
+        }
         if barrier.op == "cancel" && !barriers.contains(&try_key) {
             barriers.insert(cancel_key);
             return Ok(BarrierDecision::SkipNullCompensation);
@@ -532,13 +612,27 @@ impl TransactionStore for SqliteTransactionStore {
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
         let key = barrier.key();
-        let existing: Option<(String,)> =
-            sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = ?")
-                .bind(&key)
-                .fetch_optional(&self.pool)
-                .await?;
-        if existing.is_some() {
+        let mut transaction = self.pool.begin().await?;
+        if !insert_barrier(&mut transaction, &key, &barrier).await? {
+            transaction.commit().await?;
             return Ok(BarrierDecision::SkipDuplicate);
+        }
+
+        if barrier.op == "try" {
+            let cancel_key = format!("{}:{}:cancel", barrier.gid, barrier.branch_id);
+            let cancelled: Option<(String,)> =
+                sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = ?")
+                    .bind(&cancel_key)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            if cancelled.is_some() {
+                sqlx::query("DELETE FROM roze_dtm_barriers WHERE barrier_key = ?")
+                    .bind(&key)
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                return Ok(BarrierDecision::SkipCancelledTry);
+            }
         }
 
         if barrier.op == "cancel" {
@@ -546,15 +640,15 @@ impl TransactionStore for SqliteTransactionStore {
             let tried: Option<(String,)> =
                 sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = ?")
                     .bind(&try_key)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *transaction)
                     .await?;
             if tried.is_none() {
-                insert_barrier(&self.pool, &key, &barrier).await?;
+                transaction.commit().await?;
                 return Ok(BarrierDecision::SkipNullCompensation);
             }
         }
 
-        insert_barrier(&self.pool, &key, &barrier).await?;
+        transaction.commit().await?;
         Ok(BarrierDecision::Execute)
     }
 
@@ -679,32 +773,42 @@ where
         }
         ensure_status(&tx, &[TransactionStatus::Submitted])?;
         tx.status = TransactionStatus::Succeeding;
-        let mut applied = Vec::new();
-        for (idx, branch) in tx.branches.iter_mut().enumerate() {
-            branch.status = BranchStatus::Running;
-            branch.attempts = branch.attempts.saturating_add(1);
-            let action = branch.action.clone();
-            match self.invoke_branch(branch, &action).await {
+        self.store.update_transaction(tx.clone()).await?;
+        for index in 0..tx.branches.len() {
+            let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "action");
+            if self.store.barrier(barrier).await? != BarrierDecision::Execute {
+                return self
+                    .store
+                    .get_transaction(gid)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"));
+            }
+            let action_result = {
+                let branch = &mut tx.branches[index];
+                branch.status = BranchStatus::Running;
+                branch.attempts = branch.attempts.saturating_add(1);
+                let action = branch.action.clone();
+                self.invoke_branch(branch, &action).await
+            };
+            match action_result {
                 Ok(()) => {
+                    let branch = &mut tx.branches[index];
                     branch.status = BranchStatus::Succeeded;
                     branch.next_retry_millis = None;
-                    applied.push(idx);
                 }
                 Err(_) => {
-                    branch.status = BranchStatus::Failed;
+                    tx.branches[index].status = BranchStatus::Compensating;
                     tx.status = TransactionStatus::Aborting;
-                    for idx in applied.into_iter().rev() {
-                        let previous = &mut tx.branches[idx];
-                        if let Some(compensate) = previous.compensate.as_deref() {
-                            let _ = self.invoker.invoke(compensate, &previous.payload).await;
-                            previous.status = BranchStatus::Skipped;
+                    for previous in &mut tx.branches {
+                        if previous.status == BranchStatus::Succeeded {
+                            previous.status = BranchStatus::Compensating;
                         }
                     }
-                    tx.status = TransactionStatus::Aborted;
                     self.store.update_transaction(tx.clone()).await?;
-                    return Ok(tx);
+                    return self.abort_saga(gid).await;
                 }
             }
+            self.store.update_transaction(tx.clone()).await?;
         }
         tx.status = TransactionStatus::Succeeded;
         self.store.update_transaction(tx.clone()).await?;
@@ -727,13 +831,24 @@ where
         )?;
         tx.status = TransactionStatus::Aborting;
         for branch in tx.branches.iter_mut().rev() {
+            if branch.status == BranchStatus::Pending {
+                branch.status = BranchStatus::Skipped;
+                continue;
+            }
+            if !matches!(
+                branch.status,
+                BranchStatus::Succeeded | BranchStatus::Compensating
+            ) {
+                continue;
+            }
+            branch.status = BranchStatus::Compensating;
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "compensate");
             match self.store.barrier(barrier.clone()).await? {
                 BarrierDecision::Execute => {
                     if let Some(compensate) = branch.compensate.clone() {
                         branch.attempts = branch.attempts.saturating_add(1);
                         if self.invoke_url(branch, &compensate).await.is_err() {
-                            branch.status = BranchStatus::Failed;
+                            branch.status = BranchStatus::Compensating;
                             self.store.release_barrier(&barrier).await?;
                             self.store.update_transaction(tx.clone()).await?;
                             return Ok(tx);
@@ -742,7 +857,16 @@ where
                     branch.status = BranchStatus::Skipped;
                     branch.next_retry_millis = None;
                 }
-                BarrierDecision::SkipDuplicate | BarrierDecision::SkipNullCompensation => {}
+                BarrierDecision::SkipDuplicate => {
+                    self.store.update_transaction(tx.clone()).await?;
+                    return Ok(tx);
+                }
+                BarrierDecision::SkipNullCompensation => {
+                    unreachable!("Saga compensation is not TCC cancel")
+                }
+                BarrierDecision::SkipCancelledTry => {
+                    unreachable!("Saga compensation is not TCC try")
+                }
             }
         }
         tx.status = TransactionStatus::Aborted;
@@ -771,24 +895,37 @@ where
             }
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "try");
             let decision = self.store.barrier(barrier.clone()).await?;
-            if decision == BarrierDecision::Execute {
-                branch.status = BranchStatus::Running;
-                branch.attempts = branch.attempts.saturating_add(1);
-                let action = branch.action.clone();
-                match self.invoke_branch(branch, &action).await {
-                    Ok(()) => {
-                        branch.status = BranchStatus::Succeeded;
-                        branch.next_retry_millis = None;
-                    }
-                    Err(_) => {
-                        branch.status = BranchStatus::Failed;
-                        self.store.release_barrier(&barrier).await?;
-                        if branch.attempts >= self.options.max_attempts {
-                            tx.status = TransactionStatus::Aborting;
+            match decision {
+                BarrierDecision::Execute => {
+                    branch.status = BranchStatus::Running;
+                    branch.attempts = branch.attempts.saturating_add(1);
+                    let action = branch.action.clone();
+                    match self.invoke_branch(branch, &action).await {
+                        Ok(()) => {
+                            branch.status = BranchStatus::Succeeded;
+                            branch.next_retry_millis = None;
                         }
-                        self.store.update_transaction(tx.clone()).await?;
-                        return Ok(tx);
+                        Err(_) => {
+                            branch.status = BranchStatus::Failed;
+                            self.store.release_barrier(&barrier).await?;
+                            if branch.attempts >= self.options.max_attempts {
+                                tx.status = TransactionStatus::Aborting;
+                            }
+                            self.store.update_transaction(tx.clone()).await?;
+                            return Ok(tx);
+                        }
                     }
+                }
+                BarrierDecision::SkipCancelledTry => {
+                    branch.status = BranchStatus::Skipped;
+                    branch.next_retry_millis = None;
+                    tx.status = TransactionStatus::Aborting;
+                    self.store.update_transaction(tx.clone()).await?;
+                    return Ok(tx);
+                }
+                BarrierDecision::SkipDuplicate => {}
+                BarrierDecision::SkipNullCompensation => {
+                    unreachable!("TCC try is not a compensation operation")
                 }
             }
         }
@@ -889,6 +1026,9 @@ where
                     branch.next_retry_millis = None;
                 }
                 BarrierDecision::SkipDuplicate => {}
+                BarrierDecision::SkipCancelledTry => {
+                    unreachable!("TCC cancel is not a try operation")
+                }
             }
         }
         tx.status = TransactionStatus::Aborted;
@@ -1041,11 +1181,11 @@ fn current_millis() -> u64 {
 }
 
 async fn insert_barrier(
-    pool: &SqlitePool,
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
     key: &str,
     barrier: &BranchBarrier,
-) -> anyhow::Result<()> {
-    sqlx::query(
+) -> anyhow::Result<bool> {
+    let inserted = sqlx::query(
         r#"
         INSERT OR IGNORE INTO roze_dtm_barriers
             (barrier_key, gid, branch_id, op, created_at_millis)
@@ -1057,9 +1197,10 @@ async fn insert_barrier(
     .bind(&barrier.branch_id)
     .bind(&barrier.op)
     .bind(current_millis() as i64)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    Ok(inserted == 1)
 }
 
 fn record_branch_failure(
@@ -1080,7 +1221,12 @@ fn record_branch_failure(
 fn transaction_due(tx: &Transaction, now: u64) -> bool {
     tx.branches
         .iter()
-        .filter(|branch| matches!(branch.status, BranchStatus::Failed | BranchStatus::Running))
+        .filter(|branch| {
+            matches!(
+                branch.status,
+                BranchStatus::Failed | BranchStatus::Running | BranchStatus::Compensating
+            )
+        })
         .all(|branch| branch.next_retry_millis.is_none_or(|next| next <= now))
 }
 
@@ -1113,6 +1259,12 @@ mod tests {
         fail_on: usize,
     }
 
+    #[derive(Clone)]
+    struct FailOnCallsInvoker {
+        calls: Arc<AtomicUsize>,
+        fail_on: Arc<BTreeSet<usize>>,
+    }
+
     #[async_trait]
     impl BranchInvoker for FailingOnceInvoker {
         async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
@@ -1129,6 +1281,17 @@ mod tests {
         async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == self.fail_on {
+                anyhow::bail!("injected branch failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BranchInvoker for FailOnCallsInvoker {
+        async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_on.contains(&call) {
                 anyhow::bail!("injected branch failure");
             }
             Ok(())
@@ -1153,6 +1316,50 @@ mod tests {
 
         assert_eq!(aborted.status, TransactionStatus::Aborted);
         assert_eq!(aborted.branches[0].status, BranchStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn saga_compensation_failure_stays_aborting_until_retry_succeeds() {
+        let dtm = Dtm::with_options(
+            InMemoryTransactionStore::new(),
+            FailOnCallsInvoker {
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail_on: Arc::new(BTreeSet::from([1, 2])),
+            },
+            DtmOptions {
+                retry_backoff_millis: 1,
+                max_retry_backoff_millis: 10,
+                ..DtmOptions::default()
+            },
+        );
+        dtm.submit(Transaction::saga(
+            "gid-saga-compensate-retry",
+            vec![
+                Branch::saga("b1", "action-1", "compensate-1", serde_json::json!({})),
+                Branch::saga("b2", "action-2", "compensate-2", serde_json::json!({})),
+            ],
+        ))
+        .await
+        .expect("submit");
+
+        let aborting = dtm
+            .start_saga("gid-saga-compensate-retry")
+            .await
+            .expect("start saga");
+        assert_eq!(aborting.status, TransactionStatus::Aborting);
+        assert!(aborting
+            .branches
+            .iter()
+            .any(|branch| branch.status == BranchStatus::Compensating));
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let recovered = dtm.tick_recover_once().await.expect("compensation retry");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, TransactionStatus::Aborted);
+        assert!(recovered[0]
+            .branches
+            .iter()
+            .all(|branch| branch.status == BranchStatus::Skipped));
     }
 
     #[tokio::test]
@@ -1232,6 +1439,11 @@ mod tests {
             .expect("barrier");
 
         assert_eq!(decision, BarrierDecision::SkipNullCompensation);
+        let late_try = store
+            .barrier(BranchBarrier::new("gid", "branch", "try"))
+            .await
+            .expect("late try barrier");
+        assert_eq!(late_try, BarrierDecision::SkipCancelledTry);
     }
 
     #[tokio::test]
@@ -1470,5 +1682,89 @@ mod tests {
                 .expect("barrier"),
             BarrierDecision::SkipDuplicate
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_barrier_has_exactly_one_concurrent_winner() {
+        let store = SqliteTransactionStore::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .barrier(BranchBarrier::new("gid-race", "branch", "confirm"))
+                    .await
+                    .expect("barrier")
+            }));
+        }
+
+        let mut execute = 0;
+        let mut duplicate = 0;
+        for task in tasks {
+            match task.await.expect("join") {
+                BarrierDecision::Execute => execute += 1,
+                BarrierDecision::SkipDuplicate => duplicate += 1,
+                BarrierDecision::SkipNullCompensation => panic!("unexpected null compensation"),
+                BarrierDecision::SkipCancelledTry => panic!("unexpected cancelled try"),
+            }
+        }
+        assert_eq!(execute, 1);
+        assert_eq!(duplicate, 31);
+    }
+
+    #[tokio::test]
+    async fn sqlite_null_compensation_blocks_a_late_try() {
+        let store = SqliteTransactionStore::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        let cancel = store
+            .barrier(BranchBarrier::new("gid-null", "branch", "cancel"))
+            .await
+            .expect("cancel barrier");
+        assert_eq!(cancel, BarrierDecision::SkipNullCompensation);
+
+        let late_try = store
+            .barrier(BranchBarrier::new("gid-null", "branch", "try"))
+            .await
+            .expect("try barrier");
+        assert_eq!(late_try, BarrierDecision::SkipCancelledTry);
+    }
+
+    #[test]
+    fn branch_url_policy_requires_an_exact_origin() {
+        let policy = BranchUrlPolicy::from_allowed_origins([
+            "https://inventory.example.com",
+            "http://account:8080",
+        ])
+        .expect("policy");
+
+        policy
+            .validate("https://inventory.example.com/v1/reserve?mode=sync")
+            .expect("same origin");
+        policy
+            .validate("http://account:8080/confirm")
+            .expect("same host and port");
+        assert!(policy
+            .validate("http://inventory.example.com/v1/reserve")
+            .is_err());
+        assert!(policy.validate("http://account/confirm").is_err());
+        assert!(policy.validate("https://metadata.internal/latest").is_err());
+        assert!(policy
+            .validate("https://inventory.example.com/reserve#ignored")
+            .is_err());
+        assert!(policy
+            .validate("https://user@inventory.example.com/reserve")
+            .is_err());
+    }
+
+    #[test]
+    fn branch_url_policy_rejects_non_origin_configuration() {
+        assert!(
+            BranchUrlPolicy::from_allowed_origins(["https://inventory.example.com/api"]).is_err()
+        );
+        assert!(BranchUrlPolicy::from_allowed_origins(["file:///tmp/action"]).is_err());
+        assert!(BranchUrlPolicy::from_allowed_origins(["https://user@example.com"]).is_err());
     }
 }

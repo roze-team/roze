@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use anyhow::Context as _;
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
-    Branch, BranchKind, BranchStatus, Dtm, DtmOptions, HttpBranchInvoker, InMemoryTransactionStore,
-    SqliteTransactionStore, Transaction, TransactionKind, TransactionStatus, TransactionStore,
+    Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
+    InMemoryTransactionStore, SqliteTransactionStore, Transaction, TransactionKind,
+    TransactionStatus, TransactionStore,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -44,6 +45,8 @@ struct DtmConfig {
     recovery_lease_ttl_ms: u64,
     #[serde(default = "default_worker_id")]
     worker_id: String,
+    #[serde(default)]
+    allowed_branch_origins: Vec<String>,
 }
 
 impl Default for DtmConfig {
@@ -59,6 +62,7 @@ impl Default for DtmConfig {
             recover_interval_ms: default_recover_interval_ms(),
             recovery_lease_ttl_ms: default_recovery_lease_ttl_ms(),
             worker_id: default_worker_id(),
+            allowed_branch_origins: Vec::new(),
         }
     }
 }
@@ -112,6 +116,12 @@ impl DtmConfig {
                 "application.dtm.worker_id must be deployment-unique in production"
             );
         }
+        anyhow::ensure!(
+            !self.allowed_branch_origins.is_empty(),
+            "application.dtm.allowed_branch_origins is required"
+        );
+        BranchUrlPolicy::from_allowed_origins(&self.allowed_branch_origins)
+            .context("application.dtm.allowed_branch_origins is invalid")?;
         match self.store.kind {
             StoreKind::Memory => anyhow::ensure!(
                 !production,
@@ -161,6 +171,7 @@ type DtmRuntime = Dtm<Arc<dyn TransactionStore>, HttpBranchInvoker>;
 #[derive(Clone)]
 struct ControlState {
     dtm: Arc<DtmRuntime>,
+    branch_url_policy: BranchUrlPolicy,
     control_token: Option<Arc<str>>,
     lifecycle: Option<LifecycleState>,
 }
@@ -258,9 +269,12 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         ),
     };
-    let invoker = HttpBranchInvoker::with_timeout(Duration::from_millis(
-        config.application.dtm.branch_call_timeout_ms,
-    ))?;
+    let branch_url_policy =
+        BranchUrlPolicy::from_allowed_origins(&config.application.dtm.allowed_branch_origins)?;
+    let invoker = HttpBranchInvoker::with_timeout_and_policy(
+        Duration::from_millis(config.application.dtm.branch_call_timeout_ms),
+        branch_url_policy.clone(),
+    )?;
     let dtm: Arc<DtmRuntime> = Arc::new(Dtm::with_options(
         store,
         invoker,
@@ -279,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
     let recovery_dtm = Arc::clone(&dtm);
     let state = ControlState {
         dtm,
+        branch_url_policy,
         control_token: config
             .application
             .dtm
@@ -436,7 +451,7 @@ async fn submit_transaction(
         return unauthorized_response();
     }
     let gid = request.gid.clone();
-    let transaction = match build_transaction(kind, request) {
+    let transaction = match build_transaction(kind, request, &state.branch_url_policy) {
         Ok(transaction) => transaction,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
@@ -592,6 +607,7 @@ async fn stats(State(state): State<ControlState>, headers: HeaderMap) -> HttpRes
 fn build_transaction(
     kind: TransactionKind,
     request: SubmitTransactionRequest,
+    branch_url_policy: &BranchUrlPolicy,
 ) -> Result<Transaction, &'static str> {
     let gid = request.gid.trim();
     if gid.is_empty() || gid.len() > 128 {
@@ -620,7 +636,7 @@ fn build_transaction(
         if branch.id.trim().is_empty()
             || branch.id.len() > 128
             || !ids.insert(branch.id.clone())
-            || !valid_action_url(&branch.action)
+            || branch_url_policy.validate(&branch.action).is_err()
         {
             return Err("branch id or action URL is invalid");
         }
@@ -629,8 +645,12 @@ fn build_transaction(
                 if branch.kind.is_some_and(|kind| kind != BranchKind::TccTry) {
                     return Err("TCC branches must use TccTry kind");
                 }
-                let confirm = branch.confirm.filter(|url| valid_action_url(url));
-                let cancel = branch.cancel.filter(|url| valid_action_url(url));
+                let confirm = branch
+                    .confirm
+                    .filter(|url| branch_url_policy.validate(url).is_ok());
+                let cancel = branch
+                    .cancel
+                    .filter(|url| branch_url_policy.validate(url).is_ok());
                 if confirm.is_none() || cancel.is_none() {
                     return Err("TCC branches require valid confirm and cancel URLs");
                 }
@@ -649,7 +669,9 @@ fn build_transaction(
                 {
                     return Err("Saga branches must use SagaAction kind");
                 }
-                let compensate = branch.compensate.filter(|url| valid_action_url(url));
+                let compensate = branch
+                    .compensate
+                    .filter(|url| branch_url_policy.validate(url).is_ok());
                 if compensate.is_none() {
                     return Err("Saga branches require a valid compensate URL");
                 }
@@ -701,10 +723,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-fn valid_action_url(value: &str) -> bool {
-    value.len() <= 2048 && (value.starts_with("http://") || value.starts_with("https://"))
-}
-
 fn parse_kind(value: &str) -> Result<TransactionKind, &'static str> {
     match value.to_ascii_lowercase().as_str() {
         "tcc" => Ok(TransactionKind::Tcc),
@@ -748,11 +766,12 @@ const fn status_name(status: TransactionStatus) -> &'static str {
 }
 
 fn audit_transition(event: &'static str, transaction: &Transaction) {
-    if transaction
-        .branches
-        .iter()
-        .any(|branch| branch.status == BranchStatus::Failed)
-    {
+    if transaction.branches.iter().any(|branch| {
+        matches!(
+            branch.status,
+            BranchStatus::Failed | BranchStatus::Compensating
+        )
+    }) {
         roze_log::audit_warn!(
             event = event,
             actor_kind = "control_token",
@@ -864,7 +883,9 @@ mod tests {
         config.store.database_url = Some("sqlite://roze-dtm.db?mode=rwc".to_string());
         config.control_token = Some("x".repeat(32));
         config.worker_id = "dtm-test-1".to_string();
-        assert!(config.validate(true).is_ok());
+        assert!(config.validate(true).is_err());
+        config.allowed_branch_origins = vec!["http://inventory".to_string()];
+        config.validate(true).expect("valid production config");
     }
 
     #[test]
@@ -890,7 +911,9 @@ mod tests {
         assert!(config.validate(true).is_err());
         config.control_token = Some("x".repeat(32));
         config.worker_id = "dtm-test-1".to_string();
-        assert!(config.validate(true).is_ok());
+        assert!(config.validate(true).is_err());
+        config.allowed_branch_origins = vec!["http://inventory".to_string()];
+        config.validate(true).expect("valid production config");
     }
 
     #[test]
@@ -910,7 +933,9 @@ mod tests {
             timeout_millis: Some(30_000),
             metadata: BTreeMap::new(),
         };
-        let transaction = build_transaction(TransactionKind::Tcc, request).expect("transaction");
+        let policy = BranchUrlPolicy::from_allowed_origins(["http://inventory"]).expect("policy");
+        let transaction =
+            build_transaction(TransactionKind::Tcc, request, &policy).expect("transaction");
         assert_eq!(transaction.kind, TransactionKind::Tcc);
         assert_eq!(transaction.branches.len(), 1);
         assert_eq!(transaction.timeout_millis, Some(30_000));
@@ -922,7 +947,24 @@ mod tests {
             timeout_millis: None,
             metadata: BTreeMap::new(),
         };
-        assert!(build_transaction(TransactionKind::Tcc, request).is_err());
+        assert!(build_transaction(TransactionKind::Tcc, request, &policy).is_err());
+
+        let request = SubmitTransactionRequest {
+            gid: "order-1003".to_string(),
+            kind: None,
+            branches: vec![BranchRequest {
+                id: "metadata".to_string(),
+                kind: None,
+                action: "http://169.254.169.254/latest".to_string(),
+                compensate: None,
+                confirm: Some("http://169.254.169.254/confirm".to_string()),
+                cancel: Some("http://169.254.169.254/cancel".to_string()),
+                payload: serde_json::json!({}),
+            }],
+            timeout_millis: None,
+            metadata: BTreeMap::new(),
+        };
+        assert!(build_transaction(TransactionKind::Tcc, request, &policy).is_err());
     }
 
     #[test]
@@ -1018,13 +1060,20 @@ mod tests {
 
     fn test_router(token: Option<&str>) -> Router {
         let store: Arc<dyn TransactionStore> = Arc::new(InMemoryTransactionStore::new());
+        let branch_url_policy =
+            BranchUrlPolicy::from_allowed_origins(["http://inventory"]).expect("policy");
         let dtm = Arc::new(Dtm::with_options(
             store,
-            HttpBranchInvoker::new(),
+            HttpBranchInvoker::with_timeout_and_policy(
+                Duration::from_secs(5),
+                branch_url_policy.clone(),
+            )
+            .expect("invoker"),
             DtmOptions::default(),
         ));
         control_router(ControlState {
             dtm,
+            branch_url_policy,
             control_token: token.map(Arc::<str>::from),
             lifecycle: None,
         })
