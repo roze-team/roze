@@ -18,6 +18,11 @@ Roze 不模拟这些语义：`build_runtime` 选择 `rust-native` 时会在连�
 之前 fail-fast；仅发布服务可使用 `build_publisher`。`rskafka` 关闭默认压缩
 Feature，避免间接引入 LZ4/Zstandard 原生库。
 
+仓库内的 `user-service` 与 `roze-example` 直接选择 `rdkafka-cmake`。原生
+Windows 构建机需安装 CMake 与 Visual Studio C++ toolchain；配置完成后可直接
+运行 `cargo test --workspace`，无需额外追加 feature。Linux/WSL 发布门禁仍单独
+验证普通 `rdkafka` feature。
+
 ## 原生配置前提
 - `Publisher`/`Subscriber` 接口保持稳定。
 - `KafkaConfig` 使用 Roze 原生字段；配置解析统一走标准字段归一化。

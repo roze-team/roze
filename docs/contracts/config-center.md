@@ -30,8 +30,17 @@ last valid configuration remains active.
 Required environment variables:
 
 - `ROZE_CONFIG_CENTER_ETCD_ENDPOINTS`: comma-separated Etcd endpoints.
-- `ROZE_CONFIG_CENTER_KEY` or `ROZE_CONFIG_CENTER_ETCD_KEY`: exact config key.
-- `ROZE_CONFIG_CENTER_NAMESPACE` and `ROZE_CONFIG_CENTER_APP`: optional namespace/app values used to derive a default key.
+- `ROZE_CONFIG_CENTER_KEY`: exact config key for current application
+  integrations.
+- `ROZE_CONFIG_CENTER_NAMESPACE` and `ROZE_CONFIG_CENTER_APP`: optional
+  namespace/app audit metadata; current integrations do not derive the key
+  from these fields.
+
+`ConfigCenter` itself receives the key from its subscriber and does not define
+environment aliases. Application-owned legacy loaders may still parse older
+variables, but those aliases are not part of the current generated-service
+contract. The checked-in `user-service` requires the explicit key and creates
+no compatibility or inferred-key path.
 
 Runtime behavior:
 

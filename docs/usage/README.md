@@ -35,6 +35,15 @@ services.
   migrations, transactional enqueue, lease claims, retry, and dead letters.
 - [Configuration secrets](../contracts/configuration-secrets.md): environment,
   file, and custom secret providers plus production idempotency selection.
+- [Config Center contract](../contracts/config-center.md): source priority,
+  explicit keys, validated reloads, listener isolation, and rollback.
+- [Logging contract](../contracts/logging.md): structured events, configurable
+  paths and date patterns, rotation, gzip compression, retention, and audit
+  sinks.
+- [Queue/Kafka contract](../contracts/queue.md): provider capabilities,
+  `rdkafka-cmake`, ACK/offset behavior, retry, and dead letters.
+- [Upgrade guide](../upgrade.md): current generated layout, ownership migration,
+  dependency reconciliation, and rollback expectations.
 - [rozectl generator](./rozectl-api.md): `.api` syntax, REST/RPC generation,
   SQL/Mongo model generation and inspection, Elasticsearch/OpenSearch/
   Meilisearch search generation and inspection, client SDKs, OpenAPI output,

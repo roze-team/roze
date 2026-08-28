@@ -100,6 +100,12 @@ When a generated service is inside a Cargo workspace, its manifest inherits a
 dependency only when that name exists in `[workspace.dependencies]`; otherwise
 the generator emits the standalone explicit version. This supports partial
 application workspaces and remains deterministic across repeated `--update`.
+For an existing project, `--update` merges any standard dependencies newly
+required by the current template. It does not replace an existing application
+choice for the same dependency, including its version, features, path, or
+other Cargo sections. This allows new generated derives and runtime wiring to
+compile without discarding application-specific features such as
+`roze-kafka/rdkafka-cmake`.
 
 ## Commands
 
@@ -141,11 +147,17 @@ cargo run -p rozectl -- api generate example/user.api \
 - REST/RPC `src/logic/prelude.rs`
 - REST `src/logic/<group>/prelude.rs`
 - REST/RPC `src/application.rs`
+- REST/RPC `src/application_config.rs`
 - REST service-wide middleware hook `src/middleware/app.rs`
 - REST custom middleware files under `src/middleware/<name>.rs`
 - RPC `src/config/mod.rs` (except exact legacy generated loader migration)
 - RPC `src/logic/<method>.rs`
 - `config.yaml`
+
+The current REST layout uses directory modules such as `src/config/mod.rs`,
+`src/types/mod.rs`, `src/openapi/mod.rs`, and `src/middleware/mod.rs`. Once an
+older project is migrated, do not keep the former flat files as compatibility
+forwarders.
 
 Cross-service dependencies for both generated API and generated RPC consumer
 services should be managed separately through `roze-service.yaml`:

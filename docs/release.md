@@ -119,12 +119,13 @@ On Windows, run the non-authoritative preflight first:
 powershell -ExecutionPolicy Bypass -File scripts/release-preflight.ps1
 ```
 
-The Windows preflight excludes `user-service` and `roze-example` because they
-enable the vendored `rdkafka` build, whose Unix configure path is not a native
-Windows release target. It must not be reported as a complete release gate.
-Run `scripts/release-gate.sh` on Linux or WSL, where CI also verifies the
-rdkafka-enabled applications and `cargo check -p roze-kafka --features
-rdkafka`.
+`user-service` and `roze-example` enable `rdkafka-cmake`, so a native Windows
+host with CMake and the Visual Studio C++ toolchain can run
+`cargo test --workspace` and build librdkafka locally. In environments where
+MSBuild parallel jobs are unstable, use `cargo test -j 1 --workspace`.
+The Windows preflight remains non-authoritative because the release gate and
+Unix smoke scripts still run on Linux/WSL and validate the ordinary
+`rdkafka` feature path separately.
 
 - Create a release tracking issue from the release checklist template.
 - `cargo fmt --all -- --check`
@@ -138,6 +139,7 @@ rdkafka`.
 - `cargo check --workspace`
 - `cargo check -p roze-kafka --no-default-features --features rdkafka`
 - Windows: `cargo check -p roze-kafka --no-default-features --features rdkafka-cmake`
+- Windows with CMake/MSVC: `cargo test -j 1 --workspace`
 - `cargo check -p roze-kafka --no-default-features --features rskafka`
 - `cargo test -p rozectl -- --skip postgres --skip mysql --skip mongo`
 - `bash scripts/production-smoke.sh`

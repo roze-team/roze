@@ -40,6 +40,16 @@ Generated glue may be refreshed:
 - RPC server/client/protobuf glue
 - build files and manifest dependency wiring
 
+Current REST projects use directory modules at `src/config/mod.rs`,
+`src/types/mod.rs`, `src/openapi/mod.rs`, and `src/middleware/mod.rs`. A legacy
+flat layout is replaced during migration; do not keep duplicate flat modules
+or compatibility forwarding files.
+
+Manifest updates add missing dependencies required by current generated code,
+such as direct Veil support for typed application config. Existing dependency
+versions, features, paths, application-only dependencies, and unrelated Cargo
+sections remain unchanged.
+
 Use `--force` only when intentionally rebuilding a generated project from
 scratch.
 
@@ -94,6 +104,12 @@ This upgrade intentionally has no compatibility adapters:
 - Model runtime initialization and `ServiceContext::model()` are emitted under
   `src/model`. REST/RPC and model generation no longer share ownership of
   `src/svc/mod.rs`, so their `--update` commands may run in either order.
+- Native Windows applications that compile the rdkafka consumer runtime should
+  select `roze-kafka` feature `rdkafka-cmake` and install CMake plus the Visual
+  Studio C++ toolchain. This avoids the Unix `configure`/`make` build path.
+- New application-owned Config Center loaders require an explicit
+  `ROZE_CONFIG_CENTER_KEY`; namespace/app values are metadata rather than key
+  inference, and no legacy environment alias is generated.
 
 Run `rozectl gate check --manifest roze-gate.yaml` before regeneration or
 deployment. Breaking API/Search/SQL changes require a non-expired,

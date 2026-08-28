@@ -264,9 +264,19 @@ The first update of a legacy project transactionally adds a missing
 `application::register_services` hook and moves resolvable custom module/use
 declarations from old logic indexes into the matching application-owned
 prelude; later updates preserve those files unchanged.
+During an update, `rozectl` also adds standard dependencies required by the
+current generated templates. Existing application dependency versions,
+features, local paths, and unrelated Cargo sections remain authoritative.
 Use `--force` only for a full rebuild. New projects use
 `https://github.com/roze-team/roze.git` dependencies by default; pass
 `--roze-source path` for projects inside this repository.
+
+The checked-in `user-service` and `roze-example` applications use
+`roze-kafka`'s `rdkafka-cmake` feature. On native Windows, install CMake and the
+Visual Studio C++ toolchain; then the normal `cargo test --workspace` command
+builds librdkafka locally without the Unix `configure`/`make` path.
+`user-service` keeps its strict Config Center/Kafka deployment variables in
+[`apps/user/ops/config-center.md`](apps/user/ops/config-center.md).
 
 `rozectl api new user` and `rozectl rpc new user` create `user/` in the current
 directory by default. Use `--out services/user` to choose another location.

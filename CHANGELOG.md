@@ -6,6 +6,13 @@
   `maud::Markup` responses, and generated `@maud` REST routes with preserved
   markup logic, HTML OpenAPI/client/mock/contract-test behavior, and managed
   Cargo dependencies.
+- Updated the checked-in REST examples to the current generated directory and
+  lifecycle layout, retained business logic in application-owned extension
+  points, and selected `rdkafka-cmake` so native Windows workspace tests can
+  compile librdkafka with CMake/MSVC.
+- REST/RPC `--update` now adds missing standard dependencies required by the
+  current templates while preserving existing application versions, features,
+  paths, custom dependencies, and unrelated Cargo sections.
 
 - Pinned development, generated production verification, and release CI to
   Rust 1.98.0; added a scheduled latest-stable compatibility canary, resolved

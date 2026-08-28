@@ -39,13 +39,19 @@
 - framework-owned：handler/server、route、pb、生成 client、DTO、OpenAPI、
   generated model/search repository、构建 glue。
 - application-owned：业务 logic、自定义 middleware、扩展模块和本地
-  `config.yaml`。
+  `config.yaml`，包括 `src/application.rs`、`src/application_config.rs`、
+  `src/logic/prelude.rs` 与 REST group-local prelude。
 - marker-owned region：只更新显式 marker 之间的内容。
 
 `--update` 只刷新 framework/marker-owned 内容并删除有 marker 的陈旧生成文件。
 `--force` 只用于明确的全量重建。生成失败时，目标项目必须保持调用前状态。
 任何生成输出变化都应修改 `apps/rozectl` 的 generator/template/test，不手改临时
 生成目录。
+
+更新已有项目时，生成器应补齐当前模板新增的标准 Cargo 依赖，但不得覆盖应用
+已经选择的依赖版本、features、本地路径或无关 Cargo section。旧的平铺
+`config.rs`、`types.rs`、`openapi.rs` 和 `middleware.rs` 在迁移后由当前目录模块
+替代，不保留双目录或兼容转发层。
 
 ## REST/API 项目
 
@@ -56,6 +62,8 @@ config.yaml
 Cargo.toml
 src/
   main.rs
+  application.rs
+  application_config.rs
   config/mod.rs
   route/<group>.rs
   handler/<group>/<method>.rs
@@ -72,6 +80,10 @@ src/
 - `handler/**` 只负责协议提取、Context、校验、logic 调用和响应转换。
 - `route/**` 只负责路由与 middleware/governance 组装。
 - `svc/mod.rs` 只保存依赖，不放业务流程。
+- `application.rs` 负责应用资源与共享生命周期 worker；配置中心、Kafka 等后台
+  任务必须接入 `ServiceGroup` 的 shutdown 信号。
+- `application_config.rs` 保存 top-level `application` 的强类型配置，并使用
+  始终开启的 Veil `Debug` 脱敏。
 - `types/mod.rs` 与 `openapi/mod.rs` 来自 IDL，wire name 必须稳定。
 - 自定义 middleware 文件与 `config.yaml` 默认由应用拥有。
 - HTTP 成功响应使用 `roze-result::ApiResponse`，错误使用 `RozeError`。
@@ -128,6 +140,9 @@ src/
 ## 配置与热更新
 
 - 应用配置统一使用 `roze_config::ServiceConfig`。
+- 生成 REST/RPC 服务使用
+  `ServiceConfigWithApplication<ApplicationConfig>`，应用字段只写入保留的
+  `src/application_config.rs`。
 - 本地默认 `config.yaml`；环境与配置中心作为覆盖或热更新来源。
 - 解析、校验或 listener 失败时保留最后有效配置。
 - listener 有 timeout；变更按 section/signature 判断重建范围。
