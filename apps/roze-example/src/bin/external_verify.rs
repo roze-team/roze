@@ -33,6 +33,7 @@ async fn verify_sql(label: &str, backend: DatabaseBackend, url: String) -> anyho
 async fn verify_redis(url: String) -> anyhow::Result<()> {
     let cache = roze_cache::RedisCache::connect(&roze_cache::CacheConfig {
         url,
+        cluster_urls: Vec::new(),
         namespace: "roze_external_verify".to_string(),
         default_ttl_secs: 60,
     })

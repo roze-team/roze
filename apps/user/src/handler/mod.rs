@@ -1,22 +1,17 @@
-use roze_http::{routing::get, Json, Router};
+#![allow(unused_imports)]
 
-use crate::{openapi, svc::ServiceContext};
+pub mod user;
 
-pub fn router(_ctx: ServiceContext) -> Router {
-    Router::new()
-        .route("/healthz", get(health))
-        .route("/metrics", get(metrics))
-        .route("/openapi.json", get(openapi_doc))
-}
+use roze_context::Context;
+use roze_error::RozeError;
+use roze_http::{
+    extract::{Extension, Form, Path, Query, State},
+    http::HeaderMap,
+    Json,
+};
+use roze_result::ApiResponse;
+use roze_validation::Validate;
+use serde::Deserialize;
 
-async fn health() -> roze_result::ApiResponse<&'static str> {
-    roze_result::ApiResponse::ok("ok")
-}
-
-async fn metrics() -> String {
-    roze_metrics::http_metrics()
-}
-
-async fn openapi_doc() -> Json<serde_json::Value> {
-    Json(openapi::document())
-}
+use crate::svc::ServiceContext;
+use crate::types::*;

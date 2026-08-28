@@ -111,12 +111,17 @@ impl RunningKafkaPipeline {
     }
 }
 
-pub fn start_center_driven_kafka(
+pub fn start_center_driven_kafka<F>(
     mut config_rx: watch::Receiver<crate::config::Config>,
     reload_version: Arc<AtomicU64>,
     app_name: String,
-) -> JoinHandle<()> {
+    shutdown: F,
+) -> JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     tokio::spawn(async move {
+        tokio::pin!(shutdown);
         let mut running = RunningKafkaPipeline::default();
         let mut last_signature: Option<String> = None;
 
@@ -168,8 +173,13 @@ pub fn start_center_driven_kafka(
                 );
             }
 
-            if config_rx.changed().await.is_err() {
-                break;
+            tokio::select! {
+                _ = &mut shutdown => break,
+                changed = config_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
             }
         }
 
@@ -293,7 +303,7 @@ async fn restart_kafka_pipeline(
             signature = signature,
             topic = %USER_TOPIC,
             elapsed_ms = elapsed_ms(started_at),
-            reason = %format!("{reason}"),
+            reason = %reason,
             "kafka config missing, pipeline stopped"
         );
         return;
@@ -594,13 +604,10 @@ async fn restart_kafka_pipeline(
             workers = %kafka_config.consumer_workers,
             workers_started = handles.len(),
             spawn_failed = spawn_failed_count,
-            reason = %format!(
-                "{}",
-                restart_failure
-                    .as_ref()
-                    .map(|value| format!("{value}"))
-                    .unwrap_or_else(|| "partial_failure".to_string())
-            ),
+            reason = %restart_failure
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "partial_failure".to_string()),
             elapsed_ms = elapsed_ms(started_at),
             "kafka pipeline started with partial consumer spawn failures"
         );

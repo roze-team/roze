@@ -4373,25 +4373,25 @@ fn write_cargo_toml_with_rpc_clients(
             with_maud: spec.rest_routes.iter().any(|route| route.maud),
         },
     );
+    let mut generated_manifest = cargo_toml(
+        &package_name,
+        options.dependency_source,
+        local_crates_prefix.as_deref(),
+        in_workspace,
+        kind,
+        logical_out,
+        CargoTemplateOptions {
+            rpc_clients,
+            with_maud: spec.rest_routes.iter().any(|route| route.maud),
+        },
+    );
+    normalize_generated_workspace_dependencies(
+        &mut generated_manifest,
+        workspace_root.as_deref(),
+        &explicit_manifest,
+    )?;
     if options.mode != GenerateMode::Update || !path.exists() {
-        let mut manifest = cargo_toml(
-            &package_name,
-            options.dependency_source,
-            local_crates_prefix.as_deref(),
-            in_workspace,
-            kind,
-            logical_out,
-            CargoTemplateOptions {
-                rpc_clients,
-                with_maud: spec.rest_routes.iter().any(|route| route.maud),
-            },
-        );
-        normalize_generated_workspace_dependencies(
-            &mut manifest,
-            workspace_root.as_deref(),
-            &explicit_manifest,
-        )?;
-        return fs::write(&path, manifest)
+        return fs::write(&path, generated_manifest)
             .with_context(|| format!("failed to write {}", path.display()));
     }
 
@@ -4400,10 +4400,18 @@ fn write_cargo_toml_with_rpc_clients(
     let mut document = content
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    let generated_document = generated_manifest
+        .parse::<toml_edit::DocumentMut>()
+        .context("failed to parse generated Cargo.toml")?;
+    let generated_dependencies = generated_document["dependencies"]
+        .as_table()
+        .context("generated Cargo.toml has no [dependencies] table")?;
     let dependencies = document
         .get_mut("dependencies")
         .and_then(toml_edit::Item::as_table_mut)
         .ok_or_else(|| anyhow::anyhow!("{} has no [dependencies] table", path.display()))?;
+
+    merge_missing_dependencies(dependencies, generated_dependencies);
 
     for name in project_roze_crates(kind) {
         dependencies.insert(
@@ -4445,6 +4453,14 @@ fn write_cargo_toml_with_rpc_clients(
 
     fs::write(&path, document.to_string())
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn merge_missing_dependencies(target: &mut toml_edit::Table, generated: &toml_edit::Table) {
+    for (name, dependency) in generated {
+        if !target.contains_key(name) {
+            target.insert(name, dependency.clone());
+        }
+    }
 }
 
 fn normalize_generated_workspace_dependencies(
@@ -14353,6 +14369,34 @@ fn main() {
         assert!(!cargo.contains("toasty"));
         assert!(!cargo.contains(r#"path = "../../crates/roze-"#));
         assert!(!cargo.contains("[build-dependencies]"));
+    }
+
+    #[test]
+    fn update_merges_new_generated_dependencies_without_replacing_application_choices() {
+        let mut target = r#"
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+application-events = { path = "../application-events" }
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("target manifest");
+        let generated = r#"
+[dependencies]
+tokio = "1"
+veil = { version = "0.3.0", default-features = false }
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("generated manifest");
+
+        merge_missing_dependencies(
+            target["dependencies"].as_table_mut().unwrap(),
+            generated["dependencies"].as_table().unwrap(),
+        );
+
+        let dependencies = target["dependencies"].as_table().unwrap();
+        assert!(dependencies["tokio"].to_string().contains("full"));
+        assert!(dependencies.contains_key("application-events"));
+        assert!(dependencies.contains_key("veil"));
     }
 
     #[test]

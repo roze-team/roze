@@ -12,7 +12,7 @@ roze-config = { path = "../../crates/roze-config" }
 roze-admin = { path = "../../crates/roze-admin" }
 roze-error = { path = "../../crates/roze-error" }
 roze-http = { path = "../../crates/roze-http" }
-roze-kafka = { path = "../../crates/roze-kafka", features = ["rdkafka"] }
+roze-kafka = { path = "../../crates/roze-kafka", features = ["rdkafka-cmake"] }
 roze-log = { path = "../../crates/roze-log" }
 roze-metrics = { path = "../../crates/roze-metrics" }
 roze-middleware = { path = "../../crates/roze-middleware" }
@@ -32,5 +32,16 @@ validator.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
+roze-health = { path = "../../crates/roze-health" }
+roze-rate-limit = { path = "../../crates/roze-rate-limit" }
+roze-mq = { path = "../../crates/roze-mq" }
+roze-nats = { path = "../../crates/roze-nats" }
+roze-query = { path = "../../crates/roze-query" }
+roze-report = { path = "../../crates/roze-report" }
+roze-service = { path = "../../crates/roze-service" }
+roze-storage = { path = "../../crates/roze-storage" }
+roze-transaction = { path = "../../crates/roze-transaction" }
+roze-transaction-sql = { path = "../../crates/roze-transaction-sql" }
+veil.workspace = true
 
 [build-dependencies]

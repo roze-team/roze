@@ -1,25 +1,17 @@
-use std::convert::Infallible;
+#![allow(unused_imports)]
 
-use http::StatusCode;
-use roze_http::rest::{self, IncomingRequest};
-use tower::{util::BoxCloneService, ServiceExt};
+pub mod user;
 
-use crate::{openapi, svc::ServiceContext};
+use roze_context::Context;
+use roze_error::RozeError;
+use roze_http::{
+    extract::{Extension, Form, Path, Query, State},
+    http::HeaderMap,
+    Json,
+};
+use roze_result::ApiResponse;
+use roze_validation::Validate;
+use serde::Deserialize;
 
-pub fn router(
-    _ctx: ServiceContext,
-) -> BoxCloneService<IncomingRequest, rest::HttpResponse, Infallible> {
-    tower::service_fn(|request: IncomingRequest| async move {
-        let response = match request.uri().path() {
-            "/healthz" => rest::api_response(&roze_result::ApiResponse::ok("ok")),
-            "/metrics" => rest::text_response(StatusCode::OK, roze_metrics::http_metrics()),
-            "/openapi.json" => rest::json_response(StatusCode::OK, &openapi::document()),
-            _ => rest::text_response(
-                StatusCode::NOT_FOUND,
-                "route not migrated to Roze native HTTP",
-            ),
-        };
-        Ok::<_, Infallible>(response)
-    })
-    .boxed_clone()
-}
+use crate::svc::ServiceContext;
+use crate::types::*;

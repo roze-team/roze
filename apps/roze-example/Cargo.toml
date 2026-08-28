@@ -19,7 +19,7 @@ roze-cache = { path = "../../crates/roze-cache" }
 roze-context = { path = "../../crates/roze-context" }
 roze-db = { path = "../../crates/roze-db" }
 roze-mongo = { path = "../../crates/roze-mongo" }
-roze-kafka = { path = "../../crates/roze-kafka", features = ["rdkafka"] }
+roze-kafka = { path = "../../crates/roze-kafka", features = ["rdkafka-cmake"] }
 roze-mq = { path = "../../crates/roze-mq" }
 roze-nats = { path = "../../crates/roze-nats" }
 roze-openapi = { path = "../../crates/roze-openapi" }
@@ -34,3 +34,12 @@ validator.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
+roze-health = { path = "../../crates/roze-health" }
+roze-rate-limit = { path = "../../crates/roze-rate-limit" }
+roze-query = { path = "../../crates/roze-query" }
+roze-report = { path = "../../crates/roze-report" }
+roze-service = { path = "../../crates/roze-service" }
+roze-storage = { path = "../../crates/roze-storage" }
+roze-transaction = { path = "../../crates/roze-transaction" }
+roze-transaction-sql = { path = "../../crates/roze-transaction-sql" }
+veil.workspace = true

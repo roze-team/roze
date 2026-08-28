@@ -1,161 +1,154 @@
+mod application;
 mod config;
+pub use config::application_config;
 mod handler;
-mod kafka;
 mod logic;
 mod middleware;
+mod model;
 mod openapi;
+mod route;
 mod svc;
 mod types;
 
-use roze_http::rest::RestServer;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
-use tokio::time::{sleep, timeout, Duration};
+use roze_http::rest::{RestServer, RestService};
+use roze_service::ServiceGroup;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let (config, center) = config::load_with_config_center_with_center(config_path()).await?;
+    let config = config::load(config_path())?;
     let _tracing_guard = roze_log::init_tracing_with_config(&config)?;
-    let rest = config
+    let mut rest = config
         .rest
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing rest config"))?;
-    let (config_tx, config_rx) = tokio::sync::watch::channel(config.clone());
-    let reload_version = Arc::new(AtomicU64::new(0));
-    let config_history = roze_admin::ConfigReloadHistory::new(128);
-    let registry = roze_rpc::registry::build_service_registry(&config)?;
-    if let Some(center) = center {
-        let config_tx_for_reload = config_tx.clone();
-        center
-            .add_listener(move |updated| {
-                let _ = config_tx_for_reload.send(updated.clone());
-            })
-            .await;
-
-        let reload_version_for_listener = reload_version.clone();
-        let reload_history = config_history.clone();
-        center
-            .add_reload_listener(move |result| {
-                reload_version_for_listener.store(result.version, Ordering::SeqCst);
-                reload_history.record(result);
-                let diff_paths = result
-                    .diff
-                    .iter()
-                    .map(|entry| entry.path.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                if let Some(error) = &result.error {
-                    tracing::warn!(
-                        event = "config.reload.failed",
-                        version = result.version,
-                        old_version = result.old_version,
-                        hash = %result.hash,
-                        old_hash = %result.old_hash,
-                        source = %result.source,
-                        namespace = result.namespace.as_deref().unwrap_or_default(),
-                        app = result.app.as_deref().unwrap_or_default(),
-                        key = result.key.as_deref().unwrap_or_default(),
-                        changed = result.changed,
-                        diff_paths = %diff_paths,
-                        ts_millis = result.ts_millis,
-                        error = %error,
-                        "config center reload failed"
-                    );
-                } else {
-                    tracing::info!(
-                        event = "config.reload.applied",
-                        version = result.version,
-                        old_version = result.old_version,
-                        hash = %result.hash,
-                        old_hash = %result.old_hash,
-                        source = %result.source,
-                        namespace = result.namespace.as_deref().unwrap_or_default(),
-                        app = result.app.as_deref().unwrap_or_default(),
-                        key = result.key.as_deref().unwrap_or_default(),
-                        changed = result.changed,
-                        diff_paths = %diff_paths,
-                        success = result.success,
-                        ts_millis = result.ts_millis,
-                        "config center reload applied"
-                    );
-                    for event in result.change_events() {
-                        tracing::info!(
-                            event = "config_updated",
-                            version = event.version,
-                            old_version = event.old_version,
-                            source = %event.source,
-                            section = %event.section,
-                            section_hash = event.section_hash.as_deref().unwrap_or_default(),
-                            paths = %event.paths.join(","),
-                            changed = event.changed,
-                            "config center section updated"
-                        );
-                    }
-                }
-            })
-            .await;
+    for route in route::WEBSOCKET_PUBLIC_ROUTES {
+        if !rest
+            .middlewares
+            .auth_public_routes
+            .iter()
+            .any(|configured| configured.trim().eq_ignore_ascii_case(route))
+        {
+            rest.middlewares
+                .auth_public_routes
+                .push((*route).to_string());
+        }
     }
-
-    let app_name = config.name.clone();
-    let mut kafka_task = kafka::start_center_driven_kafka(
-        config_rx.clone(),
-        reload_version.clone(),
-        app_name.clone(),
+    tracing::info!(
+        event = roze_log::events::SERVICE_CONFIG_LOADED,
+        service = %config.name,
+        protocol = "rest",
+        listen_addr = %rest.addr,
+        register = rest.register,
+        "service configuration loaded"
     );
-
-    let mut registration = if rest.register {
-        let registry = registry
-            .clone()
+    let (mut registration, registry_health) = if rest.register {
+        let registry = roze_rpc::registry::build_service_registry(&config)?
             .ok_or_else(|| anyhow::anyhow!("missing registry config"))?;
-        Some(
-            roze_rpc::rpc::ServiceRegistrationGuard::start(
-                registry,
-                config.name.clone(),
-                rest.addr,
-            )
-            .await?,
+        let registration = roze_rpc::rpc::ServiceRegistrationGuard::start(
+            registry.clone(),
+            config.name.clone(),
+            rest.addr,
         )
+        .await?;
+        tracing::info!(event = roze_log::events::SERVICE_REGISTRY_REGISTERED, service = %config.name, protocol = "rest", addr = %rest.addr, "service registered");
+        (Some(registration), Some(registry))
     } else {
-        None
+        (None, None)
     };
-    let ctx = svc::ServiceContext::new(config.clone()).await?;
-    let _config_history = config_history;
-    let app = roze_middleware::apply_common(handler::router(ctx));
-    RestServer::new(rest.addr, app).serve().await?;
+    let service_name = config.name.clone();
+    let auth_config = config.auth.clone();
+    let mut group = ServiceGroup::new();
+    let service_shutdown = group.shutdown_listener();
+    let ctx = model::configure_context(svc::ServiceContext::new(config).await?).await?;
+    let ctx = application::configure_context(ctx).await?;
+    tracing::info!(event = roze_log::events::SERVICE_CONTEXT_INITIALIZED, service = %service_name, protocol = "rest", "service context initialized");
+    application::register_services(&mut group, &ctx)?;
+    let health = ctx.health.clone();
+    if let Some(registry) = registry_health {
+        let registry_service = service_name.clone();
+        health.register_dependency("registry", move || {
+            let registry = registry.clone();
+            let service = registry_service.clone();
+            async move { registry.discover(&service).await.map(|_| ()) }
+        });
+    }
+    if !rest.middlewares.trusted_proxy_cidrs.is_empty() && !rest.connect_info {
+        anyhow::bail!("rest.connect_info must be enabled when trusted_proxy_cidrs are configured");
+    }
+    let middleware_config = roze_middleware::CommonMiddlewareConfig::try_from_service(
+        &rest.middlewares,
+        auth_config.as_ref(),
+    )?;
+    tracing::info!(
+        event = "rest.middleware.resolved",
+        protocol = "rest",
+        request_context = middleware_config.request_context,
+        request_tracing = middleware_config.tracing,
+        auth_enabled = middleware_config.auth.is_some(),
+        cors_enabled = middleware_config.cors,
+        timeout_ms = ?middleware_config.timeout_ms,
+        body_limit_bytes = ?middleware_config.body_limit_bytes,
+        "REST middleware plan resolved"
+    );
+    let app = route::router(ctx.clone()).layer(roze_http::middleware::AddExtensionLayer::new(
+        roze_http::ws::WebSocketShutdown::new(service_shutdown),
+    ));
+    tracing::info!(
+        event = "rest.router.constructed",
+        protocol = "rest",
+        "REST router constructed"
+    );
+    let app = middleware::app::apply(app, ctx);
+    tracing::info!(
+        event = "rest.middleware.application_applied",
+        protocol = "rest",
+        "application middleware hook applied"
+    );
+    let app = roze_middleware::apply_common_with_config(app, middleware_config);
+    tracing::info!(
+        event = "rest.middleware.common_applied",
+        protocol = "rest",
+        "Roze common middleware applied"
+    );
+    if rest.connect_info {
+        group.add(RestService::new(
+            service_name.clone(),
+            RestServer::new(rest.addr, app).with_connect_info(),
+        ));
+    } else {
+        group.add(RestService::new(
+            service_name.clone(),
+            RestServer::new(rest.addr, app),
+        ));
+    }
+    group.add_fn("health-drain", move |shutdown| {
+        let health = health.clone();
+        async move {
+            shutdown.wait().await;
+            tracing::info!(
+                event = roze_log::events::SERVICE_HEALTH_DRAINING,
+                protocol = "rest",
+                "shutdown requested; marking service draining"
+            );
+            health.mark_draining();
+            Ok(())
+        }
+    });
+    tracing::info!(event = roze_log::events::SERVICE_STARTING, service = %service_name, protocol = "rest", listen_addr = %rest.addr, "service starting");
+    let result = group.start().await;
     if let Some(registration) = registration.as_mut() {
         registration.shutdown().await?;
+        tracing::info!(event = roze_log::events::SERVICE_REGISTRY_UNREGISTERED, service = %service_name, protocol = "rest", "service unregistered");
     }
-
-    drop(config_tx);
-    tracing::info!(
-        app = %app_name,
-        event = "kafka.runtime.shutdown_requested",
-        "kafka background runtime shutdown requested"
-    );
-
-    tokio::select! {
-        result = &mut kafka_task => {
-            if let Err(err) = result {
-                tracing::warn!(
-                    app = %app_name,
-                    event = "kafka.runtime.stop_error",
-                    error = %err,
-                    "kafka background runtime stopped with error"
-                );
-            }
+    match &result {
+        Ok(()) => {
+            tracing::info!(event = roze_log::events::SERVICE_STOPPED, service = %service_name, protocol = "rest", "service stopped")
         }
-        _ = sleep(Duration::from_secs(5)) => {
-            tracing::warn!(
-                app = %app_name,
-                event = "kafka.runtime.stop_timeout",
-                "kafka background runtime stop timeout, forcing abort"
-            );
-            kafka_task.abort();
-            let _ = timeout(Duration::from_secs(2), &mut kafka_task).await;
+        Err(_) => {
+            tracing::error!(event = roze_log::events::SERVICE_FAILED, service = %service_name, protocol = "rest", error_kind = "lifecycle", "service failed")
         }
     }
+    result?;
 
     Ok(())
 }
