@@ -218,7 +218,8 @@ REST -> managed RPC -> DB/cache -> outbox -> MQ consumer
 
 1. REST CRUD + PostgreSQL/MySQL + migration/rollback + Redis cache；
 2. REST + RPC + discovery + tracing + governed client；
-3. Gateway + Registry + MQ + outbox/inbox + TCC/Saga + object storage。
+3. Gateway + Registry + MQ + outbox/inbox + object storage，并通过独立
+   `roze-dtm` 的固定版本证据验证 TCC/Saga。
 
 每套系统执行 startup、readiness、dependency loss、timeout、duplicate event、
 retry exhaustion、DLQ replay、config rollback、graceful drain、migration rollback、
@@ -324,7 +325,7 @@ bash scripts/production-evidence-gate.sh
 | T204 | S2 | cardinality adversarial fixture | 随机 path/ID/tenant/error 不增加无界 time series |
 | T301 | S3 | REST CRUD 真实依赖流程 | migration、cache、backup、restore、rollback 全通过 |
 | T302 | S3 | REST→RPC 真实发现流程 | Etcd/Consul loss、slow node、恢复和 drain 全通过 |
-| T303 | S3 | event-commerce 真实事件流程 | broker restart、duplicate、DLQ replay、TCC/Saga 不重复副作用 |
+| T303 | S3 | event-commerce 真实事件流程 | broker restart、duplicate、DLQ replay；TCC/Saga 不重复副作用由独立 `roze-dtm` 固定版本证据提供 |
 | T401 | S4 | 微基准套件 | router、governance、picker、cache、metrics 均输出统一 schema |
 | T402 | S4 | 服务/故障基准套件 | 五类服务场景和五类故障场景可重复 |
 | T403 | S4 | 竞争报告 verifier | 缺样本、环境漂移、SLO 失败或方差过大均拒绝结论 |

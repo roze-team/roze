@@ -3434,6 +3434,8 @@ fn is_builtin_api_type(ty: &str) -> bool {
             | "f64"
             | "float"
             | "double"
+            | "json"
+            | "any"
             | "int"
             | "int8"
             | "int16"

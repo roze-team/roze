@@ -71,6 +71,7 @@ fn map_type(ty: &str) -> String {
         "double" => "f64".to_string(),
         "bool" => "bool".to_string(),
         "bytes" => "Vec<u8>".to_string(),
+        "json" | "any" => "serde_json::Value".to_string(),
         other => other.to_string(),
     }
 }
@@ -326,6 +327,8 @@ mod tests {
                 Scores []int64 `json:"scores"`
                 Labels map[string]string `json:"labels"`
                 Weights map[string]uint64 `json:"weights"`
+                Metadata json `json:"metadata"`
+                Arbitrary any `json:"arbitrary"`
             }
             "#,
         )
@@ -351,6 +354,8 @@ mod tests {
         assert!(rendered.contains("pub scores: Vec<i64>,"));
         assert!(rendered.contains("pub labels: std::collections::HashMap<String, String>,"));
         assert!(rendered.contains("pub weights: std::collections::HashMap<String, u64>,"));
+        assert!(rendered.contains("pub metadata: serde_json::Value,"));
+        assert!(rendered.contains("pub arbitrary: serde_json::Value,"));
         assert!(!rendered.contains(": int64,"));
         assert!(!rendered.contains(": uint64,"));
         assert!(!rendered.contains(": float,"));

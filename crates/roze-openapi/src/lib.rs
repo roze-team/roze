@@ -385,6 +385,20 @@ pub fn to_json_pretty(document: &OpenApiDocument) -> String {
 }
 
 impl Schema {
+    /// Accepts any JSON value without narrowing its object, array, or scalar shape.
+    pub fn any() -> Self {
+        Self {
+            reference: None,
+            kind: None,
+            format: None,
+            items: None,
+            properties: BTreeMap::new(),
+            required: Vec::new(),
+            description: None,
+            nullable: None,
+        }
+    }
+
     pub fn reference(name: impl Into<String>) -> Self {
         Self {
             reference: Some(format!("#/components/schemas/{}", name.into())),
@@ -508,6 +522,14 @@ mod tests {
         assert_eq!(
             json["components"]["schemas"]["LoginReq"]["properties"]["name"]["type"],
             "string"
+        );
+    }
+
+    #[test]
+    fn serializes_an_unconstrained_json_schema_as_an_empty_object() {
+        assert_eq!(
+            serde_json::to_value(Schema::any()).expect("schema serializes"),
+            serde_json::json!({})
         );
     }
 }

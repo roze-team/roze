@@ -183,7 +183,10 @@ src/
 - 可靠事件优先使用 persistent outbox + inbox/idempotency；publisher 使用
   `roze_mq::Publisher` 抽象。
 - 消费者明确 ack/nack、retry、DLQ、replay 与 duplicate-effect 语义。
-- TCC 是默认分布式事务路径；Saga 是显式可选 workflow。
+- 跨服务 TCC/Saga 由独立
+  [`roze-dtm`](https://github.com/roze-team/roze-dtm) 协调器提供；本仓库的
+  `roze-transaction::TransactionPlan` 仅用于进程内补偿编排，不等同于
+  持久化分布式 Saga。
 - 数据库、Redis、broker 和 search 的“通过”必须来自真实依赖流程。
 
 ## Search 项目

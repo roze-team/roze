@@ -81,7 +81,8 @@ The direction is Rust-native microservice ergonomics with explicit generated bou
 - ORM: SeaORM is the default generated SQL model scaffold; `--orm toasty`
   explicitly selects Toasty. Shared ORM request contracts live in `roze-orm`.
 - DTM: distributed transaction coordination lives in the independent
-  [`roze-dtm`](https://github.com/roze-team/roze-dtm) companion project.
+  [`roze-dtm`](https://github.com/roze-team/roze-dtm) companion project; pin
+  and validate it with the [integration contract](docs/integrations/roze-dtm.md).
 - Governance: registry, balancing, middleware, config center, tracing, NATS JetStream, outbox relay, and error handling live across the `roze-*` crates.
 
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.

@@ -2622,6 +2622,7 @@ fn map_type(ty: &str) -> String {
         "float" => "f32".to_string(),
         "double" => "f64".to_string(),
         "bool" => "bool".to_string(),
+        "json" | "any" => "serde_json::Value".to_string(),
         other => other.to_string(),
     }
 }
@@ -2643,6 +2644,7 @@ fn openapi_schema_expr(ty: &str) -> String {
         "u64" | "uint" | "uint64" => "Schema::integer(\"uint64\")".to_string(),
         "f32" | "float" => "Schema::number(\"float\")".to_string(),
         "f64" | "double" => "Schema::number(\"double\")".to_string(),
+        "json" | "any" | "serde_json::Value" => "Schema::any()".to_string(),
         other => format!("Schema::reference({other:?})"),
     }
 }

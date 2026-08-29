@@ -1236,6 +1236,7 @@ fn map_type(ty: &str) -> String {
         "int" => "i64".to_string(),
         "uint" => "u64".to_string(),
         "bool" => "bool".to_string(),
+        "json" | "any" => "serde_json::Value".to_string(),
         other => other.to_string(),
     }
 }

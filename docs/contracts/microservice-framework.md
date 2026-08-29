@@ -17,7 +17,7 @@
 | RPC 数据面 | 已实现 | 每 attempt P2C、EWMA latency/success、in-flight、结果反馈、watch/cache |
 | 配置中心 | 已实现；真实长稳待补 | Etcd watch、revision 恢复、last-known-good reload |
 | 服务发现 | 已集成；故障证据待补 | Memory、DNS、Etcd、Consul、cached resolver |
-| 数据一致性 | 已实现；真实故障待补 | transaction、outbox/inbox、idempotency、Saga/TCC |
+| 数据一致性 | 已实现；真实故障待补 | 本地 transaction、outbox/inbox、idempotency；跨服务 Saga/TCC 由独立 [`roze-dtm`](https://github.com/roze-team/roze-dtm) 提供 |
 | ORM 生成 | 已实现 | SeaORM 默认；`--orm toasty` 可选；tenant/audit/soft-delete |
 | MQ | 已实现；真实 broker 长稳待补 | in-memory、NATS、Kafka、retry、DLQ、outbox relay |
 | Gateway | 已实现；长连接长稳待补 | HTTP/WebSocket/SSE、registry、health、outlier、热更新 |

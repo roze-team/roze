@@ -134,8 +134,9 @@ The phase-by-phase work packages, exit gates, and evidence checklist are in
   projects.
 - Document transaction boundaries, domain validation, authorization checks, and
   reliable event publishing as application-owned code.
-- Provide full examples for DB transaction + outbox + MQ publish + RPC call +
-  TCC compensation.
+- Provide full examples for DB transaction + outbox + MQ publish + RPC call,
+  plus an explicitly version-pinned external `roze-dtm` TCC compensation
+  workflow and its recovery evidence.
 - S3-compatible object storage now has a SigV4 runtime adapter; track real
   MinIO success/failure/recovery evidence in the
   [storage runtime contract](contracts/storage-s3-runtime.md).

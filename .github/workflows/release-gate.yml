@@ -16,6 +16,8 @@ on:
       - "docs/stability-commitment.md"
       - "docs/roadmap.md"
       - "docs/contracts/**"
+      - "docs/integrations/**"
+      - "docs/evidence/*roze-dtm*"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/release-gate.yml"
@@ -32,6 +34,8 @@ on:
       - "docs/stability-commitment.md"
       - "docs/roadmap.md"
       - "docs/contracts/**"
+      - "docs/integrations/**"
+      - "docs/evidence/*roze-dtm*"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/release-gate.yml"
@@ -64,6 +68,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read fixed Roze DTM compatibility revision
+        id: roze_dtm_baseline
+        run: |
+          revision="$(python3 -c 'import json; print(json.load(open("docs/integrations/roze-dtm-compatibility.json", encoding="utf-8"))["dtm_revision"])')"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout fixed Roze DTM compatibility baseline
+        uses: actions/checkout@v4
+        with:
+          repository: roze-team/roze-dtm
+          ref: ${{ steps.roze_dtm_baseline.outputs.revision }}
+          path: .compat/roze-dtm
+          persist-credentials: false
+
+      - name: Verify Roze DTM static compatibility contract
+        run: >-
+          python3 scripts/check-roze-dtm-compatibility.py
+          --dtm-dir .compat/roze-dtm
+          --output target/roze-dtm-compatibility-report.json
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.98.0
         with:
@@ -85,7 +109,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: roze-production-release-audit-${{ github.sha }}
-          path: target/production-release-audit.json
+          path: |
+            target/production-release-audit.json
+            target/roze-dtm-compatibility-report.json
           if-no-files-found: error
           retention-days: 90
 

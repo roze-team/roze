@@ -682,6 +682,7 @@ fn ts_type(spec: &ApiSpec, ty: &str) -> String {
         "int" | "uint" | "i32" | "i64" | "u32" | "u64" | "int32" | "int64" | "uint32"
         | "uint64" | "float" | "double" | "f32" | "f64" => "number".to_string(),
         "bytes" => "number[]".to_string(),
+        "json" | "any" | "serde_json::Value" => "unknown".to_string(),
         _ if spec.types.iter().any(|candidate| candidate.name == ty) => ty.to_string(),
         _ => "unknown".to_string(),
     }
@@ -948,6 +949,33 @@ mod tests {
         assert!(!client.contains("auth_identity: unknown;"));
         assert!(!client.contains("identities: unknown;"));
         assert_eq!(client, render_ts_client(&spec));
+    }
+
+    #[test]
+    fn preserves_free_form_json_without_narrowing_payloads() {
+        let spec = parse_api(
+            r#"
+            service event-api {
+                @handler publish
+                post /events (EventReq) returns (EventResp)
+            }
+            type (
+                EventReq {
+                    payload json `json:"payload"`
+                    metadata any `json:"metadata"`
+                }
+                EventResp {
+                    payload json `json:"payload"`
+                }
+            )
+            "#,
+        )
+        .expect("valid api");
+
+        let client = render_ts_client(&spec);
+        assert!(client.contains("payload: unknown;"));
+        assert!(client.contains("metadata: unknown;"));
+        assert!(!client.contains("payload: string;"));
     }
 
     #[test]

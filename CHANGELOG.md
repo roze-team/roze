@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added an explicit external `roze-dtm` integration and evidence contract,
+  a fixed-revision CI compatibility gate covering TLS, retention,
+  interoperability, callback recovery, and Redis fault-injection surfaces,
+  corrected generated/reference-system ownership claims, and introduced REST
+  `.api` `json`/`any` fields that preserve free-form JSON through Rust, OpenAPI,
+  mocks, and TypeScript/JavaScript clients.
 - Moved the DTM coordinator and standalone service to the independent
   [`roze-dtm`](https://github.com/roze-team/roze-dtm) repository; Roze keeps
   its local transaction and persistent outbox primitives in this workspace.

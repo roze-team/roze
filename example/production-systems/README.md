@@ -11,7 +11,10 @@ The three systems exercise distinct production paths:
 2. `service-mesh`: REST to managed RPC dependency, SQL model, Redis-backed
    readiness, context propagation, deadline, retry budget, and tracing.
 3. `event-commerce`: REST, stream worker, Gateway/registry topology, reliable
-   event envelope, inbox/outbox, Saga/TCC, object storage, and replay recovery.
+   event envelope, inbox/outbox, application compensation, object storage, and
+   replay recovery. Distributed Saga/TCC evidence belongs to the independently
+   versioned [`roze-dtm`](https://github.com/roze-team/roze-dtm) matrix and is
+   not implied by this reference system.
 
 Run the compile and regeneration matrix with:
 

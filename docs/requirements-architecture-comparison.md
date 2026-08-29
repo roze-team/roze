@@ -12,7 +12,9 @@ Roze is a Rust-native, IDL-first framework and generator for:
 - REST, RPC, stream workers, models, migrations, and search;
 - OpenAPI and TypeScript/JavaScript Web clients;
 - governance, lifecycle, health, security, metrics, tracing, and configuration;
-- Gateway, registry, MQ, inbox/outbox, TCC/Saga, cache, and storage;
+- Gateway, registry, MQ, inbox/outbox, cache, and storage, with TCC/Saga
+  coordination supplied by the independent
+  [`roze-dtm`](https://github.com/roze-team/roze-dtm) project;
 - reports, chart queries, deployment assets, release gates, and evidence jobs.
 
 Non-Web language SDKs are outside the product boundary.

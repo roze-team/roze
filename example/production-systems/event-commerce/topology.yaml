@@ -16,8 +16,15 @@ required_workflows:
   - duplicate_delivery_inbox_idempotency
   - broker_disconnect_and_relay_recovery
   - retry_exhaustion_dlq_query_replay_and_purge
-  - saga_timeout_and_idempotent_compensation
-  - tcc_confirm_cancel_restart_recovery
+  - application_compensation_timeout_and_idempotent_recovery
+external_evidence:
+  roze_dtm:
+    required_for:
+      - saga_timeout_and_idempotent_compensation
+      - tcc_confirm_cancel_restart_recovery
+    repository: https://github.com/roze-team/roze-dtm
+    revision_required: true
+    production_report_required: true
   - object_storage_failure_and_cleanup
   - config_reject_and_automatic_rollback
   - graceful_drain_with_outbox_backlog

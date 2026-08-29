@@ -547,6 +547,15 @@ Fields marked with `validate:"optional"` or `validate:"omitempty"` are emitted
 as optional properties. Type resolution uses the complete API type graph and
 does not depend on declaration order.
 
+REST `.api` fields may use `json` or `any` when the payload is intentionally
+free-form. They generate `serde_json::Value` in Rust, an unconstrained `{}`
+schema in OpenAPI, representative object fixtures in mocks, and `unknown` in
+TypeScript/JavaScript clients so callers must narrow the value before use.
+This is a REST contract only. RPC arbitrary JSON must be declared in an
+explicit `.proto` contract with `google.protobuf.Value` or
+`google.protobuf.Struct`; automatic `.api`-to-protobuf generation rejects
+`json` and `any` with guidance instead of silently changing the wire contract.
+
 Routes using the idempotency middleware additionally require
 `IdempotentRequestOptions` at compile time. Its `idempotencyKey` is sent as the
 `Idempotency-Key` request header and can be reused explicitly for a safe retry.
@@ -1033,6 +1042,9 @@ and are not misrepresented as static OpenAPI constraints. Their source rule is
 preserved in `x-roze-validator`; map-key rules use
 `x-roze-map-key-schema` because OpenAPI 3.0 does not standardize
 `propertyNames`.
+Free-form `json` and `any` fields intentionally remain unconstrained schemas.
+Put business validation in application logic or replace the field with a named
+DTO when clients require a stable, statically described shape.
 
 `api swagger` is the goctl-compatible entry point and writes
 `swagger.json` under `--dir`; pass `--yaml` to write `swagger.yaml` instead.

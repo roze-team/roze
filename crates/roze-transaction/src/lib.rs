@@ -47,6 +47,11 @@ pub struct TransactionPlan {
     steps: Vec<TransactionAction>,
 }
 
+/// In-process compensation plan for one application runtime.
+///
+/// This alias does not provide durable, cross-service Saga coordination. Use
+/// the independent `roze-dtm` coordinator when multiple stateful services must
+/// participate in one distributed transaction.
 pub type Saga = TransactionPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

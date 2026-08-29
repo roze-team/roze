@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "dtm_revision": "1705e1e1519b8bd47d1381ca0811d062b6a91093",
+  "dtm_roze_revision": "217274a134068f174cbe4a266a011bf719e15d0d",
+  "package_version": "1.0.0",
+  "openapi_info_version": "0.1.0",
+  "required_capabilities": [
+    "trusted_branch_tls",
+    "retention_compare_and_delete",
+    "cross_language_protocol_acceptance",
+    "grpc_callback_recovery",
+    "official_tcc_rollback_acceptance",
+    "redis_fault_injection"
+  ]
+}

@@ -2399,6 +2399,7 @@ fn http_smoke_sample_string(ty: &str) -> String {
             "1".to_string()
         }
         "f32" | "f64" | "float" | "double" => "1.0".to_string(),
+        "json" | "any" | "serde_json::Value" => "{}".to_string(),
         _ => "string".to_string(),
     }
 }
@@ -2463,6 +2464,7 @@ fn mock_json_for_field_type(spec: &ApiSpec, ty: &str) -> serde_json::Value {
             serde_json::json!(1)
         }
         "f32" | "f64" | "float" | "double" => serde_json::json!(1.0),
+        "json" | "any" | "serde_json::Value" => serde_json::json!({ "example": true }),
         other => mock_json_for_type(spec, other),
     }
 }
@@ -2975,6 +2977,7 @@ fn openapi_schema(ty: &str) -> serde_json::Value {
         "u64" | "uint" | "uint64" => serde_json::json!({ "type": "integer", "format": "uint64" }),
         "f32" | "float" => serde_json::json!({ "type": "number", "format": "float" }),
         "f64" | "double" => serde_json::json!({ "type": "number", "format": "double" }),
+        "json" | "any" | "serde_json::Value" => serde_json::json!({}),
         other => serde_json::json!({ "$ref": format!("#/components/schemas/{other}") }),
     }
 }
@@ -5410,8 +5413,9 @@ use them to validate service discovery, load balancing, connection pools,
 deadline propagation, circuit breakers, bulkheads, outlier behavior, and
 fallback evidence for every downstream.
 Data consistency plans are generated at `ops/data-consistency.yaml`; use them to
-validate transactions, migrations, idempotent writes, outbox/DTM/Saga, read-write
-consistency, backup restore, and data rollback evidence.
+validate transactions, migrations, idempotent writes, outbox, and external
+DTM/Saga coordination, plus read-write consistency, backup restore, and data
+rollback evidence.
 Observability contracts are generated at `ops/observability-contract.yaml`; use
 them to validate metrics, logs, traces, profiles, sampling, label cardinality,
 debug queries, and evidence retention.
@@ -6670,7 +6674,7 @@ fn evidence_manifest_yaml(spec: &ApiSpec, kind: ProjectKind) -> String {
         (
             "ops/data-consistency.yaml",
             "data",
-            "transaction migration outbox DTM and backup restore evidence",
+            "transaction migration outbox and external DTM coordination evidence",
             true,
         ),
         (
@@ -9494,7 +9498,34 @@ transactions:
     evidence: db_commit_outbox_publish_recovery_test
   dtm_or_saga:
     required_when_multiple_stateful_services_mutate: true
-    evidence: saga_success_failure_compensation_test
+    ownership: external_coordinator
+    recommended_project: https://github.com/roze-team/roze-dtm
+    protocol: http_or_grpc
+    endpoint_source: deployment_config_or_service_discovery
+    bearer_token_source: secret_reference
+    coordinator_revision_required: true
+    revision_endpoint: /api/dtmsvr/version
+    revision_response_field: release_revision
+    startup_revision_match_required: true
+    transport_security:
+      allowed_branch_origins_required: true
+      private_ca_source: readonly_secret_file
+      https_and_grpcs_use_strict_certificate_and_hostname_validation: true
+      insecure_skip_verify_forbidden: true
+    retention:
+      explicit_active_and_finished_windows_required: true
+      compare_and_delete_required: true
+      persistent_audit_retention_independent: true
+    evidence:
+      - coordinator_revision_and_protocol_contract
+      - saga_success_failure_compensation_test
+      - restart_recovery_and_idempotency_test
+      - trusted_branch_tls_callback_test
+      - cross_language_http_jsonrpc_grpc_acceptance
+      - grpc_callback_recovery_matrix
+      - official_dtm_labs_tcc_rollback_acceptance
+      - retention_compare_and_delete_metrics_test
+      - redis_cluster_failover_and_fault_injection_test
   inbox:
     required_when_consuming_events_mutates_state: true
     evidence: duplicate_event_mutates_once
@@ -13123,6 +13154,9 @@ fn proto_type(ty: &str, known_types: &HashSet<&str>) -> anyhow::Result<String> {
         "u64" | "uint" | "uint64" => "uint64",
         "f32" | "float" => "float",
         "f64" | "double" => "double",
+        "json" | "any" | "serde_json::Value" => anyhow::bail!(
+            "free-form JSON type `{ty}` is REST-only in `.api`; use an explicit `.proto` contract with `google.protobuf.Value` or `google.protobuf.Struct` for RPC"
+        ),
         known if known_types.contains(known) => known,
         other => anyhow::bail!("unsupported proto field type `{other}`"),
     };
@@ -14219,6 +14253,7 @@ fn main() {
                 LoginReq {
                     username string `json:"username"`
                     password string `json:"password"`
+                    metadata json `json:"metadata"`
                 }
                 LoginResp {
                     token string `json:"token"`
@@ -14246,6 +14281,15 @@ fn main() {
             document["components"]["schemas"]["UserResp"]["properties"]["id"]["format"],
             "uint64"
         );
+        assert_eq!(
+            document["components"]["schemas"]["LoginReq"]["properties"]["metadata"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            mock_json_for_field_type(&spec, "json"),
+            serde_json::json!({ "example": true })
+        );
+        assert_eq!(http_smoke_sample_string("json"), "{}");
         assert!(document["components"]["securitySchemes"]["bearerAuth"].is_object());
         assert_eq!(
             document["paths"]["/api/v1/users/{id}"]["get"]["responses"]["200"]["content"]
@@ -16866,6 +16910,16 @@ veil = { version = "0.3.0", default-features = false }
         assert!(rpc_data_consistency
             .contains("representative_rpc_mutation_declares_transaction_or_no_persistence"));
         assert!(rpc_data_consistency.contains("dtm_or_saga:"));
+        assert!(rpc_data_consistency.contains("ownership: external_coordinator"));
+        assert!(rpc_data_consistency.contains("coordinator_revision_required: true"));
+        assert!(rpc_data_consistency.contains("revision_endpoint: /api/dtmsvr/version"));
+        assert!(rpc_data_consistency.contains("startup_revision_match_required: true"));
+        assert!(rpc_data_consistency.contains("restart_recovery_and_idempotency_test"));
+        assert!(rpc_data_consistency.contains("insecure_skip_verify_forbidden: true"));
+        assert!(rpc_data_consistency.contains("retention_compare_and_delete_metrics_test"));
+        assert!(rpc_data_consistency.contains("cross_language_http_jsonrpc_grpc_acceptance"));
+        assert!(rpc_data_consistency.contains("official_dtm_labs_tcc_rollback_acceptance"));
+        assert!(rpc_data_consistency.contains("redis_cluster_failover_and_fault_injection_test"));
         assert!(rpc_data_consistency.contains("backup_restore_test_passed_for_broad_production"));
         assert!(rpc_observability.contains("boundary: rpc"));
         assert!(rpc_observability.contains("roze_rpc_requests_total"));
@@ -18523,6 +18577,31 @@ tonic = "0.14.6"
         assert!(err
             .to_string()
             .contains("unsupported proto field type `Profile`"));
+    }
+
+    #[test]
+    fn rejects_free_form_json_in_generated_proto_with_guidance() {
+        let spec = parse_api(
+            r#"
+            service user-api {
+                post /users (CreateUserReq) returns (UserResp)
+            }
+
+            type CreateUserReq {
+                metadata: json
+            }
+
+            type UserResp {
+                id: u64
+            }
+            "#,
+        )
+        .expect("valid api");
+
+        let err = render_proto(&spec).expect_err("free-form JSON should require explicit proto");
+        let message = err.to_string();
+        assert!(message.contains("free-form JSON type `json` is REST-only"));
+        assert!(message.contains("google.protobuf.Value"));
     }
 
     #[test]
