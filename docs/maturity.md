@@ -34,7 +34,7 @@ Status legend:
 | DB/ORM/model generation | stable | integration | Toasty and SeaORM generation, SQL/Mongo inspection, migration boundaries, and model smoke coverage are supported. |
 | Cache | stable | integration | Redis cache-aside, negative cache, TTL jitter, local cache, and singleflight behavior are covered. |
 | Search generation | stable | integration | Elasticsearch, OpenSearch, and Meilisearch generation/inspection share stable document and repository contracts. |
-| Transactions/outbox/DTM | stable | integration | TCC, Saga, migration, inbox, transactional outbox, relay, recovery, and idempotency contracts are production APIs; complete reference-system long-run evidence remains pending. |
+| Transactions/outbox | stable | integration | Local transactions, migration, inbox, transactional outbox, relay, recovery, and idempotency contracts are production APIs; complete reference-system long-run evidence remains pending. Distributed TCC/Saga coordination is maintained in the independent [`roze-dtm`](https://github.com/roze-team/roze-dtm) project. |
 | Auth/JWT/permission/session | stable | verified | OIDC/OAuth2, mTLS identity, JWT rotation/revocation, RBAC/ABAC, tenant scope, session, and audit contracts are implemented. |
 | Reporting/charts | stable | verified | Bounded chart queries and asynchronous CSV/XLSX exports include tenant/auth binding, cancellation, expiry, object storage, audit, and Web projection. |
 | WebSocket | stable | verified | Native REST upgrades/frames, generated `@websocket` routes, session hub, and Gateway tunneling have stable lifecycle, bounds, shutdown, and TLS boundaries. |

@@ -890,8 +890,18 @@ fn merge_stream_cargo_toml(
         .get_mut("dependencies")
         .and_then(toml_edit::Item::as_table_mut)
         .context("existing Stream Cargo.toml has no [dependencies] table")?;
+    validate_roze_dependency_sources(dependencies)?;
 
     for (name, generated_item) in generated_dependencies {
+        if name.starts_with("roze-") && dependencies.contains_key(name) {
+            continue;
+        }
+        if name.starts_with("roze-") {
+            if let Some(inherited) = inherited_roze_dependency(dependencies, name)? {
+                dependencies.insert(name, inherited);
+                continue;
+            }
+        }
         let unchanged = dependencies
             .get(name)
             .is_some_and(|existing_item| existing_item.to_string() == generated_item.to_string());
@@ -4410,18 +4420,22 @@ fn write_cargo_toml_with_rpc_clients(
         .get_mut("dependencies")
         .and_then(toml_edit::Item::as_table_mut)
         .ok_or_else(|| anyhow::anyhow!("{} has no [dependencies] table", path.display()))?;
+    validate_roze_dependency_sources(dependencies)?;
 
     merge_missing_dependencies(dependencies, generated_dependencies);
 
     for name in project_roze_crates(kind) {
-        dependencies.insert(
-            name,
+        if dependencies.contains_key(name) {
+            continue;
+        }
+        let item = inherited_roze_dependency(dependencies, name)?.unwrap_or_else(|| {
             dependency_item(
                 name,
                 options.dependency_source,
                 local_crates_prefix.as_deref(),
-            ),
-        );
+            )
+        });
+        dependencies.insert(name, item);
     }
     for client in rpc_clients {
         dependencies.insert(
@@ -4461,6 +4475,68 @@ fn merge_missing_dependencies(target: &mut toml_edit::Table, generated: &toml_ed
             target.insert(name, dependency.clone());
         }
     }
+}
+
+pub(crate) fn inherited_roze_dependency(
+    dependencies: &toml_edit::Table,
+    target: &str,
+) -> anyhow::Result<Option<toml_edit::Item>> {
+    let mut candidates = Vec::new();
+    let mut has_workspace_source = false;
+    for (name, item) in dependencies {
+        if !name.starts_with("roze-") || name == target {
+            continue;
+        }
+        let Some(table) = item.as_inline_table() else {
+            continue;
+        };
+        if table.get("workspace").and_then(toml_edit::Value::as_bool) == Some(true) {
+            has_workspace_source = true;
+            continue;
+        }
+        if let Some(git) = table.get("git").and_then(toml_edit::Value::as_str) {
+            let mut inherited = toml_edit::InlineTable::new();
+            inherited.insert("git", git.into());
+            for key in ["rev", "tag", "branch"] {
+                if let Some(value) = table.get(key).and_then(toml_edit::Value::as_str) {
+                    inherited.insert(key, value.into());
+                }
+            }
+            candidates.push(toml_edit::Item::Value(toml_edit::Value::InlineTable(
+                inherited,
+            )));
+            continue;
+        }
+        if let Some(path) = table.get("path").and_then(toml_edit::Value::as_str) {
+            let sibling = Path::new(path)
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(target)
+                .to_string_lossy()
+                .replace('\\', "/");
+            candidates.push(format!(r#"{{ path = "{sibling}" }}"#).parse::<toml_edit::Item>()?);
+        }
+    }
+    candidates.sort_by_key(ToString::to_string);
+    candidates.dedup_by(|left, right| left.to_string() == right.to_string());
+    if candidates.len() > 1 {
+        let sources = candidates
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("conflicting Roze dependency sources in Cargo.toml: {sources}");
+    }
+    Ok(candidates.pop().or_else(|| {
+        has_workspace_source
+            .then(|| r#"{ workspace = true }"#.parse::<toml_edit::Item>().expect("valid item"))
+    }))
+}
+
+pub(crate) fn validate_roze_dependency_sources(
+    dependencies: &toml_edit::Table,
+) -> anyhow::Result<()> {
+    inherited_roze_dependency(dependencies, "__roze_source_validation__").map(|_| ())
 }
 
 fn normalize_generated_workspace_dependencies(
@@ -17046,7 +17122,8 @@ pub use admin_map::AdminMap;
         assert!(refreshed_svc.contains("RedisIdempotencyStore::connect"));
         assert!(refreshed_svc.contains("cluster_urls: cache.cluster_urls.clone(),"));
         let cargo = fs::read_to_string(out.join("Cargo.toml")).expect("read cargo");
-        assert!(cargo.contains(ROZE_GIT_URL));
+        assert!(!cargo.contains(ROZE_GIT_URL));
+        assert!(cargo.contains("roze-http = { path ="));
         assert!(cargo.contains(r#"name = "custom-service""#));
         assert!(cargo.contains("custom.workspace = true"));
 

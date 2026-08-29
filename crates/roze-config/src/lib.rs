@@ -3427,7 +3427,6 @@ compress_rotated = true
                 "env://ROZE_REGISTRY_USER" => "roze",
                 "env://ROZE_REGISTRY_PASSWORD" => "registry-password",
                 "env://ROZE_JWT_SECRET" => "0123456789abcdef0123456789abcdef",
-                "env://ROZE_DTM_DATABASE_URL" => "sqlite://roze-dtm.db?mode=rwc",
                 _ => return Ok(None),
             };
             Ok(Some(value.to_string()))
@@ -3437,11 +3436,7 @@ compress_rotated = true
     #[test]
     fn checked_in_service_configs_and_production_templates_are_valid() {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/config");
-        for file_name in [
-            "rest.production.yaml",
-            "gateway.production.yaml",
-            "dtm.production.yaml",
-        ] {
+        for file_name in ["rest.production.yaml", "gateway.production.yaml"] {
             let config = load_service_with_application_and_secret_provider::<serde_json::Value>(
                 directory.join(file_name),
                 &DeploymentTemplateSecretProvider,

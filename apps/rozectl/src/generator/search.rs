@@ -1,12 +1,12 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use anyhow::{bail, Context};
 use serde_json::Value;
 
 use super::{
-    find_workspace_root, local_crates_prefix, plan::GenerationPlan, rust_identifier,
-    sync_managed_service_if_present, to_pascal_case, to_snake_case, DependencySource, GenerateMode,
-    GenerateOptions,
+    find_workspace_root, inherited_roze_dependency, local_crates_prefix, plan::GenerationPlan,
+    rust_identifier, sync_managed_service_if_present, to_pascal_case, to_snake_case,
+    validate_roze_dependency_sources, DependencySource, GenerateMode, GenerateOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -555,7 +555,7 @@ fn write_search_project(
         );
     }
     fs::create_dir_all(&search_dir)?;
-    fs::write(search_dir.join("mod.rs"), render_search_mod(spec))?;
+    update_search_mod(&search_dir, spec)?;
     fs::write(
         search_dir.join(format!("{}.rs", to_snake_case(&spec.name))),
         render_search_index(spec, engine),
@@ -565,12 +565,35 @@ fn write_search_project(
     Ok(())
 }
 
-fn render_search_mod(spec: &SearchIndexSpec) -> String {
-    let module = to_snake_case(&spec.name);
-    let pascal = to_pascal_case(&spec.name);
-    format!(
-        "#![allow(unused_imports)]\n\npub mod {module};\n\npub use {module}::{{{pascal}Document, {pascal}SearchRepository}};\n"
-    )
+fn update_search_mod(search_dir: &Path, spec: &SearchIndexSpec) -> anyhow::Result<()> {
+    let path = search_dir.join("mod.rs");
+    let mut modules = if path.is_file() {
+        fs::read_to_string(&path)?
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub mod "))
+            .filter_map(|line| line.strip_suffix(';'))
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    modules.insert(to_snake_case(&spec.name));
+    let mut out = String::from("#![allow(unused_imports)]\n\n");
+    use std::fmt::Write as _;
+    for module in &modules {
+        writeln!(&mut out, "pub mod {module};").unwrap();
+    }
+    writeln!(&mut out).unwrap();
+    for module in &modules {
+        let pascal = to_pascal_case(module);
+        writeln!(
+            &mut out,
+            "pub use {module}::{{{pascal}Document, {pascal}SearchRepository}};"
+        )
+        .unwrap();
+    }
+    fs::write(path, out)?;
+    Ok(())
 }
 
 fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
@@ -588,7 +611,7 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
     writeln!(&mut out, "use serde_json::json;").unwrap();
     writeln!(
         &mut out,
-        "use roze_search::{{SearchClient, SearchConfig, SearchEngine}};"
+        "use roze_search::{{SearchClient, SearchConfig, SearchEngine, SearchFilter, SearchIndexSettings, SearchPage, SearchRequest, SearchTask}};"
     )
     .unwrap();
     writeln!(&mut out).unwrap();
@@ -619,6 +642,49 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
         spec.name
     )
     .unwrap();
+    let searchable = spec
+        .fields
+        .iter()
+        .filter(|field| field.searchable)
+        .map(search_field_name)
+        .collect::<Vec<_>>();
+    let filterable = spec
+        .fields
+        .iter()
+        .filter(|field| field.filterable)
+        .map(search_field_name)
+        .collect::<Vec<_>>();
+    let sortable = spec
+        .fields
+        .iter()
+        .filter(|field| field.sortable)
+        .map(search_field_name)
+        .collect::<Vec<_>>();
+    let attributes = spec
+        .fields
+        .iter()
+        .map(search_field_name)
+        .collect::<Vec<_>>();
+    writeln!(
+        &mut out,
+        "    pub const SEARCHABLE_FIELDS: &'static [&'static str] = &{searchable:?};"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    pub const FILTERABLE_FIELDS: &'static [&'static str] = &{filterable:?};"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    pub const SORTABLE_FIELDS: &'static [&'static str] = &{sortable:?};"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "    pub const ATTRIBUTES: &'static [&'static str] = &{attributes:?};"
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
@@ -647,6 +713,33 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
     writeln!(&mut out, "        }}").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
+    writeln!(&mut out, "    pub fn client(&self) -> &SearchClient {{").unwrap();
+    writeln!(&mut out, "        &self.client").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn initialize(&self, timeout: std::time::Duration) -> anyhow::Result<()> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.ensure_index(Self::INDEX, {:?}).await?.wait(timeout).await?;",
+        search_field_name(primary)
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.apply_settings(Self::INDEX, &SearchIndexSettings {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "            searchable_attributes: Self::SEARCHABLE_FIELDS.iter().map(|field| (*field).to_string()).collect(),").unwrap();
+    writeln!(&mut out, "            filterable_attributes: Self::FILTERABLE_FIELDS.iter().map(|field| (*field).to_string()).collect(),").unwrap();
+    writeln!(&mut out, "            sortable_attributes: Self::SORTABLE_FIELDS.iter().map(|field| (*field).to_string()).collect(),").unwrap();
+    writeln!(&mut out, "        }}).await?.wait(timeout).await?;").unwrap();
+    writeln!(&mut out, "        Ok(())").unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
         "    pub async fn health(&self) -> anyhow::Result<serde_json::Value> {{"
@@ -672,6 +765,19 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
     writeln!(&mut out).unwrap();
     writeln!(
         &mut out,
+        "    pub async fn index_task(&self, document: &{pascal}Document) -> anyhow::Result<SearchTask> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.index_document_task(Self::INDEX, &document.{}.to_string(), document).await",
+        primary.name
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
         "    pub async fn delete(&self, id: impl ToString) -> anyhow::Result<serde_json::Value> {{"
     )
     .unwrap();
@@ -680,6 +786,63 @@ fn render_search_index(spec: &SearchIndexSpec, engine: SearchEngine) -> String {
         "        self.client.delete_document(Self::INDEX, &id.to_string()).await"
     )
     .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn delete_task(&self, id: impl ToString) -> anyhow::Result<SearchTask> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.delete_document_task(Self::INDEX, &id.to_string()).await"
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    pub async fn delete_all(&self) -> anyhow::Result<SearchTask> {{"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.delete_all(Self::INDEX).await"
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "    pub async fn delete_by_filter(&self, filters: &[SearchFilter]) -> anyhow::Result<SearchTask> {{").unwrap();
+    writeln!(&mut out, "        Self::validate_filters(filters)?;").unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.delete_by_filter(Self::INDEX, filters).await"
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(&mut out, "    pub async fn search(&self, request: SearchRequest) -> anyhow::Result<SearchPage<{pascal}Document>> {{").unwrap();
+    writeln!(
+        &mut out,
+        "        Self::validate_filters(&request.filters)?;"
+    )
+    .unwrap();
+    writeln!(&mut out, "        for sort in &request.sort {{ if !Self::SORTABLE_FIELDS.contains(&sort.field.as_str()) {{ anyhow::bail!(\"search field `{{}}` is not sortable\", sort.field); }} }}").unwrap();
+    writeln!(&mut out, "        for attribute in &request.attributes {{ if !Self::ATTRIBUTES.contains(&attribute.as_str()) {{ anyhow::bail!(\"search attribute `{{attribute}}` is not declared\"); }} }}").unwrap();
+    writeln!(
+        &mut out,
+        "        self.client.search_page(Self::INDEX, &request).await"
+    )
+    .unwrap();
+    writeln!(&mut out, "    }}").unwrap();
+    writeln!(&mut out).unwrap();
+    writeln!(
+        &mut out,
+        "    fn validate_filters(filters: &[SearchFilter]) -> anyhow::Result<()> {{"
+    )
+    .unwrap();
+    writeln!(&mut out, "        for filter in filters {{ if !Self::FILTERABLE_FIELDS.contains(&filter.field.as_str()) {{ anyhow::bail!(\"search field `{{}}` is not filterable\", filter.field); }} }}").unwrap();
+    writeln!(&mut out, "        Ok(())").unwrap();
     writeln!(&mut out, "    }}").unwrap();
     writeln!(&mut out).unwrap();
     writeln!(
@@ -749,6 +912,7 @@ fn update_search_dependencies(
         .ok_or_else(|| {
             anyhow::anyhow!("{} has no [dependencies] table", manifest_path.display())
         })?;
+    validate_roze_dependency_sources(dependencies)?;
     let uses_workspace = content.contains("edition.workspace = true");
     insert_dependency(dependencies, "anyhow", uses_workspace, None);
     insert_dependency(
@@ -759,18 +923,22 @@ fn update_search_dependencies(
     );
     insert_dependency(dependencies, "serde_json", uses_workspace, Some(r#""1""#));
     if !dependencies.contains_key("roze-search") {
-        let item = match source {
-            DependencySource::Git => {
-                r#"{ git = "https://github.com/roze-team/roze.git" }"#.parse::<toml_edit::Item>()?
-            }
-            DependencySource::Path => {
-                let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
+        let inherited = inherited_roze_dependency(dependencies, "roze-search")?;
+        let item = if let Some(item) = inherited {
+            item
+        } else {
+            match source {
+                DependencySource::Git => r#"{ git = "https://github.com/roze-team/roze.git" }"#
+                    .parse::<toml_edit::Item>()?,
+                DependencySource::Path => {
+                    let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
                     anyhow::anyhow!(
                         "--roze-source path requires output inside a Cargo workspace containing Roze crates"
                     )
                 })?;
-                let prefix = local_crates_prefix(logical_out, &workspace_root)?;
-                format!(r#"{{ path = "{prefix}/roze-search" }}"#).parse::<toml_edit::Item>()?
+                    let prefix = local_crates_prefix(logical_out, &workspace_root)?;
+                    format!(r#"{{ path = "{prefix}/roze-search" }}"#).parse::<toml_edit::Item>()?
+                }
             }
         };
         dependencies.insert("roze-search", item);
@@ -877,6 +1045,88 @@ mod tests {
         assert!(rendered.contains("multi_match"));
         assert!(rendered.contains("\"display-name\""));
         assert!(rendered.contains("pub async fn health"));
+        assert!(rendered.contains("pub async fn initialize"));
+        assert!(rendered.contains("pub async fn search(&self, request: SearchRequest)"));
+        assert!(rendered.contains("FILTERABLE_FIELDS"));
+    }
+
+    #[test]
+    fn search_module_index_merges_multiple_schemas_deterministically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let search_dir = dir.path().join("search");
+        fs::create_dir_all(&search_dir).expect("search dir");
+        let doctors = parse_search_schema("index doctors\nprimary id\nfield id keyword primary")
+            .expect("doctors");
+        let hospitals =
+            parse_search_schema("index hospitals\nprimary id\nfield id keyword primary")
+                .expect("hospitals");
+
+        update_search_mod(&search_dir, &hospitals).expect("first");
+        update_search_mod(&search_dir, &doctors).expect("second");
+        let merged = fs::read_to_string(search_dir.join("mod.rs")).expect("mod");
+        assert!(merged.contains("pub mod doctors;"));
+        assert!(merged.contains("pub mod hospitals;"));
+        assert!(merged.find("doctors").unwrap() < merged.find("hospitals").unwrap());
+    }
+
+    #[test]
+    fn new_roze_dependency_inherits_existing_git_revision() {
+        let document = r#"
+            [dependencies]
+            roze-rpc = { git = "https://github.com/roze-team/roze.git", rev = "12c63307" }
+        "#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("manifest");
+        let dependencies = document["dependencies"].as_table().expect("dependencies");
+        let inherited = inherited_roze_dependency(dependencies, "roze-search")
+            .expect("inherit")
+            .expect("source");
+        assert!(inherited.to_string().contains("rev = \"12c63307\""));
+    }
+
+    #[test]
+    fn roze_dependency_inheritance_preserves_tag_branch_workspace_and_path() {
+        for (dependency, expected) in [
+            (
+                r#"roze-rpc = { git = "https://github.com/roze-team/roze.git", tag = "v1.0.0" }"#,
+                "tag = \"v1.0.0\"",
+            ),
+            (
+                r#"roze-rpc = { git = "https://github.com/roze-team/roze.git", branch = "release" }"#,
+                "branch = \"release\"",
+            ),
+            (r#"roze-rpc = { workspace = true }"#, "workspace = true"),
+            (
+                r#"roze-rpc = { path = "../../crates/roze-rpc" }"#,
+                "../../crates/roze-search",
+            ),
+        ] {
+            let document = format!("[dependencies]\n{dependency}\n")
+                .parse::<toml_edit::DocumentMut>()
+                .expect("manifest");
+            let dependencies = document["dependencies"].as_table().expect("dependencies");
+            let inherited = inherited_roze_dependency(dependencies, "roze-search")
+                .expect("inherit")
+                .expect("source");
+            assert!(inherited.to_string().contains(expected), "{inherited}");
+        }
+    }
+
+    #[test]
+    fn conflicting_roze_revisions_fail_instead_of_floating() {
+        let document = r#"
+            [dependencies]
+            roze-rpc = { git = "https://github.com/roze-team/roze.git", rev = "aaaa" }
+            roze-http = { git = "https://github.com/roze-team/roze.git", rev = "bbbb" }
+        "#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("manifest");
+        let dependencies = document["dependencies"].as_table().expect("dependencies");
+        let error = inherited_roze_dependency(dependencies, "roze-search")
+            .expect_err("mixed revisions must fail");
+        assert!(error
+            .to_string()
+            .contains("conflicting Roze dependency sources"));
     }
 
     #[test]

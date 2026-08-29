@@ -13,6 +13,41 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NatsAckPolicy {
+    None,
+    All,
+    #[default]
+    Explicit,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NatsDeliverPolicy {
+    #[default]
+    All,
+    Last,
+    New,
+}
+
+/// Explicit JetStream subscription contract.
+///
+/// Omitting `durable_name` derives a stable durable from the configured base
+/// durable and filter subject. Supplying the same durable from several
+/// processes explicitly opts into competing-consumer semantics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NatsSubscribeOptions {
+    #[serde(default)]
+    pub filter_subject: Option<String>,
+    #[serde(default)]
+    pub durable_name: Option<String>,
+    #[serde(default)]
+    pub ack_policy: NatsAckPolicy,
+    #[serde(default)]
+    pub deliver_policy: NatsDeliverPolicy,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NatsConfig {
     pub servers: Vec<String>,
@@ -325,34 +360,65 @@ impl NatsJetStream {
             .push_back(record);
         self.dead_lettered.fetch_add(1, Ordering::SeqCst);
     }
-}
 
-#[async_trait]
-impl roze_mq::Publisher for NatsJetStream {
-    async fn publish(&self, message: roze_mq::Message) -> anyhow::Result<()> {
-        self.publish_nats(Self::from_mq_message(message.clone()), message.attempt)
-            .await
-    }
-}
-
-#[async_trait]
-impl roze_mq::Subscriber for NatsJetStream {
-    async fn subscribe(
+    /// Subscribes with an explicit, validated JetStream consumer contract.
+    pub async fn subscribe_with_options(
         &self,
         topic: &str,
+        options: NatsSubscribeOptions,
     ) -> anyhow::Result<broadcast::Receiver<roze_mq::Delivery>> {
-        let subject = self.config.subject_name(topic);
+        let subject = options
+            .filter_subject
+            .as_deref()
+            .map(|subject| self.config.subject_name(subject))
+            .unwrap_or_else(|| self.config.subject_name(topic));
+        let durable = options
+            .durable_name
+            .unwrap_or_else(|| durable_for_subject(&self.config.jetstream.durable, &subject));
+        let ack_policy = match options.ack_policy {
+            NatsAckPolicy::None => async_nats::jetstream::consumer::AckPolicy::None,
+            NatsAckPolicy::All => async_nats::jetstream::consumer::AckPolicy::All,
+            NatsAckPolicy::Explicit => async_nats::jetstream::consumer::AckPolicy::Explicit,
+        };
+        let deliver_policy = match options.deliver_policy {
+            NatsDeliverPolicy::All => async_nats::jetstream::consumer::DeliverPolicy::All,
+            NatsDeliverPolicy::Last => async_nats::jetstream::consumer::DeliverPolicy::Last,
+            NatsDeliverPolicy::New => async_nats::jetstream::consumer::DeliverPolicy::New,
+        };
         let stream = self.ensure_stream().await?;
         let consumer = stream
             .get_or_create_consumer(
-                &self.config.jetstream.durable,
+                &durable,
                 async_nats::jetstream::consumer::pull::Config {
-                    durable_name: Some(self.config.jetstream.durable.clone()),
-                    filter_subject: subject,
+                    durable_name: Some(durable.clone()),
+                    filter_subject: subject.clone(),
+                    ack_policy,
+                    deliver_policy,
                     ..Default::default()
                 },
             )
             .await?;
+        let actual = &consumer.cached_info().config;
+        if actual.filter_subject != subject
+            || actual.ack_policy != ack_policy
+            || actual.deliver_policy != deliver_policy
+        {
+            anyhow::bail!(
+                "JetStream durable `{durable}` configuration conflict: expected filter `{subject}`, ack {:?}, deliver {:?}; actual filter `{}`, ack {:?}, deliver {:?}",
+                ack_policy,
+                deliver_policy,
+                actual.filter_subject,
+                actual.ack_policy,
+                actual.deliver_policy
+            );
+        }
+        self.forward_consumer(consumer).await
+    }
+
+    async fn forward_consumer(
+        &self,
+        consumer: async_nats::jetstream::consumer::PullConsumer,
+    ) -> anyhow::Result<broadcast::Receiver<roze_mq::Delivery>> {
         let mut messages = consumer.messages().await?;
         let (sender, receiver) = broadcast::channel(self.config.jetstream.consumer_buffer.max(1));
         let broker = self.clone();
@@ -412,6 +478,44 @@ impl roze_mq::Subscriber for NatsJetStream {
             }
         });
         Ok(receiver)
+    }
+}
+
+fn durable_for_subject(base: &str, subject: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in subject.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let base = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("{base}-{hash:016x}")
+}
+
+#[async_trait]
+impl roze_mq::Publisher for NatsJetStream {
+    async fn publish(&self, message: roze_mq::Message) -> anyhow::Result<()> {
+        self.publish_nats(Self::from_mq_message(message.clone()), message.attempt)
+            .await
+    }
+}
+
+#[async_trait]
+impl roze_mq::Subscriber for NatsJetStream {
+    async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> anyhow::Result<broadcast::Receiver<roze_mq::Delivery>> {
+        self.subscribe_with_options(topic, NatsSubscribeOptions::default())
+            .await
     }
 }
 
@@ -499,6 +603,7 @@ fn current_millis() -> u64 {
 mod tests {
     use super::*;
     use roze_mq::{Publisher, Subscriber};
+    use std::time::Duration;
 
     #[test]
     fn formats_servers_and_subjects() {
@@ -557,6 +662,20 @@ mod tests {
     }
 
     #[test]
+    fn durable_names_are_stable_and_subject_scoped() {
+        let first = durable_for_subject("medical projection", "ya.hospital.changed");
+        assert_eq!(
+            first,
+            durable_for_subject("medical projection", "ya.hospital.changed")
+        );
+        assert_ne!(
+            first,
+            durable_for_subject("medical projection", "ya.doctor.changed")
+        );
+        assert!(first.starts_with("medical-projection-"));
+    }
+
+    #[test]
     fn nats_transport_preserves_idempotency_metadata() {
         let message = roze_mq::Message::new("orders", serde_json::json!({"order_id": "order-1"}))
             .with_idempotency_key("order-1");
@@ -610,6 +729,54 @@ mod tests {
             Some("order-1")
         );
         delivery.ack().await.expect("ack delivery");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ROZE_TEST_NATS_URL, for example nats://127.0.0.1:4222"]
+    async fn one_jetstream_instance_subscribes_to_four_subjects() {
+        let server = std::env::var("ROZE_TEST_NATS_URL").expect("ROZE_TEST_NATS_URL is required");
+        let suffix = format!("{}-{}", std::process::id(), current_millis());
+        let topics =
+            ["hospital", "department", "doctor", "service"].map(|kind| format!("{kind}-{suffix}"));
+        let broker = NatsJetStream::connect(NatsConfig {
+            servers: vec![server],
+            client_name: Some(format!("roze-multi-{suffix}")),
+            subject_prefix: format!("roze.multi.{suffix}"),
+            jetstream: JetStreamConfig {
+                stream: format!("ROZE_MULTI_{suffix}"),
+                subjects: topics.to_vec(),
+                durable: format!("roze-multi-{suffix}"),
+                max_messages: 100,
+                max_retries: 1,
+                retry_subject: None,
+                dead_letter_subject: None,
+                consumer_buffer: 8,
+            },
+        })
+        .await
+        .expect("connect NATS JetStream");
+        let mut receivers = Vec::new();
+        for topic in &topics {
+            receivers.push(broker.subscribe(topic).await.expect("subscribe"));
+        }
+        for (index, topic) in topics.iter().enumerate() {
+            broker
+                .publish(roze_mq::Message::new(
+                    topic,
+                    serde_json::json!({"kind": index}),
+                ))
+                .await
+                .expect("publish");
+        }
+        for (index, receiver) in receivers.iter_mut().enumerate() {
+            let delivery = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+                .await
+                .expect("delivery timeout")
+                .expect("delivery");
+            assert_eq!(delivery.message().topic, topics[index]);
+            assert_eq!(delivery.message().payload["kind"], index);
+            delivery.ack().await.expect("ack");
+        }
     }
 
     #[tokio::test]

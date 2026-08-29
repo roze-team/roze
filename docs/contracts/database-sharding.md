@@ -159,8 +159,10 @@ Reads made by repositories from this scoped client always use the selected
 transaction primary, even when a query requests the replica source. Cache
 invalidations are applied after commit and discarded on rollback.
 
-Roze does not provide an implicit distributed transaction. Saga, TCC, Outbox,
-and application compensation remain explicit cross-shard orchestration.
+Roze does not provide an implicit distributed transaction. Outbox and
+application compensation remain explicit cross-shard orchestration; TCC/Saga
+coordination is available from the independent
+[`roze-dtm`](https://github.com/roze-team/roze-dtm) project.
 
 ## Migrations And Observability
 

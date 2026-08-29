@@ -6,8 +6,9 @@ use std::{
 use anyhow::{bail, Context};
 
 use super::{
-    dependency_item, find_workspace_root, format_generated_rust_files, local_crates_prefix, plan,
-    DependencySource, GenerateMode, GenerateOptions,
+    dependency_item, find_workspace_root, format_generated_rust_files, inherited_roze_dependency,
+    local_crates_prefix, plan, validate_roze_dependency_sources, DependencySource, GenerateMode,
+    GenerateOptions,
 };
 
 const APPLICATION_MARKER_START: &str = "// <roze:ai-module>";
@@ -173,6 +174,7 @@ fn update_manifest(
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
         .context("Cargo.toml [dependencies] must be a table")?;
+    validate_roze_dependency_sources(dependencies)?;
 
     let local_prefix = match source {
         DependencySource::Git => None,
@@ -187,16 +189,14 @@ fn update_manifest(
         }
     };
     if !dependencies.contains_key("roze-ai") {
-        dependencies.insert(
-            "roze-ai",
-            dependency_item("roze-ai", source, local_prefix.as_deref()),
-        );
+        let item = inherited_roze_dependency(dependencies, "roze-ai")?
+            .unwrap_or_else(|| dependency_item("roze-ai", source, local_prefix.as_deref()));
+        dependencies.insert("roze-ai", item);
     }
     if features.rag && !dependencies.contains_key("roze-search") {
-        dependencies.insert(
-            "roze-search",
-            dependency_item("roze-search", source, local_prefix.as_deref()),
-        );
+        let item = inherited_roze_dependency(dependencies, "roze-search")?
+            .unwrap_or_else(|| dependency_item("roze-search", source, local_prefix.as_deref()));
+        dependencies.insert("roze-search", item);
     }
     fs::write(&path, document.to_string())
         .with_context(|| format!("failed to write {}", path.display()))

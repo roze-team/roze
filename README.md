@@ -69,9 +69,7 @@ Redis, Postgres, MySQL, MongoDB, Elasticsearch, OpenSearch, and Meilisearch.
 `scripts/rozectl-smoke.sh` verifies the `rozectl` CLI command surface with
 temporary files, fake Docker for `dev`, and a fake local search server for
 search inspect.
-- `crates/roze-dtm`: distributed transaction manager core, defaulting to TCC.
 - `apps/rozectl`: code generation for API, RPC, model, search, OpenAPI, SDK, Docker, and Kubernetes assets.
-- `apps/roze-dtm`: standalone DTM base service for TCC/Saga coordination.
 - `apps/roze-example`: a generated example service from `example/user.api`.
 
 The direction is Rust-native microservice ergonomics with explicit generated boundaries:
@@ -82,7 +80,8 @@ The direction is Rust-native microservice ergonomics with explicit generated bou
 - RPC: `roze-grpc` wraps tonic build/runtime APIs, and `rpc.rs` adapts gRPC requests into shared `logic`.
 - ORM: SeaORM is the default generated SQL model scaffold; `--orm toasty`
   explicitly selects Toasty. Shared ORM request contracts live in `roze-orm`.
-- DTM: built-in distributed transaction manager defaults to TCC and keeps Saga as an optional workflow.
+- DTM: distributed transaction coordination lives in the independent
+  [`roze-dtm`](https://github.com/roze-team/roze-dtm) companion project.
 - Governance: registry, balancing, middleware, config center, tracing, NATS JetStream, outbox relay, and error handling live across the `roze-*` crates.
 
 The Loco/Rails lesson applied here is convention over configuration: generated services have a stable structure, and application code starts in `src/logic` instead of wiring boilerplate by hand.
@@ -403,9 +402,11 @@ For Toasty, choose the schema/database through the Toasty driver configuration.
 `rozectl search generate example/user.search --engine elasticsearch --out apps/roze-example`
 generates `src/search/mod.rs` and `src/search/users.rs` for Elasticsearch,
 OpenSearch, or Meilisearch. Generated repositories use `roze-search` for
-health checks, document indexing, document deletion, and text search. The DSL
-declares the index name, primary field, field types, and searchable/filterable/
-sortable flags.
+idempotent index/settings initialization, waitable mutation tasks, document
+repair/deletion, and typed filtered/sorted/paginated search. Multiple schemas
+merge deterministic exports under `src/search/mod.rs`. The DSL declares the
+index name, primary field, field types, and searchable/filterable/sortable
+allowlists.
 
 `rozectl search inspect users --engine opensearch --url http://127.0.0.1:9200 --out apps/roze-example`
 reads an existing Elasticsearch/OpenSearch index mapping and emits the same

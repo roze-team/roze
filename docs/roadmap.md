@@ -145,7 +145,8 @@ The phase-by-phase work packages, exit gates, and evidence checklist are in
 - End-to-end examples:
   - REST CRUD monolith.
   - REST + RPC + DB + Redis.
-  - Gateway + Registry + MQ + Outbox + DTM.
+  - Gateway + Registry + MQ + Outbox, with distributed coordination supplied by
+    the independent [`roze-dtm`](https://github.com/roze-team/roze-dtm) project.
   - Authoritative generation inputs and compile coverage live under
     `example/production-systems/`; the release workflow runs the real dependency
     success/failure/recovery matrix. Completed 24h/72h evidence remains required

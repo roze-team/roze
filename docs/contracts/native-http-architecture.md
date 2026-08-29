@@ -422,5 +422,6 @@ service futures before spawning, keeping the connection tasks `Send + 'static`.
 3. Add typed extractors for path, query, headers, JSON, form, state, and
    context.
 4. Rebuild middleware as Tower layers over `roze_http::IncomingRequest`.
-5. Reattach admin, gateway, DTM, and generated API routes through the same
-   Router/Service surface.
+5. Reattach admin, gateway, and generated API routes through the same
+   Router/Service surface; integrate an external DTM coordinator through its
+   protocol client rather than mounting coordinator routes in this workspace.

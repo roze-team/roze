@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Moved the DTM coordinator and standalone service to the independent
+  [`roze-dtm`](https://github.com/roze-team/roze-dtm) repository; Roze keeps
+  its local transaction and persistent outbox primitives in this workspace.
+- Added provider-neutral search lifecycle tasks, typed filter/sort/page
+  requests, contract settings, projection repair operations, generated field
+  allowlists, deterministic multi-schema search modules, and Roze Git pin
+  inheritance during search generation.
+- Made NATS JetStream subscriptions subject-scoped by default, added explicit
+  durable/filter/ack/deliver options, and reject incompatible durable reuse
+  with diagnostic configuration errors.
+- Updated generated model boolean fixtures for the Rust 1.98 Clippy gate.
 - Added native Maud integration: `roze_http::Html<T>`, optional direct
   `maud::Markup` responses, and generated `@maud` REST routes with preserved
   markup logic, HTML OpenAPI/client/mock/contract-test behavior, and managed

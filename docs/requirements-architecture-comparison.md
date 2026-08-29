@@ -49,12 +49,15 @@ payload metadata.
 
 Model generation supports Toasty and SeaORM, SQL and Mongo inspection,
 migrations, tenant scope, optimistic concurrency, cache consistency, and
-search repositories. Transactions/outbox/DTM are stable production APIs:
+search repositories. Transactions and outbox are stable production APIs:
 
 - local transaction and persistent outbox boundaries;
 - inbox idempotency and relay recovery;
-- TCC and Saga state persistence, barriers, retry, and compensation;
 - migration risk detection, rollback, and release acknowledgment gates.
+
+Distributed TCC/Saga state, barriers, retry, and compensation are maintained
+in the independent [`roze-dtm`](https://github.com/roze-team/roze-dtm)
+project.
 
 Applications still define their own domain transaction boundaries and
 compensation behavior.

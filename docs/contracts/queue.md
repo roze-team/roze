@@ -140,6 +140,16 @@ nats:
     consumer_buffer: 256
 ```
 
+`Subscriber::subscribe(topic)` derives a stable durable name from the
+configured base durable and the fully-prefixed filter subject. Therefore one
+`NatsJetStream` instance can subscribe to several subjects without reusing an
+incompatible consumer. `subscribe_with_options` additionally accepts an
+explicit filter subject, durable name, ack policy, and deliver policy. An
+explicit shared durable opts into competing-consumer semantics. Whenever a
+durable already exists, Roze compares its filter/ack/deliver configuration and
+returns a diagnostic conflict containing the durable and expected/actual
+filter instead of silently reusing it.
+
 能力：
 
 - 真实 NATS client 连接：`async_nats::connect`。

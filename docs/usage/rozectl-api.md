@@ -973,7 +973,8 @@ metrics, retry budget, and retry storm protection evidence. The dependency
 governance plan defines downstream inventory, discovery, load balancing,
 deadline propagation, circuit breakers, bulkheads, fallback, and outlier
 evidence. The data consistency plan defines transaction boundaries, idempotent
-writes, migrations, outbox/DTM/Saga, read-write consistency, reconciliation,
+writes, migrations, outbox and external DTM/Saga coordination, read-write
+consistency, reconciliation,
 backup restore, and data rollback evidence. The observability contract defines
 metrics, logs, traces, profiles, sampling, label cardinality, debug queries, and
 evidence retention. The runtime hardening contract defines timeout, rate limit,
@@ -2596,10 +2597,26 @@ src/search/mod.rs
 src/search/<index>.rs
 ```
 
-The generated index module contains a document struct, a repository struct,
-`new`, `health`, `index`, `delete`, and `search_text` helpers. The repository
-keeps the original index field names with `serde(rename = "...")`, so Rust
-field names can stay idiomatic without changing the search engine contract.
+The generated index module contains a document struct and repository helpers
+for health, idempotent index initialization, settings application, indexing,
+deletion, typed filtering/sorting/pagination, and text search. `initialize`
+creates the index with the contract primary key and waits for settings before
+returning; mutation task helpers return `SearchTask` and support bounded
+`wait(timeout)`. Filter and sort fields are checked against the `.search`
+declarations before provider-specific encoding. `client()` is a read-only
+escape hatch for advanced queries that are not yet represented by the typed
+surface.
+
+Repeated `--update` calls merge module exports in `src/search/mod.rs`, so one
+service can own several independent `.search` schemas without one generation
+overwriting another. Existing registered schemas are removed only by an
+explicit file/module change.
+
+The repository keeps original index field names with `serde(rename = "...")`,
+so Rust field names can stay idiomatic without changing the engine contract.
+When generation adds `roze-search`, it inherits the existing Roze dependency
+source tuple (`workspace`, path, or Git plus `rev`/`tag`/`branch`) and rejects
+conflicting Roze Git pins instead of silently floating to Git HEAD.
 
 The search schema DSL is intentionally small:
 

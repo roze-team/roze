@@ -37,7 +37,6 @@ members = [
     "crates/roze-sqlx",
     "crates/roze-transaction",
     "crates/roze-transaction-sql",
-    "crates/roze-dtm",
     "crates/roze-migration",
     "crates/roze-cache",
     "crates/roze-redis",
@@ -65,7 +64,6 @@ members = [
     "apps/roze-sample",
     "apps/user",
     "apps/roze-gateway",
-    "apps/roze-dtm",
 ]
 resolver = "2"
 
