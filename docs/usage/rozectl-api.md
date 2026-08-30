@@ -2184,7 +2184,10 @@ Generated SQL repositories include single-table CRUD helpers. Toasty and SeaORM
 outputs both generate primary-key lookup, cache-key lookup, `list`, `insert`,
 `upsert`, `update`, `delete_by_<primary>`, and `count` methods. SeaORM `upsert`
 uses a database `ON CONFLICT` statement over every primary-key column and is
-atomic. Toasty 0.7 does not expose an equivalent conflict API, so its generated
+atomic. It reloads the affected row by its original single or composite primary
+key after execution so SQLite does not confuse an upsert conflict with an
+unrelated `last_insert_id`. SeaORM create paths for non-auto-increment string or
+composite IDs use the same key-preserving reload. Toasty 0.7 does not expose an equivalent conflict API, so its generated
 compatibility method queries by every primary-key field and then inserts or
 updates; callers that require concurrent atomicity must wrap the operation in
 an appropriate transaction or use a database-specific implementation.
@@ -2223,13 +2226,18 @@ SQL repositories additionally generate:
 - public `escape_like_pattern` and `contains_like_pattern` helpers for custom
   repository filters built with the same wildcard escaping as generated
   `contains` and `icontains` predicates
-- `*_icontains` predicates render database-level `ILIKE` on supported SQL
-  backends instead of applying keyword filtering after pagination
-- `*_equal_fold` predicates provide ent-style case-insensitive equality with
-  the same LIKE pattern escaping and no wildcard expansion
+- generated SeaORM string predicates attach an explicit backslash `ESCAPE`
+  clause, so literal `%`, `_`, and `\\` input keeps the documented semantics
+  across SQLite, PostgreSQL, and MySQL
+- SeaORM `*_icontains` and `*_equal_fold` predicates render portable
+  `LOWER(column) LIKE lowercased_pattern` expressions on SQLite, PostgreSQL,
+  and MySQL instead of applying keyword filtering after pagination; Toasty
+  lowers the same typed contract through its backend-aware predicate compiler
+- `*_equal_fold` keeps the same LIKE pattern escaping with no wildcard
+  expansion
 - `*_not_contains`, `*_not_icontains`, `*_not_equal_fold`,
   `*_not_starts_with`, and `*_not_ends_with` predicates generate negated
-  LIKE/ILIKE filters before count and pagination
+  LIKE filters before count and pagination
 - nullable fields also get non-null value predicates such as `nickname_in`,
   `nickname_not_in`, and nullable numeric `gt/gte/lt/lte/between`
 - order helpers are generated for every queryable field, including nullable
@@ -2554,6 +2562,11 @@ ctx.model()
 
 All query-source selectors, including `.read_from(ReadSource::Replica)`, are
 bound to the transaction inside this callback and cannot escape to a replica.
+Generated SeaORM queries also expose `.for_update()?` and `.for_share()?` for
+typed pessimistic row locks. They require a transaction-scoped model client,
+always use the primary transaction connection, and reject SQLite explicitly
+instead of silently running an unlocked query. PostgreSQL and MySQL render the
+backend-native exclusive or shared lock clause.
 For sharded SeaORM models, `ctx.model().transaction_for_key(&key, ...)` resolves
 one shard primary before constructing the same scoped client. It does not
 provide a cross-shard transaction.

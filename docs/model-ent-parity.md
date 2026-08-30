@@ -17,7 +17,7 @@ semantics, regeneration behavior, and supported backends are tested.
 | ent capability | Roze status | Acceptance requirement |
 | --- | --- | --- |
 | Fields, indexes, defaults and schema round trip | aligned | Canonical `.ent` and generated-crate tests |
-| Custom and composite IDs | aligned | Typed lookup, update, delete, batch and edge paths |
+| Custom and composite IDs | aligned | Typed lookup, create/reload, update, delete, batch and edge paths, including generated SQLite runtime evidence |
 | O2O, O2M, M2M, inverse and Through edges | aligned | Cardinality-correct traversal in both directions |
 | Predicate composition | aligned | Eq/NEQ/IN/range/string/null and AND/OR/NOT |
 | `HasX`, `HasXWith` and negation | aligned | Ordinary, inverse, composite and Through edges |
@@ -27,7 +27,8 @@ semantics, regeneration behavior, and supported backends are tested.
 | Database-side `GroupBy` and custom aggregate scan | compatible | SeaORM provides bounded HAVING/two-key grouping and `into_select`; Toasty uses bounded single-statement parameterized backend-aware SQL for typed grouping and `into_query` for native custom scans; combinations beyond the generated budget remain an application extension concern |
 | Create/update/delete one and many | aligned | Validation and transaction-compatible executors |
 | Arithmetic mutations (`Add<Field>`) | compatible | SeaORM atomic filtered/update-many and single/composite-key update-one add/subtract supports nullable and non-null numeric fields. Toasty 0.7 omits Decimal helpers because `rust_decimal::Decimal` does not implement `toasty::stmt::Numeric`; nullable non-Decimal query/update-many operations use one parameterized `UPDATE` because `Option<T>` is not `Numeric`, and mixed set/add chains fail explicitly |
-| Upsert | compatible | SeaORM atomic; Toasty requires transaction protection |
+| Upsert | compatible | SeaORM is atomic and reloads insert/conflict results by the original key with generated SQLite runtime evidence; Toasty requires transaction protection |
+| Pessimistic row locking | compatible | Generated SeaORM queries expose transaction-only `for_update`/`for_share`, force the primary transaction, render backend-native locks on PostgreSQL/MySQL, and reject SQLite explicitly |
 | One-edge eager loading | aligned | Ordinary and composite-key edges are bounded to two queries; Through edges are bounded to three |
 | Multiple and nested eager loading | aligned | SeaORM and Toasty expose composable `all_with_<edge>_nested` loaders for arbitrary-depth recursion; ordinary, Through and composite-key edges participate in bounded pairwise loading, with generated three-level and composite-plus-ordinary compile/clippy evidence plus generated SeaORM/SQLite runtime assertions |
 | Mutation hooks | aligned | SeaORM and Toasty create/update-one/delete-one/update-many/delete-many and atomic arithmetic terminals execute ordered around hooks; reusable per-entity hook providers register on `ModelClient` and are inherited before builder-local hooks, with generated SQLite and PostgreSQL/MySQL runtime fixtures |

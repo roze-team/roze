@@ -4,3 +4,4 @@
 .history
 .idea
 .vs/
+**/.tmp*

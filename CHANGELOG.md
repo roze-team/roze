@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Integrated the `roze-ent` SeaORM generator fixes through upstream revision
+  `d5a9092e8cea8c215e4042c9636ae198f16879d8`: portable case-insensitive and
+  literal wildcard-safe predicates, key-preserving SQLite create/upsert reloads
+  for custom and composite IDs, and warning-free Decimal/f64 scalar output,
+  with generated SQLite runtime evidence, plus transaction-only PostgreSQL/MySQL
+  pessimistic row locks that reject unsupported SQLite use explicitly.
 - Added an explicit external `roze-dtm` integration and evidence contract,
   a fixed-revision CI compatibility gate covering TLS, retention,
   interoperability, callback recovery, Redis fault-injection, and delayed

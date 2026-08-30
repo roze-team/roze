@@ -3039,7 +3039,7 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
     writeln!(&mut out, "use sea_orm::entity::prelude::*;").unwrap();
     writeln!(
         &mut out,
-        "use sea_orm::{{sea_query::{{extension::postgres::PgExpr, Condition, Expr, ExprTrait, Func, OnConflict}}, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, SelectorTrait, Set, TransactionError, TransactionTrait, UpdateResult}};"
+        "use sea_orm::{{sea_query::{{Condition, Expr, ExprTrait, Func, LikeExpr, OnConflict}}, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbErr, DeleteResult, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Select, SelectorTrait, Set, TransactionError, TransactionTrait, UpdateResult}};"
     )
     .unwrap();
     writeln!(&mut out, "use serde::{{Deserialize, Serialize}};").unwrap();
@@ -3559,11 +3559,22 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
         "        let active: ActiveModel = model.into_active_model();"
     )
     .unwrap();
-    writeln!(
-        &mut out,
-        "        let inserted = active.insert(&db).await?;"
-    )
-    .unwrap();
+    if model.fields.iter().any(|field| field.auto_increment) {
+        writeln!(
+            &mut out,
+            "        let inserted = active.insert(&db).await?;"
+        )
+        .unwrap();
+    } else {
+        let insert_key = sea_orm_active_primary_key_expr(model, "active");
+        writeln!(&mut out, "        let insert_key = {insert_key};").unwrap();
+        writeln!(
+            &mut out,
+            "        Entity::insert(active).exec_without_returning(&db).await?;"
+        )
+        .unwrap();
+        writeln!(&mut out, "        let inserted = Entity::find_by_id(insert_key).one(&db).await?.ok_or_else(|| anyhow::anyhow!(\"inserted {pascal} could not be reloaded\"))?;").unwrap();
+    }
     if model.cache {
         writeln!(
             &mut out,
@@ -3593,18 +3604,46 @@ fn render_model_module_with_models(model: &ModelSpec, models: &[ModelSpec]) -> S
             .collect();
     }
     let update_columns = update_columns.join(", ");
+    let upsert_key = if model.primary_fields.len() == 1 {
+        sea_orm_reusable_value_expr(
+            &primary_ty,
+            &format!("model.{}", model_field_ident_by_name(primary)),
+        )
+    } else {
+        format!(
+            "({})",
+            model
+                .primary_fields
+                .iter()
+                .map(|name| {
+                    let field = model
+                        .fields
+                        .iter()
+                        .find(|field| field.name == *name)
+                        .expect("primary field");
+                    sea_orm_reusable_value_expr(
+                        &field.ty,
+                        &format!("model.{}", model_field_ident(field)),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     writeln!(
         &mut out,
         "    pub async fn upsert(&self, model: Model) -> anyhow::Result<Model> {{"
     )
     .unwrap();
     writeln!(&mut out, "        let db = self.write_db()?;").unwrap();
+    writeln!(&mut out, "        let upsert_key = {upsert_key};").unwrap();
     writeln!(
         &mut out,
         "        let active: ActiveModel = model.into_active_model();"
     )
     .unwrap();
-    writeln!(&mut out, "        let saved = Entity::insert(active).on_conflict(OnConflict::columns([{conflict_columns}]).update_columns([{update_columns}]).to_owned()).exec_with_returning(&db).await?;").unwrap();
+    writeln!(&mut out, "        Entity::insert(active).on_conflict(OnConflict::columns([{conflict_columns}]).update_columns([{update_columns}]).to_owned()).exec(&db).await?;").unwrap();
+    writeln!(&mut out, "        let saved = Entity::find_by_id(upsert_key).one(&db).await?.ok_or_else(|| anyhow::anyhow!(\"upserted {pascal} could not be reloaded\"))?;").unwrap();
     if model.cache {
         writeln!(
             &mut out,
@@ -4301,6 +4340,13 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
 
     render_sea_orm_loaded_edge_types(out, model, pascal);
 
+    writeln!(out, "#[derive(Clone, Copy, Debug, PartialEq, Eq)]").unwrap();
+    writeln!(out, "enum {pascal}Lock {{").unwrap();
+    writeln!(out, "    Update,").unwrap();
+    writeln!(out, "    Share,").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
     writeln!(out, "pub struct {pascal}Query<'repo, 'ctx> {{").unwrap();
     writeln!(out, "    repo: &'repo {pascal}Repository<'ctx>,").unwrap();
     writeln!(out, "    interceptors: Vec<std::sync::Arc<dyn roze_orm::OperationMiddleware<Self, Vec<Model>, anyhow::Error> + 'repo>>,").unwrap();
@@ -4311,6 +4357,7 @@ fn render_sea_orm_query_types(out: &mut String, model: &ModelSpec, pascal: &str)
     writeln!(out, "    offset: Option<u64>,").unwrap();
     writeln!(out, "    page: Option<(u64, u64)>,").unwrap();
     writeln!(out, "    read_source: roze_orm::ReadSource,").unwrap();
+    writeln!(out, "    lock: Option<{pascal}Lock>,").unwrap();
     if model.soft_delete.is_some() {
         writeln!(out, "    include_deleted: bool,").unwrap();
     }
@@ -4947,7 +4994,18 @@ fn render_sea_orm_create_builder(out: &mut String, model: &ModelSpec, pascal: &s
         writeln!(out, "            ..std::default::Default::default()").unwrap();
     }
     writeln!(out, "        }};").unwrap();
-    writeln!(out, "        let inserted = active.insert(&db).await?;").unwrap();
+    if model.fields.iter().any(|field| field.auto_increment) {
+        writeln!(out, "        let inserted = active.insert(&db).await?;").unwrap();
+    } else {
+        let insert_key = sea_orm_active_primary_key_expr(model, "active");
+        writeln!(out, "        let insert_key = {insert_key};").unwrap();
+        writeln!(
+            out,
+            "        Entity::insert(active).exec_without_returning(&db).await?;"
+        )
+        .unwrap();
+        writeln!(out, "        let inserted = Entity::find_by_id(insert_key).one(&db).await?.ok_or_else(|| anyhow::anyhow!(\"inserted {pascal} could not be reloaded\"))?;").unwrap();
+    }
     if model.cache {
         writeln!(
             out,
@@ -6206,6 +6264,7 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
         "            read_source: roze_orm::ReadSource::Replica,"
     )
     .unwrap();
+    writeln!(out, "            lock: None,").unwrap();
     if model.soft_delete.is_some() {
         writeln!(out, "            include_deleted: false,").unwrap();
     }
@@ -6217,12 +6276,50 @@ fn render_sea_orm_query_builder_impl(out: &mut String, model: &ModelSpec, pascal
         "    pub fn read_from(mut self, source: roze_orm::ReadSource) -> Self {{"
     )
     .unwrap();
-    writeln!(out, "        self.read_source = source;").unwrap();
+    writeln!(out, "        self.read_source = if self.lock.is_some() {{ roze_orm::ReadSource::Primary }} else {{ source }};").unwrap();
     writeln!(out, "        self").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
     writeln!(out, "    pub fn primary(self) -> Self {{").unwrap();
     writeln!(out, "        self.read_from(roze_orm::ReadSource::Primary)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    fn with_lock(mut self, lock: {pascal}Lock) -> anyhow::Result<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        if self.repo.transaction.is_none() {{ anyhow::bail!(\"{pascal} row locks require a transaction-scoped model client\"); }}").unwrap();
+    writeln!(out, "        if matches!(self.repo.write_db()?.get_database_backend(), DatabaseBackend::Sqlite) {{ anyhow::bail!(\"{pascal} row locks are not supported by SQLite\"); }}").unwrap();
+    writeln!(
+        out,
+        "        self.read_source = roze_orm::ReadSource::Primary;"
+    )
+    .unwrap();
+    writeln!(out, "        self.lock = Some(lock);").unwrap();
+    writeln!(out, "        Ok(self)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    /// Adds an exclusive row lock. This is only valid inside `ModelClient::transaction`."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    pub fn for_update(self) -> anyhow::Result<Self> {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.with_lock({pascal}Lock::Update)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "    /// Adds a shared row lock. This is only valid inside `ModelClient::transaction`."
+    )
+    .unwrap();
+    writeln!(out, "    pub fn for_share(self) -> anyhow::Result<Self> {{").unwrap();
+    writeln!(out, "        self.with_lock({pascal}Lock::Share)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
     writeln!(
@@ -6443,61 +6540,61 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
             if is_string_filter_type(field) {
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(contains_like_pattern(value)).escape('\\\\'))),",
                     predicate_variant_name(field, "Contains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(contains_like_pattern(value)).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\\\'))),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotIContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\\\'))),",
                     predicate_variant_name(field, "EqualFold")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"{{}}%\", escape_like_pattern(value)))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"{{}}%\", escape_like_pattern(value))).escape('\\\\'))),",
                     predicate_variant_name(field, "StartsWith")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"{{}}%\", escape_like_pattern(value)))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"{{}}%\", escape_like_pattern(value))).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotStartsWith")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"%{{}}\", escape_like_pattern(value)))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"%{{}}\", escape_like_pattern(value))).escape('\\\\'))),",
                     predicate_variant_name(field, "EndsWith")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"%{{}}\", escape_like_pattern(value)))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"%{{}}\", escape_like_pattern(value))).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotEndsWith")
                 )
                 .unwrap();
@@ -6550,61 +6647,61 @@ fn render_sea_orm_predicate_expr(out: &mut String, model: &ModelSpec, pascal: &s
             if is_string_filter_type(field) {
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(contains_like_pattern(value)).escape('\\\\'))),",
                     predicate_variant_name(field, "Contains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(contains_like_pattern(value))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(contains_like_pattern(value)).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\\\'))),",
                     predicate_variant_name(field, "IContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(contains_like_pattern(value))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotIContains")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\\\'))),",
                     predicate_variant_name(field, "EqualFold")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Expr::col(Column::{column}).ilike(escape_like_pattern(value))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Func::lower(Expr::col(Column::{column})).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotEqualFold")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"{{}}%\", escape_like_pattern(value)))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"{{}}%\", escape_like_pattern(value))).escape('\\\\'))),",
                     predicate_variant_name(field, "StartsWith")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"{{}}%\", escape_like_pattern(value)))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"{{}}%\", escape_like_pattern(value))).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotStartsWith")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"%{{}}\", escape_like_pattern(value)))),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"%{{}}\", escape_like_pattern(value))).escape('\\\\'))),",
                     predicate_variant_name(field, "EndsWith")
                 )
                 .unwrap();
                 writeln!(
                     out,
-                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(format!(\"%{{}}\", escape_like_pattern(value)))).not(),",
+                    "            {pascal}Predicate::{}(value) => Condition::all().add(Column::{column}.like(LikeExpr::new(format!(\"%{{}}\", escape_like_pattern(value))).escape('\\\\'))).not(),",
                     predicate_variant_name(field, "NotEndsWith")
                 )
                 .unwrap();
@@ -6698,6 +6795,20 @@ fn render_sea_orm_build_select_methods(out: &mut String, model: &ModelSpec, pasc
         "        if let Some(offset) = self.offset {{ select = select.offset(offset); }}"
     )
     .unwrap();
+    writeln!(out, "        if let Some(lock) = self.lock {{").unwrap();
+    writeln!(out, "            select = match lock {{").unwrap();
+    writeln!(
+        out,
+        "                {pascal}Lock::Update => select.lock_exclusive(),"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                {pascal}Lock::Share => select.lock_shared(),"
+    )
+    .unwrap();
+    writeln!(out, "            }};").unwrap();
+    writeln!(out, "        }}").unwrap();
     writeln!(out, "        select").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
@@ -12750,7 +12861,12 @@ fn render_avg_body(out: &mut String, ty: &str, _result_kind: &str) {
         writeln!(out, "        let mut sum = 0.0_f64;").unwrap();
         writeln!(out, "        let mut count = 0u64;").unwrap();
         writeln!(out, "        for value in {iterator} {{").unwrap();
-        writeln!(out, "            sum += value as f64;").unwrap();
+        let value_expr = if value_ty == "f64" {
+            "value"
+        } else {
+            "value as f64"
+        };
+        writeln!(out, "            sum += {value_expr};").unwrap();
         writeln!(out, "            count += 1;").unwrap();
         writeln!(out, "        }}").unwrap();
         writeln!(out, "        if count == 0 {{").unwrap();
@@ -13300,6 +13416,24 @@ fn sea_orm_reusable_value_expr(ty: &str, ident: &str) -> String {
         ident.to_string()
     } else {
         format!("{ident}.clone()")
+    }
+}
+
+fn sea_orm_active_primary_key_expr(model: &ModelSpec, active_ident: &str) -> String {
+    let values = model
+        .primary_fields
+        .iter()
+        .map(|name| {
+            format!(
+                "{active_ident}.{}.clone().unwrap()",
+                model_field_ident_by_name(name)
+            )
+        })
+        .collect::<Vec<_>>();
+    if values.len() == 1 {
+        values[0].clone()
+    } else {
+        format!("({})", values.join(", "))
     }
 }
 
@@ -15683,6 +15817,7 @@ fn is_copy_filter_type(ty: &str) -> bool {
             | "usize"
             | "f32"
             | "f64"
+            | "rust_decimal::Decimal"
             | "DateTime"
             | "DateTimeUtc"
             | "jiff::civil::DateTime"
@@ -22685,6 +22820,9 @@ mod tests {
         assert!(sea_orm.contains(
             "if value.len() > 25 { anyhow::bail!(\"id validation failed: byte length must be at most 25\"); }"
         ));
+        assert!(sea_orm.contains("let insert_key = active.id.clone().unwrap();"));
+        assert!(sea_orm.contains("Entity::insert(active).exec_without_returning(&db)"));
+        assert!(sea_orm.contains("inserted Pet could not be reloaded"));
         assert!(!sea_orm.contains("IdUnique"));
     }
 
@@ -22760,6 +22898,13 @@ mod tests {
         assert!(sea_orm.contains("pub async fn upsert(&self, model: Model)"));
         assert!(sea_orm.contains("OnConflict::columns([Column::UserId, Column::TweetId])"));
         assert!(sea_orm.contains("update_columns([Column::LikedAt])"));
+        assert!(sea_orm.contains("let upsert_key = (model.user_id, model.tweet_id);"));
+        assert!(sea_orm.contains("Entity::find_by_id(upsert_key).one(&db)"));
+        assert!(sea_orm.contains(
+            "let insert_key = (active.user_id.clone().unwrap(), active.tweet_id.clone().unwrap());"
+        ));
+        assert!(sea_orm.contains("Entity::insert(active).exec_without_returning(&db)"));
+        assert!(sea_orm.contains("inserted Like could not be reloaded"));
         assert!(sea_orm
             .contains("pub async fn add_liked_at(mut self, delta: i64) -> anyhow::Result<Model>"));
         assert!(sea_orm.contains("query = query.where_(user_id_eq(key.user_id.clone()))"));
@@ -25634,6 +25779,12 @@ mod tests {
             rendered.contains("pub fn read_from(mut self, source: roze_orm::ReadSource) -> Self")
         );
         assert!(rendered.contains("pub fn primary(self) -> Self"));
+        assert!(rendered.contains("pub fn for_update(self) -> anyhow::Result<Self>"));
+        assert!(rendered.contains("pub fn for_share(self) -> anyhow::Result<Self>"));
+        assert!(rendered.contains("row locks require a transaction-scoped model client"));
+        assert!(rendered.contains("row locks are not supported by SQLite"));
+        assert!(rendered.contains("UserLock::Update => select.lock_exclusive()"));
+        assert!(rendered.contains("UserLock::Share => select.lock_shared()"));
         assert!(rendered.contains("self.repo.read_db_from(self.read_source)"));
         assert!(rendered.contains("pub fn where_(mut self, predicate: UserPredicate) -> Self"));
         assert!(
@@ -25713,7 +25864,7 @@ mod tests {
         assert!(rendered.contains(
             "pub async fn first_nickname(mut self) -> anyhow::Result<Option<Option<String>>>"
         ));
-        assert!(rendered.contains("extension::postgres::PgExpr"));
+        assert!(!rendered.contains("extension::postgres::PgExpr"));
         assert!(rendered.contains("select_only().column(Column::Id).into_tuple::<i64>()"));
         assert!(rendered.contains("pub async fn sum_id(self) -> anyhow::Result<i64>"));
         assert!(rendered
@@ -25800,32 +25951,33 @@ mod tests {
         assert!(rendered.contains("pub fn escape_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("pub fn contains_like_pattern(value: &str) -> String"));
         assert!(rendered.contains("format!(\"%{}%\", escape_like_pattern(value))"));
+        assert!(rendered.contains("Func, LikeExpr, OnConflict"));
         assert!(rendered.contains(
-            "UserPredicate::NameContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))),"
+            r"UserPredicate::NameContains(value) => Condition::all().add(Column::Name.like(LikeExpr::new(contains_like_pattern(value)).escape('\\'))),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameNotContains(value) => Condition::all().add(Column::Name.like(contains_like_pattern(value))).not(),"
+            r"UserPredicate::NameNotContains(value) => Condition::all().add(Column::Name.like(LikeExpr::new(contains_like_pattern(value)).escape('\\'))).not(),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameIContains(value) => Condition::all().add(Expr::col(Column::Name).ilike(contains_like_pattern(value))),"
+            r"UserPredicate::NameIContains(value) => Condition::all().add(Func::lower(Expr::col(Column::Name)).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\'))),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameNotIContains(value) => Condition::all().add(Expr::col(Column::Name).ilike(contains_like_pattern(value))).not(),"
+            r"UserPredicate::NameNotIContains(value) => Condition::all().add(Func::lower(Expr::col(Column::Name)).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\'))).not(),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameEqualFold(value) => Condition::all().add(Expr::col(Column::Name).ilike(escape_like_pattern(value))),"
+            r"UserPredicate::NameEqualFold(value) => Condition::all().add(Func::lower(Expr::col(Column::Name)).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\'))),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameNotEqualFold(value) => Condition::all().add(Expr::col(Column::Name).ilike(escape_like_pattern(value))).not(),"
+            r"UserPredicate::NameNotEqualFold(value) => Condition::all().add(Func::lower(Expr::col(Column::Name)).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\'))).not(),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameNotStartsWith(value) => Condition::all().add(Column::Name.like(format!(\"{}%\", escape_like_pattern(value)))).not(),"
+            r#"UserPredicate::NameNotStartsWith(value) => Condition::all().add(Column::Name.like(LikeExpr::new(format!("{}%", escape_like_pattern(value))).escape('\\'))).not(),"#
         ));
         assert!(rendered.contains(
-            "UserPredicate::NameNotEndsWith(value) => Condition::all().add(Column::Name.like(format!(\"%{}\", escape_like_pattern(value)))).not(),"
+            r#"UserPredicate::NameNotEndsWith(value) => Condition::all().add(Column::Name.like(LikeExpr::new(format!("%{}", escape_like_pattern(value))).escape('\\'))).not(),"#
         ));
         assert!(rendered.contains(
-            "UserPredicate::NicknameContains(value) => Condition::all().add(Column::Nickname.like(contains_like_pattern(value))),"
+            r"UserPredicate::NicknameContains(value) => Condition::all().add(Column::Nickname.like(LikeExpr::new(contains_like_pattern(value)).escape('\\'))),"
         ));
         assert!(rendered.contains(
             "UserPredicate::NicknameIn(values) => Condition::all().add(Column::Nickname.is_in(values.iter().cloned().map(Some).collect::<Vec<_>>())),"
@@ -25834,10 +25986,10 @@ mod tests {
             "UserPredicate::NicknameNotIn(values) => Condition::all().add(Column::Nickname.is_not_in(values.iter().cloned().map(Some).collect::<Vec<_>>())),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NicknameIContains(value) => Condition::all().add(Expr::col(Column::Nickname).ilike(contains_like_pattern(value))),"
+            r"UserPredicate::NicknameIContains(value) => Condition::all().add(Func::lower(Expr::col(Column::Nickname)).like(LikeExpr::new(contains_like_pattern(&value.to_lowercase())).escape('\\'))),"
         ));
         assert!(rendered.contains(
-            "UserPredicate::NicknameEqualFold(value) => Condition::all().add(Expr::col(Column::Nickname).ilike(escape_like_pattern(value))),"
+            r"UserPredicate::NicknameEqualFold(value) => Condition::all().add(Func::lower(Expr::col(Column::Nickname)).like(LikeExpr::new(escape_like_pattern(&value.to_lowercase())).escape('\\'))),"
         ));
         assert!(rendered.contains("Column::Id.is_in(values.clone())"));
         assert!(rendered.contains("Column::Id.gte(*value)"));
@@ -26302,6 +26454,8 @@ mod tests {
         assert!(sea_orm.contains("pub async fn subtract_discount_amount"));
         assert!(sea_orm.contains("pub async fn add_min_order_amount"));
         assert!(sea_orm.contains("pub async fn subtract_min_order_amount"));
+        assert!(!sea_orm.contains("Column::DiscountAmount.eq(value.clone())"));
+        assert!(!sea_orm.contains("Expr::value(value.clone())"));
 
         let rendered = render_toasty_model_module(model);
         assert!(rendered.contains("pub status: i16"));
@@ -26311,7 +26465,7 @@ mod tests {
         assert!(rendered.contains("StatusBetween(i16, i16)"));
         assert!(rendered.contains("DiscountAmountGte(rust_decimal::Decimal)"));
         assert!(rendered.contains("Coupon::fields().status().eq(*value)"));
-        assert!(rendered.contains("Coupon::fields().discount_amount().ge(value.clone())"));
+        assert!(rendered.contains("Coupon::fields().discount_amount().ge(*value)"));
         assert!(rendered.contains("pub async fn add_status"));
         assert!(rendered.contains("pub async fn subtract_status"));
         assert!(!rendered.contains("fn add_discount_amount"));
@@ -26340,6 +26494,14 @@ mod tests {
         assert!(rendered.contains(
             "Ok(values.into_iter().flatten().reduce(|left, right| if left >= right { left } else { right }))"
         ));
+    }
+
+    #[test]
+    fn f64_average_generation_avoids_redundant_same_type_cast() {
+        let mut rendered = String::new();
+        render_avg_body(&mut rendered, "f64", "anyhow");
+        assert!(rendered.contains("sum += value;"));
+        assert!(!rendered.contains("sum += value as f64;"));
     }
 
     #[test]
@@ -28744,6 +28906,14 @@ impl ServiceContext {
                 field Int64("account_id") {
                 }
             }
+            entity ApiKey {
+                table "api_keys"
+                cache false
+                field String("id").Primary() {
+                }
+                field String("label") {
+                }
+            }
             entity Session {
                 table "sessions"
                 cache false
@@ -28772,7 +28942,7 @@ impl ServiceContext {
             r#"mod model;
 mod svc;
 
-use model::{AccountRepository, GroupModel, GroupQuery, GroupRepository, MembershipRepository, OrderRepository, SessionRepository, UserMutationHooks, UserQuery, UserRepository, UserUpdateMany};
+use model::{AccountRepository, ApiKeyRepository, GroupModel, GroupQuery, GroupRepository, MembershipRepository, OrderRepository, SessionRepository, UserModel, UserMutationHooks, UserQuery, UserRepository, UserUpdateMany};
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -28872,6 +29042,7 @@ async fn main() -> anyhow::Result<()> {
         "CREATE TABLE groups (id BIGINT PRIMARY KEY)",
         "CREATE TABLE memberships (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, group_id BIGINT NOT NULL)",
         "CREATE TABLE accounts (tenant_id BIGINT NOT NULL, account_id BIGINT NOT NULL, PRIMARY KEY (tenant_id, account_id))",
+        "CREATE TABLE api_keys (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE sessions (id BIGINT PRIMARY KEY, account_tenant BIGINT NOT NULL, account_id BIGINT NOT NULL, user_id BIGINT NOT NULL)",
         "INSERT INTO users (id, name, score) VALUES (1, 'alice', 10), (2, 'bob', NULL)",
         "INSERT INTO orders (id, user_id) VALUES (100, 1), (101, 2)",
@@ -28889,10 +29060,39 @@ async fn main() -> anyhow::Result<()> {
     let memberships = MembershipRepository::new(&ctx);
     let orders = OrderRepository::new(&ctx);
     let accounts = AccountRepository::new(&ctx);
+    let api_keys = ApiKeyRepository::new(&ctx);
     let sessions = SessionRepository::new(&ctx);
     let memberships_nested = &memberships;
     let users_nested = &users;
     let orders_nested = &orders;
+
+    let inserted_by_upsert = users
+        .upsert(UserModel { id: 3, name: "carol".to_string(), score: Some(7) })
+        .await?;
+    assert_eq!(inserted_by_upsert.id, 3);
+    assert_eq!(inserted_by_upsert.name, "carol");
+    let updated_by_upsert = users
+        .upsert(UserModel { id: 2, name: "bob-upserted".to_string(), score: Some(12) })
+        .await?;
+    assert_eq!(updated_by_upsert.id, 2);
+    assert_eq!(updated_by_upsert.name, "bob-upserted");
+    assert_eq!(users.query().where_(model::user::id_eq(2)).only().await?, updated_by_upsert);
+
+    let created_account = accounts
+        .create()
+        .set_tenant_id(8)
+        .set_account_id(10)
+        .save()
+        .await?;
+    assert_eq!((created_account.tenant_id, created_account.account_id), (8, 10));
+    let created_api_key = api_keys
+        .create()
+        .set_id("runtime-key".to_string())
+        .set_label("SQLite runtime".to_string())
+        .save()
+        .await?;
+    assert_eq!(created_api_key.id, "runtime-key");
+    assert_eq!(created_api_key.label, "SQLite runtime");
 
     let loaded = users
         .query()
@@ -28928,6 +29128,25 @@ async fn main() -> anyhow::Result<()> {
     let mixed = users.query().mixin(IdOneMixin).all().await?;
     assert_eq!(mixed.len(), 1);
     assert_eq!(mixed[0].id, 1);
+
+    let folded_contains = users
+        .query()
+        .where_(model::user::name_icontains("ALI"))
+        .only()
+        .await?;
+    assert_eq!(folded_contains.id, 1);
+    let folded_equal = users
+        .query()
+        .where_(model::user::name_equal_fold("ALICE"))
+        .only()
+        .await?;
+    assert_eq!(folded_equal.id, 1);
+    assert!(!users
+        .query()
+        .where_(model::user::name_not_icontains("ALI"))
+        .where_(model::user::id_eq(1))
+        .exists()
+        .await?);
 
     let traversal_calls = Arc::new(AtomicUsize::new(0));
     let traversed = mixed[0]
