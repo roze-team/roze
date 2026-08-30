@@ -126,6 +126,26 @@ def inspect(roze_root: Path, dtm_root: Path) -> dict[str, Any]:
         )
         and (dtm_root / "scripts" / "production-soak.mjs").is_file()
         and (dtm_root / "scripts" / "validate-soak-evidence.py").is_file(),
+        "delayed_message_restart_recovery": source_contains(
+            dtm_root / ".github" / "workflows" / "ci.yml",
+            "node scripts/message-restart-integration.mjs",
+        )
+        and source_contains(
+            dtm_root / "scripts" / "message-restart-integration.mjs",
+            'delay_millis: 4_000',
+        )
+        and source_contains(
+            dtm_root / "scripts" / "message-restart-integration.mjs",
+            'child.kill("SIGKILL")',
+        )
+        and source_contains(
+            dtm_root / "scripts" / "message-restart-integration.mjs",
+            "branchCalls === 1",
+        )
+        and source_contains(
+            dtm_root / "scripts" / "message-restart-integration.mjs",
+            'waitForStatus(gid, "succeeded"',
+        ),
     }
 
     roze_revision = git_revision(roze_root)
@@ -161,9 +181,43 @@ def validate_baseline(report: dict[str, Any], baseline: dict[str, Any]) -> None:
             report.get(field) == baseline.get(field),
             f"compatibility baseline mismatch for {field}: expected {baseline.get(field)!r}, got {report.get(field)!r}",
         )
+
+    upstream_ci = baseline.get("upstream_ci")
+    require(isinstance(upstream_ci, dict), "missing upstream_ci provenance")
+    require(upstream_ci.get("workflow") == "ci", "unexpected upstream CI workflow")
+    run_id = upstream_ci.get("run_id")
+    require(isinstance(run_id, int) and run_id > 0, "invalid upstream CI run_id")
+    require(
+        upstream_ci.get("head_revision") == report.get("dtm_revision"),
+        "upstream CI head revision does not match the DTM baseline",
+    )
+    require(
+        upstream_ci.get("recorded_conclusion") == "success",
+        "upstream CI baseline is not recorded as successful",
+    )
+    require(
+        upstream_ci.get("url")
+        == f"https://github.com/roze-team/roze-dtm/actions/runs/{run_id}",
+        "upstream CI URL does not match run_id",
+    )
+
     capabilities = report.get("capabilities", {})
-    for capability in baseline.get("required_capabilities", []):
+    required_capabilities = baseline.get("required_capabilities")
+    require(
+        isinstance(required_capabilities, list) and required_capabilities,
+        "required_capabilities must be a non-empty list",
+    )
+    require(
+        all(isinstance(capability, str) and capability for capability in required_capabilities),
+        "required_capabilities must contain non-empty strings",
+    )
+    require(
+        len(required_capabilities) == len(set(required_capabilities)),
+        "required_capabilities contains duplicates",
+    )
+    for capability in required_capabilities:
         require(capabilities.get(capability) is True, f"missing required DTM capability: {capability}")
+    report["upstream_ci"] = upstream_ci
     report["baseline_status"] = "matched"
 
 

@@ -4,7 +4,8 @@
 
 - Added an explicit external `roze-dtm` integration and evidence contract,
   a fixed-revision CI compatibility gate covering TLS, retention,
-  interoperability, callback recovery, and Redis fault-injection surfaces,
+  interoperability, callback recovery, Redis fault-injection, and delayed
+  Message coordinator-restart recovery surfaces,
   corrected generated/reference-system ownership claims, and introduced REST
   `.api` `json`/`any` fields that preserve free-form JSON through Rust, OpenAPI,
   mocks, and TypeScript/JavaScript clients.

@@ -36,7 +36,10 @@ The checked-in
 DTM revision, its Roze dependency revision, package/OpenAPI versions, and the
 required security, recovery, interoperability, and retention surfaces. Release
 CI checks out that exact revision; it does not follow the moving DTM `main`
-branch.
+branch. The baseline also records the successful upstream workflow run and
+requires its head revision and run URL to agree with the pinned DTM revision.
+This is immutable provenance recorded during review, not a live GitHub status
+query by the offline checker.
 
 Use `--require-roze-head` in a coordinated upgrade gate when the DTM dependency
 pin is required to equal the current Roze commit. The default report remains
@@ -110,10 +113,17 @@ transactions, outbox/inbox, idempotency, and application compensation only.
 Saga/TCC success, failure, restart recovery, and idempotent compensation
 evidence belongs to the adjacent `roze-dtm` production report.
 
+For delayed Message transactions, evidence must additionally show that the
+commit decision and delivery time survive coordinator termination, a different
+worker takes over only after the previous recovery lease expires, and the
+branch is delivered exactly once in the tested scenario. SQLite restart
+acceptance does not establish PostgreSQL/Redis multi-instance, network
+partition, or sustained-load maturity.
+
 Do not claim production-ready distributed transactions without failure
 injection, coordinator crash/restart recovery, cross-language protocol
 compatibility, and sustained 24-hour/72-hour evidence tied to the exact Roze
 and `roze-dtm` revisions under test.
 
 The latest dated repository-to-repository review is recorded in
-[Roze DTM compatibility baseline](../evidence/2026-08-29-roze-dtm-compatibility.md).
+[Roze DTM compatibility baseline](../evidence/2026-08-30-roze-dtm-compatibility.md).

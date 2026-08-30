@@ -9512,6 +9512,11 @@ transactions:
       private_ca_source: readonly_secret_file
       https_and_grpcs_use_strict_certificate_and_hostname_validation: true
       insecure_skip_verify_forbidden: true
+    recovery:
+      durable_decision_before_branch_delivery_required: true
+      worker_takeover_after_recovery_lease_expiry_required: true
+      delayed_message_delivery_time_survives_restart_required: true
+      branch_idempotency_required: true
     retention:
       explicit_active_and_finished_windows_required: true
       compare_and_delete_required: true
@@ -9520,6 +9525,7 @@ transactions:
       - coordinator_revision_and_protocol_contract
       - saga_success_failure_compensation_test
       - restart_recovery_and_idempotency_test
+      - delayed_message_restart_recovery_test
       - trusted_branch_tls_callback_test
       - cross_language_http_jsonrpc_grpc_acceptance
       - grpc_callback_recovery_matrix
@@ -16651,6 +16657,9 @@ veil = { version = "0.3.0", default-features = false }
         assert!(rest_data_consistency
             .contains("representative_http_mutation_declares_transaction_or_no_persistence"));
         assert!(rest_data_consistency.contains("outbox:"));
+        assert!(rest_data_consistency
+            .contains("delayed_message_delivery_time_survives_restart_required: true"));
+        assert!(rest_data_consistency.contains("delayed_message_restart_recovery_test"));
         assert!(rest_data_consistency.contains("test: migration_rollback"));
         assert!(rest_data_consistency.contains("dual_write_without_outbox_or_dtm_evidence"));
         assert!(rest_observability.contains("boundary: rest"));
@@ -16914,7 +16923,10 @@ veil = { version = "0.3.0", default-features = false }
         assert!(rpc_data_consistency.contains("coordinator_revision_required: true"));
         assert!(rpc_data_consistency.contains("revision_endpoint: /api/dtmsvr/version"));
         assert!(rpc_data_consistency.contains("startup_revision_match_required: true"));
+        assert!(rpc_data_consistency
+            .contains("worker_takeover_after_recovery_lease_expiry_required: true"));
         assert!(rpc_data_consistency.contains("restart_recovery_and_idempotency_test"));
+        assert!(rpc_data_consistency.contains("delayed_message_restart_recovery_test"));
         assert!(rpc_data_consistency.contains("insecure_skip_verify_forbidden: true"));
         assert!(rpc_data_consistency.contains("retention_compare_and_delete_metrics_test"));
         assert!(rpc_data_consistency.contains("cross_language_http_jsonrpc_grpc_acceptance"));

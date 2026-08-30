@@ -1,5 +1,10 @@
 # Roze DTM compatibility baseline — 2026-08-29
 
+Superseded by the
+[2026-08-30 compatibility baseline](2026-08-30-roze-dtm-compatibility.md).
+This file remains as the historical record for the revision pair inspected on
+2026-08-29.
+
 This review records the exact repository state used to verify the ownership and
 integration contracts after `roze-dtm` was removed from the Roze workspace. It
 is a static compatibility baseline, not runtime or production evidence.
