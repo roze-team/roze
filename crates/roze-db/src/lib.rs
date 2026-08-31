@@ -39,7 +39,12 @@ async fn connect_url(config: &DatabaseConfig, url: &str) -> Result<DatabaseConne
         .min_connections(config.min_connections)
         .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
         .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-        .sqlx_logging(config.sqlx_logging);
+        .sqlx_logging(config.sqlx_logging)
+        .sqlx_logging_level(log::LevelFilter::Debug)
+        .sqlx_slow_statements_logging_settings(
+            log::LevelFilter::Warn,
+            Duration::from_millis(config.slow_query_threshold_ms.max(1)),
+        );
 
     Database::connect(options).await
 }
@@ -602,6 +607,7 @@ mod tests {
             connect_timeout_secs: 3,
             idle_timeout_secs: 30,
             sqlx_logging: false,
+            slow_query_threshold_ms: 1_000,
         };
 
         assert_eq!(config.max_connections, 10);
@@ -621,6 +627,7 @@ mod tests {
             connect_timeout_secs: 3,
             idle_timeout_secs: 30,
             sqlx_logging: false,
+            slow_query_threshold_ms: 1_000,
         };
 
         let connections = connect_connections(&config).await.expect("connect");
@@ -707,6 +714,7 @@ mod tests {
             connect_timeout_secs: 3,
             idle_timeout_secs: 30,
             sqlx_logging: false,
+            slow_query_threshold_ms: 1_000,
         };
         let mut shards = BTreeMap::new();
         for shard in ["shard-00", "shard-01"] {

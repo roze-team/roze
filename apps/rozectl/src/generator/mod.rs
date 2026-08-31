@@ -23,6 +23,7 @@ use anyhow::{bail, Context};
 use crate::parser::{ApiSpec, HttpMethod, RpcMethod};
 
 const ROZE_GIT_URL: &str = "https://github.com/roze-team/roze.git";
+const ROZE_GIT_REV: &str = env!("ROZE_GIT_REV");
 const REST_ROZE_CRATES: [&str; 24] = [
     "roze-config",
     "roze-error",
@@ -953,7 +954,9 @@ validator = { version = "0.20", features = ["derive"] }"#
     let mut roze_dependencies =
         roze_dependencies(dependency_source, local_crates_prefix, &STREAM_ROZE_CRATES);
     let plain_kafka = match dependency_source {
-        DependencySource::Git => format!(r#"roze-kafka = {{ git = "{ROZE_GIT_URL}" }}"#),
+        DependencySource::Git => {
+            format!(r#"roze-kafka = {{ git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}" }}"#)
+        }
         DependencySource::Path => format!(
             r#"roze-kafka = {{ path = "{}/roze-kafka" }}"#,
             local_crates_prefix.expect("local crates prefix")
@@ -961,7 +964,7 @@ validator = { version = "0.20", features = ["derive"] }"#
     };
     let configured_kafka = match dependency_source {
         DependencySource::Git => format!(
-            r#"roze-kafka = {{ git = "{ROZE_GIT_URL}", default-features = false, features = ["{}"] }}"#,
+            r#"roze-kafka = {{ git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}", default-features = false, features = ["{}"] }}"#,
             broker.cargo_feature()
         ),
         DependencySource::Path => format!(
@@ -4522,6 +4525,15 @@ pub(crate) fn inherited_roze_dependency(
     }
     candidates.sort_by_key(ToString::to_string);
     candidates.dedup_by(|left, right| left.to_string() == right.to_string());
+    if let Some(pinned_url) = candidates
+        .iter()
+        .find_map(git_pin)
+        .map(|(url, _)| url.to_string())
+    {
+        candidates.retain(|candidate| {
+            git_pin(candidate).is_some() || git_url(candidate).is_none_or(|url| url != pinned_url)
+        });
+    }
     if candidates.len() > 1 {
         let sources = candidates
             .iter()
@@ -4537,9 +4549,61 @@ pub(crate) fn inherited_roze_dependency(
 }
 
 pub(crate) fn validate_roze_dependency_sources(
-    dependencies: &toml_edit::Table,
+    dependencies: &mut toml_edit::Table,
 ) -> anyhow::Result<()> {
-    inherited_roze_dependency(dependencies, "__roze_source_validation__").map(|_| ())
+    let canonical = inherited_roze_dependency(dependencies, "__roze_source_validation__")?;
+    if let Some(canonical) = canonical.as_ref() {
+        normalize_roze_git_dependencies(dependencies, canonical);
+    }
+    Ok(())
+}
+
+fn git_url(item: &toml_edit::Item) -> Option<&str> {
+    item.as_inline_table()?.get("git")?.as_str()
+}
+
+fn git_pin(item: &toml_edit::Item) -> Option<(&str, (&'static str, &str))> {
+    let table = item.as_inline_table()?;
+    let url = table.get("git")?.as_str()?;
+    for key in ["rev", "tag", "branch"] {
+        if let Some(value) = table.get(key).and_then(toml_edit::Value::as_str) {
+            return Some((url, (key, value)));
+        }
+    }
+    None
+}
+
+fn normalize_roze_git_dependencies(
+    dependencies: &mut toml_edit::Table,
+    canonical: &toml_edit::Item,
+) {
+    let Some((canonical_url, (pin_key, pin_value))) = git_pin(canonical) else {
+        return;
+    };
+    for (name, item) in dependencies.iter_mut() {
+        if !name.starts_with("roze-") {
+            continue;
+        }
+        let Some(table) = item.as_inline_table_mut() else {
+            continue;
+        };
+        if table.get("git").and_then(toml_edit::Value::as_str) != Some(canonical_url) {
+            continue;
+        }
+        let existing_pin = ["rev", "tag", "branch"].into_iter().find_map(|key| {
+            table
+                .get(key)
+                .and_then(toml_edit::Value::as_str)
+                .map(|value| (key, value))
+        });
+        if existing_pin == Some((pin_key, pin_value)) {
+            continue;
+        }
+        for key in ["rev", "tag", "branch"] {
+            table.remove(key);
+        }
+        table.insert(pin_key, pin_value.into());
+    }
 }
 
 fn normalize_generated_workspace_dependencies(
@@ -4983,6 +5047,9 @@ fn cargo_toml(
     out: &Path,
     cargo_options: CargoTemplateOptions<'_>,
 ) -> String {
+    let standalone_rpc_build_dependencies = format!(
+        "protoc-bin-vendored = \"3\"\nroze-grpc = {{ git = \"{ROZE_GIT_URL}\", rev = \"{ROZE_GIT_REV}\" }}\ntonic-prost-build = \"0.14.6\""
+    );
     let roze_dependencies = roze_dependencies(
         dependency_source,
         local_crates_prefix,
@@ -5059,9 +5126,7 @@ veil = { version = "0.3.0", default-features = false }"#
 roze-grpc.workspace = true
 tonic-prost-build.workspace = true"#
             } else {
-                r#"protoc-bin-vendored = "3"
-roze-grpc = { git = "https://github.com/roze-team/roze.git" }
-tonic-prost-build = "0.14.6""#
+                standalone_rpc_build_dependencies.as_str()
             },
         ),
     };
@@ -5169,7 +5234,9 @@ fn roze_dependencies(
     crates
         .iter()
         .map(|name| match source {
-            DependencySource::Git => format!(r#"{name} = {{ git = "{ROZE_GIT_URL}" }}"#),
+            DependencySource::Git => {
+                format!(r#"{name} = {{ git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}" }}"#)
+            }
             DependencySource::Path => {
                 let prefix = local_crates_prefix.expect("local crates prefix");
                 format!(r#"{name} = {{ path = "{prefix}/{name}" }}"#)
@@ -5195,6 +5262,7 @@ fn dependency_item(
     match source {
         DependencySource::Git => {
             dependency.insert("git", ROZE_GIT_URL.into());
+            dependency.insert("rev", ROZE_GIT_REV.into());
         }
         DependencySource::Path => {
             let prefix = local_crates_prefix.expect("local crates prefix");
@@ -11327,6 +11395,7 @@ governance:
 #   migrate: true
 #   batch_size: 100
 #   interval_ms: 1000
+#   max_idle_interval_ms: 5000
 # auth:
 #   jwt_keys:
 #     - id: "2026-07"
@@ -11464,6 +11533,7 @@ governance:
 #   migrate: true
 #   batch_size: 100
 #   interval_ms: 1000
+#   max_idle_interval_ms: 5000
 # auth:
 #   jwt_keys:
 #     - id: "2026-07"
@@ -14482,15 +14552,12 @@ fn main() {
             },
         );
 
-        assert!(
-            cargo.contains(r#"roze-config = { git = "https://github.com/roze-team/roze.git" }"#)
-        );
-        assert!(cargo.contains(r#"roze-rpc = { git = "https://github.com/roze-team/roze.git" }"#));
+        let expected = format!(r#"git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}""#);
+        assert!(cargo.contains(&format!("roze-config = {{ {expected} }}")));
+        assert!(cargo.contains(&format!("roze-rpc = {{ {expected} }}")));
         assert!(cargo.contains("veil.workspace = true"));
-        assert!(cargo.contains(r#"roze-db = { git = "https://github.com/roze-team/roze.git" }"#));
-        assert!(cargo.contains(
-            r#"roze-transaction-sql = { git = "https://github.com/roze-team/roze.git" }"#
-        ));
+        assert!(cargo.contains(&format!("roze-db = {{ {expected} }}")));
+        assert!(cargo.contains(&format!("roze-transaction-sql = {{ {expected} }}")));
         assert!(!cargo.contains("roze-mongo"));
         assert!(!cargo.contains("toasty"));
         assert!(!cargo.contains(r#"path = "../../crates/roze-"#));
@@ -14523,6 +14590,41 @@ veil = { version = "0.3.0", default-features = false }
         assert!(dependencies["tokio"].to_string().contains("full"));
         assert!(dependencies.contains_key("application-events"));
         assert!(dependencies.contains_key("veil"));
+    }
+
+    #[test]
+    fn update_propagates_one_existing_roze_git_pin_to_floating_dependencies() {
+        let mut document = r#"
+[dependencies]
+roze-config = { git = "https://github.com/roze-team/roze.git" }
+roze-rpc = { git = "https://github.com/roze-team/roze.git", features = ["client"] }
+roze-sms = { git = "https://github.com/roze-team/roze.git", rev = "12c63307" }
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("manifest");
+        let dependencies = document["dependencies"]
+            .as_table_mut()
+            .expect("dependencies");
+
+        validate_roze_dependency_sources(dependencies).expect("normalize dependencies");
+
+        for name in ["roze-config", "roze-rpc", "roze-sms"] {
+            let dependency = dependencies[name]
+                .as_inline_table()
+                .expect("inline dependency");
+            assert_eq!(
+                dependency.get("rev").and_then(toml_edit::Value::as_str),
+                Some("12c63307")
+            );
+        }
+        assert_eq!(
+            dependencies["roze-rpc"]
+                .as_inline_table()
+                .and_then(|dependency| dependency.get("features"))
+                .and_then(toml_edit::Value::as_array)
+                .map(toml_edit::Array::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -14570,14 +14672,11 @@ veil = { version = "0.3.0", default-features = false }
         assert!(cargo.contains(r#"anyhow = "1""#));
         assert!(cargo.contains(r#"tokio = { version = "1""#));
         assert!(cargo.contains(r#"veil = { version = "0.3.0", default-features = false }"#));
-        assert!(cargo.contains(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#));
-        assert_eq!(
-            cargo
-                .matches(r#"roze-grpc = { git = "https://github.com/roze-team/roze.git" }"#)
-                .count(),
-            2
-        );
-        assert!(!cargo.contains("rev ="));
+        let expected =
+            format!(r#"roze-grpc = {{ git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}" }}"#);
+        assert!(cargo.contains(&expected));
+        assert_eq!(cargo.matches(&expected).count(), 2);
+        assert!(cargo.contains("rev ="));
         assert!(!cargo.contains(".workspace = true"));
     }
 
@@ -15989,9 +16088,10 @@ veil = { version = "0.3.0", default-features = false }
         }
 
         let updated = fs::read_to_string(&manifest_path).expect("read updated manifest");
-        assert_eq!(updated, customized);
+        assert_ne!(updated, customized);
         assert!(updated.contains("allocation-rpc"));
         assert!(updated.contains("roze-context"));
+        assert!(updated.contains(&format!(r#"rev = "{ROZE_GIT_REV}""#)));
         assert!(updated.contains("application-test-support"));
         assert!(updated.contains(r#"features = ["rdkafka-cmake"]"#));
 

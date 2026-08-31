@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added an adaptive persistent-outbox relay loop with in-process enqueue
+  notifications, bounded one-to-five-second idle backoff, and immediate backlog
+  draining; SQL and in-memory stores expose the same wakeup contract.
+- Pinned newly generated Git-based `roze-*` dependencies to one Roze commit and
+  made `--update` propagate a single existing Git pin without disturbing Cargo
+  features or repeated-generation stability.
+- Disabled full SQL statement logging by default; opt-in SQL logs use DEBUG for
+  ordinary statements and configurable WARN-level slow-query reporting.
+- Added dependency-and-method-isolated outbound RPC circuit breakers with
+  serialized half-open probes and propagated `Retry-After` metadata/headers for
+  RPC and REST circuit-open responses.
 - Integrated the `roze-ent` SeaORM generator fixes through upstream revision
   `d5a9092e8cea8c215e4042c9636ae198f16879d8`: portable case-insensitive and
   literal wildcard-safe predicates, key-preserving SQLite create/upsert reloads

@@ -3964,6 +3964,7 @@ name = "roze-db"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "log",
  "roze-config",
  "roze-metrics",
  "sea-orm",

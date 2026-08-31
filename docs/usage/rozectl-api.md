@@ -1,5 +1,13 @@
 # rozectl generator
 
+New Git-based `roze-*` dependencies are pinned to the Roze revision used to
+build `rozectl`. During `--update`, a single existing `rev`, `tag`, or `branch`
+on the canonical Roze Git URL remains authoritative and is propagated to the
+other Roze dependencies while preserving Cargo features. This repairs projects
+that previously mixed floating Roze Git dependencies with one pinned crate and
+keeps repeated IDL generation reproducible. Conflicting pins still fail closed;
+workspace/path generation remains unchanged.
+
 The model generator's ent capability definition and remaining release blockers
 are tracked in [Roze Model / ent Capability Parity](../model-ent-parity.md).
 
@@ -735,8 +743,11 @@ store. `ServiceContext::sql_outbox()` exposes the concrete adapter for
 `TransactionalOutbox<sea_orm::DatabaseTransaction>`, so business writes and
 outbox messages can commit atomically. The same store implements
 `TransactionalOutbox<toasty::Transaction>` for Toasty repositories.
-`relay_outbox_batch` accepts concrete or `dyn roze_mq::Publisher` values,
-publishes claimed messages after commit, and records retry/dead-letter state.
+`run_outbox_relay` accepts concrete or `dyn roze_mq::Publisher` values, wakes on
+local enqueue notifications, backs empty polls off between `interval_ms` and
+`max_idle_interval_ms`, and drains non-empty batches without delay. Its
+`relay_outbox_batch` primitive publishes claimed messages after commit and
+records retry/dead-letter state.
 
 Generated REST services expose standard operational endpoints:
 

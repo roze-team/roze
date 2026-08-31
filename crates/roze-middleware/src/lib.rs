@@ -814,7 +814,7 @@ pub fn begin_route(
     )
     .to_string();
     let breaker_permit = match policy.breaker {
-        Some(_) => match route_breaker_allow(&key) {
+        Some(config) => match route_breaker_allow(&key) {
             BreakerDecision::Allow(permit) => {
                 roze_metrics::record_resilience_decision(
                     service.as_str(),
@@ -835,7 +835,11 @@ pub fn begin_route(
                     "breaker",
                     "open",
                 );
-                return Err(RozeError::Unavailable("circuit open".to_string()));
+                let retry_after = ROUTE_BREAKERS
+                    .get_or_init(BreakerRegistry::new)
+                    .retry_after(&key)
+                    .unwrap_or(config.reset_timeout);
+                return Err(circuit_open_error(retry_after));
             }
         },
         None => None,
@@ -1004,6 +1008,10 @@ pub async fn enforce_route_rate_limit(
 
 fn route_breaker_allow(key: &str) -> BreakerDecision {
     ROUTE_BREAKERS.get_or_init(BreakerRegistry::new).allow(key)
+}
+
+fn circuit_open_error(retry_after: Duration) -> RozeError {
+    RozeError::unavailable_with_retry_after("circuit open", retry_after)
 }
 
 fn route_breaker_record(
@@ -2617,7 +2625,12 @@ mod tests {
             Context::background(),
             Some(&governance),
         );
-        assert!(matches!(next, Err(RozeError::Unavailable(message)) if message == "circuit open"));
+        let error = match next {
+            Err(error) => error,
+            Ok(_) => panic!("open breaker should reject request"),
+        };
+        assert_eq!(error.message(), "circuit open");
+        assert_eq!(error.retry_after_seconds(), Some(60));
     }
 
     #[test]
@@ -2662,9 +2675,12 @@ mod tests {
             Context::background(),
             Some(&governance),
         );
-        assert!(
-            matches!(protected, Err(RozeError::Unavailable(message)) if message == "circuit open")
-        );
+        let error = match protected {
+            Err(error) => error,
+            Ok(_) => panic!("half-open breaker should serialize probes"),
+        };
+        assert_eq!(error.message(), "circuit open");
+        assert_eq!(error.retry_after_seconds(), Some(1));
 
         std::thread::sleep(Duration::from_millis(2));
         let (_ctx, successful_probe) = begin_route(
@@ -2682,9 +2698,12 @@ mod tests {
             Context::background(),
             Some(&governance),
         );
-        assert!(
-            matches!(concurrent, Err(RozeError::Unavailable(message)) if message == "circuit open")
-        );
+        let error = match concurrent {
+            Err(error) => error,
+            Ok(_) => panic!("half-open breaker should serialize probes"),
+        };
+        assert_eq!(error.message(), "circuit open");
+        assert_eq!(error.retry_after_seconds(), Some(1));
         finish_route(successful_probe, true, "200");
 
         let recovered = begin_route(

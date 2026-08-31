@@ -169,6 +169,7 @@ filter instead of silently reusing it.
 - `OutboxMessage::with_context`：入 outbox 时固化当前 Context propagation headers。
 - `InMemoryOutbox`：框架内置内存 outbox，适合本地开发、测试和上层持久化实现的契约参考。
 - `relay_outbox_batch`：读取 pending/failed 消息并发布到任意 `roze_mq::Publisher`，包括 `NatsJetStream`。
+- `run_outbox_relay`：本地入队通过 `Notify` 唤醒，空队列在 1–5 秒之间自适应退避，有积压时连续拉取；跨进程写入仍由有上限的轮询兜底。
 - 发布成功：标记 `Published`。
 - 发布失败：标记 `Failed`，并按指数退避写入 `next_attempt_millis`。
 

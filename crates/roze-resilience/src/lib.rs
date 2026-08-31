@@ -480,6 +480,18 @@ impl BreakerRegistry {
         })
     }
 
+    pub fn retry_after(&self, key: &str) -> Option<Duration> {
+        let state = self.states.get(key)?;
+        match state.phase {
+            BreakerPhase::Open => state
+                .open_until
+                .map(|until| until.saturating_duration_since(Instant::now()))
+                .map(|duration| duration.max(Duration::from_millis(1))),
+            BreakerPhase::HalfOpen => Some(Duration::from_secs(1)),
+            BreakerPhase::Closed => None,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.states.len()
     }

@@ -163,11 +163,33 @@ impl RozeError {
         }
     }
 
+    pub fn unavailable_with_retry_after(
+        message: impl Into<String>,
+        retry_after: std::time::Duration,
+    ) -> Self {
+        let retry_after_seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+        Self::Fallback {
+            status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            body: Some(serde_json::json!({
+                "code": 503,
+                "msg": message.into(),
+                "data": null,
+            })),
+            headers: BTreeMap::from([(
+                "retry-after".to_string(),
+                retry_after_seconds.max(1).to_string(),
+            )]),
+        }
+    }
+
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
             Self::RateLimited {
                 retry_after_seconds,
             } => Some(*retry_after_seconds),
+            Self::Fallback { headers, .. } => headers
+                .get("retry-after")
+                .and_then(|value| value.parse().ok()),
             _ => None,
         }
     }

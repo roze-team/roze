@@ -31,7 +31,14 @@ outbox:
   migrate: true
   batch_size: 100
   interval_ms: 1000
+  max_idle_interval_ms: 5000
 ```
+
+Relay workers should use `roze_transaction::run_outbox_relay`. A successful
+local enqueue wakes the worker through `tokio::sync::Notify`; empty polls back
+off from `interval_ms` to `max_idle_interval_ms`, while non-empty batches are
+drained immediately. The bounded poll remains authoritative for messages
+inserted by other processes or notifications missed around transaction commit.
 
 `auto` selects SQL when a database is configured. `sql` requires a database.
 An enabled memory store is rejected in the production profile and produces a

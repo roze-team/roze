@@ -37,6 +37,7 @@ use tracing::info;
 
 static METHOD_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 static METHOD_SHEDDERS: OnceLock<SheddingRegistry> = OnceLock::new();
+static CLIENT_BREAKERS: OnceLock<BreakerRegistry> = OnceLock::new();
 static CLIENT_RETRY_BUDGETS: OnceLock<RetryBudgetRegistry> = OnceLock::new();
 static RPC_ENDPOINT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
@@ -1101,7 +1102,18 @@ pub fn error_from_status(status: &Status) -> RozeError {
         Code::NotFound => RozeError::NotFound(status.message().to_string()),
         Code::AlreadyExists | Code::Aborted => RozeError::Conflict(status.message().to_string()),
         Code::FailedPrecondition => RozeError::FailedPrecondition(status.message().to_string()),
-        Code::Unavailable => RozeError::Unavailable(status.message().to_string()),
+        Code::Unavailable => {
+            if let Some(retry_after) = metadata_value(status.metadata(), RETRY_AFTER_METADATA)
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                RozeError::unavailable_with_retry_after(
+                    status.message(),
+                    Duration::from_secs(retry_after.max(1)),
+                )
+            } else {
+                RozeError::Unavailable(status.message().to_string())
+            }
+        }
         _ => RozeError::Internal(status.message().to_string()),
     }
 }
@@ -1264,6 +1276,7 @@ pub struct MethodRetryPolicy {
     pub backoff: Duration,
     pub max_backoff: Duration,
     pub budget_percent: Option<u32>,
+    pub breaker: Option<MethodBreakerConfig>,
 }
 
 #[derive(Debug)]
@@ -1380,19 +1393,36 @@ pub fn retry_policy_for_method(
     governance: Option<&roze_config::GovernanceConfig>,
     method: &str,
 ) -> MethodRetryPolicy {
+    let mut policy = MethodRetryPolicy::from_options(options);
     let Some(governance) = governance else {
-        return MethodRetryPolicy::from_options(options);
+        return policy;
     };
-    let retry = governance.resolve_policy(method).retry;
-    match retry {
-        Some(retry) => MethodRetryPolicy {
+    let resolved = governance.resolve_policy(method);
+    if let Some(retry) = resolved.retry {
+        policy = MethodRetryPolicy {
             max_retries: retry.max_attempts.saturating_sub(1) as usize,
             backoff: retry.backoff,
             max_backoff: retry.max_backoff,
             budget_percent: retry.budget_percent,
-        },
-        None => MethodRetryPolicy::from_options(options),
+            breaker: policy.breaker,
+        };
     }
+    policy.breaker = options.breaker.then(|| {
+        resolved.breaker.map_or_else(
+            || {
+                let breaker = roze_config::BreakerConfig::default();
+                MethodBreakerConfig {
+                    failure_threshold: breaker.failure_threshold,
+                    reset_timeout: Duration::from_millis(breaker.reset_timeout_ms),
+                }
+            },
+            |breaker| MethodBreakerConfig {
+                failure_threshold: breaker.failure_threshold,
+                reset_timeout: breaker.reset_timeout,
+            },
+        )
+    });
+    policy
 }
 
 impl MethodRetryPolicy {
@@ -1402,6 +1432,13 @@ impl MethodRetryPolicy {
             backoff: options.retry_backoff,
             max_backoff: options.retry_max_backoff,
             budget_percent: None,
+            breaker: options.breaker.then(|| {
+                let breaker = roze_config::BreakerConfig::default();
+                MethodBreakerConfig {
+                    failure_threshold: breaker.failure_threshold,
+                    reset_timeout: Duration::from_millis(breaker.reset_timeout_ms),
+                }
+            }),
         }
     }
 }
@@ -1429,7 +1466,7 @@ pub fn begin_method(
     );
     let key = OperationKey::new(&service, GovernanceBoundary::Rpc, &method).to_string();
     let breaker_permit = match policy.breaker {
-        Some(_) => match method_breaker_allow(&key) {
+        Some(config) => match method_breaker_allow(&key) {
             BreakerDecision::Allow(permit) => {
                 record_resilience_decision(
                     service.as_str(),
@@ -1445,7 +1482,11 @@ pub fn begin_method(
             }
             BreakerDecision::Reject => {
                 record_resilience_decision(service.as_str(), "rpc", "breaker", "open");
-                return Err(Status::unavailable("circuit open"));
+                let retry_after = METHOD_BREAKERS
+                    .get_or_init(BreakerRegistry::new)
+                    .retry_after(&key)
+                    .unwrap_or(config.reset_timeout);
+                return Err(circuit_open_status(retry_after));
             }
         },
         None => None,
@@ -1579,6 +1620,32 @@ where
     Fut: std::future::Future<Output = Result<T, Status>>,
 {
     let budget_key = OperationKey::new(service, GovernanceBoundary::Rpc, method).to_string();
+    let mut breaker_guard = match policy.breaker {
+        Some(config) => {
+            let registry = CLIENT_BREAKERS.get_or_init(BreakerRegistry::new);
+            match registry.allow(&budget_key) {
+                BreakerDecision::Allow(permit) => {
+                    record_resilience_decision(
+                        service,
+                        "rpc",
+                        "breaker",
+                        if permit == BreakerPermit::Probe {
+                            "half_open_probe"
+                        } else {
+                            "allowed"
+                        },
+                    );
+                    Some(ClientBreakerGuard::new(budget_key.clone(), config, permit))
+                }
+                BreakerDecision::Reject => {
+                    record_resilience_decision(service, "rpc", "breaker", "open");
+                    let retry_after = client_breaker_retry_after(registry, &budget_key, config);
+                    return Err(circuit_open_status(retry_after));
+                }
+            }
+        }
+        None => None,
+    };
     context.ensure_retry_budget(policy.max_retries);
     tracing::debug!(
         protocol = "rpc",
@@ -1596,7 +1663,7 @@ where
         .get_or_init(RetryBudgetRegistry::default)
         .record_call(&budget_key);
     let mut attempt = 0usize;
-    loop {
+    let result = loop {
         tracing::debug!(
             protocol = "rpc",
             service,
@@ -1615,7 +1682,7 @@ where
                     outcome = "success",
                     "RPC attempt completed"
                 );
-                return Ok(value);
+                break Ok(value);
             }
             Err(status) if attempt < policy.max_retries && should_retry_status(&status) => {
                 tracing::debug!(protocol = "rpc", service, method, attempt = attempt + 1, code = ?status.code(), outcome = "retryable", "RPC attempt completed");
@@ -1631,7 +1698,7 @@ where
                         "RPC retry stopped"
                     );
                     record_resilience_decision(service, "rpc", "retry", "budget_exhausted");
-                    return Err(status);
+                    break Err(status);
                 }
                 let next_attempt = attempt + 1;
                 let delay = full_jitter_delay(policy.backoff, policy.max_backoff, next_attempt);
@@ -1657,7 +1724,7 @@ where
                             "deadline_exhausted"
                         },
                     );
-                    return Err(status);
+                    break Err(status);
                 }
                 if !delay.is_zero() {
                     sleep(delay).await;
@@ -1674,7 +1741,7 @@ where
                             "deadline_exhausted"
                         },
                     );
-                    return Err(status);
+                    break Err(status);
                 }
                 if !context.try_consume_retry_budget() {
                     tracing::debug!(
@@ -1685,17 +1752,112 @@ where
                         "RPC retry stopped by propagated request budget"
                     );
                     record_resilience_decision(service, "rpc", "retry", "request_budget_exhausted");
-                    return Err(status);
+                    break Err(status);
                 }
                 attempt = next_attempt;
                 record_resilience_decision(service, "rpc", "retry", "attempt");
             }
             Err(status) => {
                 tracing::debug!(protocol = "rpc", service, method, attempt = attempt + 1, code = ?status.code(), outcome = "failed", "RPC attempt completed without retry");
-                return Err(status);
+                break Err(status);
             }
         }
+    };
+    if let Some(guard) = breaker_guard.as_mut() {
+        guard.finish(&result);
     }
+    result
+}
+
+struct ClientBreakerGuard {
+    key: String,
+    config: MethodBreakerConfig,
+    permit: BreakerPermit,
+    finished: bool,
+}
+
+impl ClientBreakerGuard {
+    fn new(key: String, config: MethodBreakerConfig, permit: BreakerPermit) -> Self {
+        Self {
+            key,
+            config,
+            permit,
+            finished: false,
+        }
+    }
+
+    fn finish<T>(&mut self, result: &Result<T, Status>) {
+        let registry = CLIENT_BREAKERS.get_or_init(BreakerRegistry::new);
+        match result {
+            Ok(_) => registry.record_success(&self.key, self.permit),
+            Err(status) if status.code() == Code::Cancelled => registry.cancel(
+                &self.key,
+                self.permit,
+                resilience_breaker_config(self.config),
+            ),
+            Err(status) if status_counts_as_breaker_failure(status) => registry.record_failure(
+                &self.key,
+                self.permit,
+                resilience_breaker_config(self.config),
+            ),
+            Err(_) => registry.record_success(&self.key, self.permit),
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for ClientBreakerGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            CLIENT_BREAKERS.get_or_init(BreakerRegistry::new).cancel(
+                &self.key,
+                self.permit,
+                resilience_breaker_config(self.config),
+            );
+        }
+    }
+}
+
+fn resilience_breaker_config(config: MethodBreakerConfig) -> roze_resilience::BreakerConfig {
+    roze_resilience::BreakerConfig {
+        failure_threshold: config.failure_threshold,
+        reset_timeout: config.reset_timeout,
+    }
+}
+
+fn status_counts_as_breaker_failure(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        Code::Unavailable
+            | Code::DeadlineExceeded
+            | Code::Internal
+            | Code::Unknown
+            | Code::DataLoss
+    )
+}
+
+fn client_breaker_retry_after(
+    registry: &BreakerRegistry,
+    key: &str,
+    config: MethodBreakerConfig,
+) -> Duration {
+    registry.retry_after(key).unwrap_or(config.reset_timeout)
+}
+
+fn circuit_open_status(retry_after: Duration) -> Status {
+    let mut metadata = MetadataMap::new();
+    insert_metadata(&mut metadata, ERROR_CODE_METADATA, "503");
+    insert_metadata(&mut metadata, ERROR_KIND_METADATA, "unavailable");
+    insert_metadata(
+        &mut metadata,
+        RETRY_AFTER_METADATA,
+        &duration_seconds_ceil(retry_after).to_string(),
+    );
+    Status::with_metadata(Code::Unavailable, "circuit open", metadata)
+}
+
+fn duration_seconds_ceil(duration: Duration) -> u64 {
+    (duration.as_secs() + u64::from(duration.subsec_nanos() > 0)).max(1)
 }
 
 fn retry_context_status(context: &Context, delay: Duration) -> Option<Status> {
@@ -2288,6 +2450,155 @@ mod tests {
         assert_eq!(error.code(), Code::Unavailable);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(context.retry_budget_remaining(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn client_breakers_are_isolated_by_dependency_and_export_retry_after() {
+        let method = format!("DependencyBreaker{}", std::process::id());
+        let failing_service = format!("captcha-config-{}", std::process::id());
+        let healthy_service = format!("merchant-profile-{}", std::process::id());
+        let mut governance = roze_config::GovernanceConfig::default();
+        governance.routes.insert(
+            method.clone(),
+            roze_config::RouteGovernanceConfig {
+                retry: Some(roze_config::RetryConfig {
+                    max_attempts: 1,
+                    backoff_ms: 0,
+                    max_backoff_ms: 0,
+                    budget_percent: None,
+                }),
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 60_000,
+                }),
+                ..Default::default()
+            },
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_attempts = Arc::clone(&attempts);
+
+        retry_status_for_method(
+            &failing_service,
+            &Context::background(),
+            move || {
+                let attempts = Arc::clone(&first_attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(Status::unavailable("dependency down"))
+                }
+            },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect_err("first failure should open dependency breaker");
+
+        let rejected_attempts = Arc::clone(&attempts);
+        let rejected = retry_status_for_method(
+            &failing_service,
+            &Context::background(),
+            move || {
+                let attempts = Arc::clone(&rejected_attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), Status>(())
+                }
+            },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect_err("open dependency breaker should reject without calling upstream");
+
+        assert_eq!(rejected.code(), Code::Unavailable);
+        assert_eq!(rejected.message(), "circuit open");
+        assert_eq!(
+            metadata_value(rejected.metadata(), RETRY_AFTER_METADATA),
+            Some("60")
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        let healthy = retry_status_for_method(
+            &healthy_service,
+            &Context::background(),
+            || async { Ok::<_, Status>("ok") },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect("another dependency must retain an independent breaker");
+        assert_eq!(healthy, "ok");
+
+        let error = error_from_status(&rejected);
+        assert_eq!(error.message(), "circuit open");
+        assert_eq!(error.retry_after_seconds(), Some(60));
+    }
+
+    #[tokio::test]
+    async fn cancelled_client_half_open_probe_reopens_breaker() {
+        let method = format!("CancelledClientProbe{}", std::process::id());
+        let service = format!("cancelled-probe-{}", std::process::id());
+        let mut governance = roze_config::GovernanceConfig::default();
+        governance.routes.insert(
+            method.clone(),
+            roze_config::RouteGovernanceConfig {
+                retry: Some(roze_config::RetryConfig {
+                    max_attempts: 1,
+                    backoff_ms: 0,
+                    max_backoff_ms: 0,
+                    budget_percent: None,
+                }),
+                breaker: Some(roze_config::BreakerConfig {
+                    failure_threshold: 1,
+                    reset_timeout_ms: 1,
+                }),
+                ..Default::default()
+            },
+        );
+
+        retry_status_for_method(
+            &service,
+            &Context::background(),
+            || async { Err::<(), _>(Status::unavailable("dependency down")) },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect_err("initial failure should open breaker");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+
+        let cancelled = retry_status_for_method(
+            &service,
+            &Context::background(),
+            || async { Err::<(), _>(Status::cancelled("probe cancelled")) },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect_err("half-open probe should surface cancellation");
+        assert_eq!(cancelled.code(), Code::Cancelled);
+
+        let rejected = retry_status_for_method(
+            &service,
+            &Context::background(),
+            || async { Ok::<(), Status>(()) },
+            RpcClientOptions::default(),
+            Some(&governance),
+            &method,
+        )
+        .await
+        .expect_err("cancelled half-open probe should reopen breaker");
+        assert_eq!(rejected.code(), Code::Unavailable);
+        assert_eq!(rejected.message(), "circuit open");
+        assert_eq!(
+            metadata_value(rejected.metadata(), RETRY_AFTER_METADATA),
+            Some("1")
+        );
     }
 
     #[tokio::test]

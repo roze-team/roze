@@ -7,6 +7,7 @@ use super::{
     find_workspace_root, inherited_roze_dependency, local_crates_prefix, plan::GenerationPlan,
     rust_identifier, sync_managed_service_if_present, to_pascal_case, to_snake_case,
     validate_roze_dependency_sources, DependencySource, GenerateMode, GenerateOptions,
+    ROZE_GIT_REV, ROZE_GIT_URL,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,8 +929,10 @@ fn update_search_dependencies(
             item
         } else {
             match source {
-                DependencySource::Git => r#"{ git = "https://github.com/roze-team/roze.git" }"#
-                    .parse::<toml_edit::Item>()?,
+                DependencySource::Git => {
+                    format!(r#"{{ git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}" }}"#)
+                        .parse::<toml_edit::Item>()?
+                }
                 DependencySource::Path => {
                     let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
                     anyhow::anyhow!(

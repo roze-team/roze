@@ -130,6 +130,13 @@ cancelled probe also reopens the breaker for another reset interval without
 incrementing the failure count. Completion carries its original permit, so a
 stale request that started while closed cannot close a newer open state.
 
+Breaker state is isolated by the normalized service and route/method operation
+key. Rejections include the remaining open interval: REST uses an integer
+`Retry-After` header and RPC uses `retry-after` response metadata. Applications
+serving slowly changing public configuration can combine this with
+`roze-cache::CacheConsistencyPolicy { stale_on_error: true, .. }` to return a
+bounded last-known-good value while the dependency recovers.
+
 ## Adaptive Shedding
 
 `shedding` combines a hard concurrency limit with a 50-bucket rolling health

@@ -29,7 +29,15 @@ database:
   policy: round-robin
   max_connections: 20
   min_connections: 2
+  sqlx_logging: false
+  slow_query_threshold_ms: 1000
 ```
+
+SQL statement logging is quiet by default. When `sqlx_logging` is enabled,
+ordinary statements are emitted at `DEBUG`; statements slower than
+`slow_query_threshold_ms` are emitted at `WARN`. Production `INFO` logs should
+record bounded operation summaries, duration, and affected-row counts rather
+than full SQL text.
 
 Native sharding uses one named topology. Shard IDs are stable operational
 identifiers and are sorted before routing, so reordering YAML does not remap

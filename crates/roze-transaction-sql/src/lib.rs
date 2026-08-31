@@ -13,6 +13,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbBackend,
     QueryResult, Statement, TransactionTrait, Value,
 };
+use tokio::sync::Notify;
 
 pub const POSTGRES_MIGRATION: &str = include_str!("../migrations/postgres/001_roze_outbox.sql");
 pub const MYSQL_MIGRATION: &str = include_str!("../migrations/mysql/001_roze_outbox.sql");
@@ -40,6 +41,7 @@ pub struct SqlOutboxStore {
     database: DatabaseConnection,
     backend: DbBackend,
     config: Arc<SqlOutboxConfig>,
+    notifier: Arc<Notify>,
 }
 
 impl std::fmt::Debug for SqlOutboxStore {
@@ -73,6 +75,7 @@ impl SqlOutboxStore {
             database,
             backend,
             config: Arc::new(config),
+            notifier: Arc::new(Notify::new()),
         })
     }
 
@@ -124,6 +127,7 @@ impl SqlOutboxStore {
             .await?;
         if result.rows_affected() > 0 {
             roze_metrics::record_outbox_event(driver_name(self.backend), "replayed");
+            self.notifier.notify_one();
         }
         Ok(result.rows_affected() > 0)
     }
@@ -179,6 +183,9 @@ impl SqlOutboxStore {
             driver_name(self.backend),
             if inserted { "enqueued" } else { "duplicate" },
         );
+        if inserted {
+            self.notifier.notify_one();
+        }
         Ok(inserted)
     }
 
@@ -234,6 +241,9 @@ impl SqlOutboxStore {
                 driver_name(self.backend),
                 if inserted { "enqueued" } else { "duplicate" },
             );
+            if inserted {
+                self.notifier.notify_one();
+            }
         }
         Ok(())
     }
@@ -241,6 +251,10 @@ impl SqlOutboxStore {
 
 #[async_trait]
 impl OutboxStore for SqlOutboxStore {
+    fn notifier(&self) -> Option<Arc<Notify>> {
+        Some(self.notifier.clone())
+    }
+
     async fn enqueue(&self, message: OutboxMessage) -> Result<bool> {
         self.enqueue_on(&self.database, &message).await
     }

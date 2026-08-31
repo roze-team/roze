@@ -19,6 +19,7 @@ fn database_config(url: String) -> roze_db::DatabaseConfig {
         connect_timeout_secs: 10,
         idle_timeout_secs: 30,
         sqlx_logging: false,
+        slow_query_threshold_ms: 1_000,
     }
 }
 

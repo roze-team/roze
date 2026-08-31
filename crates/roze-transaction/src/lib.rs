@@ -3,11 +3,13 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 
@@ -219,6 +221,15 @@ impl OutboxMessage {
 
 #[async_trait]
 pub trait OutboxStore: std::fmt::Debug + Send + Sync + 'static {
+    /// Returns an in-process wakeup signal for relay workers.
+    ///
+    /// Durable stores remain authoritative: notifications are only a latency
+    /// optimization, and relay workers still poll with a bounded idle backoff
+    /// to discover messages committed by other processes.
+    fn notifier(&self) -> Option<Arc<Notify>> {
+        None
+    }
+
     async fn enqueue(&self, message: OutboxMessage) -> Result<bool>;
     async fn get(&self, id: &str) -> Result<Option<OutboxMessage>>;
     async fn claim_pending(
@@ -251,6 +262,7 @@ where
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryOutbox {
     messages: Arc<Mutex<BTreeMap<String, OutboxMessage>>>,
+    notifier: Arc<Notify>,
 }
 
 impl InMemoryOutbox {
@@ -261,13 +273,21 @@ impl InMemoryOutbox {
 
 #[async_trait]
 impl OutboxStore for InMemoryOutbox {
+    fn notifier(&self) -> Option<Arc<Notify>> {
+        Some(self.notifier.clone())
+    }
+
     async fn enqueue(&self, message: OutboxMessage) -> Result<bool> {
-        Ok(self
+        let inserted = self
             .messages
             .lock()
             .expect("outbox lock poisoned")
             .insert(message.id.clone(), message)
-            .is_none())
+            .is_none();
+        if inserted {
+            self.notifier.notify_one();
+        }
+        Ok(inserted)
     }
 
     async fn get(&self, id: &str) -> Result<Option<OutboxMessage>> {
@@ -356,6 +376,23 @@ pub struct OutboxRelayConfig {
     pub max_backoff_millis: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxRelayLoopConfig {
+    pub relay: OutboxRelayConfig,
+    pub idle_backoff_min: Duration,
+    pub idle_backoff_max: Duration,
+}
+
+impl Default for OutboxRelayLoopConfig {
+    fn default() -> Self {
+        Self {
+            relay: OutboxRelayConfig::default(),
+            idle_backoff_min: Duration::from_secs(1),
+            idle_backoff_max: Duration::from_secs(5),
+        }
+    }
+}
+
 impl Default for OutboxRelayConfig {
     fn default() -> Self {
         Self {
@@ -398,6 +435,77 @@ where
         }
     }
     Ok(report)
+}
+
+/// Relays outbox messages until the shutdown future resolves.
+///
+/// The worker drains consecutive batches without sleeping while work exists.
+/// Empty polls back off from one to five seconds by default, and a local
+/// enqueue notification interrupts that wait. The bounded poll remains
+/// necessary for cross-process inserts and missed notifications.
+pub async fn run_outbox_relay<S, P, F>(
+    outbox: &S,
+    publisher: &P,
+    config: OutboxRelayLoopConfig,
+    shutdown: F,
+) -> Result<()>
+where
+    S: OutboxStore + ?Sized,
+    P: roze_mq::Publisher + ?Sized,
+    F: Future<Output = ()>,
+{
+    let min_idle = config.idle_backoff_min.max(Duration::from_millis(1));
+    let max_idle = config.idle_backoff_max.max(min_idle);
+    let notifier = outbox.notifier();
+    let mut idle_delay = min_idle;
+    tokio::pin!(shutdown);
+
+    loop {
+        let report =
+            relay_outbox_batch(outbox, publisher, unix_time_millis(), config.relay).await?;
+        if report.published > 0 || report.failed > 0 {
+            idle_delay = min_idle;
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return Ok(()),
+                _ = tokio::task::yield_now() => {}
+            }
+            continue;
+        }
+
+        let sleep = tokio::time::sleep(idle_delay);
+        tokio::pin!(sleep);
+        match notifier.as_ref() {
+            Some(notifier) => {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => return Ok(()),
+                    _ = notifier.notified() => {}
+                    _ = &mut sleep => {}
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown => return Ok(()),
+                    _ = &mut sleep => {}
+                }
+            }
+        }
+        idle_delay = next_idle_delay(idle_delay, max_idle);
+    }
+}
+
+fn next_idle_delay(current: Duration, maximum: Duration) -> Duration {
+    current.saturating_mul(2).min(maximum)
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn next_attempt_millis(now_millis: u64, attempts: u32, config: OutboxRelayConfig) -> u64 {
@@ -767,6 +875,42 @@ mod tests {
         assert_eq!(restored.idempotency_key().as_deref(), Some("order-1"));
         assert_eq!(restored.retry_budget_remaining(), Some(2));
         assert!(restored.remaining_timeout().is_some());
+    }
+
+    #[tokio::test]
+    async fn outbox_enqueue_wakes_a_waiting_relay() {
+        let outbox = InMemoryOutbox::new();
+        let notifier = outbox.notifier().expect("in-memory notifier");
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+
+        outbox
+            .enqueue(OutboxMessage::new(
+                "wake-1",
+                "orders",
+                "wake-1",
+                serde_json::json!({"id": 1}),
+            ))
+            .await
+            .expect("enqueue");
+
+        tokio::time::timeout(Duration::from_millis(100), &mut notified)
+            .await
+            .expect("relay wakeup");
+    }
+
+    #[test]
+    fn outbox_idle_backoff_is_bounded() {
+        let maximum = Duration::from_secs(5);
+        assert_eq!(
+            next_idle_delay(Duration::from_secs(1), maximum),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_idle_delay(Duration::from_secs(4), maximum),
+            Duration::from_secs(5)
+        );
+        assert_eq!(next_idle_delay(maximum, maximum), maximum);
     }
 
     #[tokio::test]

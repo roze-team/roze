@@ -268,6 +268,23 @@ impl ServiceConfig {
                 "cache.cluster_urls cannot contain empty seed URLs"
             );
         }
+        if let Some(database) = &self.database {
+            anyhow::ensure!(
+                database.slow_query_threshold_ms > 0,
+                "database.slow_query_threshold_ms must be greater than zero"
+            );
+        }
+        if let Some(outbox) = self.outbox.as_ref().filter(|outbox| outbox.enabled) {
+            anyhow::ensure!(outbox.batch_size > 0, "outbox.batch_size must be positive");
+            anyhow::ensure!(
+                outbox.interval_ms > 0,
+                "outbox.interval_ms must be positive"
+            );
+            anyhow::ensure!(
+                outbox.max_idle_interval_ms >= outbox.interval_ms,
+                "outbox.max_idle_interval_ms must be greater than or equal to outbox.interval_ms"
+            );
+        }
         if self.rpc.is_some() && self.rest.is_none() {
             let rpc_uses_client_ip = self
                 .governance
@@ -679,6 +696,8 @@ pub struct OutboxConfig {
     pub batch_size: usize,
     #[serde(default = "default_outbox_interval_ms")]
     pub interval_ms: u64,
+    #[serde(default = "default_outbox_max_idle_interval_ms")]
+    pub max_idle_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1368,6 +1387,8 @@ pub struct DatabaseConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_sqlx_logging")]
     pub sqlx_logging: bool,
+    #[serde(default = "default_slow_query_threshold_ms")]
+    pub slow_query_threshold_ms: u64,
 }
 
 impl fmt::Debug for DatabaseConfig {
@@ -1397,6 +1418,7 @@ impl fmt::Debug for DatabaseConfig {
             .field("connect_timeout_secs", &self.connect_timeout_secs)
             .field("idle_timeout_secs", &self.idle_timeout_secs)
             .field("sqlx_logging", &self.sqlx_logging)
+            .field("slow_query_threshold_ms", &self.slow_query_threshold_ms)
             .finish()
     }
 }
@@ -1934,7 +1956,11 @@ fn default_idle_timeout_secs() -> u64 {
 }
 
 fn default_sqlx_logging() -> bool {
-    true
+    false
+}
+
+fn default_slow_query_threshold_ms() -> u64 {
+    1_000
 }
 
 fn default_retry_max_attempts() -> u32 {
@@ -1963,6 +1989,10 @@ fn default_outbox_batch_size() -> usize {
 
 fn default_outbox_interval_ms() -> u64 {
     1_000
+}
+
+fn default_outbox_max_idle_interval_ms() -> u64 {
+    5_000
 }
 
 fn default_outbox_table() -> String {
@@ -3536,6 +3566,7 @@ interval_ms = 500
         assert!(outbox.enabled);
         assert_eq!(outbox.batch_size, 50);
         assert_eq!(outbox.interval_ms, 500);
+        assert_eq!(outbox.max_idle_interval_ms, 5_000);
     }
 
     #[test]
