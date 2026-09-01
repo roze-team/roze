@@ -15,34 +15,27 @@ use crate::generator::{
     validate_roze_dependency_sources, DependencySource, GenerateMode, GenerateOptions,
 };
 
-const MONGO_MODEL_MARKER: &str = "// @roze-model-backend: mongo";
-
 pub use roze_ent::{
     model_graph, normalize_model_source_to_ent, parse_models, parse_models_with_format,
-    validate_model_graph, ExtensionFileOwnership, InspectDatabaseKind, ModelAnnotation, ModelEdge,
-    ModelExtensionFile, ModelField, ModelFieldValidation, ModelFormat, ModelGenerationGraph,
-    ModelGeneratorExtension, ModelIndex, ModelOrm, ModelSpec, ModelThroughEdge,
-    MODEL_GENERATOR_EXTENSION_API_VERSION,
+    validate_model_graph, ExtensionFileOwnership, InspectDatabaseKind, ModelAnnotation,
+    ModelBackend, ModelEdge, ModelExtensionFile, ModelField, ModelFieldValidation, ModelFormat,
+    ModelGenerationGraph, ModelGeneratorExtension, ModelIndex, ModelOrm, ModelProjectRequirements,
+    ModelSpec, ModelThroughEdge, RuntimeCapability, MODEL_GENERATOR_EXTENSION_API_VERSION,
+    MODEL_PROJECT_REQUIREMENTS_API_VERSION,
 };
 
 struct RozectlHost {
     dependency: roze_ent::RozeDependency,
     logical_out: PathBuf,
     dependency_source: DependencySource,
-    mongo: bool,
 }
 
 impl RozectlHost {
-    fn current(
-        logical_out: &Path,
-        dependency_source: DependencySource,
-        mongo: bool,
-    ) -> anyhow::Result<Self> {
+    fn current(logical_out: &Path, dependency_source: DependencySource) -> anyhow::Result<Self> {
         Ok(Self {
             dependency: roze_ent::RozeDependency::pinned(super::ROZE_GIT_URL, super::ROZE_GIT_REV)?,
             logical_out: logical_out.to_path_buf(),
             dependency_source,
-            mongo,
         })
     }
 }
@@ -53,8 +46,21 @@ impl roze_ent::HostAdapter for RozectlHost {
     }
 
     fn sync_project(&self, staged_project: &Path) -> anyhow::Result<()> {
-        if self.mongo {
-            ensure_mongo_project_wiring(staged_project, &self.logical_out, self.dependency_source)?;
+        super::sync_managed_service_if_present(staged_project)
+    }
+
+    fn sync_model_project(
+        &self,
+        staged_project: &Path,
+        requirements: &ModelProjectRequirements,
+    ) -> anyhow::Result<()> {
+        if requirements.backend == ModelBackend::MongoDb {
+            ensure_mongo_project_wiring(
+                staged_project,
+                &self.logical_out,
+                self.dependency_source,
+                requirements,
+            )?;
         }
         super::sync_managed_service_if_present(staged_project)
     }
@@ -102,11 +108,7 @@ pub fn generate_model_project(
     format: ModelFormat,
     orm: ModelOrm,
 ) -> anyhow::Result<()> {
-    let host = RozectlHost::current(
-        out,
-        generate_options.dependency_source,
-        matches!(format, ModelFormat::Mongo),
-    )?;
+    let host = RozectlHost::current(out, generate_options.dependency_source)?;
     roze_ent::generate_model_project_with_host(
         source,
         out,
@@ -125,11 +127,7 @@ pub fn generate_model_project_with_extensions(
     orm: ModelOrm,
     extensions: &[&dyn ModelGeneratorExtension],
 ) -> anyhow::Result<()> {
-    let host = RozectlHost::current(
-        out,
-        generate_options.dependency_source,
-        matches!(format, ModelFormat::Mongo),
-    )?;
+    let host = RozectlHost::current(out, generate_options.dependency_source)?;
     roze_ent::generate_model_project_with_extensions_and_host(
         source,
         out,
@@ -152,11 +150,7 @@ pub async fn inspect_model_project(
     generate_options: GenerateOptions,
     orm: ModelOrm,
 ) -> anyhow::Result<()> {
-    let host = RozectlHost::current(
-        out,
-        generate_options.dependency_source,
-        matches!(db_kind, InspectDatabaseKind::Mongo),
-    )?;
+    let host = RozectlHost::current(out, generate_options.dependency_source)?;
     roze_ent::inspect_model_project_with_host(
         table,
         schema_name,
@@ -172,31 +166,62 @@ pub async fn inspect_model_project(
 }
 
 pub(super) fn is_mongo_model_project(out: &Path) -> bool {
-    let model_dir = out.join("src/model");
-    let model_mod = model_dir.join("mod.rs");
-    if fs::read_to_string(model_mod).is_ok_and(|source| source.contains(MONGO_MODEL_MARKER)) {
-        return true;
-    }
-    fs::read_dir(model_dir).is_ok_and(|entries| {
-        entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "rs")
-                && fs::read_to_string(entry.path())
-                    .is_ok_and(|source| source.contains("use roze_mongo::"))
+    fs::read_to_string(out.join("Cargo.toml"))
+        .ok()
+        .and_then(|manifest| manifest.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|document| {
+            document
+                .get("package")?
+                .as_table()?
+                .get("metadata")?
+                .as_table()?
+                .get("roze")?
+                .as_table()?
+                .get("model")?
+                .as_table()?
+                .get("backend")?
+                .as_str()
+                .map(str::to_owned)
         })
-    })
+        .is_some_and(|backend| backend == "mongo")
 }
 
 pub(super) fn ensure_mongo_project_wiring(
     staged_out: &Path,
     logical_out: &Path,
     source: DependencySource,
+    requirements: &ModelProjectRequirements,
 ) -> anyhow::Result<()> {
-    update_mongo_model_context_hook(staged_out)?;
-    update_mongo_service_context(staged_out)?;
-    update_mongo_dependency(staged_out, logical_out, source)
+    anyhow::ensure!(
+        requirements.backend == ModelBackend::MongoDb,
+        "Mongo project wiring requires the MongoDb backend"
+    );
+    anyhow::ensure!(
+        requirements.dependency("roze-mongo").is_some(),
+        "Mongo project requirements must declare the direct `roze-mongo` dependency"
+    );
+    for capability in [
+        RuntimeCapability::MongoConnection,
+        RuntimeCapability::HealthRegistration,
+        RuntimeCapability::ModelContextHook,
+    ] {
+        anyhow::ensure!(
+            requirements.requires(capability),
+            "Mongo project requirements are missing runtime capability {capability:?}"
+        );
+    }
+    if requirements.requires(RuntimeCapability::ModelContextHook) {
+        update_mongo_model_context_hook(staged_out)?;
+    }
+    if requirements.requires(RuntimeCapability::MongoConnection) {
+        update_mongo_service_context(staged_out)?;
+    }
+    update_mongo_dependencies(staged_out, logical_out, source, requirements)
+}
+
+pub(super) fn restore_mongo_service_wiring(out: &Path) -> anyhow::Result<()> {
+    update_mongo_model_context_hook(out)?;
+    update_mongo_service_context(out)
 }
 
 fn update_mongo_model_context_hook(out: &Path) -> anyhow::Result<()> {
@@ -206,9 +231,6 @@ fn update_mongo_model_context_hook(out: &Path) -> anyhow::Result<()> {
     }
     let mut module = fs::read_to_string(&module_path)
         .with_context(|| format!("failed to read {}", module_path.display()))?;
-    if !module.contains(MONGO_MODEL_MARKER) {
-        module.push_str(&format!("\n{MONGO_MODEL_MARKER}\n"));
-    }
     if !module.contains("pub async fn configure_context(") {
         module.push_str(
             "\nuse crate::svc::ServiceContext;\n\npub async fn configure_context(\n    ctx: ServiceContext,\n) -> anyhow::Result<ServiceContext> {\n    Ok(ctx)\n}\n",
@@ -266,10 +288,11 @@ fn replace_required(source: String, from: &str, to: &str, path: &Path) -> anyhow
     Ok(source.replacen(from, to, 1))
 }
 
-fn update_mongo_dependency(
+fn update_mongo_dependencies(
     staged_out: &Path,
     logical_out: &Path,
     source: DependencySource,
+    requirements: &ModelProjectRequirements,
 ) -> anyhow::Result<()> {
     let manifest_path = staged_out.join("Cargo.toml");
     if !manifest_path.is_file() {
@@ -288,30 +311,69 @@ fn update_mongo_dependency(
             anyhow::anyhow!("{} has no [dependencies] table", manifest_path.display())
         })?;
     validate_roze_dependency_sources(dependencies)?;
-    if dependencies.contains_key("roze-mongo") {
-        return Ok(());
-    }
-
-    let inherited = inherited_roze_dependency(dependencies, "roze-mongo")?;
-    let inherited = match inherited {
-        Some(item)
-            if !dependency_uses_workspace(&item)
-                || workspace_declares_dependency(logical_out, "roze-mongo")? =>
-        {
-            Some(item)
+    for requirement in &requirements.cargo_dependencies {
+        if let Some(dependency) = dependencies.get_mut(&requirement.name) {
+            merge_required_features(
+                dependency,
+                &requirement.features,
+                &requirement.name,
+                &manifest_path,
+            )?;
+            continue;
         }
-        _ => None,
-    };
-    let dependency = if let Some(inherited) = inherited {
-        inherited
-    } else {
-        match source {
+
+        let mut dependency =
+            dependency_for_requirement(dependencies, logical_out, source, &requirement.name)?;
+        merge_required_features(
+            &mut dependency,
+            &requirement.features,
+            &requirement.name,
+            &manifest_path,
+        )?;
+        dependencies.insert(&requirement.name, dependency);
+    }
+    let package = document
+        .get_mut("package")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("{} has no [package] table", manifest_path.display()))?;
+    let metadata = ensure_child_table(package, "metadata", &manifest_path)?;
+    let roze = ensure_child_table(metadata, "roze", &manifest_path)?;
+    let model = ensure_child_table(roze, "model", &manifest_path)?;
+    model.insert(
+        "backend",
+        toml_edit::value(match requirements.backend {
+            ModelBackend::MongoDb => "mongo",
+            ModelBackend::SeaOrm => "sea-orm",
+            ModelBackend::Toasty => "toasty",
+        }),
+    );
+    fs::write(&manifest_path, document.to_string())
+        .with_context(|| format!("failed to write {}", manifest_path.display()))
+}
+
+fn dependency_for_requirement(
+    dependencies: &toml_edit::Table,
+    logical_out: &Path,
+    source: DependencySource,
+    name: &str,
+) -> anyhow::Result<toml_edit::Item> {
+    if name.starts_with("roze-") {
+        let inherited = inherited_roze_dependency(dependencies, name)?;
+        if let Some(item) = inherited {
+            if !dependency_uses_workspace(&item)
+                || workspace_declares_dependency(logical_out, name)?
+            {
+                return Ok(item);
+            }
+        }
+        return match source {
             DependencySource::Git => format!(
                 r#"{{ git = "{}", rev = "{}" }}"#,
                 super::ROZE_GIT_URL,
                 super::ROZE_GIT_REV
             )
-            .parse::<toml_edit::Item>()?,
+            .parse::<toml_edit::Item>()
+            .map_err(Into::into),
             DependencySource::Path => {
                 let workspace_root = find_workspace_root(logical_out)?.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -319,13 +381,115 @@ fn update_mongo_dependency(
                     )
                 })?;
                 let prefix = local_crates_prefix(logical_out, &workspace_root)?;
-                format!(r#"{{ path = "{prefix}/roze-mongo" }}"#).parse::<toml_edit::Item>()?
+                format!(r#"{{ path = "{prefix}/{name}" }}"#)
+                    .parse::<toml_edit::Item>()
+                    .map_err(Into::into)
             }
-        }
+        };
+    }
+
+    if workspace_declares_dependency(logical_out, name)? {
+        return r#"{ workspace = true }"#.parse::<toml_edit::Item>().map_err(Into::into);
+    }
+
+    let version = match name {
+        "anyhow" | "serde" | "serde_json" | "rust_decimal" | "regex" | "uuid" => "1",
+        "chrono" => "0.4",
+        "jiff" => "0.2",
+        _ => anyhow::bail!(
+            "roze-ent requires unsupported Cargo dependency `{name}`; add host mapping before generating"
+        ),
     };
-    dependencies.insert("roze-mongo", dependency);
-    fs::write(&manifest_path, document.to_string())
-        .with_context(|| format!("failed to write {}", manifest_path.display()))
+    Ok(toml_edit::value(version))
+}
+
+fn merge_required_features(
+    dependency: &mut toml_edit::Item,
+    required: &[String],
+    name: &str,
+    manifest_path: &Path,
+) -> anyhow::Result<()> {
+    if required.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(version) = dependency.as_str().map(str::to_owned) {
+        let mut inline = toml_edit::InlineTable::new();
+        inline.insert("version", toml_edit::Value::from(version));
+        *dependency = toml_edit::Item::Value(toml_edit::Value::InlineTable(inline));
+    }
+
+    if let Some(inline) = dependency.as_inline_table_mut() {
+        let mut features = inline
+            .get("features")
+            .and_then(toml_edit::Value::as_array)
+            .map(array_strings)
+            .transpose()?
+            .unwrap_or_default();
+        features.extend(required.iter().cloned());
+        features.sort();
+        features.dedup();
+        inline.insert("features", toml_edit::Value::Array(string_array(&features)));
+        return Ok(());
+    }
+
+    if let Some(table) = dependency.as_table_mut() {
+        let mut features = table
+            .get("features")
+            .and_then(toml_edit::Item::as_array)
+            .map(array_strings)
+            .transpose()?
+            .unwrap_or_default();
+        features.extend(required.iter().cloned());
+        features.sort();
+        features.dedup();
+        table.insert("features", toml_edit::value(string_array(&features)));
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "cannot merge required features for dependency `{name}` in {}",
+        manifest_path.display()
+    )
+}
+
+fn array_strings(array: &toml_edit::Array) -> anyhow::Result<Vec<String>> {
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("Cargo dependency features must be strings"))
+        })
+        .collect()
+}
+
+fn string_array(values: &[String]) -> toml_edit::Array {
+    let mut array = toml_edit::Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    array
+}
+
+fn ensure_child_table<'a>(
+    parent: &'a mut toml_edit::Table,
+    name: &str,
+    manifest_path: &Path,
+) -> anyhow::Result<&'a mut toml_edit::Table> {
+    if !parent.contains_key(name) {
+        parent.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    parent
+        .get_mut(name)
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cargo metadata `{name}` must be a table in {}",
+                manifest_path.display()
+            )
+        })
 }
 
 fn dependency_uses_workspace(item: &toml_edit::Item) -> bool {
@@ -409,12 +573,17 @@ model User {
             super::super::ROZE_GIT_REV
         );
         assert!(manifest.contains(&expected));
+        assert!(manifest.contains(r#"anyhow = "1""#));
+        assert!(manifest.contains(r#"serde = { version = "1", features = ["derive"] }"#));
+        assert!(manifest.contains("[package.metadata.roze.model]"));
+        assert!(manifest.contains(r#"backend = "mongo""#));
+        assert_eq!(MODEL_PROJECT_REQUIREMENTS_API_VERSION, 1);
         assert!(fs::read_to_string(out.join("src/model/user.rs"))
             .expect("read Mongo model")
             .contains("use roze_mongo::"));
         let model_mod = fs::read_to_string(out.join("src/model/mod.rs")).expect("read model mod");
-        assert!(model_mod.contains(MONGO_MODEL_MARKER));
         assert!(model_mod.contains("pub async fn configure_context("));
+        assert!(is_mongo_model_project(&out));
 
         generate_model_project(
             source,
@@ -502,6 +671,8 @@ model User {
 
         let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
         assert!(manifest.contains(r#"roze-mongo = { path = "../../crates/roze-mongo" }"#));
+        assert!(manifest.contains(r#"anyhow = "1""#));
+        assert!(manifest.contains(r#"serde = { version = "1", features = ["derive"] }"#));
         let service_context =
             fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
         assert!(service_context.contains("pub mongo: Option<roze_mongo::MongoDatabase>"));

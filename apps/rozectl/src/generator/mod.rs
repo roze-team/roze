@@ -3882,7 +3882,7 @@ fn generate_rest_project_in_place(
     )?;
     ensure_model_module(out)?;
     if model::is_mongo_model_project(out) {
-        model::ensure_mongo_project_wiring(out, logical_out, options.dependency_source)?;
+        model::restore_mongo_service_wiring(out)?;
     }
     format_new_project_rust(out, options.mode)?;
     Ok(())

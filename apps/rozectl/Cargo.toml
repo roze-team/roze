@@ -11,7 +11,7 @@ thiserror.workspace = true
 toml_edit.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
-roze-ent = { git = "https://github.com/roze-team/roze-ent.git", rev = "3ade3d80a598cc4c8f5bdb457546fe5f986df8c5" }
+roze-ent = { git = "https://github.com/roze-team/roze-ent.git", rev = "cb54b7dd1f83cf032aa381857c2f6283cab29177" }
 roze-middleware = { path = "../../crates/roze-middleware" }
 roze-config = { path = "../../crates/roze-config" }
 serde_json.workspace = true

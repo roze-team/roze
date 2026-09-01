@@ -1737,9 +1737,10 @@ generated normalized proto keeps `repeated` and `map` field shapes.
 
 The model generator uses Roze-native `generate` and `inspect` commands.
 `roze-ent` is the single source of truth for schema parsing, normalization,
-database inspection, and SeaORM/Toasty/MongoDB rendering. `rozectl model` is a
-thin CLI and project-wiring adapter over a fixed `roze-ent` Git revision; it
-does not carry a second parser or renderer implementation.
+database inspection, SeaORM/Toasty/MongoDB rendering, and structured model
+project requirements. `rozectl model` is a thin CLI and project-wiring adapter
+over a fixed `roze-ent` Git revision: it consumes declared Cargo dependencies
+and runtime capabilities without carrying a second parser or renderer.
 
 SQL DDL:
 
@@ -2616,8 +2617,10 @@ rozectl model mongo --schema example/user.model --dir services/user-api
 ```
 
 The Mongo output creates a Rust module with a model type, repository, typed CRUD
-helpers, cache helper stubs, and common error helpers. It also adds the direct
-`roze-mongo` Cargo dependency required by the generated imports. Use
+helpers, cache helper stubs, and common error helpers. `roze-ent` declares the
+complete dependency/features and runtime-capability requirements; `rozectl`
+merges them into the target manifest and service context, and records
+`package.metadata.roze.model.backend = "mongo"` for later REST regeneration. Use
 `model generate --format mongo` for DSL-owned schemas and
 `model inspect --db-kind mongo` for existing MongoDB collections.
 
