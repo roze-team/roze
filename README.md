@@ -328,7 +328,10 @@ The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 Model parsing, normalization, SQL/Mongo inspection, and SeaORM/Toasty/MongoDB
 rendering come from the independently versioned `roze-ent` library pinned by
 `rozectl`. The CLI remains the host adapter for project wiring, formatting,
-and the current Roze dependency revision.
+and the current Roze dependency revision. Mongo generation and inspection add
+the direct `roze-mongo` dependency using the target project's existing
+workspace, path, or pinned Git source; Mongo `--update` does not require an
+ORM selection.
 
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
 inspects an existing SQL table and emits the same SeaORM-based model scaffold.

@@ -156,6 +156,19 @@ impl From<DbKind> for generator::model::InspectDatabaseKind {
     }
 }
 
+fn resolve_generate_model_orm(
+    out: &Path,
+    mode: GenerateMode,
+    format: ModelFormat,
+    requested: Option<ModelOrm>,
+    switch_orm: bool,
+) -> anyhow::Result<generator::model::ModelOrm> {
+    if matches!(format, ModelFormat::Mongo) {
+        return Ok(requested.unwrap_or_default().into());
+    }
+    generator::model::resolve_model_orm(out, mode, requested.map(Into::into), switch_orm)
+}
+
 impl From<SearchEngine> for generator::search::SearchEngine {
     fn from(value: SearchEngine) -> Self {
         match value {
@@ -1461,12 +1474,7 @@ fn run() -> anyhow::Result<()> {
                 } else {
                     GenerateMode::Create
                 };
-                let orm = generator::model::resolve_model_orm(
-                    &out,
-                    mode,
-                    orm.map(Into::into),
-                    switch_orm,
-                )?;
+                let orm = resolve_generate_model_orm(&out, mode, format, orm, switch_orm)?;
                 if mode == GenerateMode::Update && switch_orm {
                     eprintln!(
                         "ORM switch preview: regenerate src/model generated modules and Cargo dependencies; preserve application-owned src/model/*_ext.rs files"
@@ -5038,6 +5046,17 @@ mod tests {
     #[test]
     fn new_project_defaults_to_current_directory() {
         assert_eq!(resolve_new_out("user", None), PathBuf::from("user"));
+    }
+
+    #[test]
+    fn mongo_model_update_does_not_require_sql_orm_state() {
+        let out = temp_test_root("rozectl-mongo-update-orm");
+
+        let orm =
+            resolve_generate_model_orm(&out, GenerateMode::Update, ModelFormat::Mongo, None, false)
+                .expect("Mongo update must not inspect SQL ORM state");
+
+        assert_eq!(orm, generator::model::ModelOrm::SeaOrm);
     }
 
     #[test]

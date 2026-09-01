@@ -3881,6 +3881,9 @@ fn generate_rest_project_in_place(
         rest::render_rest_main(spec, config_migration != ConfigMigration::PreservedCustom),
     )?;
     ensure_model_module(out)?;
+    if model::is_mongo_model_project(out) {
+        model::ensure_mongo_project_wiring(out, logical_out, options.dependency_source)?;
+    }
     format_new_project_rust(out, options.mode)?;
     Ok(())
 }
@@ -14535,6 +14538,68 @@ fn main() {
         assert!(yaml.contains("components:"));
 
         fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[test]
+    fn rest_update_preserves_mongo_model_project_wiring() {
+        let root = temp_test_root("rozectl-rest-mongo-wiring");
+        let out = root.join("user-api");
+        let spec = parse_api(
+            r#"
+service user-api {
+    @handler getUser
+    get /users/:id (GetUserReq) returns (UserResp)
+}
+type GetUserReq {
+    id i64 `path:"id"`
+}
+type UserResp {
+    name string `json:"name"`
+}
+"#,
+        )
+        .expect("parse REST contract");
+
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("generate REST project");
+        model::generate_model_project(
+            r#"
+model User {
+    table: users
+    primary: id
+    field id object_id
+    field name String
+}
+"#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            model::ModelFormat::Mongo,
+            model::ModelOrm::SeaOrm,
+        )
+        .expect("generate Mongo model");
+        generate_rest_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("regenerate REST project");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml")).expect("read manifest");
+        assert!(manifest.contains("roze-mongo"));
+        let service_context =
+            fs::read_to_string(out.join("src/svc/mod.rs")).expect("read service context");
+        assert!(service_context.contains("pub mongo: Option<roze_mongo::MongoDatabase>"));
+        assert!(
+            service_context.contains("roze_mongo::connect_optional(config.mongo.as_ref()).await?")
+        );
+        let model_mod = fs::read_to_string(out.join("src/model/mod.rs")).expect("read model mod");
+        assert!(model_mod.contains("pub async fn configure_context("));
+
+        fs::remove_dir_all(root).expect("remove temporary project");
     }
 
     #[test]

@@ -1757,10 +1757,10 @@ rozectl model generate model/schema.ent --out services/user-api --format ent
 rozectl model generate model/schema.ent --out services/user-api --format ent --orm toasty
 ```
 
-On `--update`, omit `--orm` to inherit the ORM marker stored in the generated
-`src/model/mod.rs`. Legacy projects are inferred from their unambiguous
-`Cargo.toml` dependency. If Roze cannot determine the ORM, generation stops
-and requires an explicit `--orm`. Changing an existing ORM requires both
+For SQL model output, on `--update`, omit `--orm` to inherit the ORM marker
+stored in the generated `src/model/mod.rs`. Legacy projects are inferred from
+their unambiguous `Cargo.toml` dependency. If Roze cannot determine the ORM,
+generation stops and requires an explicit `--orm`. Changing an existing ORM requires both
 `--orm <target>` and `--switch-orm`; the CLI previews the generated files and
 dependencies that will change while preserving application-owned
 `src/model/*_ext.rs` files.
@@ -2193,7 +2193,11 @@ Mongo inspection samples collection documents, maps `_id` to `id`, and emits
 Mongo repository modules. It preserves Mongo index metadata, emits find helpers
 for single-field unique indexes, emits compound-index find/list helpers, and
 still emits an `id: ObjectId` model for empty collections. `--orm` does not
-affect Mongo output.
+affect Mongo output and is not required for Mongo `--update`. When the target
+contains a `Cargo.toml`, generation adds `roze-mongo` using the project's
+existing workspace, path, or pinned Git dependency source. Generated services
+also connect the optional Mongo database through `ServiceContext`, register its
+health check, and preserve that wiring across later REST/RPC updates.
 
 Generated SQL repositories include single-table CRUD helpers. Toasty and SeaORM
 outputs both generate primary-key lookup, cache-key lookup, `list`, `insert`,
@@ -2612,9 +2616,10 @@ rozectl model mongo --schema example/user.model --dir services/user-api
 ```
 
 The Mongo output creates a Rust module with a model type, repository, typed CRUD
-helpers, cache helper stubs, and common error helpers. Use `model generate
---format mongo` for DSL-owned schemas and `model inspect --db-kind mongo` for
-existing MongoDB collections.
+helpers, cache helper stubs, and common error helpers. It also adds the direct
+`roze-mongo` Cargo dependency required by the generated imports. Use
+`model generate --format mongo` for DSL-owned schemas and
+`model inspect --db-kind mongo` for existing MongoDB collections.
 
 ## Search generation
 
