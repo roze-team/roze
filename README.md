@@ -325,6 +325,11 @@ supports both the existing DSL and SQL DDL via `--format auto|dsl|sql`.
 The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 `field` lines.
 
+Model parsing, normalization, SQL/Mongo inspection, and SeaORM/Toasty/MongoDB
+rendering come from the independently versioned `roze-ent` library pinned by
+`rozectl`. The CLI remains the host adapter for project wiring, formatting,
+and the current Roze dependency revision.
+
 `rozectl model inspect users --db-kind sqlite --db-url sqlite::memory: --out apps/roze-example`
 inspects an existing SQL table and emits the same SeaORM-based model scaffold.
 Postgres, MySQL, and MongoDB are also supported through `--db-kind`. SeaORM is

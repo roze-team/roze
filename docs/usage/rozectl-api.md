@@ -1736,6 +1736,10 @@ generated normalized proto keeps `repeated` and `map` field shapes.
 ## Model generation
 
 The model generator uses Roze-native `generate` and `inspect` commands.
+`roze-ent` is the single source of truth for schema parsing, normalization,
+database inspection, and SeaORM/Toasty/MongoDB rendering. `rozectl model` is a
+thin CLI and project-wiring adapter over a fixed `roze-ent` Git revision; it
+does not carry a second parser or renderer implementation.
 
 SQL DDL:
 

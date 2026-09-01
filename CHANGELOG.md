@@ -13,6 +13,11 @@
 - Added dependency-and-method-isolated outbound RPC circuit breakers with
   serialized half-open probes and propagated `Retry-After` metadata/headers for
   RPC and REST circuit-open responses.
+- Replaced the in-tree `rozectl` model parser, inspectors, and renderers with a
+  thin host adapter over `roze-ent` revision
+  `3ade3d80a598cc4c8f5bdb457546fe5f986df8c5`; SeaORM, Toasty, MongoDB,
+  deterministic updates, and model extension behavior now have one generator
+  implementation while `rozectl` retains CLI and service-context wiring.
 - Integrated the `roze-ent` SeaORM generator fixes through upstream revision
   `d5a9092e8cea8c215e4042c9636ae198f16879d8`: portable case-insensitive and
   literal wildcard-safe predicates, key-preserving SQLite create/upsert reloads
