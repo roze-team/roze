@@ -948,7 +948,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
-validator = { version = "0.20", features = ["derive"] }"#
+validator = { version = "0.21", features = ["derive"] }"#
     };
     let workspace_boundary = if in_workspace { "" } else { "\n[workspace]\n" };
     let mut roze_dependencies =
@@ -5086,7 +5086,7 @@ veil.workspace = true"#
             } else {
                 r#"serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-validator = { version = "0.20", features = ["derive"] }
+validator = { version = "0.21", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 veil = { version = "0.3.0", default-features = false }"#
@@ -5120,7 +5120,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
-validator = { version = "0.20", features = ["derive"] }
+validator = { version = "0.21", features = ["derive"] }
 tracing = "0.1"
 veil = { version = "0.3.0", default-features = false }"#
             },
