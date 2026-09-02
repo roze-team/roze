@@ -11,7 +11,8 @@ use std::{
 use anyhow::Context;
 
 use crate::generator::{
-    find_workspace_root, inherited_roze_dependency, local_crates_prefix,
+    canonical_roze_dependency, find_workspace_root, inherited_roze_dependency, local_crates_prefix,
+    migrate_legacy_generated_validator, normalize_roze_dependency_document,
     validate_roze_dependency_sources, DependencySource, GenerateMode, GenerateOptions,
 };
 
@@ -108,15 +109,17 @@ pub fn generate_model_project(
     format: ModelFormat,
     orm: ModelOrm,
 ) -> anyhow::Result<()> {
+    let original_manifest = normalize_legacy_host_manifest(out, generate_options.mode)?;
     let host = RozectlHost::current(out, generate_options.dependency_source)?;
-    roze_ent::generate_model_project_with_host(
+    let result = roze_ent::generate_model_project_with_host(
         source,
         out,
         options(generate_options),
         format,
         orm,
         &host,
-    )
+    );
+    rollback_manifest_on_error(out, original_manifest, result)
 }
 
 pub fn generate_model_project_with_extensions(
@@ -127,8 +130,9 @@ pub fn generate_model_project_with_extensions(
     orm: ModelOrm,
     extensions: &[&dyn ModelGeneratorExtension],
 ) -> anyhow::Result<()> {
+    let original_manifest = normalize_legacy_host_manifest(out, generate_options.mode)?;
     let host = RozectlHost::current(out, generate_options.dependency_source)?;
-    roze_ent::generate_model_project_with_extensions_and_host(
+    let result = roze_ent::generate_model_project_with_extensions_and_host(
         source,
         out,
         options(generate_options),
@@ -136,7 +140,8 @@ pub fn generate_model_project_with_extensions(
         orm,
         extensions,
         &host,
-    )
+    );
+    rollback_manifest_on_error(out, original_manifest, result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -150,8 +155,9 @@ pub async fn inspect_model_project(
     generate_options: GenerateOptions,
     orm: ModelOrm,
 ) -> anyhow::Result<()> {
+    let original_manifest = normalize_legacy_host_manifest(out, generate_options.mode)?;
     let host = RozectlHost::current(out, generate_options.dependency_source)?;
-    roze_ent::inspect_model_project_with_host(
+    let result = roze_ent::inspect_model_project_with_host(
         table,
         schema_name,
         db_url,
@@ -162,7 +168,68 @@ pub async fn inspect_model_project(
         orm,
         &host,
     )
-    .await
+    .await;
+    rollback_manifest_on_error(out, original_manifest, result)
+}
+
+fn normalize_legacy_host_manifest(
+    out: &Path,
+    mode: GenerateMode,
+) -> anyhow::Result<Option<String>> {
+    if mode != GenerateMode::Update {
+        return Ok(None);
+    }
+    let manifest_path = out.join("Cargo.toml");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let original = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let mut document = original
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let fallback = format!(
+        r#"{{ git = "{}", rev = "{}" }}"#,
+        super::ROZE_GIT_URL,
+        super::ROZE_GIT_REV
+    )
+    .parse::<toml_edit::Item>()
+    .context("failed to construct pinned Roze dependency")?;
+    let canonical = canonical_roze_dependency(&document, Some(&fallback))?;
+    normalize_roze_dependency_document(&mut document, canonical.as_ref());
+    let validator = r#"{ version = "0.21", features = ["derive"] }"#
+        .parse::<toml_edit::Item>()
+        .context("failed to construct current validator dependency")?;
+    migrate_legacy_generated_validator(&mut document, &validator);
+    let updated = document.to_string();
+    if updated == original {
+        return Ok(None);
+    }
+    fs::write(&manifest_path, updated)
+        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    Ok(Some(original))
+}
+
+fn rollback_manifest_on_error<T>(
+    out: &Path,
+    original_manifest: Option<String>,
+    result: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if let Some(original_manifest) = original_manifest {
+                let manifest_path = out.join("Cargo.toml");
+                fs::write(&manifest_path, original_manifest).with_context(|| {
+                    format!(
+                        "model generation failed and the legacy manifest migration could not be rolled back in {}: {error:#}",
+                        manifest_path.display()
+                    )
+                })?;
+            }
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn is_mongo_model_project(out: &Path) -> bool {
@@ -550,6 +617,109 @@ mod tests {
         .expect("use roze-ent version requirement");
 
         assert_eq!(dependency.as_str(), Some("9.7"));
+    }
+
+    #[test]
+    fn model_update_normalizes_floating_host_dependencies_and_legacy_validator() {
+        let out = temp_model_output("rozectl-model-floating-host");
+        fs::create_dir_all(out.join("src")).expect("create source directory");
+        fs::write(out.join("src/main.rs"), "fn main() {}\n").expect("write main");
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "legacy-model-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+roze-config = { git = "https://github.com/roze-team/roze.git" }
+validator = { version = "0.20", features = ["derive"] }
+
+[build-dependencies]
+roze-grpc = { git = "https://github.com/roze-team/roze.git" }
+
+[target.'cfg(windows)'.dependencies]
+roze-context = { git = "https://github.com/roze-team/roze.git" }
+"#,
+        )
+        .expect("write manifest");
+
+        generate_model_project(
+            r#"
+entity User {
+    table "users"
+    field id: u64 {
+        primary
+    }
+    field name: string {
+    }
+}
+"#,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Ent,
+            ModelOrm::Toasty,
+        )
+        .expect("update model project");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read manifest")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse manifest");
+        super::super::visit_dependency_tables(&manifest, |dependencies| {
+            for (name, dependency) in dependencies {
+                if name.starts_with("roze-") {
+                    assert_eq!(
+                        dependency
+                            .as_inline_table()
+                            .and_then(|dependency| dependency.get("rev"))
+                            .and_then(toml_edit::Value::as_str),
+                        Some(super::super::ROZE_GIT_REV),
+                        "{name} was not pinned"
+                    );
+                }
+            }
+        });
+        assert_eq!(
+            manifest["dependencies"]["validator"]
+                .as_inline_table()
+                .and_then(|dependency| dependency.get("version"))
+                .and_then(toml_edit::Value::as_str),
+            Some("0.21")
+        );
+        fs::remove_dir_all(out).expect("remove temporary model output");
+    }
+
+    #[test]
+    fn failed_model_update_rolls_back_legacy_manifest_normalization() {
+        let out = temp_model_output("rozectl-model-floating-host-rollback");
+        fs::create_dir_all(out.join("src")).expect("create source directory");
+        fs::write(out.join("src/main.rs"), "fn main() {}\n").expect("write main");
+        let original = r#"[package]
+name = "legacy-model-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+roze-config = { git = "https://github.com/roze-team/roze.git" }
+validator = { version = "0.20", features = ["derive"] }
+"#;
+        fs::write(out.join("Cargo.toml"), original).expect("write manifest");
+
+        generate_model_project(
+            "this is not a model schema",
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+            ModelFormat::Ent,
+            ModelOrm::Toasty,
+        )
+        .expect_err("invalid model update must fail");
+
+        assert_eq!(
+            fs::read_to_string(out.join("Cargo.toml")).expect("read rolled back manifest"),
+            original
+        );
+        fs::remove_dir_all(out).expect("remove temporary model output");
     }
 
     #[test]

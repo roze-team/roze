@@ -3,10 +3,14 @@
 New Git-based `roze-*` dependencies are pinned to the Roze revision used to
 build `rozectl`. During `--update`, a single existing `rev`, `tag`, or `branch`
 on the canonical Roze Git URL remains authoritative and is propagated to the
-other Roze dependencies while preserving Cargo features. This repairs projects
-that previously mixed floating Roze Git dependencies with one pinned crate and
-keeps repeated IDL generation reproducible. Conflicting pins still fail closed;
-workspace/path generation remains unchanged.
+other Roze dependencies in normal, development, build, and target-specific
+dependency tables while preserving Cargo features. If every existing Roze Git
+dependency floats, `--update` uses the exact revision embedded in `rozectl` as
+the canonical pin. Recognized generated `validator = 0.20` declarations are
+migrated to `validator = 0.21` for compatibility with current generated
+handlers and `roze-validation`. Conflicting pins still fail closed;
+workspace/path generation and unrelated application-owned dependency choices
+remain unchanged.
 
 The model generator's ent capability definition and remaining release blockers
 are tracked in [Roze Model / ent Capability Parity](../model-ent-parity.md).

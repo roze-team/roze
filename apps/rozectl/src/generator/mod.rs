@@ -4425,12 +4425,42 @@ fn write_cargo_toml_with_rpc_clients(
     let generated_dependencies = generated_document["dependencies"]
         .as_table()
         .context("generated Cargo.toml has no [dependencies] table")?;
+    let generated_build_dependencies = generated_document
+        .get("build-dependencies")
+        .and_then(toml_edit::Item::as_table);
+    if options.dependency_source == DependencySource::Path {
+        if let (Some(existing), Some(generated)) = (
+            document
+                .get_mut("build-dependencies")
+                .and_then(toml_edit::Item::as_table_mut),
+            generated_build_dependencies,
+        ) {
+            for (name, dependency) in generated {
+                if name.starts_with("roze-")
+                    && existing.get(name).and_then(git_url) == Some(ROZE_GIT_URL)
+                {
+                    existing.insert(name, dependency.clone());
+                }
+            }
+        }
+    }
+    let generated_validator = generated_dependencies.get("validator").cloned();
+    let fallback_roze_dependency = dependency_item(
+        "roze-config",
+        options.dependency_source,
+        local_crates_prefix.as_deref(),
+    );
+    let canonical_roze_dependency =
+        canonical_roze_dependency(&document, Some(&fallback_roze_dependency))?;
+    normalize_roze_dependency_document(&mut document, canonical_roze_dependency.as_ref());
+    if let Some(generated_validator) = generated_validator.as_ref() {
+        migrate_legacy_generated_validator(&mut document, generated_validator);
+    }
+
     let dependencies = document
         .get_mut("dependencies")
         .and_then(toml_edit::Item::as_table_mut)
         .ok_or_else(|| anyhow::anyhow!("{} has no [dependencies] table", path.display()))?;
-    validate_roze_dependency_sources(dependencies)?;
-
     merge_missing_dependencies(dependencies, generated_dependencies);
 
     for name in project_roze_crates(kind) {
@@ -4468,6 +4498,21 @@ fn write_cargo_toml_with_rpc_clients(
         );
     }
 
+    if let Some(generated_build_dependencies) = generated_build_dependencies {
+        if !document.contains_key("build-dependencies") {
+            document.insert(
+                "build-dependencies",
+                toml_edit::Item::Table(toml_edit::Table::new()),
+            );
+        }
+        let build_dependencies = document
+            .get_mut("build-dependencies")
+            .and_then(toml_edit::Item::as_table_mut)
+            .expect("inserted build-dependencies table");
+        merge_missing_dependencies(build_dependencies, generated_build_dependencies);
+    }
+    normalize_roze_dependency_document(&mut document, canonical_roze_dependency.as_ref());
+
     normalize_workspace_dependency_document(
         &mut document,
         workspace_root.as_deref(),
@@ -4484,6 +4529,136 @@ fn merge_missing_dependencies(target: &mut toml_edit::Table, generated: &toml_ed
             target.insert(name, dependency.clone());
         }
     }
+}
+
+fn visit_dependency_tables(
+    document: &toml_edit::DocumentMut,
+    mut visit: impl FnMut(&toml_edit::Table),
+) {
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(dependencies) = document.get(section).and_then(toml_edit::Item::as_table) {
+            visit(dependencies);
+        }
+    }
+    if let Some(targets) = document.get("target").and_then(toml_edit::Item::as_table) {
+        for (_, target) in targets {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(dependencies) = target.get(section).and_then(toml_edit::Item::as_table)
+                {
+                    visit(dependencies);
+                }
+            }
+        }
+    }
+}
+
+fn visit_dependency_tables_mut(
+    document: &mut toml_edit::DocumentMut,
+    mut visit: impl FnMut(&mut toml_edit::Table),
+) {
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(dependencies) = document
+            .get_mut(section)
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            visit(dependencies);
+        }
+    }
+    if let Some(targets) = document
+        .get_mut("target")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        for (_, target) in targets.iter_mut() {
+            let Some(target) = target.as_table_mut() else {
+                continue;
+            };
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(dependencies) = target
+                    .get_mut(section)
+                    .and_then(toml_edit::Item::as_table_mut)
+                {
+                    visit(dependencies);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn canonical_roze_dependency(
+    document: &toml_edit::DocumentMut,
+    fallback: Option<&toml_edit::Item>,
+) -> anyhow::Result<Option<toml_edit::Item>> {
+    let mut candidates = toml_edit::Table::new();
+    let mut index = 0usize;
+    visit_dependency_tables(document, |dependencies| {
+        for (name, dependency) in dependencies {
+            if name.starts_with("roze-") {
+                candidates.insert(&format!("roze-candidate-{index}"), dependency.clone());
+                index += 1;
+            }
+        }
+    });
+    let existing = inherited_roze_dependency(&candidates, "__roze_source_validation__")?;
+    Ok(match existing {
+        Some(existing)
+            if git_url(&existing).is_some()
+                && git_pin(&existing).is_none()
+                && fallback.is_some_and(|fallback| {
+                    git_url(fallback) == git_url(&existing) && git_pin(fallback).is_some()
+                }) =>
+        {
+            fallback.cloned()
+        }
+        Some(existing) => Some(existing),
+        None => fallback.cloned(),
+    })
+}
+
+pub(crate) fn normalize_roze_dependency_document(
+    document: &mut toml_edit::DocumentMut,
+    canonical: Option<&toml_edit::Item>,
+) {
+    let Some(canonical) = canonical else {
+        return;
+    };
+    visit_dependency_tables_mut(document, |dependencies| {
+        normalize_roze_git_dependencies(dependencies, canonical);
+    });
+}
+
+pub(crate) fn migrate_legacy_generated_validator(
+    document: &mut toml_edit::DocumentMut,
+    replacement: &toml_edit::Item,
+) {
+    visit_dependency_tables_mut(document, |dependencies| {
+        let Some(validator) = dependencies.get_mut("validator") else {
+            return;
+        };
+        if is_legacy_generated_validator(validator) {
+            *validator = replacement.clone();
+        }
+    });
+}
+
+fn is_legacy_generated_validator(item: &toml_edit::Item) -> bool {
+    let Some(dependency) = item.as_inline_table() else {
+        return false;
+    };
+    if dependency.len() != 2
+        || dependency.get("version").and_then(toml_edit::Value::as_str) != Some("0.20")
+    {
+        return false;
+    }
+    let Some(features) = dependency
+        .get("features")
+        .and_then(toml_edit::Value::as_array)
+    else {
+        return false;
+    };
+    features.len() == 1 && features.get(0).and_then(toml_edit::Value::as_str) == Some("derive")
 }
 
 pub(crate) fn inherited_roze_dependency(
@@ -5050,9 +5225,15 @@ fn cargo_toml(
     out: &Path,
     cargo_options: CargoTemplateOptions<'_>,
 ) -> String {
-    let standalone_rpc_build_dependencies = format!(
-        "protoc-bin-vendored = \"3\"\nroze-grpc = {{ git = \"{ROZE_GIT_URL}\", rev = \"{ROZE_GIT_REV}\" }}\ntonic-prost-build = \"0.14.6\""
-    );
+    let standalone_rpc_build_dependencies = match dependency_source {
+        DependencySource::Git => format!(
+            "protoc-bin-vendored = \"3\"\nroze-grpc = {{ git = \"{ROZE_GIT_URL}\", rev = \"{ROZE_GIT_REV}\" }}\ntonic-prost-build = \"0.14.6\""
+        ),
+        DependencySource::Path => format!(
+            "protoc-bin-vendored = \"3\"\nroze-grpc = {{ path = \"{}/roze-grpc\" }}\ntonic-prost-build = \"0.14.6\"",
+            local_crates_prefix.expect("local crates prefix")
+        ),
+    };
     let roze_dependencies = roze_dependencies(
         dependency_source,
         local_crates_prefix,
@@ -14690,6 +14871,154 @@ roze-sms = { git = "https://github.com/roze-team/roze.git", rev = "12c63307" }
                 .map(toml_edit::Array::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn update_normalizes_legacy_dependency_sections_and_validator() {
+        let mut document = r#"
+[dependencies]
+roze-config = { git = "https://github.com/roze-team/roze.git" }
+validator = { version = "0.20", features = ["derive"] }
+
+[dev-dependencies]
+roze-test = { git = "https://github.com/roze-team/roze.git" }
+
+[build-dependencies]
+roze-grpc = { git = "https://github.com/roze-team/roze.git" }
+
+[target.'cfg(windows)'.dependencies]
+roze-context = { git = "https://github.com/roze-team/roze.git" }
+
+[target.'cfg(unix)'.build-dependencies]
+roze-grpc = { git = "https://github.com/roze-team/roze.git" }
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("manifest");
+        let fallback = format!(r#"{{ git = "{ROZE_GIT_URL}", rev = "{ROZE_GIT_REV}" }}"#)
+            .parse::<toml_edit::Item>()
+            .expect("fallback dependency");
+        let canonical = canonical_roze_dependency(&document, Some(&fallback))
+            .expect("resolve canonical dependency");
+        normalize_roze_dependency_document(&mut document, canonical.as_ref());
+        let validator = r#"{ version = "0.21", features = ["derive"] }"#
+            .parse::<toml_edit::Item>()
+            .expect("validator dependency");
+        migrate_legacy_generated_validator(&mut document, &validator);
+
+        visit_dependency_tables(&document, |dependencies| {
+            for (name, dependency) in dependencies {
+                if name.starts_with("roze-") {
+                    assert_eq!(
+                        dependency
+                            .as_inline_table()
+                            .and_then(|dependency| dependency.get("rev"))
+                            .and_then(toml_edit::Value::as_str),
+                        Some(ROZE_GIT_REV),
+                        "{name} was not normalized"
+                    );
+                }
+            }
+        });
+        assert_eq!(
+            document["dependencies"]["validator"]
+                .as_inline_table()
+                .and_then(|dependency| dependency.get("version"))
+                .and_then(toml_edit::Value::as_str),
+            Some("0.21")
+        );
+    }
+
+    #[test]
+    fn rpc_update_migrates_all_floating_legacy_manifest_idempotently() {
+        let spec = parse_api(
+            r#"
+            service legacy-rpc {
+                rpc GetUser (GetUserReq) returns (GetUserResp)
+            }
+            type GetUserReq {
+                id: u64
+            }
+            type GetUserResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let root = temp_test_root("rozectl-rpc-floating-dependencies");
+        let out = root.join("legacy-rpc");
+        fs::create_dir_all(&root).expect("create test root");
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Create, DependencySource::Git),
+        )
+        .expect("create rpc project");
+
+        let manifest_path = out.join("Cargo.toml");
+        let mut manifest = fs::read_to_string(&manifest_path)
+            .expect("read manifest")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse manifest");
+        visit_dependency_tables_mut(&mut manifest, |dependencies| {
+            for (name, dependency) in dependencies.iter_mut() {
+                if name.starts_with("roze-") {
+                    dependency
+                        .as_inline_table_mut()
+                        .expect("generated inline Roze dependency")
+                        .remove("rev");
+                }
+            }
+        });
+        manifest["dependencies"]["validator"] = r#"{ version = "0.20", features = ["derive"] }"#
+            .parse::<toml_edit::Item>()
+            .expect("legacy validator");
+        manifest["dev-dependencies"]["roze-context"] =
+            r#"{ git = "https://github.com/roze-team/roze.git" }"#
+                .parse::<toml_edit::Item>()
+                .expect("dev dependency");
+        manifest["target"]["cfg(windows)"]["dependencies"]["roze-config"] =
+            r#"{ git = "https://github.com/roze-team/roze.git" }"#
+                .parse::<toml_edit::Item>()
+                .expect("target dependency");
+        fs::write(&manifest_path, manifest.to_string()).expect("write legacy manifest");
+
+        let update = GenerateOptions::new(GenerateMode::Update, DependencySource::Git);
+        generate_rpc_project(&spec, &out, update).expect("update legacy rpc project");
+        let first = fs::read_to_string(&manifest_path).expect("read updated manifest");
+        let updated = first
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse updated manifest");
+        visit_dependency_tables(&updated, |dependencies| {
+            for (name, dependency) in dependencies {
+                if name.starts_with("roze-") {
+                    assert_eq!(
+                        dependency
+                            .as_inline_table()
+                            .and_then(|dependency| dependency.get("rev"))
+                            .and_then(toml_edit::Value::as_str),
+                        Some(ROZE_GIT_REV),
+                        "{name} was not pinned"
+                    );
+                }
+            }
+        });
+        assert_eq!(
+            updated["dependencies"]["validator"]
+                .as_inline_table()
+                .and_then(|dependency| dependency.get("version"))
+                .and_then(toml_edit::Value::as_str),
+            Some("0.21")
+        );
+        assert!(updated["build-dependencies"]
+            .as_table()
+            .is_some_and(|dependencies| dependencies.contains_key("tonic-prost-build")));
+
+        generate_rpc_project(&spec, &out, update).expect("repeat rpc update");
+        assert_eq!(
+            fs::read_to_string(&manifest_path).expect("read repeated manifest"),
+            first
+        );
+        fs::remove_dir_all(root).expect("remove test root");
     }
 
     #[test]
