@@ -322,8 +322,13 @@ fn update_mongo_dependencies(
             continue;
         }
 
-        let mut dependency =
-            dependency_for_requirement(dependencies, logical_out, source, &requirement.name)?;
+        let mut dependency = dependency_for_requirement(
+            dependencies,
+            logical_out,
+            source,
+            &requirement.name,
+            requirement.version_req.as_deref(),
+        )?;
         merge_required_features(
             &mut dependency,
             &requirement.features,
@@ -356,6 +361,7 @@ fn dependency_for_requirement(
     logical_out: &Path,
     source: DependencySource,
     name: &str,
+    version_req: Option<&str>,
 ) -> anyhow::Result<toml_edit::Item> {
     if name.starts_with("roze-") {
         let inherited = inherited_roze_dependency(dependencies, name)?;
@@ -392,15 +398,12 @@ fn dependency_for_requirement(
         return r#"{ workspace = true }"#.parse::<toml_edit::Item>().map_err(Into::into);
     }
 
-    let version = match name {
-        "anyhow" | "serde" | "serde_json" | "rust_decimal" | "regex" | "uuid" => "1",
-        "chrono" => "0.4",
-        "jiff" => "0.2",
-        _ => anyhow::bail!(
-            "roze-ent requires unsupported Cargo dependency `{name}`; add host mapping before generating"
-        ),
-    };
-    Ok(toml_edit::value(version))
+    let version_req = version_req.ok_or_else(|| {
+        anyhow::anyhow!(
+            "roze-ent did not declare a compatible Cargo version for crates.io dependency `{name}`"
+        )
+    })?;
+    Ok(toml_edit::value(version_req))
 }
 
 fn merge_required_features(
@@ -533,6 +536,23 @@ mod tests {
     }
 
     #[test]
+    fn crates_io_dependency_uses_roze_ent_version_requirement() {
+        let dependencies = toml_edit::Table::new();
+        let out = temp_model_output("rozectl-model-dependency-version");
+
+        let dependency = dependency_for_requirement(
+            &dependencies,
+            &out,
+            DependencySource::Git,
+            "future-model-runtime",
+            Some("9.7"),
+        )
+        .expect("use roze-ent version requirement");
+
+        assert_eq!(dependency.as_str(), Some("9.7"));
+    }
+
+    #[test]
     fn mongo_generation_adds_pinned_roze_dependency_and_updates_stably() {
         let out = temp_model_output("rozectl-mongo-dependency");
         fs::create_dir_all(out.join("src")).expect("create source directory");
@@ -577,7 +597,7 @@ model User {
         assert!(manifest.contains(r#"serde = { version = "1", features = ["derive"] }"#));
         assert!(manifest.contains("[package.metadata.roze.model]"));
         assert!(manifest.contains(r#"backend = "mongo""#));
-        assert_eq!(MODEL_PROJECT_REQUIREMENTS_API_VERSION, 1);
+        assert_eq!(MODEL_PROJECT_REQUIREMENTS_API_VERSION, 2);
         assert!(fs::read_to_string(out.join("src/model/user.rs"))
             .expect("read Mongo model")
             .contains("use roze_mongo::"));

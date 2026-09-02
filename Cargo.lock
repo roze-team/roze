@@ -3974,7 +3974,7 @@ dependencies = [
 [[package]]
 name = "roze-ent"
 version = "0.1.0"
-source = "git+https://github.com/roze-team/roze-ent.git?rev=cb54b7dd1f83cf032aa381857c2f6283cab29177#cb54b7dd1f83cf032aa381857c2f6283cab29177"
+source = "git+https://github.com/roze-team/roze-ent.git?rev=c5a545cc90e61b7538c1e8a67c615fe657253f50#c5a545cc90e61b7538c1e8a67c615fe657253f50"
 dependencies = [
  "anyhow",
  "futures-util",

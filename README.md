@@ -327,9 +327,10 @@ The DSL supports `table`, `primary`, `cache`, `cache_ttl_secs`, and repeated
 
 Model parsing, normalization, SQL/Mongo inspection, and SeaORM/Toasty/MongoDB
 rendering come from the independently versioned `roze-ent` library pinned by
-`rozectl`. `roze-ent` also returns structured Cargo dependency and runtime
-capability requirements; the CLI consumes them as the host adapter for project
-wiring, formatting, and the current Roze dependency revision. Mongo generation
+`rozectl`. `roze-ent` also returns structured Cargo dependency names,
+compatible versions, features, and runtime capability requirements; the CLI
+consumes them as the host adapter for project wiring, formatting, and the
+current Roze dependency revision. Mongo generation
 and inspection persist the backend in Cargo package metadata and merge all
 required dependencies and features using the target project's workspace, path,
 or pinned Git source. Mongo `--update` does not require an ORM selection.

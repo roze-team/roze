@@ -1739,8 +1739,9 @@ The model generator uses Roze-native `generate` and `inspect` commands.
 `roze-ent` is the single source of truth for schema parsing, normalization,
 database inspection, SeaORM/Toasty/MongoDB rendering, and structured model
 project requirements. `rozectl model` is a thin CLI and project-wiring adapter
-over a fixed `roze-ent` Git revision: it consumes declared Cargo dependencies
-and runtime capabilities without carrying a second parser or renderer.
+over a fixed `roze-ent` Git revision: it consumes requirements contract v2,
+including declared Cargo-compatible versions, features, and runtime
+capabilities, without carrying a second parser or renderer.
 
 SQL DDL:
 
