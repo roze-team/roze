@@ -4445,11 +4445,14 @@ fn write_cargo_toml_with_rpc_clients(
         }
     }
     let generated_validator = generated_dependencies.get("validator").cloned();
-    let fallback_roze_dependency = dependency_item(
-        "roze-config",
-        options.dependency_source,
-        local_crates_prefix.as_deref(),
-    );
+    let fallback_roze_dependency = workspace_roze_dependency(workspace_root.as_deref())?
+        .unwrap_or_else(|| {
+            dependency_item(
+                "roze-config",
+                options.dependency_source,
+                local_crates_prefix.as_deref(),
+            )
+        });
     let canonical_roze_dependency =
         canonical_roze_dependency(&document, Some(&fallback_roze_dependency))?;
     normalize_roze_dependency_document(&mut document, canonical_roze_dependency.as_ref());
@@ -4603,6 +4606,9 @@ pub(crate) fn canonical_roze_dependency(
     });
     let existing = inherited_roze_dependency(&candidates, "__roze_source_validation__")?;
     Ok(match existing {
+        Some(existing) if dependency_uses_workspace(&existing) && fallback.is_some() => {
+            fallback.cloned()
+        }
         Some(existing)
             if git_url(&existing).is_some()
                 && git_pin(&existing).is_none()
@@ -4755,9 +4761,10 @@ fn normalize_roze_git_dependencies(
     dependencies: &mut toml_edit::Table,
     canonical: &toml_edit::Item,
 ) {
-    let Some((canonical_url, (pin_key, pin_value))) = git_pin(canonical) else {
+    let Some(canonical_url) = git_url(canonical) else {
         return;
     };
+    let canonical_pin = git_pin(canonical).map(|(_, pin)| pin);
     for (name, item) in dependencies.iter_mut() {
         if !name.starts_with("roze-") {
             continue;
@@ -4774,14 +4781,37 @@ fn normalize_roze_git_dependencies(
                 .and_then(toml_edit::Value::as_str)
                 .map(|value| (key, value))
         });
-        if existing_pin == Some((pin_key, pin_value)) {
+        if existing_pin == canonical_pin {
             continue;
         }
         for key in ["rev", "tag", "branch"] {
             table.remove(key);
         }
-        table.insert(pin_key, pin_value.into());
+        if let Some((pin_key, pin_value)) = canonical_pin {
+            table.insert(pin_key, pin_value.into());
+        }
     }
+}
+
+fn workspace_roze_dependency(
+    workspace_root: Option<&Path>,
+) -> anyhow::Result<Option<toml_edit::Item>> {
+    let Some(workspace_root) = workspace_root else {
+        return Ok(None);
+    };
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let document = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let Some(dependencies) = document
+        .get("workspace")
+        .and_then(|item| item.get("dependencies"))
+        .and_then(toml_edit::Item::as_table)
+    else {
+        return Ok(None);
+    };
+    inherited_roze_dependency(dependencies, "__roze_workspace_source__")
 }
 
 fn normalize_generated_workspace_dependencies(
@@ -15018,6 +15048,84 @@ roze-grpc = { git = "https://github.com/roze-team/roze.git" }
             fs::read_to_string(&manifest_path).expect("read repeated manifest"),
             first
         );
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn rpc_update_inherits_floating_roze_source_from_workspace() {
+        let spec = parse_api(
+            r#"
+            service catalog-rpc {
+                rpc GetProduct (GetProductReq) returns (GetProductResp)
+            }
+            type GetProductReq {
+                id: u64
+            }
+            type GetProductResp {
+                name: string
+            }
+            "#,
+        )
+        .expect("valid rpc api");
+        let root = temp_test_root("rozectl-rpc-workspace-floating-dependencies");
+        let out = root.join("services/catalog-rpc");
+        fs::create_dir_all(&out).expect("create RPC project");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"[workspace]
+members = ["services/catalog-rpc"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+roze-config = {{ git = "{ROZE_GIT_URL}" }}
+"#,
+            ),
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            out.join("Cargo.toml"),
+            r#"[package]
+name = "catalog-rpc"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+roze-config.workspace = true
+"#,
+        )
+        .expect("write RPC manifest");
+
+        generate_rpc_project(
+            &spec,
+            &out,
+            GenerateOptions::new(GenerateMode::Update, DependencySource::Git),
+        )
+        .expect("update RPC project");
+
+        let manifest = fs::read_to_string(out.join("Cargo.toml"))
+            .expect("read updated manifest")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse updated manifest");
+        visit_dependency_tables(&manifest, |dependencies| {
+            for (name, dependency) in dependencies {
+                if !name.starts_with("roze-") || dependency_uses_workspace(dependency) {
+                    continue;
+                }
+                assert_eq!(git_url(dependency), Some(ROZE_GIT_URL), "{name} source");
+                assert_eq!(git_pin(dependency), None, "{name} unexpectedly pinned");
+            }
+        });
+        assert!(dependency_uses_workspace(
+            &manifest["dependencies"]["roze-config"]
+        ));
+
         fs::remove_dir_all(root).expect("remove test root");
     }
 

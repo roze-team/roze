@@ -6,11 +6,13 @@ on the canonical Roze Git URL remains authoritative and is propagated to the
 other Roze dependencies in normal, development, build, and target-specific
 dependency tables while preserving Cargo features. If every existing Roze Git
 dependency floats, `--update` uses the exact revision embedded in `rozectl` as
-the canonical pin. Recognized generated `validator = 0.20` declarations are
-migrated to `validator = 0.21` for compatibility with current generated
-handlers and `roze-validation`. Conflicting pins still fail closed;
-workspace/path generation and unrelated application-owned dependency choices
-remain unchanged.
+the canonical pin, except when the service inherits Roze dependencies from a
+parent workspace: the workspace's canonical floating or pinned source remains
+authoritative for newly required crates too. Recognized generated
+`validator = 0.20` declarations are migrated to `validator = 0.21` for
+compatibility with current generated handlers and `roze-validation`.
+Conflicting pins still fail closed; path generation and unrelated
+application-owned dependency choices remain unchanged.
 
 The model generator's ent capability definition and remaining release blockers
 are tracked in [Roze Model / ent Capability Parity](../model-ent-parity.md).
