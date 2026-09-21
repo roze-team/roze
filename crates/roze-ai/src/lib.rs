@@ -16,6 +16,7 @@ mod schema;
 mod storage_checkpoint;
 mod team;
 mod tool;
+mod typesafe_system_one;
 
 pub use agent::{Agent, AgentOptions, AgentOutput};
 pub use compose::{
@@ -46,3 +47,6 @@ pub use team::{
     TeamOutput,
 };
 pub use tool::{Tool, ToolRegistry};
+pub use typesafe_system_one::{
+    SystemOneAnswer, SystemOneQuestion, SystemOneRequest, SystemOneResponse, TypeSafeSystemOneModel,
+};

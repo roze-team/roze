@@ -473,6 +473,12 @@ ai:
       api_key: ${OPENAI_API_KEY}
       model: replace-with-your-model
       timeout_ms: 30000
+    decisions:
+      kind: typesafe_system_one
+      base_url: https://api.typesafe.ai/v1
+      api_key: ${TYPESAFE_API_KEY}
+      model: jev-latest
+      timeout_ms: 30000
 "#
 }
 
@@ -537,6 +543,9 @@ mod tests {
         assert!(fs::read_to_string(root.join("src/ai/mod.rs"))
             .expect("module")
             .contains("assistant-v2"));
+        assert!(fs::read_to_string(root.join("config/ai.example.yaml"))
+            .expect("AI config example")
+            .contains("kind: typesafe_system_one"));
         assert_eq!(
             fs::read_to_string(root.join("src/application.rs"))
                 .expect("application")

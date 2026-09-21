@@ -332,7 +332,7 @@ fn role_name(role: MessageRole) -> &'static str {
     }
 }
 
-fn validate_status(response: &reqwest::Response) -> Result<(), AiError> {
+pub(crate) fn validate_status(response: &reqwest::Response) -> Result<(), AiError> {
     let status = response.status();
     if status.is_success() {
         return Ok(());
@@ -361,7 +361,7 @@ fn validate_status(response: &reqwest::Response) -> Result<(), AiError> {
     )))
 }
 
-fn map_reqwest_error(error: reqwest::Error) -> AiError {
+pub(crate) fn map_reqwest_error(error: reqwest::Error) -> AiError {
     if error.is_timeout() {
         AiError::ProviderUnavailable("provider request timed out".to_string())
     } else if error.is_connect() {

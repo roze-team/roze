@@ -160,6 +160,11 @@ impl AiConfig {
             "ai.default_provider `{}` is not declared in ai.providers",
             self.default_provider
         );
+        anyhow::ensure!(
+            self.default_provider_config()
+                .is_some_and(|provider| provider.kind == AiProviderKind::OpenaiCompatible),
+            "ai.default_provider must reference a chat model; typesafe_system_one is a decision model"
+        );
         for (name, provider) in &self.providers {
             anyhow::ensure!(
                 !name.trim().is_empty(),
@@ -178,6 +183,7 @@ impl AiConfig {
 pub enum AiProviderKind {
     #[default]
     OpenaiCompatible,
+    TypesafeSystemOne,
 }
 
 #[derive(Clone, Serialize, Deserialize, veil::Redact)]
@@ -3962,6 +3968,59 @@ governance: {}
         let debug = format!("{:?}", ai.default_provider_config().unwrap());
         assert!(debug.contains("************"));
         assert!(!debug.contains("secret-value"));
+    }
+
+    #[test]
+    fn loads_typesafe_system_one_provider() {
+        let config: ServiceConfig = deserialize_config_value(serde_json::json!({
+            "name": "demo",
+            "ai": {
+                "default_provider": "chat",
+                "providers": {
+                    "chat": {
+                        "kind": "openai_compatible",
+                        "base_url": "https://api.openai.com/v1",
+                        "model": "gpt-5"
+                    },
+                    "decisions": {
+                        "kind": "typesafe_system_one",
+                        "base_url": "https://api.typesafe.ai/v1",
+                        "api_key": "secret-value",
+                        "model": "jev-latest"
+                    }
+                }
+            },
+            "governance": {}
+        }))
+        .expect("valid service config");
+
+        let provider = &config.ai.expect("AI config").providers["decisions"];
+        assert_eq!(provider.kind, AiProviderKind::TypesafeSystemOne);
+        assert_eq!(provider.model, "jev-latest");
+    }
+
+    #[test]
+    fn rejects_typesafe_system_one_as_default_chat_provider() {
+        let config = AiConfig {
+            default_provider: "decisions".to_string(),
+            max_steps: 8,
+            providers: BTreeMap::from([(
+                "decisions".to_string(),
+                AiProviderConfig {
+                    kind: AiProviderKind::TypesafeSystemOne,
+                    base_url: "https://api.typesafe.ai/v1".to_string(),
+                    api_key: None,
+                    model: "jev-latest".to_string(),
+                    timeout_ms: 30_000,
+                },
+            )]),
+        };
+
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("decision model"));
     }
 
     #[test]

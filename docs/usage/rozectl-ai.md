@@ -92,6 +92,12 @@ ai:
       api_key: ${OPENAI_API_KEY}
       model: replace-with-your-model
       timeout_ms: 30000
+    decisions:
+      kind: typesafe_system_one
+      base_url: https://api.typesafe.ai/v1
+      api_key: ${TYPESAFE_API_KEY}
+      model: jev-latest
+      timeout_ms: 30000
 ```
 
 Without an `ai` section, the generated application-owned `agent.rs` retains
@@ -99,6 +105,27 @@ the deterministic Mock development mode. With the section present it builds
 all configured providers through `AiRuntime::from_config`. Register
 application tools in `tools.rs`; tool permission declarations are enforced
 against the inbound Roze context.
+
+TypeSafe System One is a structured decision model rather than a chat model,
+so it is registered separately from Agent providers. Evaluate Noul, Choice,
+or Score questions through the configured model:
+
+```rust
+use roze_ai::{SystemOneQuestion, SystemOneRequest};
+
+let model = runtime
+    .system_one_model("decisions")
+    .ok_or_else(|| anyhow::anyhow!("decisions model is not configured"))?;
+let result = model
+    .evaluate(
+        request_context,
+        SystemOneRequest::new(
+            "Help! My payouts have failed for three days.",
+            [("urgent", SystemOneQuestion::noul("Does this convey urgency?"))],
+        ),
+    )
+    .await?;
+```
 
 `workflow.rs` starts with a valid `START -> prepare -> END` graph. Replace the
 passthrough node with application-owned `WorkflowNode` or `FnNode` components.

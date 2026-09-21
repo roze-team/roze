@@ -197,12 +197,23 @@ ai:
       api_key: ${OPENAI_API_KEY}
       model: replace-with-your-model
       timeout_ms: 30000
+    decisions:
+      kind: typesafe_system_one
+      base_url: https://api.typesafe.ai/v1
+      api_key: ${TYPESAFE_API_KEY}
+      model: jev-latest
+      timeout_ms: 30000
 ```
 
 Provider names must be non-empty, `default_provider` must exist, `max_steps`
 must be between 1 and 64, URLs must use HTTP(S) without embedded credentials,
 and timeout values must be non-zero. Debug output never includes the resolved
 API key.
+
+`typesafe_system_one` providers are structured decision models and cannot be
+the default chat provider. `AiRuntime::system_one_model` exposes their
+Noul/Choice/Score evaluation surface without pretending that `/v1/systemone`
+implements chat completions or tool calling.
 
 The adapter sends the Roze request and trace IDs as headers and honors the
 remaining Roze deadline. It does not retry internally. HTTP 429 maps to the
