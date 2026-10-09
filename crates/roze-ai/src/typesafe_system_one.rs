@@ -122,6 +122,13 @@ pub struct SystemOneRequest {
     pub questions: BTreeMap<String, SystemOneQuestion>,
 }
 
+#[derive(Serialize)]
+struct SystemOneWireRequest<'a> {
+    state: &'a Value,
+    model: &'a str,
+    questions: &'a BTreeMap<String, SystemOneQuestion>,
+}
+
 impl SystemOneRequest {
     pub fn new(
         state: impl Into<Value>,
@@ -215,11 +222,11 @@ impl TypeSafeSystemOneModel {
     ) -> Result<SystemOneResponse, AiError> {
         check_context(context)?;
         request.validate()?;
-        let mut body = serde_json::to_value(request)
-            .map_err(|_| AiError::Internal("failed to encode System One request".to_string()))?;
-        body.as_object_mut()
-            .expect("System One request is an object")
-            .insert("model".to_string(), Value::String(self.model.clone()));
+        let body = SystemOneWireRequest {
+            state: &request.state,
+            model: &self.model,
+            questions: &request.questions,
+        };
         let mut builder = self
             .client
             .post(format!("{}/systemone", self.base_url))
@@ -239,10 +246,12 @@ impl TypeSafeSystemOneModel {
         let response = builder.send().await.map_err(map_reqwest_error)?;
         check_context(context)?;
         validate_status(&response)?;
-        response
+        let response = response
             .json::<SystemOneResponse>()
             .await
-            .map_err(|_| AiError::Provider("provider returned invalid JSON".to_string()))
+            .map_err(|_| AiError::Provider("provider returned invalid JSON".to_string()))?;
+        validate_answer_types(&request.questions, &response.answers)?;
+        Ok(response)
     }
 }
 
@@ -264,6 +273,36 @@ fn validate_structured_value(name: &str, value: &Value) -> Result<(), AiError> {
     Err(AiError::InvalidRequest(format!(
         "System One {name} must be a string, object, or array"
     )))
+}
+
+fn validate_answer_types(
+    questions: &BTreeMap<String, SystemOneQuestion>,
+    answers: &BTreeMap<String, SystemOneAnswer>,
+) -> Result<(), AiError> {
+    if questions.len() != answers.len() || questions.keys().ne(answers.keys()) {
+        return Err(AiError::Provider(
+            "provider returned answers for unexpected questions".to_string(),
+        ));
+    }
+    if questions.iter().any(|(name, question)| {
+        !matches!(
+            (question, &answers[name]),
+            (SystemOneQuestion::Noul { .. }, SystemOneAnswer::Noul { .. })
+                | (
+                    SystemOneQuestion::Choice { .. },
+                    SystemOneAnswer::Choice { .. }
+                )
+                | (
+                    SystemOneQuestion::Score { .. },
+                    SystemOneAnswer::Score { .. }
+                )
+        )
+    }) {
+        return Err(AiError::Provider(
+            "provider returned an answer type that does not match its question".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -375,6 +414,48 @@ mod tests {
                 .expect("JSON body");
         assert_eq!(body["model"], "jev-latest");
         assert_eq!(body["questions"]["urgent"]["type"], "noul");
+    }
+
+    #[tokio::test]
+    async fn rejects_an_answer_type_that_does_not_match_its_question() {
+        let response = json!({
+            "model": "jev-1.13.0",
+            "answers": {
+                "urgent": {
+                    "type": "choice",
+                    "choice": "yes",
+                    "confidence": 1.0,
+                    "probabilities": {"yes": 1.0}
+                }
+            },
+            "usage": {"input_tokens": 12, "output_tokens": 3}
+        })
+        .to_string();
+        let (base_url, _received) = serve_once(response);
+        let model = TypeSafeSystemOneModel::from_config(&AiProviderConfig {
+            kind: roze_config::AiProviderKind::TypesafeSystemOne,
+            base_url,
+            api_key: None,
+            model: "jev-latest".to_string(),
+            timeout_ms: 2_000,
+        })
+        .expect("model");
+
+        let error = model
+            .evaluate(
+                &Context::background_with_request_id_and_trace_id("request-ai", "trace-ai"),
+                SystemOneRequest::new(
+                    "Help! This is urgent.",
+                    [(
+                        "urgent",
+                        SystemOneQuestion::noul("Does this convey urgency?"),
+                    )],
+                ),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AiError::Provider(message) if message.contains("does not match")));
     }
 
     #[test]
