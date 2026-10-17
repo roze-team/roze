@@ -413,7 +413,7 @@ impl Context {
             return true;
         };
         budget
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok()
@@ -430,7 +430,7 @@ impl Context {
             return 0;
         };
         let previous = budget
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_sub(current.min(maximum)))
             })
             .expect("retry budget allocation update is infallible");
@@ -449,7 +449,7 @@ impl Context {
             .clone();
         match budget {
             Some(budget) => {
-                let _ = budget.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let _ = budget.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     Some(
                         current
                             .saturating_add(amount)
@@ -471,7 +471,7 @@ impl Context {
             .clone();
         match budget {
             Some(budget) => {
-                let _ = budget.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let _ = budget.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     Some(current.min(remaining))
                 });
             }
