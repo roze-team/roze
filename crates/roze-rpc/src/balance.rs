@@ -91,7 +91,7 @@ impl InstanceLoad {
     fn decrement_inflight(&self) {
         let _ = self
             .inflight
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(1))
             });
     }
